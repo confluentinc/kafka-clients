@@ -25,11 +25,17 @@ family). The map's values are Java's internal ``Errors``, carried as what
 ``Errors.exception()`` gives (``None`` for ``NONE``). ``MemberToRemove`` has no Java
 ``toString``, so a message naming one shows Python's default ``str``, the counterpart of
 Java's ``Object.toString``.
+
+The client's result is built by ``_of_client`` instead: the C API hands out no
+``Map<MemberIdentity, Errors>`` future, but the core's own result, whose
+``memberResult(member)`` and ``all()`` carry Java's outcome and raise Java's
+``IllegalArgumentException``, so each call of ``member_result`` and ``all`` returns
+the core's future of the same name.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
@@ -60,7 +66,8 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
     Java: ``org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult``.
     """
 
-    __slots__ = ("_future", "_member_infos", "_kind")
+    __slots__ = ("_future", "_member_infos", "_kind", "_client_member_result",
+                 "_client_all")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError(
@@ -77,12 +84,31 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         result._future = future
         result._member_infos = set(member_infos)
         result._kind = kind
+        result._client_member_result = None
+        result._client_all = None
+        return result
+
+    @classmethod
+    def _of_client(cls, *, member_result: Callable[[MemberToRemove], Any],
+                   all: Callable[[], Any],  # noqa: A002 - Java's method name
+                   member_infos: Iterable[MemberToRemove],
+                   kind: type[Sync] | type[Async]) -> RemoveMembersFromConsumerGroupResult[Any]:
+        """The client's result: ``member_result(member)`` and ``all()`` return the
+        core's ``memberResult(member)`` and ``all()`` futures."""
+        result = cls.__new__(cls)
+        result._future = None
+        result._member_infos = set(member_infos)
+        result._kind = kind
+        result._client_member_result = member_result
+        result._client_all = all
         return result
 
     def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns a future which indicates whether the request was 100% success, i.e. no
         either top level or member level error. If not, the first member error shall be
         returned."""
+        if self._client_all is not None:
+            return self._client_all()  # type: ignore[no-any-return]
         result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(member_errors: _MemberErrors | None, throwable: BaseException | None
@@ -111,6 +137,8 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
 
     def member_result(self, *, member: MemberToRemove) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns the selected member future."""
+        if self._client_member_result is not None:
+            return self._client_member_result(member)  # type: ignore[no-any-return]
         if self._remove_all():
             raise IllegalArgumentError(
                 message="The method: memberResult is not applicable in 'removeAll' mode")

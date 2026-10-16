@@ -19,7 +19,7 @@
 ``describe_classic_groups``, sync and async (CLAUDE.md, Python Binding Conventions,
 Tests and typing).
 
-Every ``KafkaAdminClientTest.java`` (Apache Kafka 4.3.1) test of these RPCs scripts
+Every ``KafkaAdminClientTest.java`` (Apache Kafka 4.4.0) test of these RPCs scripts
 broker responses with a ``MockClient``, which the binding cannot inject,
 so none is translated here: ``testListGroups*``, ``testDescribeConsumerGroup*``,
 ``testDescribeMultipleConsumerGroups``, ``testDescribeNonConsumerGroups``,
@@ -35,12 +35,13 @@ translations of them are in ``rust/src/admin/kafka_admin_client.rs``
 ``test_remove_members_from_group*``).
 
 What is tested instead: each method's keyword-only signature and Java forms; the
-closed client's error; the arguments each Options object reaches the extension
-with (the ``_async`` entry point replaced by a recorder that answers with a
-whole-call error, which fails every future); each call's failure against an
-unreachable bootstrap address, with the core's translation of Java's message; and
-the conversion of the extension's plain values into the value classes and result
-futures, fed with the shapes the C drains document.
+closed client's error; that each call returns its Result at once, before its futures
+complete, as Java's does; the inputs and the Options setters each call hands the
+extension (its ``Admin_<rpc>`` entry wrapped by a recorder that then calls it); each
+call's failure against an unreachable bootstrap address, with the core's translation
+of Java's message, through ``get()`` and ``ExecutionError``; the conversion of the
+extension's plain values into the value classes; and the results the client builds
+over the C result's own per-key futures.
 """
 
 from __future__ import annotations
@@ -53,14 +54,16 @@ from typing import Any
 import pytest
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
-from confluent_kafka import IllegalArgumentError, IllegalStateError
+from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.admin import (
     Admin,
     AlterConsumerGroupOffsetsOptions,
+    AlterConsumerGroupOffsetsResult,
     AsyncAdmin,
     ClassicGroupDescription,
     ConsumerGroupDescription,
     DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupOffsetsResult,
     DeleteConsumerGroupsOptions,
     DescribeClassicGroupsOptions,
     DescribeConsumerGroupsOptions,
@@ -68,29 +71,33 @@ from confluent_kafka.admin import (
     ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
     ListGroupsOptions,
+    ListGroupsResult,
     MemberAssignment,
     MemberDescription,
     MemberToRemove,
     RemoveMembersFromConsumerGroupOptions,
+    RemoveMembersFromConsumerGroupResult,
     _conversions,
 )
-from confluent_kafka.admin._futures import Sync
+from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common import (
     AclOperation,
+    AsyncKafkaFuture,
     ClassicGroupState,
     GroupState,
     GroupType,
     KafkaError,
+    KafkaFuture,
     Node,
     TopicPartition,
 )
 from confluent_kafka.common.errors import (
     GroupAuthorizationError,
-    GroupIdNotFoundError,
     UnknownMemberIdError,
     UnknownTopicOrPartitionError,
 )
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.consumer import OffsetAndMetadata
 
 UNREACHABLE = {"bootstrap.servers": "localhost:1"}
@@ -101,6 +108,8 @@ UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 FAST_DEFAULT = {**UNREACHABLE, "default.api.timeout.ms": "300", "request.timeout.ms": "100"}
 CLOSED = "Cannot accept new calls when AdminClient is closing."
 SHORT = 300
+#: How long a test waits for a future the core completes (seconds).
+WAIT = 30.0
 TP0 = TopicPartition(topic="t", partition=0)
 TP1 = TopicPartition(topic="t", partition=1)
 LCGO_FORMS = ("list_consumer_group_offsets() takes one of (group_id, options), (group_id), "
@@ -113,6 +122,32 @@ def _timed_out(api_name: str) -> str:
     ``apiName + "(api=FIND_COORDINATOR)"``)."""
     return re.escape(f"Timed out waiting for a node assignment. Call: {api_name}"
                      "(api=FIND_COORDINATOR)")
+
+
+def _fails(future: Any, cls: type[BaseException], match: str | None = None) -> BaseException:
+    """Java's ``TestUtils.assertFutureThrows``: ``get()`` raises ``ExecutionError``
+    whose cause is exactly of ``cls``, its text matching ``match``."""
+    assert isinstance(future, KafkaFuture)
+    with pytest.raises(ExecutionError) as info:
+        future.get(timeout=WAIT)
+    cause = info.value.__cause__
+    assert type(cause) is cls, repr(cause)
+    if match is not None:
+        assert re.search(match, str(cause)), str(cause)
+    return cause
+
+
+async def _afails(future: Any, cls: type[BaseException], match: str | None = None
+                  ) -> BaseException:
+    """:func:`_fails` for an ``AsyncKafkaFuture``."""
+    assert isinstance(future, AsyncKafkaFuture)
+    with pytest.raises(ExecutionError) as info:
+        await future.get(timeout=WAIT)
+    cause = info.value.__cause__
+    assert type(cause) is cls, repr(cause)
+    if match is not None:
+        assert re.search(match, str(cause)), str(cause)
+    return cause
 
 
 def _admin(configs: dict[str, Any] | None = None) -> Admin:
@@ -151,15 +186,15 @@ def _all_calls(admin: Admin) -> list[Callable[[], object]]:
 def test_positional_calls_raise_type_error() -> None:
     with _admin() as admin:
         calls: list[Callable[[], object]] = [
-            lambda: admin.describe_consumer_groups(["g"]),  # type: ignore[call-arg, misc]
+            lambda: admin.describe_consumer_groups(["g"]),  # type: ignore[call-arg]
             lambda: admin.list_consumer_group_offsets("g"),  # type: ignore[call-overload]
-            lambda: admin.delete_consumer_groups(["g"]),  # type: ignore[call-arg, misc]
-            lambda: admin.delete_consumer_group_offsets("g", [TP0]),  # type: ignore[call-arg, misc]
-            lambda: admin.list_groups(ListGroupsOptions()),  # type: ignore[call-arg, misc]
-            lambda: admin.remove_members_from_consumer_group(  # type: ignore[call-arg, misc]
+            lambda: admin.delete_consumer_groups(["g"]),  # type: ignore[call-arg]
+            lambda: admin.delete_consumer_group_offsets("g", [TP0]),  # type: ignore[call-arg]
+            lambda: admin.list_groups(ListGroupsOptions()),  # type: ignore[call-arg]
+            lambda: admin.remove_members_from_consumer_group(  # type: ignore[call-arg]
                 "g", _remove_options()),
-            lambda: admin.alter_consumer_group_offsets("g", {}),  # type: ignore[call-arg, misc]
-            lambda: admin.describe_classic_groups(["g"]),  # type: ignore[call-arg, misc]
+            lambda: admin.alter_consumer_group_offsets("g", {}),  # type: ignore[call-arg]
+            lambda: admin.describe_classic_groups(["g"]),  # type: ignore[call-arg]
         ]
         for call in calls:
             with pytest.raises(TypeError):
@@ -192,7 +227,7 @@ def test_list_consumer_group_offsets_rejects_what_java_has_no_overload_for() -> 
 async def test_async_list_consumer_group_offsets_rejects_the_same_forms() -> None:
     async with AsyncAdmin.create(configs=UNREACHABLE) as admin:
         with pytest.raises(IllegalArgumentError, match=re.escape(LCGO_FORMS + "()")):
-            await admin.list_consumer_group_offsets()  # type: ignore[call-overload]
+            admin.list_consumer_group_offsets()  # type: ignore[call-overload]
 
 
 def test_calls_after_close_raise_illegal_state() -> None:
@@ -208,150 +243,176 @@ async def test_async_calls_after_close_raise_illegal_state() -> None:
     admin = AsyncAdmin.create(configs=UNREACHABLE)
     await admin.close()
     with pytest.raises(IllegalStateError, match=CLOSED):
-        await admin.describe_consumer_groups(group_ids=["g"])
+        admin.describe_consumer_groups(group_ids=["g"])
     with pytest.raises(IllegalStateError, match=CLOSED):
-        await admin.list_consumer_group_offsets(group_id="g")
+        admin.list_consumer_group_offsets(group_id="g")
     with pytest.raises(IllegalStateError, match=CLOSED):
-        await admin.list_groups()
+        admin.list_groups()
     with pytest.raises(IllegalStateError, match=CLOSED):
-        await admin.remove_members_from_consumer_group(group_id="g", options=_remove_options())
+        admin.remove_members_from_consumer_group(group_id="g", options=_remove_options())
 
 
-# ---- the arguments each call hands the extension ----------------------------
+# ---- the inputs and options each call hands the extension -------------------
 
 
 class _Recorder:
-    """Stands in for one ``Admin_*_async`` entry point: records the arguments and
-    answers at once with a whole-call error (an owned handle), so no broker is
-    needed and every future of the result fails with it."""
+    """Wraps one ``Admin_<rpc>`` entry of the extension: records what the call
+    passes after the client handle (its inputs, then the Options setters that ran as
+    ``(setter, value)`` pairs) and calls the entry."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str, value_payload: bool = True):
-        self.args: tuple[Any, ...] | None = None
-        self._value_payload = value_payload
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str):
+        self.args: Any = None
+        self._entry = getattr(_lib, name)
         monkeypatch.setattr(_lib, name, self)
 
-    def __call__(self, c_admin: int, *rest: Any) -> None:
-        *args, cb = rest
-        self.args = tuple(args)
-        error = _lib.KafkaError_new(GroupAuthorizationError._ffi_id, "denied")
-        if self._value_payload:
-            cb(0, error)
-        else:
-            cb(error)
+    def __call__(self, c_admin: int, *args: Any) -> Any:
+        self.args = args
+        return self._entry(c_admin, *args)
 
 
-def _assert_denied(future: Any) -> None:
-    with pytest.raises(GroupAuthorizationError, match="denied"):
-        future.result()
+def test_calls_return_their_result_at_once() -> None:
+    """Java's RPCs return their Result before any future completes: with a long
+    ``default.api.timeout.ms``, every future is still pending when the call
+    returns. ``close(timeout=0)`` then aborts them, as Java's ``close(Duration.ZERO)``
+    does."""
+    admin = _admin({**UNREACHABLE, "default.api.timeout.ms": "60000"})
+    try:
+        described = admin.describe_consumer_groups(group_ids=["g"])
+        assert not described.described_groups()["g"].is_done()
+        assert not described.all().is_done()
+        listed = admin.list_groups()
+        assert not listed.all().is_done()
+        offsets = admin.list_consumer_group_offsets(group_id="g")
+        assert not offsets.partitions_to_offset_and_metadata().is_done()
+        deleted = admin.delete_consumer_group_offsets(group_id="g", partitions=[TP0])
+        assert not deleted.partition_result(partition=TP0).is_done()
+    finally:
+        admin.close(timeout=0)
 
 
 def test_describe_consumer_groups_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_describe_consumer_groups_async")
+    rec = _Recorder(monkeypatch, "Admin_describe_consumer_groups")
     with _admin() as admin:
         result = admin.describe_consumer_groups(
             group_ids=iter(["g1", "g2"]),
-            options=DescribeConsumerGroupsOptions(timeout_ms=1234,
+            options=DescribeConsumerGroupsOptions(timeout_ms=SHORT,
                                                   include_authorized_operations=True))
-        assert rec.args == (["g1", "g2"], 1234, True)
+        assert rec.args == (["g1", "g2"], [("timeout_ms", SHORT),
+                                           ("include_authorized_operations", True)])
         assert set(result.described_groups()) == {"g1", "g2"}
         for future in result.described_groups().values():
-            _assert_denied(future)
-        _assert_denied(result.all())
-        admin.describe_consumer_groups(group_ids=["g"])
+            _fails(future, KafkaTimeoutError, _timed_out("describeConsumerGroups"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("describeConsumerGroups"))
+        admin.describe_consumer_groups(group_ids=[])
         # Java's describeConsumerGroups(groupIds): new DescribeConsumerGroupsOptions().
-        assert rec.args == (["g"], -1, False)
+        assert rec.args == ([], [])
 
 
 def test_describe_classic_groups_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_describe_classic_groups_async")
+    rec = _Recorder(monkeypatch, "Admin_describe_classic_groups")
     with _admin() as admin:
         result = admin.describe_classic_groups(
             group_ids=["g1"],
-            options=DescribeClassicGroupsOptions(timeout_ms=5,
+            options=DescribeClassicGroupsOptions(timeout_ms=SHORT,
                                                  include_authorized_operations=True))
-        assert rec.args == (["g1"], 5, True)
-        _assert_denied(result.described_groups()["g1"])
-        admin.describe_classic_groups(group_ids=["g"])
-        assert rec.args == (["g"], -1, False)
+        assert rec.args == (["g1"], [("timeout_ms", SHORT),
+                                     ("include_authorized_operations", True)])
+        _fails(result.described_groups()["g1"], KafkaTimeoutError,
+               _timed_out("describeClassicGroups"))
+        admin.describe_classic_groups(group_ids=[])
+        assert rec.args == ([], [])
 
 
 def test_list_consumer_group_offsets_passes_its_specs(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_list_consumer_group_offsets_async")
-    with _admin() as admin:
-        # Java's listConsumerGroupOffsets(groupId): one group, new
-        # ListConsumerGroupOffsetsSpec() (all partitions), default options.
+    rec = _Recorder(monkeypatch, "Admin_list_consumer_group_offsets")
+    with _admin(FAST_DEFAULT) as admin:
+        # Java's listConsumerGroupOffsets(groupId): its own entry point, default options.
         result = admin.list_consumer_group_offsets(group_id="g")
-        assert rec.args == ([("g", True, [])], -1, False)
-        _assert_denied(result.partitions_to_offset_and_metadata())
+        assert rec.args == ("g", None, [])
+        _fails(result.partitions_to_offset_and_metadata(), KafkaTimeoutError,
+               _timed_out("offsetFetch"))
         admin.list_consumer_group_offsets(
             group_id="g", options=ListConsumerGroupOffsetsOptions(timeout_ms=7,
                                                                   require_stable=True))
-        assert rec.args == ([("g", True, [])], 7, True)
+        assert rec.args == ("g", None, [("timeout_ms", 7), ("require_stable", True)])
         result = admin.list_consumer_group_offsets(group_specs={
             "a": ListConsumerGroupOffsetsSpec(topic_partitions=[TP0, TP1]),
             "b": ListConsumerGroupOffsetsSpec()})
-        assert rec.args == ([("a", False, [("t", 0), ("t", 1)]), ("b", True, [])], -1, False)
-        _assert_denied(result.partitions_to_offset_and_metadata(group_id="a"))
-        _assert_denied(result.all())
-        with pytest.raises(IllegalStateError):
+        assert rec.args is not None
+        group_id, rows, pairs = rec.args
+        assert group_id is None and pairs == []
+        assert rows[1] == ("b", None)
+        assert rows[0][0] == "a" and sorted(rows[0][1]) == [("t", 0), ("t", 1)]
+        _fails(result.partitions_to_offset_and_metadata(group_id="a"), KafkaTimeoutError)
+        _fails(result.all(), KafkaTimeoutError)
+        with pytest.raises(IllegalStateError, match="Offsets from multiple consumer groups"):
             result.partitions_to_offset_and_metadata()
 
 
 def test_delete_consumer_groups_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_delete_consumer_groups_async")
+    rec = _Recorder(monkeypatch, "Admin_delete_consumer_groups")
     with _admin() as admin:
         result = admin.delete_consumer_groups(group_ids=["g1", "g2"],
                                               options=DeleteConsumerGroupsOptions(timeout_ms=9))
-        assert rec.args == (["g1", "g2"], 9)
+        assert rec.args == (["g1", "g2"], [("timeout_ms", 9)])
         assert set(result.deleted_groups()) == {"g1", "g2"}
-        _assert_denied(result.all())
+        _fails(result.all(), KafkaTimeoutError, _timed_out("deleteConsumerGroups"))
         admin.delete_consumer_groups(group_ids=[])
-        assert rec.args == ([], -1)
+        assert rec.args == ([], [])
 
 
 def test_delete_consumer_group_offsets_passes_its_options(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_delete_consumer_group_offsets_async")
-    with _admin() as admin:
+    rec = _Recorder(monkeypatch, "Admin_delete_consumer_group_offsets")
+    with _admin(FAST_DEFAULT) as admin:
         result = admin.delete_consumer_group_offsets(
-            group_id="g", partitions={TP0}, options=DeleteConsumerGroupOffsetsOptions(timeout_ms=3))
-        assert rec.args == ("g", [("t", 0)], 3)
-        _assert_denied(result.partition_result(partition=TP0))
-        _assert_denied(result.all())
-        with pytest.raises(IllegalArgumentError, match="was not included in the original request"):
+            group_id="g", partitions={TP0},
+            options=DeleteConsumerGroupOffsetsOptions(timeout_ms=SHORT))
+        assert rec.args == ("g", [("t", 0)], [("timeout_ms", SHORT)])
+        _fails(result.partition_result(partition=TP0), KafkaTimeoutError,
+               _timed_out("offsetDelete"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("offsetDelete"))
+        with pytest.raises(IllegalArgumentError,
+                           match=re.escape("Partition t-1 was not included in the original "
+                                           "request")):
             result.partition_result(partition=TP1)
         admin.delete_consumer_group_offsets(group_id="g", partitions=[])
-        assert rec.args == ("g", [], -1)
+        assert rec.args == ("g", [], [])
 
 
 def test_list_groups_passes_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_list_groups_async")
-    with _admin() as admin:
+    rec = _Recorder(monkeypatch, "Admin_list_groups")
+    with _admin(FAST_DEFAULT) as admin:
         admin.list_groups()
-        # Java's listGroups(): new ListGroupsOptions(), every filter empty.
-        assert rec.args == ([], [], [], -1)
+        # Java's listGroups(): new ListGroupsOptions(), no setter run.
+        assert rec.args == ([],)
         options = ListGroupsOptions(timeout_ms=11, group_states=[GroupState.STABLE],
                                     types=[GroupType.CLASSIC], protocol_types=["consumer"])
         admin.list_groups(options=options)
-        # The names KafkaAdminClient.listGroups sends: GroupState / GroupType toString().
-        assert rec.args == (["Stable"], ["consumer"], ["Classic"], 11)
+        # The stored sets, each enum as its toString() name, which the extension
+        # parses back (GroupState.parse / GroupType.parse).
+        assert rec.args == ([("timeout_ms", 11), ("in_group_states", ["Stable"]),
+                             ("with_types", ["Classic"]),
+                             ("with_protocol_types", ["consumer"])],)
+        # Java's null set: Set.of(), sent as the empty stored set.
+        admin.list_groups(options=ListGroupsOptions().in_group_states(group_states=None))
+        assert rec.args == ([("in_group_states", [])],)
 
 
 def test_remove_members_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_remove_members_from_consumer_group_async")
-    with _admin() as admin:
+    rec = _Recorder(monkeypatch, "Admin_remove_members_from_consumer_group")
+    with _admin(FAST_DEFAULT) as admin:
         member = MemberToRemove(group_instance_id="i1")
         result = admin.remove_members_from_consumer_group(
             group_id="g", options=_remove_options([member], reason="bye", timeout_ms=4))
-        assert rec.args == ("g", False, ["i1"], "bye", 4)
-        _assert_denied(result.all())
-        _assert_denied(result.member_result(member=member))
-        # removeAll mode: no members; a null reason crosses as None (the core
-        # defaults it, KafkaAdminClient.java:4221).
+        assert rec.args == ("g", ["i1"], [("timeout_ms", 4), ("reason", "bye")])
+        _fails(result.all(), KafkaTimeoutError, _timed_out("leaveGroup"))
+        _fails(result.member_result(member=member), KafkaTimeoutError, _timed_out("leaveGroup"))
+        # removeAll mode: no members; a null timeout crosses as None (the core's -1:
+        # default.api.timeout.ms).
         result = admin.remove_members_from_consumer_group(
             group_id="g", options=_remove_options(timeout_ms=None))
-        assert rec.args == ("g", True, [], None, -1)
-        _assert_denied(result.all())
+        assert rec.args == ("g", None, [("timeout_ms", None)])
         with pytest.raises(IllegalArgumentError,
                            match="The method: memberResult is not applicable in 'removeAll' mode"):
             result.member_result(member=member)
@@ -359,42 +420,46 @@ def test_remove_members_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_alter_consumer_group_offsets_passes_its_offsets(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_alter_consumer_group_offsets_async")
-    with _admin() as admin:
+    rec = _Recorder(monkeypatch, "Admin_alter_consumer_group_offsets")
+    with _admin(FAST_DEFAULT) as admin:
         result = admin.alter_consumer_group_offsets(
             group_id="g",
             offsets={TP0: OffsetAndMetadata(offset=5, leader_epoch=3, metadata="m"),
                      TP1: OffsetAndMetadata(offset=6)},
-            options=AlterConsumerGroupOffsetsOptions(timeout_ms=2))
-        # (topic, partition, offset, metadata, has_leader_epoch, leader_epoch)
-        assert rec.args == ("g", [("t", 0, 5, "m", True, 3), ("t", 1, 6, "", False, -1)], 2)
-        _assert_denied(result.partition_result(partition=TP0))
-        _assert_denied(result.all())
+            options=AlterConsumerGroupOffsetsOptions(timeout_ms=SHORT))
+        # (topic, partition, offset, metadata, leader_epoch), -1 for an absent epoch.
+        assert rec.args == ("g", [("t", 0, 5, "m", 3), ("t", 1, 6, "", -1)],
+                            [("timeout_ms", SHORT)])
+        _fails(result.partition_result(partition=TP0), KafkaTimeoutError,
+               _timed_out("offsetCommit"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("offsetCommit"))
         admin.alter_consumer_group_offsets(group_id="g", offsets={})
-        assert rec.args == ("g", [], -1)
+        assert rec.args == ("g", [], [])
 
 
-def test_negative_option_timeout_is_sent_as_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_negative_option_timeout_expires_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Java's ``calcDeadlineMs`` takes ``Math.max(0, timeoutMs)``: a given negative
-    timeout expires at once, never the FFI's "not set" ``-1``."""
-    rec = _Recorder(monkeypatch, "Admin_delete_consumer_groups_async")
-    with _admin() as admin:
-        admin.delete_consumer_groups(group_ids=["g"],
-                                     options=DeleteConsumerGroupsOptions(timeout_ms=-5))
-        assert rec.args == (["g"], 0)
+    timeout expires at once (the extension sends it as 0), never as the C API's
+    "not set" ``-1``, which would wait out ``default.api.timeout.ms``."""
+    rec = _Recorder(monkeypatch, "Admin_delete_consumer_groups")
+    with _admin({**UNREACHABLE, "default.api.timeout.ms": "600000"}) as admin:
+        result = admin.delete_consumer_groups(group_ids=["g"],
+                                              options=DeleteConsumerGroupsOptions(timeout_ms=-5))
+        assert rec.args == (["g"], [("timeout_ms", -5)])
+        _fails(result.all(), KafkaTimeoutError, _timed_out("deleteConsumerGroups"))
 
 
 async def test_async_calls_pass_the_same_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = _Recorder(monkeypatch, "Admin_list_consumer_group_offsets_async")
+    rec = _Recorder(monkeypatch, "Admin_list_consumer_group_offsets")
     async with AsyncAdmin.create(configs=UNREACHABLE) as admin:
-        result = await admin.list_consumer_group_offsets(
+        result = admin.list_consumer_group_offsets(
             group_specs={"a": ListConsumerGroupOffsetsSpec(topic_partitions=[TP0])},
-            options=ListConsumerGroupOffsetsOptions(timeout_ms=8))
-        assert rec.args == ([("a", False, [("t", 0)])], 8, False)
+            options=ListConsumerGroupOffsetsOptions(timeout_ms=SHORT))
+        assert rec.args == (None, [("a", [("t", 0)])], [("timeout_ms", SHORT)])
         future = result.partitions_to_offset_and_metadata()
-        assert isinstance(future, asyncio.Future) and future.done()
-        with pytest.raises(GroupAuthorizationError, match="denied"):
-            await result.all()
+        assert isinstance(future, AsyncKafkaFuture)
+        await _afails(future, KafkaTimeoutError, _timed_out("offsetFetch"))
+        await _afails(result.all(), KafkaTimeoutError, _timed_out("offsetFetch"))
 
 
 # ---- against an unreachable bootstrap: each call times out ------------------
@@ -405,41 +470,36 @@ def test_describe_consumer_groups_times_out() -> None:
         result = admin.describe_consumer_groups(
             group_ids=["g1", "g2"], options=DescribeConsumerGroupsOptions(timeout_ms=SHORT))
         for future in result.described_groups().values():
-            assert future.done()
-            with pytest.raises(KafkaTimeoutError, match=_timed_out("describeConsumerGroups")):
-                future.result()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("describeConsumerGroups")):
-            result.all().result()
-        assert admin.describe_consumer_groups(group_ids=[]).all().result() == {}
+            _fails(future, KafkaTimeoutError, _timed_out("describeConsumerGroups"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("describeConsumerGroups"))
+        assert admin.describe_consumer_groups(group_ids=[]).all().get(timeout=WAIT) == {}
 
 
 def test_list_consumer_group_offsets_times_out() -> None:
     with _admin() as admin:
         result = admin.list_consumer_group_offsets(
             group_id="g", options=ListConsumerGroupOffsetsOptions(timeout_ms=SHORT))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetFetch")):
-            result.partitions_to_offset_and_metadata().result()
+        _fails(result.partitions_to_offset_and_metadata(), KafkaTimeoutError,
+               _timed_out("offsetFetch"))
         result = admin.list_consumer_group_offsets(
             group_specs={"a": ListConsumerGroupOffsetsSpec(topic_partitions=[TP0]),
                          "b": ListConsumerGroupOffsetsSpec()},
             options=ListConsumerGroupOffsetsOptions(timeout_ms=SHORT, require_stable=True))
         for group_id in ("a", "b"):
-            with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetFetch")):
-                result.partitions_to_offset_and_metadata(group_id=group_id).result()
+            _fails(result.partitions_to_offset_and_metadata(group_id=group_id),
+                   KafkaTimeoutError, _timed_out("offsetFetch"))
         with pytest.raises(IllegalArgumentError,
                            match="Offsets for consumer group 'c' were not requested."):
             result.partitions_to_offset_and_metadata(group_id="c")
-        assert admin.list_consumer_group_offsets(group_specs={}).all().result() == {}
+        assert admin.list_consumer_group_offsets(group_specs={}).all().get(timeout=WAIT) == {}
 
 
 def test_delete_consumer_groups_times_out() -> None:
     with _admin() as admin:
         result = admin.delete_consumer_groups(
             group_ids=["g"], options=DeleteConsumerGroupsOptions(timeout_ms=SHORT))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("deleteConsumerGroups")):
-            result.deleted_groups()["g"].result()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("deleteConsumerGroups")):
-            result.all().result()
+        _fails(result.deleted_groups()["g"], KafkaTimeoutError, _timed_out("deleteConsumerGroups"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("deleteConsumerGroups"))
 
 
 def test_delete_consumer_group_offsets_times_out() -> None:
@@ -447,15 +507,13 @@ def test_delete_consumer_group_offsets_times_out() -> None:
         options = DeleteConsumerGroupOffsetsOptions(timeout_ms=SHORT)
         result = admin.delete_consumer_group_offsets(group_id="g", partitions=[TP0],
                                                      options=options)
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetDelete")):
-            result.partition_result(partition=TP0).result()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetDelete")):
-            result.all().result()
+        _fails(result.partition_result(partition=TP0), KafkaTimeoutError,
+               _timed_out("offsetDelete"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("offsetDelete"))
         # No partition: the call's own future still times out (the core's all()).
         result = admin.delete_consumer_group_offsets(group_id="g", partitions=[],
                                                      options=options)
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetDelete")):
-            result.all().result()
+        _fails(result.all(), KafkaTimeoutError, _timed_out("offsetDelete"))
 
 
 def test_list_groups_fails_to_find_brokers() -> None:
@@ -463,16 +521,17 @@ def test_list_groups_fails_to_find_brokers() -> None:
     ``KafkaException("Failed to find brokers to send ListGroups", cause)``."""
     with _admin() as admin:
         result = admin.list_groups(options=ListGroupsOptions(timeout_ms=SHORT))
-        assert result.valid().result() == []
-        errors = result.errors().result()
+        assert result.valid().get(timeout=WAIT) == []
+        errors = result.errors().get(timeout=WAIT)
         assert len(errors) == 1
         assert type(errors[0]) is KafkaError
         assert str(errors[0]) == "Failed to find brokers to send ListGroups"
         assert isinstance(errors[0].__cause__, KafkaTimeoutError)
         assert str(errors[0].__cause__) == (
             "Timed out waiting for a node assignment. Call: findAllBrokers")
-        with pytest.raises(KafkaError, match="Failed to find brokers to send ListGroups"):
-            result.all().result()
+        _fails(result.all(), KafkaError, "Failed to find brokers to send ListGroups")
+        # Java's fields: the same future on every call.
+        assert result.all() is result.all() and result.valid() is result.valid()
 
 
 def test_remove_members_times_out() -> None:
@@ -480,10 +539,8 @@ def test_remove_members_times_out() -> None:
         member = MemberToRemove(group_instance_id="i1")
         result = admin.remove_members_from_consumer_group(
             group_id="g", options=_remove_options([member]))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("leaveGroup")):
-            result.member_result(member=member).result()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("leaveGroup")):
-            result.all().result()
+        _fails(result.member_result(member=member), KafkaTimeoutError, _timed_out("leaveGroup"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("leaveGroup"))
         with pytest.raises(IllegalArgumentError, match="was not included in the original request"):
             result.member_result(member=MemberToRemove(group_instance_id="other"))
 
@@ -497,81 +554,68 @@ def test_remove_all_members_fails_to_describe_the_group() -> None:
     with _admin(FAST_DEFAULT) as admin:
         result = admin.remove_members_from_consumer_group(group_id="g",
                                                           options=_remove_options())
-        with pytest.raises(KafkaError) as info:
-            result.all().result()
-        assert type(info.value) is KafkaError
-        assert str(info.value) == "Encounter error when trying to get members from group: g"
-        assert isinstance(info.value.__cause__, KafkaTimeoutError)
-        assert re.fullmatch(_timed_out("describeConsumerGroups"), str(info.value.__cause__))
+        cause = _fails(result.all(), KafkaError)
+        assert str(cause) == "Encounter error when trying to get members from group: g"
+        assert isinstance(cause.__cause__, KafkaTimeoutError)
+        assert re.fullmatch(_timed_out("describeConsumerGroups"), str(cause.__cause__))
 
 
 def test_alter_consumer_group_offsets_times_out() -> None:
     """The driver's timeout fails Java's one future, so ``all()`` reports it as it
-    is, not renamed into "Failed altering group offsets ..."."""
+    is, not renamed into "Failed altering group offsets ...", and so does a
+    partition not in the request (Java checks it only once that future
+    succeeded)."""
     with _admin() as admin:
         result = admin.alter_consumer_group_offsets(
             group_id="g", offsets={TP0: OffsetAndMetadata(offset=5)},
             options=AlterConsumerGroupOffsetsOptions(timeout_ms=SHORT))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetCommit")):
-            result.partition_result(partition=TP0).result()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetCommit")):
-            result.all().result()
+        _fails(result.partition_result(partition=TP0), KafkaTimeoutError,
+               _timed_out("offsetCommit"))
+        _fails(result.all(), KafkaTimeoutError, _timed_out("offsetCommit"))
+        _fails(result.partition_result(partition=TP1), KafkaTimeoutError,
+               _timed_out("offsetCommit"))
 
 
 def test_describe_classic_groups_times_out() -> None:
     with _admin() as admin:
         result = admin.describe_classic_groups(
             group_ids=["g"], options=DescribeClassicGroupsOptions(timeout_ms=SHORT))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("describeClassicGroups")):
-            result.described_groups()["g"].result()
-        assert admin.describe_classic_groups(group_ids=[]).all().result() == {}
+        _fails(result.described_groups()["g"], KafkaTimeoutError,
+               _timed_out("describeClassicGroups"))
+        assert admin.describe_classic_groups(group_ids=[]).all().get(timeout=WAIT) == {}
 
 
 async def test_async_calls_time_out() -> None:
     async with AsyncAdmin.create(configs=FAST_DEFAULT) as admin:
-        described = await admin.describe_consumer_groups(
+        described = admin.describe_consumer_groups(
             group_ids=["g"], options=DescribeConsumerGroupsOptions(timeout_ms=SHORT))
         future = described.described_groups()["g"]
-        assert isinstance(future, asyncio.Future) and future.done()
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("describeConsumerGroups")):
-            await described.all()
-        offsets = await admin.list_consumer_group_offsets(group_id="g")
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetFetch")):
-            await offsets.all()
-        deleted = await admin.delete_consumer_groups(group_ids=["g"])
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("deleteConsumerGroups")):
-            await deleted.all()
-        offsets_deleted = await admin.delete_consumer_group_offsets(group_id="g",
-                                                                    partitions=[TP0])
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetDelete")):
-            await offsets_deleted.partition_result(partition=TP0)
-        listed = await admin.list_groups()
-        assert [str(e) for e in await listed.errors()] == [
+        assert isinstance(future, AsyncKafkaFuture)
+        await _afails(described.all(), KafkaTimeoutError, _timed_out("describeConsumerGroups"))
+        offsets = admin.list_consumer_group_offsets(group_id="g")
+        await _afails(offsets.all(), KafkaTimeoutError, _timed_out("offsetFetch"))
+        deleted = admin.delete_consumer_groups(group_ids=["g"])
+        await _afails(deleted.all(), KafkaTimeoutError, _timed_out("deleteConsumerGroups"))
+        offsets_deleted = admin.delete_consumer_group_offsets(group_id="g", partitions=[TP0])
+        await _afails(offsets_deleted.partition_result(partition=TP0), KafkaTimeoutError,
+                      _timed_out("offsetDelete"))
+        listed = admin.list_groups()
+        assert [str(e) for e in await listed.errors().get(timeout=WAIT)] == [
             "Failed to find brokers to send ListGroups"]
-        with pytest.raises(KafkaError, match="Failed to find brokers to send ListGroups"):
-            await listed.all()
+        await _afails(listed.all(), KafkaError, "Failed to find brokers to send ListGroups")
         member = MemberToRemove(group_instance_id="i1")
-        removed = await admin.remove_members_from_consumer_group(
+        removed = admin.remove_members_from_consumer_group(
             group_id="g", options=_remove_options([member]))
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("leaveGroup")):
-            await removed.member_result(member=member)
-        altered = await admin.alter_consumer_group_offsets(
+        await _afails(removed.member_result(member=member), KafkaTimeoutError,
+                      _timed_out("leaveGroup"))
+        altered = admin.alter_consumer_group_offsets(
             group_id="g", offsets={TP0: OffsetAndMetadata(offset=1)})
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("offsetCommit")):
-            await altered.all()
-        classic = await admin.describe_classic_groups(group_ids=["g"])
-        with pytest.raises(KafkaTimeoutError, match=_timed_out("describeClassicGroups")):
-            await classic.all()
+        await _afails(altered.all(), KafkaTimeoutError, _timed_out("offsetCommit"))
+        classic = admin.describe_classic_groups(group_ids=["g"])
+        await _afails(classic.all(), KafkaTimeoutError, _timed_out("describeClassicGroups"))
 
 
 # ---- the extension's plain values into the value classes --------------------
-
-
-def _borrowed(cls: type[BaseException], message: str) -> tuple[Any, ...]:
-    """A per-key error in the borrowed form ``borrowed_error_to_py`` gives."""
-    from confluent_kafka.common.errors.api_error import ApiError
-
-    return (getattr(cls, "_ffi_id"), message, 0, 0, None, int(issubclass(cls, ApiError)), None)
 
 
 _MEMBER = ("consumer-1", "instance-1", None, "client-1", "/10.0.0.1",
@@ -579,11 +623,10 @@ _MEMBER = ("consumer-1", "instance-1", None, "client-1", "/10.0.0.1",
 _NODE = (2, "broker2", 9092, "rack-a")
 
 
-def test_consumer_group_description_from_the_drain() -> None:
+def test_consumer_group_description_from_the_extension() -> None:
     description = ("g", False, [_MEMBER], "uniform", "Consumer", "Stable", _NODE,
                    [AclOperation.READ.code(), AclOperation.DESCRIBE.code()], 5, 4)
-    error, value = _conversions._consumer_group_description((None, description))
-    assert error is None
+    value = _conversions._consumer_group_description(description)
     expected_member = MemberDescription(
         member_id="consumer-1", group_instance_id="instance-1", rack_id=None,
         client_id="client-1", host="/10.0.0.1",
@@ -596,15 +639,13 @@ def test_consumer_group_description_from_the_drain() -> None:
         coordinator=Node(id=2, host="broker2", port=9092, rack="rack-a"),
         authorized_operations={AclOperation.READ, AclOperation.DESCRIBE}, group_epoch=5,
         target_assignment_epoch=4)
-    assert value.coordinator() is not None and value.coordinator().is_fenced() is False
+    coordinator = value.coordinator()
+    assert coordinator is not None and coordinator.is_fenced() is False
     # authorizedOperations() is null unless requested; an absent coordinator is null.
-    _, omitted = _conversions._consumer_group_description(
-        (None, ("g", True, [], "", "Classic", "Empty", None, None, None, None)))
+    omitted = _conversions._consumer_group_description(
+        ("g", True, [], "", "Classic", "Empty", None, None, None, None))
     assert omitted.authorized_operations() is None and omitted.coordinator() is None
     assert omitted.type() is GroupType.CLASSIC and omitted.group_state() is GroupState.EMPTY
-    error, value = _conversions._consumer_group_description(
-        (_borrowed(GroupIdNotFoundError, "Group g not found."), None))
-    assert type(error) is GroupIdNotFoundError and value is None
 
 
 def test_classic_group_description_keeps_a_null_operations_set() -> None:
@@ -612,157 +653,134 @@ def test_classic_group_description_keeps_a_null_operations_set() -> None:
     core reports as ``null`` stays ``None``, where the public constructor's "not
     given" would give ``set()``."""
     member = ("m", None, None, "c", "h", [("t", 0)], None, None, None)
-    raw = ("g", "range", "consumer", False, [member], "Stable", _NODE, None)
-    error, value = _conversions._classic_group_description((None, raw))
-    assert error is None
+    value = _conversions._classic_group_description(
+        ("g", "range", "consumer", False, [member], "Stable", _NODE, None))
     assert isinstance(value, ClassicGroupDescription)
     assert value.authorized_operations() is None
     assert value.state() is ClassicGroupState.STABLE
     assert value.protocol() == "range" and value.protocol_data() == "consumer"
-    assert value.members()[0].assignment().topic_partitions() == {TP0}
+    assignment = value.members()[0].assignment()
+    assert assignment is not None and assignment.topic_partitions() == {TP0}
     assert value.members()[0].target_assignment() is None
-    _, with_ops = _conversions._classic_group_description(
-        (None, ("g", "", "", True, [], "Dead", None, [AclOperation.ALTER.code()])))
+    with_ops = _conversions._classic_group_description(
+        ("g", "", "", True, [], "Dead", None, [AclOperation.ALTER.code()]))
     assert with_ops.authorized_operations() == {AclOperation.ALTER}
     assert with_ops.is_simple_consumer_group() and with_ops.state() is ClassicGroupState.DEAD
 
 
-def test_group_offsets_from_the_drain() -> None:
-    error, value = _conversions._group_offsets(
-        (None, {("t", 0): (5, "meta", 3), ("t", 1): (6, "", None), ("u", 0): None}))
-    assert error is None
+def test_group_offsets_from_the_extension() -> None:
+    value = _conversions._group_offsets(
+        {("t", 0): (5, "meta", 3), ("t", 1): (6, "", None), ("u", 0): None})
     assert value == {TP0: OffsetAndMetadata(offset=5, leader_epoch=3, metadata="meta"),
                      TP1: OffsetAndMetadata(offset=6, leader_epoch=None, metadata=""),
                      TopicPartition(topic="u", partition=0): None}
 
 
-def test_group_listings_from_the_drain() -> None:
+def test_group_listings_from_the_extension() -> None:
     valid = [("g1", "Consumer", "consumer", "Stable", False), ("g2", None, "", None, False)]
-    errors = [_borrowed(GroupAuthorizationError, "denied")]
-    results = _conversions._group_listings((valid, errors))
-    assert results[:2] == [
+    assert _conversions._group_listings(valid) == [
         GroupListing(group_id="g1", type=GroupType.CONSUMER, protocol="consumer",
                      group_state=GroupState.STABLE),
         GroupListing(group_id="g2", type=None, protocol="", group_state=None)]
-    assert type(results[2]) is GroupAuthorizationError and str(results[2]) == "denied"
 
 
-def _fake_drain(drained: dict[Any, Any]) -> Callable[[int], dict[Any, Any]]:
-    return lambda handle: drained
+# ---- the results over the C result's own futures ----------------------------
 
 
-def test_sub_level_errors_become_the_map_of_javas_one_future() -> None:
-    """A key's ``Errors.exception()`` (the code's default message) is an entry of
-    Java's ``Map<K, Errors>``; ``None`` is ``Errors.NONE``."""
-    drained = {("t", 0): None,
-               ("t", 1): _borrowed(UnknownTopicOrPartitionError,
-                                   "This server does not host this topic-partition.")}
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain(drained), _conversions.topic_partition_from_tuple,
-        _conversions._alter_offset_absent, Sync)
-    errors = future.result()
-    assert errors[TP0] is None
-    assert type(errors[TP1]) is UnknownTopicOrPartitionError
-    from confluent_kafka.admin import AlterConsumerGroupOffsetsResult
-    result = AlterConsumerGroupOffsetsResult._new(future=future, kind=Sync)
-    assert result.partition_result(partition=TP0).result() is None
-    with pytest.raises(UnknownTopicOrPartitionError,
-                       match=re.escape("Failed altering group offsets for the following "
-                                       "partitions: [t-1]")):
-        result.all().result()
+def _done(value: Any) -> KafkaFuture[Any]:
+    impl: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+    impl.complete(value)
+    return KafkaFuture._of_impl(impl)
 
 
-def test_a_failure_every_key_carries_fails_the_one_future() -> None:
-    """An error that is not a code's ``Errors.exception()``, such as the driver's
-    timeout (an ``ApiError`` with its own message) or a non-API error, is the
-    failure of Java's one future."""
-    timeout = _borrowed(KafkaTimeoutError, "Timed out waiting for a node assignment. Call: x")
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({"i1": timeout, "i2": timeout}),
-        _conversions._member_identity_key, _conversions._member_absent, Sync)
-    with pytest.raises(KafkaTimeoutError, match="Timed out waiting for a node assignment"):
-        future.result()
-    # An IllegalArgumentError with any other text than the key's absent-key text.
-    absent_t1 = 'Alter offset for partition "t-1" was not attempted'
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({("t", 0): _borrowed(IllegalArgumentError, absent_t1)}),
-        _conversions.topic_partition_from_tuple, _conversions._alter_offset_absent, Sync)
-    with pytest.raises(IllegalArgumentError, match=re.escape(absent_t1)):
-        future.result()
+def _failed(error: BaseException) -> KafkaFuture[Any]:
+    impl: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+    impl.complete_with_error(error)
+    return KafkaFuture._of_impl(impl)
 
 
-def test_a_key_absent_from_the_response_is_absent_from_the_map() -> None:
-    """When the response leaves out a requested key, the core gives that key alone
-    the Result's absent-key ``IllegalArgumentError``. The key is left out of the
-    rebuilt map: the Result raises Java's own text for it and its siblings resolve
-    (``AlterConsumerGroupOffsetsResult.java:50,71-74``,
-    ``DeleteConsumerGroupOffsetsResult.java:85``,
-    ``RemoveMembersFromConsumerGroupResult.java:104``)."""
-    from confluent_kafka.admin import (
-        AlterConsumerGroupOffsetsResult,
-        DeleteConsumerGroupOffsetsResult,
-        RemoveMembersFromConsumerGroupResult,
-    )
-
-    altered_text = 'Alter offset for partition "t-1" was not attempted'
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({("t", 0): None,
-                             ("t", 1): _borrowed(IllegalArgumentError, altered_text)}),
-        _conversions.topic_partition_from_tuple, _conversions._alter_offset_absent, Sync)
-    assert future.result() == {TP0: None}
-    altered = AlterConsumerGroupOffsetsResult._new(future=future, kind=Sync)
-    assert altered.partition_result(partition=TP0).result() is None
-    # Java's all() reads only the map's values.
-    assert altered.all().result() is None
-    with pytest.raises(IllegalArgumentError, match=re.escape(altered_text)):
-        altered.partition_result(partition=TP1).result()
-
-    deleted_text = ('Offset deletion result for partition "t-1" was not included in the '
-                    'response')
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({("t", 0): None,
-                             ("t", 1): _borrowed(IllegalArgumentError, deleted_text)}),
-        _conversions.topic_partition_from_tuple, _conversions._offset_deletion_absent, Sync)
-    deleted = DeleteConsumerGroupOffsetsResult._new(future=future, partitions=[TP0, TP1],
-                                                    kind=Sync)
-    assert deleted.partition_result(partition=TP0).result() is None
-    with pytest.raises(IllegalArgumentError, match=re.escape(deleted_text)):
-        deleted.partition_result(partition=TP1).result()
-    with pytest.raises(IllegalArgumentError, match=re.escape(deleted_text)):
-        deleted.all().result()
-
-    member, absent = (MemberToRemove(group_instance_id="i1"),
-                      MemberToRemove(group_instance_id="i2"))
-    removed_text = ('Member "MemberIdentity(memberId=\'\', groupInstanceId=\'i2\', reason=null)" '
-                    'was not included in the removal response')
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({"i1": None, "i2": _borrowed(IllegalArgumentError, removed_text)}),
-        _conversions._member_identity_key, _conversions._member_absent, Sync)
-    removed = RemoveMembersFromConsumerGroupResult._new(future=future,
-                                                       member_infos=[member, absent],
-                                                       kind=Sync)
-    assert removed.member_result(member=member).result() is None
-    with pytest.raises(IllegalArgumentError, match=re.escape(removed_text)):
-        removed.member_result(member=absent).result()
-    with pytest.raises(IllegalArgumentError, match=re.escape(removed_text)):
-        removed.all().result()
+def test_outcomes_carry_each_keys_outcome_as_it_stands() -> None:
+    """Java's one ``Map<K, Errors>`` future, read from the core's per-key futures:
+    a key's error is kept as it is (``Errors.exception()``, the call's failure or
+    the result's absent-key ``IllegalArgumentException``), ``None`` for success; it
+    completes once every key's future is done."""
+    error = UnknownTopicOrPartitionError(message="This server does not host this "
+                                                 "topic-partition.")
+    pending: _KafkaFutureImpl[None] = _KafkaFutureImpl()
+    other = TopicPartition(topic="u", partition=0)
+    future = _conversions.outcomes(
+        Sync, None, {TP0: _done(None), TP1: _failed(error), other: KafkaFuture._of_impl(pending)})
+    assert isinstance(future, KafkaFuture)
+    assert not future.is_done()
+    pending.complete(None)
+    outcome = future.get(timeout=WAIT)
+    assert outcome == {TP0: None, TP1: error, other: None}
+    assert outcome[TP1] is error
 
 
-def test_member_results_are_keyed_as_java_looks_them_up() -> None:
-    """``memberResult`` looks a member up by ``MemberToRemove.toMemberIdentity()``."""
-    from confluent_kafka.admin import RemoveMembersFromConsumerGroupResult
+def test_delete_consumer_group_offsets_result_over_the_cores_partition_results() -> None:
+    """Over :func:`outcomes`, ``DeleteConsumerGroupOffsetsResult`` answers each case
+    as Java's does: a partition's own error, a partition the response left out (the
+    core's absent-key error, Java's text), and the call's failure, which every
+    partition carries."""
+    absent = IllegalArgumentError(message='Offset deletion result for partition "t-1" was '
+                                          'not included in the response')
+    result = DeleteConsumerGroupOffsetsResult._new(
+        future=_conversions.outcomes(Sync, None, {TP0: _done(None), TP1: _failed(absent)}),
+        partitions=[TP0, TP1], kind=Sync)
+    assert result.partition_result(partition=TP0).get(timeout=WAIT) is None
+    assert _fails(result.partition_result(partition=TP1), IllegalArgumentError) is absent
+    assert _fails(result.all(), IllegalArgumentError) is absent
+
+    denied = GroupAuthorizationError(message="denied")
+    result = DeleteConsumerGroupOffsetsResult._new(
+        future=_conversions.outcomes(Sync, None, {TP0: _failed(denied), TP1: _failed(denied)}),
+        partitions=[TP0, TP1], kind=Sync)
+    assert _fails(result.partition_result(partition=TP0), GroupAuthorizationError) is denied
+    assert _fails(result.all(), GroupAuthorizationError) is denied
+
+
+def test_client_results_return_the_cores_futures() -> None:
+    """The client's ``AlterConsumerGroupOffsetsResult``,
+    ``RemoveMembersFromConsumerGroupResult`` and ``ListGroupsResult`` hand out the
+    core's own futures: a new one from each ``partition_result`` / ``member_result``
+    / ``all`` call, as Java's do, and Java's three fields on ``ListGroupsResult``."""
+    asked: list[Any] = []
+    error = UnknownMemberIdError(message="The coordinator is not aware of this member.")
+
+    def partition_result(partition: TopicPartition) -> KafkaFuture[None]:
+        asked.append(partition)
+        return _done(None) if partition == TP0 else _failed(error)
+
+    altered = AlterConsumerGroupOffsetsResult._of_client(
+        partition_result=partition_result, all=lambda: _failed(error), kind=Sync)
+    assert altered.partition_result(partition=TP0).get(timeout=WAIT) is None
+    assert _fails(altered.partition_result(partition=TP1), UnknownMemberIdError) is error
+    assert asked == [TP0, TP1]
+    assert altered.all() is not altered.all()
+    assert _fails(altered.all(), UnknownMemberIdError) is error
 
     member = MemberToRemove(group_instance_id="i1")
-    other = MemberToRemove(group_instance_id="i2")
-    future = _conversions._sub_level_errors_future(
-        (1, 0), _fake_drain({"i1": None, "i2": _borrowed(
-            UnknownMemberIdError, "The coordinator is not aware of this member.")}),
-        _conversions._member_identity_key, _conversions._member_absent, Sync)
-    result = RemoveMembersFromConsumerGroupResult._new(future=future,
-                                                       member_infos=[member, other],
-                                                       kind=Sync)
-    assert result.member_result(member=member).result() is None
-    with pytest.raises(UnknownMemberIdError):
-        result.member_result(member=other).result()
-    with pytest.raises(UnknownMemberIdError):
-        result.all().result()
+    members: list[MemberToRemove] = []
+
+    def member_result(m: MemberToRemove) -> KafkaFuture[None]:
+        members.append(m)
+        return _done(None)
+
+    removed = RemoveMembersFromConsumerGroupResult._of_client(
+        member_result=member_result, all=lambda: _done(None), member_infos=[member], kind=Sync)
+    assert removed.member_result(member=member).get(timeout=WAIT) is None
+    assert members == [member]
+    assert removed.all().get(timeout=WAIT) is None
+
+    listing = GroupListing(group_id="g", type=None, protocol="", group_state=None)
+    all_future, valid, errors = _done([listing]), _done([listing]), _done([])
+    listed = ListGroupsResult._of_client(all=all_future, valid=valid, errors=errors, kind=Sync)
+    assert listed.all() is all_future and listed.valid() is valid
+    assert listed.errors() is errors
+
+
+async def test_async_outcomes_are_async_futures() -> None:
+    future = _conversions.outcomes(Async, asyncio.get_running_loop(), {"k": _done(None)})
+    assert isinstance(future, AsyncKafkaFuture)
+    assert await future.get(timeout=WAIT) == {"k": None}

@@ -27,6 +27,12 @@ class ListGroupsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *, future: KafkaFuture[Iterable[object]] | AsyncKafkaFuture[Iterable[object]],
              kind: type[KindT]) -> ListGroupsResult[KindT]: ...
+    @classmethod
+    def _of_client(cls, *,
+                   all: KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]],
+                   valid: KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]],
+                   errors: KafkaFuture[list[BaseException]] | AsyncKafkaFuture[list[BaseException]],
+                   kind: type[KindT]) -> ListGroupsResult[KindT]: ...
     @overload
     def all(self: ListGroupsResult[Sync]) -> KafkaFuture[list[GroupListing]]: ...
     @overload

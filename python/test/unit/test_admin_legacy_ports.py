@@ -439,8 +439,8 @@ def test_list_groups_reports_every_seeded_group_with_the_consumer_defaults() -> 
         client.incremental_alter_configs(configs={
             ConfigResource(type=ConfigResource.Type.GROUP, name=name): [AlterConfigOp(
                 config_entry=ConfigEntry(name="k", value="v"),
-                operation_type=AlterConfigOp.OpType.SET)]}).all().result()
-    listings = client.list_groups().all().result()
+                operation_type=AlterConfigOp.OpType.SET)]}).all().get()
+    listings = client.list_groups().all().get()
     assert {listing.group_id() for listing in listings} == {"lg-a", "lg-b"}
     listing = next(entry for entry in listings if entry.group_id() == "lg-a")
     assert listing.type() is GroupType.CONSUMER
@@ -458,11 +458,11 @@ def test_list_groups_ignores_its_filters_on_the_mock() -> None:
     client.incremental_alter_configs(configs={
         ConfigResource(type=ConfigResource.Type.GROUP, name="g"): [AlterConfigOp(
             config_entry=ConfigEntry(name="k", value="v"),
-            operation_type=AlterConfigOp.OpType.SET)]}).all().result()
+            operation_type=AlterConfigOp.OpType.SET)]}).all().get()
     options = ListGroupsOptions.for_consumer_groups().in_group_states(
         group_states={GroupState.EMPTY})
     assert [listing.group_id() for listing in
-            client.list_groups(options=options).all().result()] == ["g"]
+            client.list_groups(options=options).all().get()] == ["g"]
 
 
 def test_option_timeout_ms_is_an_int_of_milliseconds() -> None:

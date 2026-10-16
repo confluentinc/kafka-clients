@@ -14,8 +14,8 @@
 
 # Stub for confluent_kafka.admin.RemoveMembersFromConsumerGroupResult.
 
-from collections.abc import Iterable
-from typing import Generic, overload
+from collections.abc import Callable, Iterable
+from typing import Any, Generic, overload
 
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _MemberIdentity
@@ -29,6 +29,10 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
     def _new(cls, *, future: KafkaFuture[dict[_MemberIdentity, BaseException | None]] | AsyncKafkaFuture[dict[_MemberIdentity, BaseException | None]],
              member_infos: Iterable[MemberToRemove],
              kind: type[KindT]) -> RemoveMembersFromConsumerGroupResult[KindT]: ...
+    @classmethod
+    def _of_client(cls, *, member_result: Callable[[MemberToRemove], Any],
+                   all: Callable[[], Any], member_infos: Iterable[MemberToRemove],
+                   kind: type[KindT]) -> RemoveMembersFromConsumerGroupResult[KindT]: ...
     @overload
     def all(self: RemoveMembersFromConsumerGroupResult[Sync]
             ) -> KafkaFuture[None]: ...

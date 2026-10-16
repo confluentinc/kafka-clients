@@ -21,11 +21,16 @@ constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new`` b
 it (CLAUDE.md, Python Binding Conventions, Class family). The stored map's values are
 Java's internal ``Errors``, carried as what ``Errors.exception()`` gives (``None`` for
 ``NONE``); ``Errors.exception(message)`` is ``_errors_exception`` (``_internals``).
+
+The client's result is built by ``_of_client`` instead: the C API hands out no
+``Map<TopicPartition, Errors>`` future, but the core's own result, whose
+``partitionResult(partition)`` and ``all()`` carry Java's outcome, so each call of
+``partition_result`` and ``all`` returns the core's future of the same name.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
@@ -47,7 +52,7 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
     Java: ``org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult``.
     """
 
-    __slots__ = ("_future", "_kind")
+    __slots__ = ("_future", "_kind", "_client_partition_result", "_client_all")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError(
@@ -61,10 +66,27 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
         result = cls.__new__(cls)
         result._future = future
         result._kind = kind
+        result._client_partition_result = None
+        result._client_all = None
+        return result
+
+    @classmethod
+    def _of_client(cls, *, partition_result: Callable[[TopicPartition], Any],
+                   all: Callable[[], Any],  # noqa: A002 - Java's method name
+                   kind: type[Sync] | type[Async]) -> AlterConsumerGroupOffsetsResult[Any]:
+        """The client's result: ``partition_result(partition)`` and ``all()`` return
+        the core's ``partitionResult(partition)`` and ``all()`` futures."""
+        result = cls.__new__(cls)
+        result._future = None
+        result._kind = kind
+        result._client_partition_result = partition_result
+        result._client_all = all
         return result
 
     def partition_result(self, *, partition: TopicPartition) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which can be used to check the result for a given partition."""
+        if self._client_partition_result is not None:
+            return self._client_partition_result(partition)  # type: ignore[no-any-return]
         result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(topic_partitions: Mapping[TopicPartition, BaseException | None] | None,
@@ -89,6 +111,8 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
 
     def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the alter offsets succeed."""
+        if self._client_all is not None:
+            return self._client_all()  # type: ignore[no-any-return]
         def check(topic_partition_errors_map: Mapping[TopicPartition, BaseException | None]
                   ) -> None:
             partitions_failed = [partition for partition, error

@@ -14,7 +14,8 @@
 
 # Stub for confluent_kafka.admin.AlterConsumerGroupOffsetsResult.
 
-from typing import Generic, overload
+from collections.abc import Callable
+from typing import Any, Generic, overload
 
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
@@ -26,6 +27,10 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *, future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
              kind: type[KindT]) -> AlterConsumerGroupOffsetsResult[KindT]: ...
+    @classmethod
+    def _of_client(cls, *, partition_result: Callable[[TopicPartition], Any],
+                   all: Callable[[], Any],
+                   kind: type[KindT]) -> AlterConsumerGroupOffsetsResult[KindT]: ...
     @overload
     def partition_result(self: AlterConsumerGroupOffsetsResult[Sync], *,
                          partition: TopicPartition) -> KafkaFuture[None]: ...

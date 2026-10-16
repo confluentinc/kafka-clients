@@ -455,11 +455,15 @@ def test_list_groups_metadata_failure(options: Any) -> None:
     ``testListStreamsGroupsMetadataFailure`` and ``testListShareGroupsMetadataFailure``:
     Java scripts an empty Metadata response so no broker is found, and asserts the
     ``all()`` future fails with ``KafkaException``; an unreachable bootstrap makes the
-    same call fail (Java's message, ``KafkaAdminClient.listGroups``)."""
+    same call fail (Java's message, ``KafkaAdminClient.listGroups``), through
+    ``get()``'s ``ExecutionError``."""
+    from confluent_kafka import ExecutionError
+
     with _admin(retries="0") as admin:
-        with pytest.raises(KafkaError) as info:
-            admin.list_groups(options=options).all().result()
-        assert str(info.value) == LIST_GROUPS_FAILED
+        with pytest.raises(ExecutionError) as info:
+            admin.list_groups(options=options).all().get()
+        assert type(info.value.__cause__) is KafkaError
+        assert str(info.value.__cause__) == LIST_GROUPS_FAILED
 
 
 def test_equals_of_client_quota_filter_component() -> None:

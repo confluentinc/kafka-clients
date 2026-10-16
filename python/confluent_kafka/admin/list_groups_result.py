@@ -24,6 +24,10 @@ errors as ``List``\\ s, so each ``Collection`` is a ``list`` (Types); ``all()`` 
 when the given future fails (Java discards the ``thenApply`` future that would carry the
 failure). The futures it builds without a caller asking (``all()`` and the
 discarded ``thenApply``) do not log an unread error, as Java's do not.
+
+The client's result is built by ``_of_client`` instead, over the core's own
+result's ``all()``, ``valid()`` and ``errors()`` futures, which the core builds from
+Java's ``Collection<Object>`` as this constructor does.
 """
 
 from __future__ import annotations
@@ -85,6 +89,22 @@ class ListGroupsResult(Generic[KindT]):
 
         # Java discards this future.
         future.then_apply(function=split)
+        return result
+
+    @classmethod
+    def _of_client(
+            cls, *,
+            all: KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]],
+            valid: KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]],
+            errors: KafkaFuture[list[BaseException]] | AsyncKafkaFuture[list[BaseException]],
+            kind: type[Sync] | type[Async]) -> ListGroupsResult[Any]:
+        """The client's result over the core's ``all()``, ``valid()`` and
+        ``errors()`` futures."""
+        result = cls.__new__(cls)
+        result._all = all
+        result._valid = valid
+        result._errors = errors
+        result._kind = kind
         return result
 
     def all(self) -> KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]]:

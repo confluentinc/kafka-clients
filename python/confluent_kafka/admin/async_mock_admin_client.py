@@ -413,24 +413,24 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         return self._describe_delegation_token(
             options if options is not None else DescribeDelegationTokenOptions())
 
-    async def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                       options: DescribeConsumerGroupsOptions | None = None
-                                       ) -> DescribeConsumerGroupsResult[Async]:
+    def describe_consumer_groups(self, *, group_ids: Iterable[str],
+                                 options: DescribeConsumerGroupsOptions | None = None
+                                 ) -> DescribeConsumerGroupsResult[Async]:
         """See :meth:`MockAdminClient.describe_consumer_groups`."""
         return self._describe_consumer_groups(group_ids)
 
     @overload
-    async def list_consumer_group_offsets(self, *, group_id: str,
-                                          options: ListConsumerGroupOffsetsOptions | None = None
-                                          ) -> ListConsumerGroupOffsetsResult[Async]: ...
+    def list_consumer_group_offsets(self, *, group_id: str,
+                                    options: ListConsumerGroupOffsetsOptions | None = None
+                                    ) -> ListConsumerGroupOffsetsResult[Async]: ...
     @overload
-    async def list_consumer_group_offsets(
+    def list_consumer_group_offsets(
         self, *, group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
         options: ListConsumerGroupOffsetsOptions | None = None
     ) -> ListConsumerGroupOffsetsResult[Async]: ...
 
     @java_forms(*_LIST_CONSUMER_GROUP_OFFSETS_FORMS)
-    async def list_consumer_group_offsets(
+    def list_consumer_group_offsets(
         self, *, group_id: str | None = None,
         group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = None,
         options: ListConsumerGroupOffsetsOptions | None = None
@@ -441,20 +441,20 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
             group_specs = {group_id: ListConsumerGroupOffsetsSpec()}
         return self._list_consumer_group_offsets(group_specs)
 
-    async def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                                     options: DeleteConsumerGroupsOptions | None = None
-                                     ) -> DeleteConsumerGroupsResult[Async]:
+    def delete_consumer_groups(self, *, group_ids: Iterable[str],
+                               options: DeleteConsumerGroupsOptions | None = None
+                               ) -> DeleteConsumerGroupsResult[Async]:
         """See :meth:`MockAdminClient.delete_consumer_groups`."""
         return self._delete_consumer_groups(group_ids)
 
-    async def delete_consumer_group_offsets(self, *, group_id: str,
-                                            partitions: Iterable[TopicPartition],
-                                            options: DeleteConsumerGroupOffsetsOptions | None = None
-                                            ) -> DeleteConsumerGroupOffsetsResult[Async]:
+    def delete_consumer_group_offsets(self, *, group_id: str,
+                                      partitions: Iterable[TopicPartition],
+                                      options: DeleteConsumerGroupOffsetsOptions | None = None
+                                      ) -> DeleteConsumerGroupOffsetsResult[Async]:
         """See :meth:`MockAdminClient.delete_consumer_group_offsets`."""
         return self._delete_consumer_group_offsets(group_id, partitions)
 
-    async def list_groups(
+    def list_groups(
         self, *, options: ListGroupsOptions | None = None
     ) -> ListGroupsResult[Async]:
         """See :meth:`MockAdminClient.list_groups`."""
@@ -481,16 +481,16 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.list_partition_reassignments`."""
         return self._list_partition_reassignments(partitions)
 
-    async def remove_members_from_consumer_group(
+    def remove_members_from_consumer_group(
         self, *, group_id: str, options: RemoveMembersFromConsumerGroupOptions
     ) -> RemoveMembersFromConsumerGroupResult[Async]:
         """See :meth:`MockAdminClient.remove_members_from_consumer_group`."""
         return self._remove_members_from_consumer_group(group_id, options)
 
-    async def alter_consumer_group_offsets(self, *, group_id: str,
-                                           offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                           options: AlterConsumerGroupOffsetsOptions | None = None
-                                           ) -> AlterConsumerGroupOffsetsResult[Async]:
+    def alter_consumer_group_offsets(self, *, group_id: str,
+                                     offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                                     options: AlterConsumerGroupOffsetsOptions | None = None
+                                     ) -> AlterConsumerGroupOffsetsResult[Async]:
         """See :meth:`MockAdminClient.alter_consumer_group_offsets`."""
         return self._alter_consumer_group_offsets(group_id, offsets)
 
@@ -599,9 +599,9 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.list_config_resources`."""
         return self._list_config_resources(config_resource_types)
 
-    async def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                      options: DescribeClassicGroupsOptions | None = None
-                                      ) -> DescribeClassicGroupsResult[Async]:
+    def describe_classic_groups(self, *, group_ids: Iterable[str],
+                                options: DescribeClassicGroupsOptions | None = None
+                                ) -> DescribeClassicGroupsResult[Async]:
         """See :meth:`MockAdminClient.describe_classic_groups`."""
         return self._describe_classic_groups(group_ids)
 

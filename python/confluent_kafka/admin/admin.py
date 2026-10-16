@@ -243,10 +243,6 @@ _CLOSE_FOREVER_MS = -1
 #: Java's admin thread name prefix (``KafkaAdminClient.NETWORK_THREAD_PREFIX``).
 _PUMP_THREAD_NAME = "kafka-admin-client-thread"
 
-_Payload = tuple[Any, ...]
-_Submit = Callable[[int, Callable[..., None]], None]
-_Free = Callable[[_Payload], None]
-
 
 class _AdminState:
     """The native admin handle, the closed flag and the uses in flight, shared by
@@ -345,48 +341,6 @@ class _AdminState:
             return entry(c_admin, *args)
         finally:
             self._end_use()
-
-    # ---- the previous FFI's whole-result callback --------------------------------
-    # The RPCs not yet on the extension's ``AdminResult`` still submit an
-    # ``_async`` entry point through these; they go once every RPC uses ``_call``.
-
-    def _submit(self, submit: _Submit, cb: Callable[..., None]) -> None:
-        c_admin = self._begin_use()
-        try:
-            submit(c_admin, cb)
-        except BaseException:
-            self._end_use()
-            raise
-
-    def _wait_for(self, submit: _Submit, free: _Free) -> _Payload:
-        box: dict[str, _Payload] = {}
-        done = threading.Event()
-        lock = threading.Lock()
-        abandoned = False
-
-        def cb(*payload: Any) -> None:
-            try:
-                with lock:
-                    if abandoned:
-                        free(payload)
-                        return
-                    box["payload"] = payload
-                done.set()
-            finally:
-                self._end_use()
-
-        self._submit(submit, cb)
-        try:
-            done.wait()
-        except BaseException:
-            with lock:
-                abandoned = True
-                unclaimed = box.pop("payload", None)
-            if unclaimed is not None:
-                free(unclaimed)
-            raise
-        return box["payload"]
-
 
 
 class _Pump:
@@ -1100,17 +1054,14 @@ class Admin(_AdminState):
         ``group_ids``: the IDs of the groups to describe; ``options``: the options to
         use when describing the groups (Java's ``describeConsumerGroups(groupIds)``
         passes ``new DescribeConsumerGroupsOptions()``). Returns the
-        ``DescribeConsumerGroupsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``DescribeConsumerGroupsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeConsumerGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.describe_consumer_groups_args(ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_consumer_groups_async(c_admin, *args, cb),
-            _conversions.free_describe_consumer_groups)
-        return _conversions.describe_consumer_groups_result(ids, payload, Sync)
+        native = self._call(_lib.Admin_describe_consumer_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.describe_consumer_groups_result(native, Sync, None)
 
     @overload
     def list_consumer_group_offsets(self, *, group_id: str,
@@ -1141,20 +1092,18 @@ class Admin(_AdminState):
         to list offsets for. ``options``: the options to use when listing the
         consumer group offsets (Java's short forms pass ``new
         ListConsumerGroupOffsetsOptions()``). Returns the
-        ``ListConsumerGroupOffsetsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``ListConsumerGroupOffsetsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = ListConsumerGroupOffsetsOptions()
+        native = self._call(_lib.Admin_list_consumer_group_offsets,
+                            *_conversions.list_consumer_group_offsets_args(group_id, group_specs),
+                            options._setters_ran())
         if group_specs is None:
-            assert group_id is not None
-            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}
-        specs = dict(group_specs)
-        args = _conversions.list_consumer_group_offsets_args(specs, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_consumer_group_offsets_async(c_admin, *args, cb),
-            _conversions.free_list_consumer_group_offsets)
-        return _conversions.list_consumer_group_offsets_result(specs, payload, Sync)
+            assert group_id is not None  # java_forms: one or the other
+            return _conversions.list_consumer_group_offsets_result([group_id], native, Sync, None)
+        return _conversions.list_consumer_group_offsets_result(group_specs, native, Sync, None)
 
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
                                options: DeleteConsumerGroupsOptions | None = None
@@ -1164,17 +1113,14 @@ class Admin(_AdminState):
         ``group_ids``: the groups to delete; ``options``: the options to use when
         deleting a consumer group (Java's ``deleteConsumerGroups(groupIds)`` passes
         ``new DeleteConsumerGroupsOptions()``). Returns the
-        ``DeleteConsumerGroupsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``DeleteConsumerGroupsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.delete_consumer_groups_args(ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_delete_consumer_groups_async(c_admin, *args, cb),
-            _conversions.free_delete_consumer_groups)
-        return _conversions.delete_consumer_groups_result(ids, payload, Sync)
+        native = self._call(_lib.Admin_delete_consumer_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.delete_consumer_groups_result(native, Sync, None)
 
     def delete_consumer_group_offsets(self, *, group_id: str,
                                       partitions: Iterable[TopicPartition],
@@ -1188,34 +1134,29 @@ class Admin(_AdminState):
         delete; ``options``: the options to use when deleting offsets in a consumer
         group (Java's ``deleteConsumerGroupOffsets(groupId, partitions)`` passes
         ``new DeleteConsumerGroupOffsetsOptions()``). Returns the
-        ``DeleteConsumerGroupOffsetsResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        ``DeleteConsumerGroupOffsetsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupOffsetsOptions()
         tps = list(partitions)
-        args = _conversions.delete_consumer_group_offsets_args(group_id, tps, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_delete_consumer_group_offsets_async(
-                c_admin, *args, cb),
-            _conversions.free_delete_consumer_group_offsets)
-        return _conversions.delete_consumer_group_offsets_result(tps, payload, Sync)
+        native = self._call(_lib.Admin_delete_consumer_group_offsets,
+                            *_conversions.delete_consumer_group_offsets_args(group_id, tps),
+                            options._setters_ran())
+        return _conversions.delete_consumer_group_offsets_result(tps, native, Sync, None)
 
     def list_groups(self, *, options: ListGroupsOptions | None = None) -> ListGroupsResult[Sync]:
         """List the groups available in the cluster.
 
         ``options``: the options to use when listing the groups (Java's
         ``listGroups()`` passes ``new ListGroupsOptions()``). Returns the
-        ``ListGroupsResult``, its futures complete *(deviation: see
-        ``create_topics``)*.
+        ``ListGroupsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = ListGroupsOptions()
-        args = _conversions.list_groups_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_groups_async(c_admin, *args, cb),
-            _conversions.free_list_groups)
-        return _conversions.list_groups_result(payload, Sync)
+        native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
+        return _conversions.list_groups_result(native, Sync, None)
 
     def elect_leaders(self, *, election_type: ElectionType,
                       partitions: Iterable[TopicPartition] | None,
@@ -1346,15 +1287,13 @@ class Admin(_AdminState):
 
         ``group_id``: the ID of the group to remove member from; ``options``: the
         options to carry removing members' information. Returns the
-        ``RemoveMembersFromConsumerGroupResult``, its futures complete *(deviation:
-        see ``create_topics``)*.
+        ``RemoveMembersFromConsumerGroupResult``.
         """
+        self._check_not_closed()
         args = _conversions.remove_members_from_consumer_group_args(group_id, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_remove_members_from_consumer_group_async(
-                c_admin, *args, cb),
-            _conversions.free_remove_members_from_consumer_group)
-        return _conversions.remove_members_from_consumer_group_result(options, payload, Sync)
+        native = self._call(_lib.Admin_remove_members_from_consumer_group, *args,
+                            options._setters_ran())
+        return _conversions.remove_members_from_consumer_group_result(options, native, Sync, None)
 
     def alter_consumer_group_offsets(self, *, group_id: str,
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -1371,17 +1310,15 @@ class Admin(_AdminState):
         the map being ignored; ``options``: the options to use when altering the
         offsets (Java's ``alterConsumerGroupOffsets(groupId, offsets)`` passes ``new
         AlterConsumerGroupOffsetsOptions()``). Returns the
-        ``AlterConsumerGroupOffsetsResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        ``AlterConsumerGroupOffsetsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = AlterConsumerGroupOffsetsOptions()
-        args = _conversions.alter_consumer_group_offsets_args(group_id, offsets, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_alter_consumer_group_offsets_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_consumer_group_offsets)
-        return _conversions.alter_consumer_group_offsets_result(payload, Sync)
+        native = self._call(_lib.Admin_alter_consumer_group_offsets,
+                            *_conversions.alter_consumer_group_offsets_args(group_id, offsets),
+                            options._setters_ran())
+        return _conversions.alter_consumer_group_offsets_result(native, Sync, None)
 
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
                      options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Sync]:
@@ -1786,17 +1723,14 @@ class Admin(_AdminState):
         ``group_ids``: the IDs of the groups to describe; ``options``: the options to
         use when describing the groups (Java's ``describeClassicGroups(groupIds)``
         passes ``new DescribeClassicGroupsOptions()``). Returns the
-        ``DescribeClassicGroupsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``DescribeClassicGroupsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeClassicGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.describe_classic_groups_args(ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_classic_groups_async(c_admin, *args, cb),
-            _conversions.free_describe_classic_groups)
-        return _conversions.describe_classic_groups_result(ids, payload, Sync)
+        native = self._call(_lib.Admin_describe_classic_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.describe_classic_groups_result(native, Sync, None)
 
     def force_terminate_transaction(self, *, transactional_id: str,
                                     options: TerminateTransactionOptions | None = None

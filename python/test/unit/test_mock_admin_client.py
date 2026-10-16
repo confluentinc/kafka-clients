@@ -1157,7 +1157,7 @@ def test_mock_list_consumer_group_offsets_rejects_a_negative_seeded_offset() -> 
     # The mock is still usable afterwards.
     mock.update_consumer_group_offsets(new_offsets={tp: 7})
     offsets = mock.list_consumer_group_offsets(group_specs=specs)
-    listed = offsets.partitions_to_offset_and_metadata().result()[tp]
+    listed = offsets.partitions_to_offset_and_metadata().get()[tp]
     assert listed is not None and listed.offset() == 7
 
 
@@ -1169,7 +1169,7 @@ def test_mock_list_consumer_group_offsets_negative_offset_outside_the_selection_
     mock.update_consumer_group_offsets(new_offsets={selected: 5, other: -1})
     specs = {"group": ListConsumerGroupOffsetsSpec(topic_partitions=[selected])}
     offsets = mock.list_consumer_group_offsets(
-        group_specs=specs).partitions_to_offset_and_metadata(group_id="group").result()
+        group_specs=specs).partitions_to_offset_and_metadata(group_id="group").get()
     assert len(offsets) == 1
     listed = offsets[selected]
     assert listed is not None and listed.offset() == 5
@@ -1179,8 +1179,8 @@ def test_list_consumer_group_offsets_java_mock_quirks() -> None:
     mock = admin()
     # No offsets stored: the filter never runs, so the default spec lists nothing.
     result = mock.list_consumer_group_offsets(group_id="g")
-    assert result.partitions_to_offset_and_metadata(group_id="g").result() == {}
-    assert result.all().result() == {"g": {}}
+    assert result.partitions_to_offset_and_metadata(group_id="g").get() == {}
+    assert result.all().get() == {"g": {}}
     tp = TopicPartition(topic="t", partition=0)
     mock.update_consumer_group_offsets(new_offsets={tp: 3})
     # Java's listConsumerGroupOffsets(groupId) passes new ListConsumerGroupOffsetsSpec(),
@@ -1203,11 +1203,11 @@ def test_list_consumer_group_offsets_java_mock_quirks() -> None:
 
 def test_list_groups_lists_the_groups_with_configs() -> None:
     mock = admin()
-    assert mock.list_groups().all().result() == []
+    assert mock.list_groups().all().get() == []
     resource = ConfigResource(type=ConfigResource.Type.GROUP, name="g1")
     mock.incremental_alter_configs(configs={resource: [AlterConfigOp(
         config_entry=ConfigEntry(name="k", value="v"), operation_type=AlterConfigOp.OpType.SET)]})
-    (listing,) = mock.list_groups(options=ListGroupsOptions()).all().result()
+    (listing,) = mock.list_groups(options=ListGroupsOptions()).all().get()
     assert listing.group_id() == "g1"
     assert listing.type() is GroupType.CONSUMER
     assert listing.protocol() == "consumer"

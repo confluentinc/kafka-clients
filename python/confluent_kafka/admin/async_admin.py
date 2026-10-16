@@ -41,14 +41,13 @@ from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._async import (
     LoopBinding,
     OffLoopPump,
-    Undelivered,
     await_to_end,
     call_soon_on,
 )
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Async
 from confluent_kafka.admin.abort_transaction_options import AbortTransactionOptions
-from confluent_kafka.admin.admin import _AdminState, _Free, _Payload, _Submit, close_timeout_ms
+from confluent_kafka.admin.admin import _AdminState, close_timeout_ms
 from confluent_kafka.admin.alter_client_quotas_options import AlterClientQuotasOptions
 from confluent_kafka.admin.alter_configs_options import AlterConfigsOptions
 from confluent_kafka.admin.alter_consumer_group_offsets_options import (
@@ -238,7 +237,6 @@ class AsyncAdmin(_AdminState):
     def _init_async_state(self) -> None:
         """The shared state, the loop binding and the off-loop pump."""
         _AdminState.__init__(self)
-        self._undelivered = Undelivered()
         self._binding = LoopBinding(type(self).__name__)
         self._off_loop_pump = OffLoopPump(self._run_pump, "confluent-kafka-admin-pump")
         # One drainer at a time: the loop and the off-loop pump never drain at once.
@@ -334,14 +332,10 @@ class AsyncAdmin(_AdminState):
         except BaseException:
             threading.Thread(target=self._finish_close, args=(closed,),
                              name="kafka-admin-client-close", daemon=True).start()
-            self._undelivered.free_closed()
             raise
-        try:
-            # Off the loop: waits for the uses still in flight, then frees the
-            # handle; a cancellation meanwhile lets it run to its end.
-            await await_to_end(loop.run_in_executor(None, self._teardown))
-        finally:
-            self._undelivered.free_closed()
+        # Off the loop: waits for the uses still in flight, then frees the handle;
+        # a cancellation meanwhile lets it run to its end.
+        await await_to_end(loop.run_in_executor(None, self._teardown))
 
     def _finish_close(self, closed: threading.Event) -> None:
         closed.wait()
@@ -352,35 +346,6 @@ class AsyncAdmin(_AdminState):
 
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
-
-    # ---- the previous FFI's whole-result callback --------------------------------
-    # The RPCs not yet on the extension's ``AdminResult`` still await an ``_async``
-    # entry point through this; it goes once every RPC uses ``_call``.
-
-    async def _await_for(self, submit: _Submit, free: _Free) -> _Payload:
-        self._undelivered.free_closed()
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[_Payload] = loop.create_future()
-
-        def deliver(payload: _Payload) -> None:
-            if future.done():
-                free(payload)
-                return
-            future.set_result(payload)
-
-        def cb(*payload: Any) -> None:
-            try:
-                self._undelivered.hand_over(loop, deliver, payload, free)
-            finally:
-                self._end_use()
-
-        self._submit(submit, cb)
-        try:
-            return await future
-        except asyncio.CancelledError:
-            if future.done() and not future.cancelled():
-                free(future.result())
-            raise
 
     def create_topics(self, *, new_topics: Iterable[NewTopic],
                       options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Async]:
@@ -629,92 +594,87 @@ class AsyncAdmin(_AdminState):
                             _conversions.describe_delegation_token_options(options))
         return _conversions.describe_delegation_token_result(native, Async, self._binding.loop)
 
-    async def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                       options: DescribeConsumerGroupsOptions | None = None
-                                       ) -> DescribeConsumerGroupsResult[Async]:
+    def describe_consumer_groups(self, *, group_ids: Iterable[str],
+                                 options: DescribeConsumerGroupsOptions | None = None
+                                 ) -> DescribeConsumerGroupsResult[Async]:
         """See :meth:`Admin.describe_consumer_groups`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeConsumerGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.describe_consumer_groups_args(ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_consumer_groups_async(c_admin, *args, cb),
-            _conversions.free_describe_consumer_groups)
-        return _conversions.describe_consumer_groups_result(ids, payload, Async)
+        native = self._call(_lib.Admin_describe_consumer_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.describe_consumer_groups_result(native, Async, self._binding.loop)
 
     @overload
-    async def list_consumer_group_offsets(
+    def list_consumer_group_offsets(
         self, *, group_id: str, options: ListConsumerGroupOffsetsOptions | None = None
     ) -> ListConsumerGroupOffsetsResult[Async]: ...
     @overload
-    async def list_consumer_group_offsets(
+    def list_consumer_group_offsets(
         self, *, group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
         options: ListConsumerGroupOffsetsOptions | None = None
     ) -> ListConsumerGroupOffsetsResult[Async]: ...
 
     @java_forms(Form("group_id", "options"), Form("group_id"),
                 Form("group_specs", "options"), Form("group_specs"))
-    async def list_consumer_group_offsets(
+    def list_consumer_group_offsets(
         self, *, group_id: str | None = None,
         group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = None,
         options: ListConsumerGroupOffsetsOptions | None = None
     ) -> ListConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.list_consumer_group_offsets`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ListConsumerGroupOffsetsOptions()
+        native = self._call(_lib.Admin_list_consumer_group_offsets,
+                            *_conversions.list_consumer_group_offsets_args(group_id, group_specs),
+                            options._setters_ran())
         if group_specs is None:
-            assert group_id is not None
-            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}
-        specs = dict(group_specs)
-        args = _conversions.list_consumer_group_offsets_args(specs, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_consumer_group_offsets_async(c_admin, *args, cb),
-            _conversions.free_list_consumer_group_offsets)
-        return _conversions.list_consumer_group_offsets_result(specs, payload, Async)
+            assert group_id is not None  # java_forms: one or the other
+            return _conversions.list_consumer_group_offsets_result([group_id], native, Async,
+                                                                   self._binding.loop)
+        return _conversions.list_consumer_group_offsets_result(group_specs, native, Async,
+                                                               self._binding.loop)
 
-    async def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                                     options: DeleteConsumerGroupsOptions | None = None
-                                     ) -> DeleteConsumerGroupsResult[Async]:
+    def delete_consumer_groups(self, *, group_ids: Iterable[str],
+                               options: DeleteConsumerGroupsOptions | None = None
+                               ) -> DeleteConsumerGroupsResult[Async]:
         """See :meth:`Admin.delete_consumer_groups`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.delete_consumer_groups_args(ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_delete_consumer_groups_async(c_admin, *args, cb),
-            _conversions.free_delete_consumer_groups)
-        return _conversions.delete_consumer_groups_result(ids, payload, Async)
+        native = self._call(_lib.Admin_delete_consumer_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.delete_consumer_groups_result(native, Async, self._binding.loop)
 
-    async def delete_consumer_group_offsets(
+    def delete_consumer_group_offsets(
         self, *, group_id: str, partitions: Iterable[TopicPartition],
         options: DeleteConsumerGroupOffsetsOptions | None = None
     ) -> DeleteConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.delete_consumer_group_offsets`; the result's future is an
         ``asyncio.Future``."""
+        self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupOffsetsOptions()
         tps = list(partitions)
-        args = _conversions.delete_consumer_group_offsets_args(group_id, tps, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_delete_consumer_group_offsets_async(
-                c_admin, *args, cb),
-            _conversions.free_delete_consumer_group_offsets)
-        return _conversions.delete_consumer_group_offsets_result(tps, payload, Async)
+        native = self._call(_lib.Admin_delete_consumer_group_offsets,
+                            *_conversions.delete_consumer_group_offsets_args(group_id, tps),
+                            options._setters_ran())
+        return _conversions.delete_consumer_group_offsets_result(tps, native, Async,
+                                                                 self._binding.loop)
 
-    async def list_groups(self, *, options: ListGroupsOptions | None = None
-                          ) -> ListGroupsResult[Async]:
+    def list_groups(self, *, options: ListGroupsOptions | None = None
+                    ) -> ListGroupsResult[Async]:
         """See :meth:`Admin.list_groups`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ListGroupsOptions()
-        args = _conversions.list_groups_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_groups_async(c_admin, *args, cb),
-            _conversions.free_list_groups)
-        return _conversions.list_groups_result(payload, Async)
+        native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
+        return _conversions.list_groups_result(native, Async, self._binding.loop)
 
     def elect_leaders(self, *, election_type: ElectionType,
                             partitions: Iterable[TopicPartition] | None,
@@ -758,32 +718,32 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.list_partition_reassignments_result(native, Async, self._binding.loop)
 
-    async def remove_members_from_consumer_group(
+    def remove_members_from_consumer_group(
         self, *, group_id: str, options: RemoveMembersFromConsumerGroupOptions
     ) -> RemoveMembersFromConsumerGroupResult[Async]:
         """See :meth:`Admin.remove_members_from_consumer_group`; the result's
-        futures are ``asyncio.Future``\\ s."""
+        futures are ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         args = _conversions.remove_members_from_consumer_group_args(group_id, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_remove_members_from_consumer_group_async(
-                c_admin, *args, cb),
-            _conversions.free_remove_members_from_consumer_group)
-        return _conversions.remove_members_from_consumer_group_result(options, payload, Async)
+        native = self._call(_lib.Admin_remove_members_from_consumer_group, *args,
+                            options._setters_ran())
+        return _conversions.remove_members_from_consumer_group_result(options, native, Async,
+                                                                      self._binding.loop)
 
-    async def alter_consumer_group_offsets(
+    def alter_consumer_group_offsets(
         self, *, group_id: str, offsets: Mapping[TopicPartition, OffsetAndMetadata],
         options: AlterConsumerGroupOffsetsOptions | None = None
     ) -> AlterConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.alter_consumer_group_offsets`; the result's future is an
         ``asyncio.Future``."""
+        self._check_not_closed()
         if options is None:
             options = AlterConsumerGroupOffsetsOptions()
-        args = _conversions.alter_consumer_group_offsets_args(group_id, offsets, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_alter_consumer_group_offsets_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_consumer_group_offsets)
-        return _conversions.alter_consumer_group_offsets_result(payload, Async)
+        native = self._call(_lib.Admin_alter_consumer_group_offsets,
+                            *_conversions.alter_consumer_group_offsets_args(group_id, offsets),
+                            options._setters_ran())
+        return _conversions.alter_consumer_group_offsets_result(native, Async,
+                                                                self._binding.loop)
 
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
                            options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Async]:
@@ -974,19 +934,17 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.list_config_resources_result(native, Async, self._binding.loop)
 
-    async def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                      options: DescribeClassicGroupsOptions | None = None
-                                      ) -> DescribeClassicGroupsResult[Async]:
+    def describe_classic_groups(self, *, group_ids: Iterable[str],
+                                options: DescribeClassicGroupsOptions | None = None
+                                ) -> DescribeClassicGroupsResult[Async]:
         """See :meth:`Admin.describe_classic_groups`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeClassicGroupsOptions()
-        ids = list(group_ids)
-        args = _conversions.describe_classic_groups_args(ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_classic_groups_async(c_admin, *args, cb),
-            _conversions.free_describe_classic_groups)
-        return _conversions.describe_classic_groups_result(ids, payload, Async)
+        native = self._call(_lib.Admin_describe_classic_groups, list(group_ids),
+                            options._setters_ran())
+        return _conversions.describe_classic_groups_result(native, Async, self._binding.loop)
 
     def force_terminate_transaction(self, *, transactional_id: str,
                                     options: TerminateTransactionOptions | None = None

@@ -29,20 +29,17 @@ order:
   from them in Python (the ``post`` of ``AdminResult.futures`` /
   ``AdminResult.future``).
 
-The shared helpers come first. An RPC still on the previous FFI's whole-result
-callback keeps its ``<rpc>_args`` / ``<rpc>_result(payload, kind)`` /
-``free_<rpc>`` until it moves to an ``AdminResult``.
+The shared helpers come first.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
-
-from confluent_kafka._errors import from_borrowed_ffi_error, from_ffi_error
+from confluent_kafka._errors import from_borrowed_ffi_error
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.errors.api_error import ApiError
 from confluent_kafka.common.kafka_future import (
@@ -58,11 +55,9 @@ if TYPE_CHECKING:
     from confluent_kafka.admin._internals import (
         _CoordinatorKey,
         _DescribeUserScramCredentialsResponseData,
-        _MemberIdentity,
     )
     from confluent_kafka.admin.abort_transaction_result import AbortTransactionResult
     from confluent_kafka.admin.abort_transaction_spec import AbortTransactionSpec
-    from confluent_kafka.admin.abstract_options import AbstractOptions
     from confluent_kafka.admin.alter_client_quotas_result import AlterClientQuotasResult
     from confluent_kafka.admin.alter_config_op import AlterConfigOp
     from confluent_kafka.admin.alter_configs_result import AlterConfigsResult
@@ -76,8 +71,10 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.alter_user_scram_credentials_result import (
         AlterUserScramCredentialsResult,
     )
+    from confluent_kafka.admin.classic_group_description import ClassicGroupDescription
     from confluent_kafka.admin.config import Config
     from confluent_kafka.admin.config_entry import ConfigEntry
+    from confluent_kafka.admin.consumer_group_description import ConsumerGroupDescription
     from confluent_kafka.admin.create_acls_result import CreateAclsResult
     from confluent_kafka.admin.create_delegation_token_options import (
         CreateDelegationTokenOptions,
@@ -120,6 +117,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.feature_metadata import FeatureMetadata
     from confluent_kafka.admin.feature_update import FeatureUpdate
     from confluent_kafka.admin.fence_producers_result import FenceProducersResult
+    from confluent_kafka.admin.group_listing import GroupListing
     from confluent_kafka.admin.list_config_resources_result import ListConfigResourcesResult
     from confluent_kafka.admin.list_consumer_group_offsets_result import (
         ListConsumerGroupOffsetsResult,
@@ -136,6 +134,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.log_dir_description import LogDirDescription
     from confluent_kafka.admin.member_assignment import MemberAssignment
     from confluent_kafka.admin.member_description import MemberDescription
+    from confluent_kafka.admin.member_to_remove import MemberToRemove
     from confluent_kafka.admin.new_partition_reassignment import NewPartitionReassignment
     from confluent_kafka.admin.new_partitions import NewPartitions
     from confluent_kafka.admin.new_topic import NewTopic
@@ -184,7 +183,6 @@ __all__ = [
     "DESCRIBE_TOPIC_NAMES",
     "DESCRIBE_TOPIC_NAME_COLLECTION",
     "Kind",
-    "Payload",
     "abort_transaction_args",
     "abort_transaction_result",
     "acl_operations_from_codes",
@@ -213,7 +211,6 @@ __all__ = [
     "delete_acls_result",
     "delete_consumer_group_offsets_args",
     "delete_consumer_group_offsets_result",
-    "delete_consumer_groups_args",
     "delete_consumer_groups_result",
     "delete_records_args",
     "delete_records_result",
@@ -221,14 +218,12 @@ __all__ = [
     "delete_topics_result",
     "describe_acls_args",
     "describe_acls_result",
-    "describe_classic_groups_args",
     "describe_classic_groups_result",
     "describe_client_quotas_args",
     "describe_client_quotas_result",
     "describe_cluster_result",
     "describe_configs_args",
     "describe_configs_result",
-    "describe_consumer_groups_args",
     "describe_consumer_groups_result",
     "describe_delegation_token_options",
     "describe_delegation_token_result",
@@ -247,23 +242,10 @@ __all__ = [
     "describe_user_scram_credentials_result",
     "elect_leaders_args",
     "elect_leaders_result",
-    "error_only",
     "expire_delegation_token_result",
-    "failed_future",
     "fence_producers_args",
     "fence_producers_result",
     "force_terminate_transaction_result",
-    "free_alter_consumer_group_offsets",
-    "free_delete_consumer_group_offsets",
-    "free_delete_consumer_groups",
-    "free_describe_classic_groups",
-    "free_describe_consumer_groups",
-    "free_list_consumer_group_offsets",
-    "free_list_groups",
-    "free_remove_members_from_consumer_group",
-    "free_value_payload",
-    "free_void_payload",
-    "future_of",
     "incremental_alter_configs_args",
     "incremental_alter_configs_result",
     "linked",
@@ -271,7 +253,7 @@ __all__ = [
     "list_config_resources_result",
     "list_consumer_group_offsets_args",
     "list_consumer_group_offsets_result",
-    "list_groups_args",
+    "list_groups_options",
     "list_groups_result",
     "list_offsets_args",
     "list_offsets_result",
@@ -283,20 +265,17 @@ __all__ = [
     "node_from_tuple",
     "offset_spec_value",
     "optional_node_from_tuple",
+    "outcomes",
     "partitions_spec",
-    "per_key_futures",
     "remove_members_from_consumer_group_args",
     "remove_members_from_consumer_group_result",
     "renew_delegation_token_result",
     "replica_from_tuple",
-    "single_future",
-    "timeout_ms",
     "topic_collection_target",
     "topic_partition_from_tuple",
     "unregister_controller_result",
     "update_features_args",
     "update_features_result",
-    "void_future",
     "wrap",
     "wrap_map",
 ]
@@ -305,13 +284,6 @@ _T = TypeVar("_T")
 
 #: The client kind a result is built for (``_futures.Sync`` / ``_futures.Async``).
 Kind = type[Sync] | type[Async]
-#: A completion payload of an ``Admin_*_async`` call: ``(result_int, error_int)``,
-#: or ``(error_int,)`` for a ``void`` one.
-Payload = tuple[Any, ...]
-
-# Java's ``timeoutMs == null`` (use ``default.api.timeout.ms``) crosses as -1
-# (CLAUDE.md conversion table, "Duration": absent -1 for admin's timeouts).
-_NO_TIMEOUT = -1
 
 
 # ---- shared helpers ---------------------------------------------------------
@@ -361,105 +333,10 @@ def linked(kind: Kind, loop: asyncio.AbstractEventLoop | None,
     return KafkaFuture._of_impl(impl)
 
 
-def timeout_ms(options: AbstractOptions) -> int:
-    """``options.timeoutMs()`` as the extension's ``timeout_ms``: ``-1`` when Java's
-    is ``null`` (use ``default.api.timeout.ms``). A given negative value is sent as
-    ``0``, as Java's ``calcDeadlineMs`` takes ``Math.max(0, optionTimeoutMs)``
-    (``KafkaAdminClient.java:496-499``), so the FFI's "unset" marker is never sent
-    for a given value."""
-    value = options.timeout_ms()
-    return _NO_TIMEOUT if value is None else max(0, int(value))
-
-
 def borrowed_error(raw: tuple[Any, ...] | None) -> BaseException | None:
-    """A drain's per-key error (the borrowed form of ``from_ffi_error``), or ``None``
-    for no error."""
+    """A borrowed error tuple read from a delivered value (the borrowed form of
+    ``from_ffi_error``), or ``None`` for no error."""
     return None if raw is None else from_borrowed_ffi_error(raw)
-
-
-def future_of(kind: Kind, value: Any = None, error: BaseException | None = None
-              ) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
-    """Java's ``KafkaFutureImpl`` completed with ``value``, or failed with ``error``,
-    of ``kind``."""
-    impl: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
-    if error is not None:
-        impl.complete_with_error(error)
-    else:
-        impl.complete(value)
-    future: KafkaFuture[Any] | AsyncKafkaFuture[Any] = kind._FUTURE._of_impl(impl)
-    return future
-
-
-def failed_future(kind: Kind, error: BaseException) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
-    """A future of ``kind`` failed with ``error``."""
-    return future_of(kind, error=error)
-
-
-def per_key_futures(keys: Iterable[_T], payload: Payload,
-                    drain: Callable[[int], Mapping[Any, Any]],
-                    convert: Callable[[Any], tuple[BaseException | None, Any]], kind: Kind,
-                    key_of: Callable[[Any], _T] | None = None) -> dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
-    """The per-key futures of a keyed result: from the drained result handle, each
-    key's ``convert(raw) -> (error, value)``; on a whole-call error, every requested
-    key fails with it (Java's ``completeAllExceptionally``). ``key_of`` maps a
-    drained key to the result's key (identity by default)."""
-    result_handle, error = payload
-    if error:
-        failure = from_ffi_error(error)
-        if result_handle:
-            drain(result_handle)
-        return {key: failed_future(kind, failure) for key in dict.fromkeys(keys)}
-    futures: dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]] = {}
-    for raw_key, raw in drain(result_handle).items():
-        key_error, value = convert(raw)
-        key = raw_key if key_of is None else key_of(raw_key)
-        futures[key] = future_of(kind, value, key_error)
-    return futures
-
-
-def single_future(payload: Payload, drain: Callable[[int], Any],
-                  convert: Callable[[Any], Any], kind: Kind) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
-    """The one future of a single-future result: ``convert(drain(handle))``, or the
-    whole-call error."""
-    result_handle, error = payload
-    if error:
-        failure = from_ffi_error(error)
-        if result_handle:
-            drain(result_handle)
-        return failed_future(kind, failure)
-    return future_of(kind, convert(drain(result_handle)))
-
-
-def void_future(payload: Payload, kind: Kind) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
-    """The ``KafkaFuture<Void>`` of a ``void`` call's ``(error_int,)`` payload:
-    completed with ``None``, or failed with the typed error (the owned handle is
-    consumed)."""
-    (error,) = payload
-    return future_of(kind, None, from_ffi_error(error) if error else None)
-
-
-def free_value_payload(drain: str) -> Callable[[Payload], None]:
-    """The free function of a ``(result_int, error_int)`` payload whose result is
-    freed by the extension's ``drain`` (read when it runs)."""
-    def free(payload: Payload) -> None:
-        result_handle, error = payload
-        if error:
-            _lib.KafkaError_destroy(error)
-        if result_handle:
-            getattr(_lib, drain)(result_handle)
-    return free
-
-
-def free_void_payload(payload: Payload) -> None:
-    """The free function of a ``(error_int,)`` payload."""
-    (error,) = payload
-    if error:
-        _lib.KafkaError_destroy(error)
-
-
-def error_only(raw_error: tuple[Any, ...] | None) -> tuple[BaseException | None, None]:
-    """A drained per-key error of a ``KafkaFuture<Void>`` key as ``(error, None)``."""
-    return borrowed_error(raw_error), None
 
 
 def node_from_tuple(raw: tuple[int, str, int, str | None]) -> Node:
@@ -1221,26 +1098,18 @@ def _group_member(raw: tuple[Any, ...]) -> MemberDescription:
         member_epoch=member_epoch, upgraded=upgraded)
 
 
-def describe_consumer_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_consumer_groups_async(h, group_ids, timeout_ms,
-    include_authorized_operations, cb)``'s arguments."""
-    return (group_ids, timeout_ms(options), options.include_authorized_operations())
-
-
-def _consumer_group_description(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, description)`` as the group's ``(error,
-    ConsumerGroupDescription)``; the group and state names are Java's
+def _consumer_group_description(raw: tuple[Any, ...]) -> ConsumerGroupDescription:
+    """A ``ConsumerGroupDescription`` from the extension's ``(group_id, is_simple,
+    members, partition_assignor, type, state, coordinator, authorized_operations,
+    group_epoch, target_assignment_epoch)``
+    (``consumer_group_description_to_py``); the type and state names are Java's
     ``toString()`` values, read back with ``parse``."""
     from confluent_kafka.admin.consumer_group_description import ConsumerGroupDescription
     from confluent_kafka.common import GroupState, GroupType
 
-    raw_error, description = raw
-    error = borrowed_error(raw_error)
-    if error is not None or description is None:
-        return error, None
     (group_id, is_simple, members, partition_assignor, group_type, group_state, coordinator,
-     operations, group_epoch, target_assignment_epoch) = description
-    return None, ConsumerGroupDescription(
+     operations, group_epoch, target_assignment_epoch) = raw
+    return ConsumerGroupDescription(
         group_id=group_id, is_simple_consumer_group=bool(is_simple),
         members=[_group_member(member) for member in members],
         partition_assignor=partition_assignor, type=GroupType.parse(name=group_type),
@@ -1250,229 +1119,195 @@ def _consumer_group_description(raw: tuple[Any, Any]) -> tuple[BaseException | N
         target_assignment_epoch=target_assignment_epoch)
 
 
-def describe_consumer_groups_result(group_ids: Iterable[str], payload: Payload,
-                                    kind: Kind) -> DescribeConsumerGroupsResult[Any]:
-    """The ``DescribeConsumerGroupsResult`` of a ``describe_consumer_groups``
-    payload: one future per group id."""
+def describe_consumer_groups_result(native: Any, kind: Kind,
+                                    loop: asyncio.AbstractEventLoop | None
+                                    ) -> DescribeConsumerGroupsResult[Any]:
+    """The ``DescribeConsumerGroupsResult`` over the C result's
+    ``describedGroups()`` futures."""
     from confluent_kafka.admin.describe_consumer_groups_result import (
         DescribeConsumerGroupsResult,
     )
 
-    futures = per_key_futures(group_ids, payload, _lib.DescribeConsumerGroupsResult_drain,
-                              _consumer_group_description, kind)
+    futures: dict[str, Any] = wrap_map(
+        kind, loop, native.futures("described_groups", _consumer_group_description))
     return DescribeConsumerGroupsResult._new(futures=futures, kind=kind)
 
 
-free_describe_consumer_groups = free_value_payload("DescribeConsumerGroupsResult_drain")
-
-
-def list_consumer_group_offsets_args(group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
-                                     options: Any) -> tuple[Any, ...]:
-    """``Admin_list_consumer_group_offsets_async(h, spec, timeout_ms,
-    require_stable, cb)``'s arguments: each group as ``(group_id, all_partitions,
-    [(topic, partition), ...])``, ``all_partitions`` for Java's ``topicPartitions()
-    == null``."""
-    spec = []
-    for group_id, group_spec in group_specs.items():
-        partitions = group_spec.topic_partitions()
-        spec.append((group_id, partitions is None,
-                     [] if partitions is None
+def list_consumer_group_offsets_args(
+        group_id: str | None,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None) -> tuple[Any, ...]:
+    """``Admin_list_consumer_group_offsets(h, group_id, group_specs, options)``'s
+    inputs: the group id of Java's ``(groupId, options)`` form, or each entry of its
+    ``(groupSpecs, options)`` form as ``(group_id, [(topic, partition), ...])``,
+    ``None`` partitions for Java's ``topicPartitions() == null`` (every partition of
+    the group)."""
+    if group_specs is None:
+        return (group_id, None)
+    rows = []
+    for spec_group_id, spec in group_specs.items():
+        partitions = spec.topic_partitions()
+        rows.append((spec_group_id, None if partitions is None
                      else [(tp.topic(), tp.partition()) for tp in partitions]))
-    return (spec, timeout_ms(options), options.require_stable())
+    return (None, rows)
 
 
-def _group_offsets(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, {(topic, partition): (offset, metadata, leader_epoch) |
-    None})`` as the group's ``(error, {TopicPartition: OffsetAndMetadata | None})``,
-    ``None`` being Java's ``null`` value: no committed offset."""
+def _group_offsets(raw: Mapping[tuple[str, int], tuple[int, str, int | None] | None]
+                   ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+    """``{TopicPartition: OffsetAndMetadata | None}`` from the extension's
+    ``{(topic, partition): (offset, metadata, leader_epoch) | None}``, ``None`` being
+    Java's ``null`` value: no committed offset."""
     from confluent_kafka.common import TopicPartition
     from confluent_kafka.consumer import OffsetAndMetadata
 
-    raw_error, offsets = raw
-    error = borrowed_error(raw_error)
-    if error is not None or offsets is None:
-        return error, None
-    return None, {
+    return {
         TopicPartition(topic=topic, partition=partition):
             None if value is None
             else OffsetAndMetadata(offset=value[0], leader_epoch=value[2], metadata=value[1])
-        for (topic, partition), value in offsets.items()}
+        for (topic, partition), value in raw.items()}
 
 
-def list_consumer_group_offsets_result(group_specs: Mapping[str, Any], payload: Payload,
-                                       kind: Kind) -> ListConsumerGroupOffsetsResult[Any]:
-    """The ``ListConsumerGroupOffsetsResult`` of a ``list_consumer_group_offsets``
-    payload: one future per group, keyed by Java's ``CoordinatorKey.byGroupId``."""
+def list_consumer_group_offsets_result(group_ids: Iterable[str], native: Any, kind: Kind,
+                                       loop: asyncio.AbstractEventLoop | None
+                                       ) -> ListConsumerGroupOffsetsResult[Any]:
+    """The ``ListConsumerGroupOffsetsResult`` over the C result: each requested
+    group's future is the C ``partitionsToOffsetAndMetadata(groupId)``, keyed by
+    Java's ``CoordinatorKey.byGroupId``."""
     from confluent_kafka.admin._internals import _CoordinatorKey
     from confluent_kafka.admin.list_consumer_group_offsets_result import (
         ListConsumerGroupOffsetsResult,
     )
 
-    def key_of(group_id: str) -> _CoordinatorKey:
-        return _CoordinatorKey.by_group_id(group_id=group_id)
-
-    futures = per_key_futures((key_of(group_id) for group_id in group_specs), payload,
-                              _lib.ListConsumerGroupOffsetsResult_drain, _group_offsets, kind,
-                              key_of=key_of)
+    futures: dict[_CoordinatorKey, Any] = {
+        _CoordinatorKey.by_group_id(group_id=group_id): wrap(kind, loop, native.future(
+            "partitions_to_offset_and_metadata_with_group_id", group_id, _group_offsets))
+        for group_id in dict.fromkeys(group_ids)}
     return ListConsumerGroupOffsetsResult._new(futures=futures, kind=kind)
 
 
-free_list_consumer_group_offsets = free_value_payload("ListConsumerGroupOffsetsResult_drain")
-
-
-def delete_consumer_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:
-    """``Admin_delete_consumer_groups_async(h, group_ids, timeout_ms, cb)``'s
-    arguments."""
-    return (group_ids, timeout_ms(options))
-
-
-def delete_consumer_groups_result(group_ids: Iterable[str], payload: Payload,
-                                  kind: Kind) -> DeleteConsumerGroupsResult[Any]:
-    """The ``DeleteConsumerGroupsResult`` of a ``delete_consumer_groups`` payload:
-    one ``KafkaFuture<Void>`` per group id."""
+def delete_consumer_groups_result(native: Any, kind: Kind,
+                                  loop: asyncio.AbstractEventLoop | None
+                                  ) -> DeleteConsumerGroupsResult[Any]:
+    """The ``DeleteConsumerGroupsResult`` over the C result's ``deletedGroups()``
+    futures."""
     from confluent_kafka.admin.delete_consumer_groups_result import DeleteConsumerGroupsResult
 
-    futures = per_key_futures(group_ids, payload, _lib.DeleteConsumerGroupsResult_drain,
-                              error_only, kind)
+    futures: dict[str, Any] = wrap_map(kind, loop, native.futures("deleted_groups"))
     return DeleteConsumerGroupsResult._new(futures=futures, kind=kind)
 
 
-free_delete_consumer_groups = free_value_payload("DeleteConsumerGroupsResult_drain")
+def outcomes(kind: Kind, loop: asyncio.AbstractEventLoop | None,
+             futures: Mapping[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]]
+             ) -> KafkaFuture[dict[_T, BaseException | None]] | AsyncKafkaFuture[
+                 dict[_T, BaseException | None]]:
+    """One future of every key's outcome as it stands: ``{key: None}`` for a key
+    whose future succeeded, ``{key: error}`` for one that failed, complete once every
+    key's future is. It is Java's ``Map<K, Errors>`` future of a result that holds
+    one, read from the core's per-key futures (``partitionResult(partition)``), each
+    of which already completes as Java's result completes that key: with the key's
+    ``Errors.exception()``, with the failure of the call, which every key then
+    carries, or with the result's own ``IllegalArgumentException`` for a key the
+    response left out. A key's error kept as it stands answers each of these the
+    way Java's result answers it, with no need to tell them apart."""
+    impl: _KafkaFutureImpl[dict[_T, BaseException | None]] = _KafkaFutureImpl()
+    errors: dict[_T, BaseException | None] = {}
+    lock = threading.Lock()
+    remaining = len(futures)
+
+    def settle(key: _T, state: _KafkaFutureImpl[Any]) -> None:
+        nonlocal remaining
+        with lock:
+            errors[key] = None if state._state == _VALUE else state._outcome
+            remaining -= 1
+            done = remaining == 0
+        if done:
+            impl.complete({k: errors[k] for k in futures})
+
+    def listener(key: _T) -> Callable[[_KafkaFutureImpl[Any]], None]:
+        return lambda state: settle(key, state)
+
+    for key, future in futures.items():
+        future._state()._add_listener(listener(key))
+    if kind is Async:
+        return AsyncKafkaFuture._of_impl(impl, loop)
+    return KafkaFuture._of_impl(impl)
 
 
-def _is_errors_entry(error: BaseException) -> bool:
-    """Whether a per-key error is a value of Java's ``Map<K, Errors>``: what
-    ``Errors.exception()`` gives, an ``ApiError`` carrying its code's default
-    message (``Errors.java``, ``_error_registry.DEFAULT_MESSAGES``)."""
-    from confluent_kafka._error_registry import DEFAULT_MESSAGES
-
-    if not isinstance(error, ApiError):
-        return False
-    ffi_id = getattr(type(error), "_ffi_id", None)
-    message = DEFAULT_MESSAGES.get(ffi_id) if isinstance(ffi_id, int) else None
-    return message is not None and str(error) == message
+def delete_consumer_group_offsets_args(group_id: str, partitions: Iterable[TopicPartition]
+                                       ) -> tuple[Any, ...]:
+    """``Admin_delete_consumer_group_offsets(h, group_id, partitions, options)``'s
+    inputs: each partition as ``(topic, partition)``."""
+    return (group_id, [(tp.topic(), tp.partition()) for tp in partitions])
 
 
-def _sub_level_errors_future(payload: Payload, drain: Callable[[int], Mapping[Any, Any]],
-                             key_of: Callable[[Any], Any], absent_message: Callable[[Any], str],
-                             kind: Kind) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
-    """Java's one future over a ``Map<K, Errors>`` (``deleteConsumerGroupOffsets``,
-    ``alterConsumerGroupOffsets``, ``removeMembersFromConsumerGroup``), rebuilt from
-    the FFI's per-key outcomes ``{key: error_or_None}``.
-
-    The FFI completes each requested key with the result's own per-key future
-    (``partitionResult`` / ``memberResult``), so a key's error is either the key's
-    ``Errors.exception()`` or the failure of Java's one future, which every key
-    then carries. A key the response left out has the Result's own absent-key error,
-    an ``IllegalArgumentError`` whose text is ``absent_message(key)``: it is left out
-    of the map, so the Result raises that text for it and its siblings resolve, as in
-    Java. A key's error is an entry of the map when it is what
-    ``Errors.exception()`` gives (an ``ApiError`` with its code's default message;
-    ``None`` for ``Errors.NONE``); any other error, such as the driver's
-    ``TimeoutError("Timed out waiting for a node assignment. Call: …")`` or a
-    lookup failure, fails the one future, as it fails Java's. A whole-call error of
-    the callback fails it too. *(The FFI does not say which of the two a key's
-    error is. A group-level error Java's handler fails the future with through
-    ``Errors.exception()`` becomes a map of it; the result then reports it as Java's
-    does, each per-key future and ``all()`` failing with that error.
-    ``alterConsumerGroupOffsets``, whose ``all()`` would rename it, puts every
-    response error in the map, so there the case does not arise.)*"""
-    from confluent_kafka.illegal_argument_error import IllegalArgumentError
-
-    result_handle, error = payload
-    if error:
-        failure = from_ffi_error(error)
-        if result_handle:
-            drain(result_handle)
-        return failed_future(kind, failure)
-    errors: dict[Any, BaseException | None] = {}
-    for raw_key, raw_error in drain(result_handle).items():
-        key = key_of(raw_key)
-        key_error = borrowed_error(raw_error)
-        if (isinstance(key_error, IllegalArgumentError)
-                and str(key_error) == absent_message(key)):
-            continue  # absent from Java's map
-        if key_error is not None and not _is_errors_entry(key_error):
-            return failed_future(kind, key_error)
-        errors[key] = key_error
-    return future_of(kind, errors)
-
-
-def _offset_deletion_absent(partition: TopicPartition) -> str:
-    """``DeleteConsumerGroupOffsetsResult``'s absent-partition text
-    (``DeleteConsumerGroupOffsetsResult.java:85``)."""
-    from confluent_kafka._java import java_str
-
-    return ("Offset deletion result for partition \"" + java_str(partition)
-            + "\" was not included in the response")
-
-
-def delete_consumer_group_offsets_args(group_id: str, partitions: list[TopicPartition],
-                                       options: Any) -> tuple[Any, ...]:
-    """``Admin_delete_consumer_group_offsets_async(h, group_id, partitions,
-    timeout_ms, cb)``'s arguments: each partition as ``(topic, partition)``."""
-    return (group_id, [(tp.topic(), tp.partition()) for tp in partitions],
-            timeout_ms(options))
-
-
-def delete_consumer_group_offsets_result(partitions: Iterable[TopicPartition],
-                                         payload: Payload,
-                                         kind: Kind) -> DeleteConsumerGroupOffsetsResult[Any]:
-    """The ``DeleteConsumerGroupOffsetsResult`` of a
-    ``delete_consumer_group_offsets`` payload: Java's ``(future, partitions)``."""
+def delete_consumer_group_offsets_result(partitions: Iterable[TopicPartition], native: Any,
+                                         kind: Kind, loop: asyncio.AbstractEventLoop | None
+                                         ) -> DeleteConsumerGroupOffsetsResult[Any]:
+    """The ``DeleteConsumerGroupOffsetsResult`` over the C result: Java's ``(future,
+    partitions)``, its future the :func:`outcomes` of the C
+    ``partitionResult(partition)`` of each requested partition. With no partition
+    there is no per-key future: Java's future then fails as the call fails, which is
+    the C ``all()``, and is otherwise empty."""
     from confluent_kafka.admin.delete_consumer_group_offsets_result import (
         DeleteConsumerGroupOffsetsResult,
     )
 
-    future = _sub_level_errors_future(payload, _lib.DeleteConsumerGroupOffsetsResult_drain,
-                                      topic_partition_from_tuple, _offset_deletion_absent, kind)
-    return DeleteConsumerGroupOffsetsResult._new(future=future, partitions=partitions,
-                                                 kind=kind)
+    requested = list(dict.fromkeys(partitions))
+    if requested:
+        future: Any = outcomes(kind, loop, {
+            tp: wrap(kind, loop, native.future("partition_result", (tp.topic(), tp.partition())))
+            for tp in requested})
+    else:
+        future = wrap(kind, loop, native.future("all")).then_apply(function=lambda _: {})
+    return DeleteConsumerGroupOffsetsResult._new(future=future, partitions=requested, kind=kind)
 
 
-free_delete_consumer_group_offsets = free_value_payload("DeleteConsumerGroupOffsetsResult_drain")
+def list_groups_options(options: Any) -> list[tuple[str, Any]]:
+    """The ``(setter, value)`` pairs of a ``ListGroupsOptions``: the set filters as
+    their stored sets (the copies Java's setters store), each ``GroupState`` /
+    ``GroupType`` as its ``toString()`` name, which the extension parses back
+    (``GroupState.parse``, ``GroupType.parse``)."""
+    stored: dict[str, Callable[[], list[str]]] = {
+        "in_group_states": lambda: [str(state) for state in options.group_states()],
+        "with_types": lambda: [str(group_type) for group_type in options.types()],
+        "with_protocol_types": lambda: list(options.protocol_types())}
+    return [(setter, stored[setter]() if setter in stored else value)
+            for setter, value in options._setters_ran()]
 
 
-def list_groups_args(options: Any) -> tuple[Any, ...]:
-    """``Admin_list_groups_async(h, group_states, protocol_types, types, timeout_ms,
-    cb)``'s arguments: the states and types as Java's ``toString()`` names, as
-    ``KafkaAdminClient.listGroups`` sends them."""
-    return ([str(state) for state in options.group_states()], list(options.protocol_types()),
-            [str(group_type) for group_type in options.types()], timeout_ms(options))
-
-
-def _group_listings(drained: tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]
-                    ) -> list[object]:
-    """Java's ``Collection<Object>`` of a ``listGroups`` call, its ``GroupListing``\\ s
-    and its errors, from the drained ``(valid, errors)``: each listing ``(group_id,
-    group_type, protocol, group_state, is_simple)``, the names Java's
-    ``toString()`` values (``None`` for ``Optional.empty()``). ``is_simple`` is
-    ``GroupListing``'s own computation and is not read."""
-    from confluent_kafka._errors import from_borrowed_ffi_error
+def _group_listing(raw: tuple[Any, ...]) -> GroupListing:
+    """A ``GroupListing`` from the extension's ``(group_id, group_type, protocol,
+    group_state, is_simple)``, the names Java's ``toString()`` values (``None`` for
+    ``Optional.empty()``); ``is_simple`` is ``GroupListing``'s own computation and
+    is not read."""
     from confluent_kafka.admin.group_listing import GroupListing
     from confluent_kafka.common import GroupState, GroupType
 
-    valid, errors = drained
-    results: list[object] = [
-        GroupListing(group_id=group_id,
-                     type=None if group_type is None else GroupType.parse(name=group_type),
-                     protocol=protocol,
-                     group_state=None if group_state is None else GroupState.parse(
-                         name=group_state))
-        for group_id, group_type, protocol, group_state, _is_simple in valid]
-    results.extend(from_borrowed_ffi_error(raw_error) for raw_error in errors)
-    return results
+    group_id, group_type, protocol, group_state, _is_simple = raw
+    return GroupListing(group_id=group_id,
+                        type=None if group_type is None else GroupType.parse(name=group_type),
+                        protocol=protocol,
+                        group_state=None if group_state is None else GroupState.parse(
+                            name=group_state))
 
 
-def list_groups_result(payload: Payload, kind: Kind) -> ListGroupsResult[Any]:
-    """The ``ListGroupsResult`` of a ``list_groups`` payload."""
+def _group_listings(raw: list[tuple[Any, ...]]) -> list[GroupListing]:
+    return [_group_listing(row) for row in raw]
+
+
+def _errors(raw: list[tuple[Any, ...]]) -> list[BaseException]:
+    return [from_borrowed_ffi_error(row) for row in raw]
+
+
+def list_groups_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                       ) -> ListGroupsResult[Any]:
+    """The ``ListGroupsResult`` over the C result's ``all()``, ``valid()`` and
+    ``errors()`` futures."""
     from confluent_kafka.admin.list_groups_result import ListGroupsResult
 
-    future = single_future(payload, _lib.ListGroupsResult_drain, _group_listings, kind)
-    return ListGroupsResult._new(future=future, kind=kind)
-
-
-free_list_groups = free_value_payload("ListGroupsResult_drain")
+    return ListGroupsResult._of_client(
+        all=wrap(kind, loop, native.future("all", None, _group_listings)),
+        valid=wrap(kind, loop, native.future("valid", None, _group_listings)),
+        errors=wrap(kind, loop, native.future("errors", None, _errors)), kind=kind)
 
 
 def partitions_spec(partitions: Iterable[TopicPartition]) -> list[tuple[str, int]]:
@@ -1560,97 +1395,69 @@ def list_partition_reassignments_result(native: Any, kind: Kind,
     return ListPartitionReassignmentsResult._new(reassignments=future, kind=kind)
 
 
-def remove_members_from_consumer_group_args(group_id: str, options: Any) -> tuple[Any, ...]:
-    """``Admin_remove_members_from_consumer_group_async(h, group_id, remove_all,
-    group_instance_ids, reason, timeout_ms, cb)``'s arguments: the members' group
-    instance ids, and the reason ``None`` for Java's ``null``."""
-    return (group_id, options.remove_all(),
-            [member.group_instance_id() for member in options.members()], options.reason(),
-            timeout_ms(options))
-
-
-def _member_identity_key(group_instance_id: str) -> _MemberIdentity:
-    """A drained group instance id as the ``MemberIdentity`` Java's result looks it
-    up by: ``MemberToRemove.toMemberIdentity()``."""
-    from confluent_kafka.admin._internals import _to_member_identity
-    from confluent_kafka.admin.member_to_remove import MemberToRemove
-
-    return _to_member_identity(MemberToRemove(group_instance_id=group_instance_id))
-
-
-def _member_absent(member: _MemberIdentity) -> str:
-    """``RemoveMembersFromConsumerGroupResult``'s absent-member text
-    (``RemoveMembersFromConsumerGroupResult.java:104``)."""
-    from confluent_kafka._java import java_str
-
-    return "Member \"" + java_str(member) + "\" was not included in the removal response"
+def remove_members_from_consumer_group_args(group_id: str,
+                                            options: RemoveMembersFromConsumerGroupOptions
+                                            ) -> tuple[Any, ...]:
+    """``Admin_remove_members_from_consumer_group(h, group_id, members, options)``'s
+    inputs: the members' group instance ids (Java's ``MemberToRemove`` holds nothing
+    else), ``None`` in ``removeAll`` mode (Java's ``new
+    RemoveMembersFromConsumerGroupOptions()``)."""
+    if options.remove_all():
+        return (group_id, None)
+    return (group_id, [member.group_instance_id() for member in options.members()])
 
 
 def remove_members_from_consumer_group_result(
-        options: RemoveMembersFromConsumerGroupOptions, payload: Payload,
-        kind: Kind) -> RemoveMembersFromConsumerGroupResult[Any]:
-    """The ``RemoveMembersFromConsumerGroupResult`` of a
-    ``remove_members_from_consumer_group`` payload: Java's ``(future,
-    options.members())``. In ``removeAll`` mode the FFI has no per-member key, and a
-    failed removal is the callback's error (the core's ``all()``)."""
+        options: RemoveMembersFromConsumerGroupOptions, native: Any, kind: Kind,
+        loop: asyncio.AbstractEventLoop | None) -> RemoveMembersFromConsumerGroupResult[Any]:
+    """The ``RemoveMembersFromConsumerGroupResult`` over the C result: each call of
+    ``member_result`` and ``all`` reads the C ``memberResult(member)`` / ``all()``,
+    which carry Java's outcome and raise Java's ``IllegalArgumentException`` for a
+    member the result has no future of."""
     from confluent_kafka.admin.remove_members_from_consumer_group_result import (
         RemoveMembersFromConsumerGroupResult,
     )
 
-    future = _sub_level_errors_future(
-        payload, _lib.RemoveMembersFromConsumerGroupResult_drain, _member_identity_key,
-        _member_absent, kind)
-    return RemoveMembersFromConsumerGroupResult._new(future=future,
-                                                     member_infos=options.members(),
-                                                     kind=kind)
+    def member_result(member: MemberToRemove) -> Any:
+        return wrap(kind, loop, native.future("member_result", member.group_instance_id()))
 
-
-free_remove_members_from_consumer_group = free_value_payload("RemoveMembersFromConsumerGroupResult_drain")
+    return RemoveMembersFromConsumerGroupResult._of_client(
+        member_result=member_result, all=lambda: wrap(kind, loop, native.future("all")),
+        member_infos=options.members(), kind=kind)
 
 
 def alter_consumer_group_offsets_args(group_id: str,
-                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                      options: Any) -> tuple[Any, ...]:
-    """``Admin_alter_consumer_group_offsets_async(h, group_id, spec, timeout_ms,
-    cb)``'s arguments: each entry as ``(topic, partition, offset, metadata,
-    has_leader_epoch, leader_epoch)``."""
-    spec = []
+                                      offsets: Mapping[TopicPartition, OffsetAndMetadata]
+                                      ) -> tuple[Any, ...]:
+    """``Admin_alter_consumer_group_offsets(h, group_id, offsets, options)``'s inputs:
+    each entry as ``(topic, partition, offset, metadata, leader_epoch)``, ``-1`` for
+    an absent leader epoch."""
+    rows = []
     for tp, offset_and_metadata in offsets.items():
         leader_epoch = offset_and_metadata.leader_epoch()
-        spec.append((tp.topic(), tp.partition(), offset_and_metadata.offset(),
-                     offset_and_metadata.metadata(), leader_epoch is not None,
+        rows.append((tp.topic(), tp.partition(), offset_and_metadata.offset(),
+                     offset_and_metadata.metadata(),
                      -1 if leader_epoch is None else leader_epoch))
-    return (group_id, spec, timeout_ms(options))
+    return (group_id, rows)
 
 
-def _alter_offset_absent(partition: TopicPartition) -> str:
-    """``AlterConsumerGroupOffsetsResult``'s absent-partition text
-    (``AlterConsumerGroupOffsetsResult.java:50``)."""
-    from confluent_kafka._java import java_str
-
-    return "Alter offset for partition \"" + java_str(partition) + "\" was not attempted"
-
-
-def alter_consumer_group_offsets_result(payload: Payload,
-                                        kind: Kind) -> AlterConsumerGroupOffsetsResult[Any]:
-    """The ``AlterConsumerGroupOffsetsResult`` of an
-    ``alter_consumer_group_offsets`` payload: Java's one future over the
-    partitions' ``Errors``."""
+def alter_consumer_group_offsets_result(native: Any, kind: Kind,
+                                        loop: asyncio.AbstractEventLoop | None
+                                        ) -> AlterConsumerGroupOffsetsResult[Any]:
+    """The ``AlterConsumerGroupOffsetsResult`` over the C result: each call of
+    ``partition_result`` and ``all`` reads the C ``partitionResult(partition)`` /
+    ``all()``."""
     from confluent_kafka.admin.alter_consumer_group_offsets_result import (
         AlterConsumerGroupOffsetsResult,
     )
 
-    future = _sub_level_errors_future(payload, _lib.AlterConsumerGroupOffsetsResult_drain,
-                                      topic_partition_from_tuple, _alter_offset_absent, kind)
-    return AlterConsumerGroupOffsetsResult._new(future=future, kind=kind)
+    def partition_result(partition: TopicPartition) -> Any:
+        return wrap(kind, loop, native.future(
+            "partition_result", (partition.topic(), partition.partition())))
 
-
-free_alter_consumer_group_offsets = free_value_payload("AlterConsumerGroupOffsetsResult_drain")
-
-
-_MATCH_TYPE_EXACT = 0
-_MATCH_TYPE_DEFAULT = 1
-_MATCH_TYPE_SPECIFIED = 2
+    return AlterConsumerGroupOffsetsResult._of_client(
+        partition_result=partition_result,
+        all=lambda: wrap(kind, loop, native.future("all")), kind=kind)
 
 
 def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
@@ -2130,27 +1937,19 @@ def unregister_controller_result(native: Any, kind: Kind,
                                            kind=kind)
 
 
-def describe_classic_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_classic_groups_async(h, group_ids, timeout_ms,
-    include_authorized_operations, cb)``'s arguments."""
-    return (group_ids, timeout_ms(options), options.include_authorized_operations())
-
-
-def _classic_group_description(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, description)`` as the group's ``(error,
-    ClassicGroupDescription)``, built through ``_new`` so that an authorized
-    operations set the core reports as ``null`` stays ``None`` (decision log 41).
-    The members' assignments arrive decoded (the core's ``ConsumerProtocol``)."""
+def _classic_group_description(raw: tuple[Any, ...]) -> ClassicGroupDescription:
+    """A ``ClassicGroupDescription`` from the extension's ``(group_id, protocol,
+    protocol_data, is_simple, members, state, coordinator, authorized_operations)``
+    (``classic_group_description_to_py``), built through ``_new`` so that an
+    authorized operations set the core reports as ``null`` stays ``None`` (decision
+    log 41). The members' assignments arrive decoded (the core's
+    ``ConsumerProtocol``)."""
     from confluent_kafka.admin.classic_group_description import ClassicGroupDescription
     from confluent_kafka.common import ClassicGroupState
 
-    raw_error, description = raw
-    error = borrowed_error(raw_error)
-    if error is not None or description is None:
-        return error, None
     (group_id, protocol, protocol_data, _is_simple, members, state, coordinator,
-     operations) = description
-    return None, ClassicGroupDescription._new(
+     operations) = raw
+    return ClassicGroupDescription._new(
         group_id=group_id, protocol=protocol, protocol_data=protocol_data,
         members=[_group_member(member) for member in members],
         state=ClassicGroupState.parse(name=state),
@@ -2158,20 +1957,18 @@ def _classic_group_description(raw: tuple[Any, Any]) -> tuple[BaseException | No
         authorized_operations=acl_operations_from_codes(operations))
 
 
-def describe_classic_groups_result(group_ids: Iterable[str], payload: Payload,
-                                   kind: Kind) -> DescribeClassicGroupsResult[Any]:
-    """The ``DescribeClassicGroupsResult`` of a ``describe_classic_groups``
-    payload: one future per group id."""
+def describe_classic_groups_result(native: Any, kind: Kind,
+                                   loop: asyncio.AbstractEventLoop | None
+                                   ) -> DescribeClassicGroupsResult[Any]:
+    """The ``DescribeClassicGroupsResult`` over the C result's ``describedGroups()``
+    futures."""
     from confluent_kafka.admin.describe_classic_groups_result import (
         DescribeClassicGroupsResult,
     )
 
-    futures = per_key_futures(group_ids, payload, _lib.DescribeClassicGroupsResult_drain,
-                              _classic_group_description, kind)
+    futures: dict[str, Any] = wrap_map(
+        kind, loop, native.futures("described_groups", _classic_group_description))
     return DescribeClassicGroupsResult._new(futures=futures, kind=kind)
-
-
-free_describe_classic_groups = free_value_payload("DescribeClassicGroupsResult_drain")
 
 
 def force_terminate_transaction_result(native: Any, kind: Kind,

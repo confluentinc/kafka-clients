@@ -163,8 +163,8 @@ async def test_configs() -> None:
     assert entry is not None and entry.value() == "v"
     listed = await client.list_config_resources()
     assert resource in await listed.all()
-    groups = await client.list_groups()
-    assert [g.group_id() for g in await groups.all()] == ["g"]
+    groups = client.list_groups()
+    assert [g.group_id() for g in await groups.all().get()] == ["g"]
 
 
 async def test_partitions_records_log_dirs_and_offsets() -> None:
@@ -196,14 +196,14 @@ async def test_consumer_group_offsets() -> None:
     client = admin()
     tp = TopicPartition(topic="t", partition=0)
     client.update_consumer_group_offsets(new_offsets={tp: 4})
-    result = await client.list_consumer_group_offsets(
+    result = client.list_consumer_group_offsets(
         group_specs={"g": ListConsumerGroupOffsetsSpec(topic_partitions=[])})
-    listed = (await result.partitions_to_offset_and_metadata(group_id="g"))[tp]
+    listed = (await result.partitions_to_offset_and_metadata(group_id="g").get())[tp]
     assert listed is not None and listed.offset() == 4
     with pytest.raises(NullPointerError):  # Java's default spec
-        await client.list_consumer_group_offsets(group_id="g")
+        client.list_consumer_group_offsets(group_id="g")
     with pytest.raises(UnsupportedVersionError) as e:
-        await client.describe_consumer_groups(group_ids=["g"])
+        client.describe_consumer_groups(group_ids=["g"])
     assert str(e.value) == "Not implemented yet"
 
 
@@ -273,7 +273,7 @@ async def test_positional_calls_are_type_errors() -> None:
     with pytest.raises(TypeError):
         await client.create_topics([])  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        await client.list_consumer_group_offsets("g")  # type: ignore[call-overload]
+        client.list_consumer_group_offsets("g")  # type: ignore[call-overload]
     with pytest.raises(TypeError):
         client.timeout_next_request(1)  # type: ignore[call-arg]
     with pytest.raises(TypeError):

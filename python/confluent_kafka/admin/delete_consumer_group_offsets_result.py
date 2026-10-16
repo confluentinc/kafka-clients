@@ -20,7 +20,9 @@ builds it (CLAUDE.md, Python Binding Conventions, Class family). Its methods mak
 future completed from the stored future's ``when_complete``: Java's
 ``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl`` (Futures). The stored
 map's values are Java's internal ``Errors``, carried as what ``Errors.exception()``
-gives (``None`` for ``NONE``; ``_internals``).
+gives (``None`` for ``NONE``; ``_internals``). The client's future is read from the
+core's per-partition futures (``_conversions.outcomes``), each partition's error kept
+as it stands, which the methods answer as Java's answer the map Java's future holds.
 """
 
 from __future__ import annotations

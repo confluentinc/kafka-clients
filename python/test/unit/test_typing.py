@@ -707,16 +707,15 @@ def test_admin_topic_rpc_typing_imports() -> None:
 
 def _admin_group_rpc_types(c: object = None) -> None:
     """The consumer-group RPCs: each result's futures follow the client that
-    returned it, and ``list_consumer_group_offsets`` takes either of its Java
-    forms, with no written type argument.
+    returned it (``KafkaFuture`` from ``Admin``, ``AsyncKafkaFuture`` from
+    ``AsyncAdmin``, whose RPCs return their result at once as well), and
+    ``list_consumer_group_offsets`` takes either of its Java forms, with no written
+    type argument.
 
     Type-check-only: the body is statically analysed by mypy --strict but never
     executed at runtime."""
     if c is None:
         return
-    import asyncio
-    import concurrent.futures
-
     from confluent_kafka.admin import (
         Admin,
         AsyncAdmin,
@@ -727,56 +726,54 @@ def _admin_group_rpc_types(c: object = None) -> None:
         MemberToRemove,
         RemoveMembersFromConsumerGroupOptions,
     )
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
     from confluent_kafka.consumer import OffsetAndMetadata
 
     admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
     tp = TopicPartition(topic="t", partition=0)
     assert_type(admin.describe_consumer_groups(group_ids=["g"]).described_groups(),
-                "dict[str, concurrent.futures.Future[ConsumerGroupDescription]]")
+                dict[str, KafkaFuture[ConsumerGroupDescription]])
     assert_type(admin.list_consumer_group_offsets(group_id="g").all(),
-                "concurrent.futures.Future[dict[str, dict[TopicPartition, "
-                "OffsetAndMetadata | None]]]")
+                KafkaFuture[dict[str, dict[TopicPartition, OffsetAndMetadata | None]]])
     by_spec = admin.list_consumer_group_offsets(
         group_specs={"g": ListConsumerGroupOffsetsSpec(topic_partitions=[tp])})
     assert_type(by_spec.partitions_to_offset_and_metadata(group_id="g"),
-                "concurrent.futures.Future[dict[TopicPartition, OffsetAndMetadata | None]]")
+                KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]])
     assert_type(admin.delete_consumer_groups(group_ids=["g"]).deleted_groups(),
-                "dict[str, concurrent.futures.Future[None]]")
+                dict[str, KafkaFuture[None]])
     assert_type(admin.delete_consumer_group_offsets(group_id="g", partitions={tp})
-                .partition_result(partition=tp), "concurrent.futures.Future[None]")
-    assert_type(admin.list_groups().valid(), "concurrent.futures.Future[list[GroupListing]]")
+                .partition_result(partition=tp), KafkaFuture[None])
+    assert_type(admin.list_groups().valid(), KafkaFuture[list[GroupListing]])
     options = RemoveMembersFromConsumerGroupOptions(
         members=[MemberToRemove(group_instance_id="i")])
     assert_type(admin.remove_members_from_consumer_group(group_id="g", options=options).all(),
-                "concurrent.futures.Future[None]")
+                KafkaFuture[None])
     assert_type(admin.alter_consumer_group_offsets(
-        group_id="g", offsets={tp: OffsetAndMetadata(offset=1)}).all(),
-        "concurrent.futures.Future[None]")
+        group_id="g", offsets={tp: OffsetAndMetadata(offset=1)}).all(), KafkaFuture[None])
     assert_type(admin.describe_classic_groups(group_ids=["g"]).all(),
-                "concurrent.futures.Future[dict[str, ClassicGroupDescription]]")
+                KafkaFuture[dict[str, ClassicGroupDescription]])
 
     async def _async() -> None:
         async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
-        described = await async_admin.describe_consumer_groups(group_ids=["g"])
-        assert_type(described.all(), "asyncio.Future[dict[str, ConsumerGroupDescription]]")
-        offsets = await (await async_admin.list_consumer_group_offsets(
-            group_id="g")).partitions_to_offset_and_metadata()
+        described = async_admin.describe_consumer_groups(group_ids=["g"])
+        assert_type(described.all(), AsyncKafkaFuture[dict[str, ConsumerGroupDescription]])
+        offsets = await async_admin.list_consumer_group_offsets(
+            group_id="g").partitions_to_offset_and_metadata().get()
         assert_type(offsets, dict[TopicPartition, OffsetAndMetadata | None])
-        assert_type(await (await async_admin.list_groups()).errors(), list[BaseException])
-        removed = await async_admin.remove_members_from_consumer_group(group_id="g",
-                                                                       options=options)
+        assert_type(await async_admin.list_groups().errors().get(), list[BaseException])
+        removed = async_admin.remove_members_from_consumer_group(group_id="g", options=options)
         assert_type(removed.member_result(member=MemberToRemove(group_instance_id="i")),
-                    "asyncio.Future[None]")
-        altered = await async_admin.alter_consumer_group_offsets(group_id="g", offsets={})
-        assert_type(altered.partition_result(partition=tp), "asyncio.Future[None]")
-        deleted = await async_admin.delete_consumer_group_offsets(group_id="g", partitions=[])
-        assert_type(deleted.all(), "asyncio.Future[None]")
-        assert_type(await (await async_admin.delete_consumer_groups(group_ids=[])).all(), None)
-        classic = await async_admin.describe_classic_groups(group_ids=["g"])
+                    AsyncKafkaFuture[None])
+        altered = async_admin.alter_consumer_group_offsets(group_id="g", offsets={})
+        assert_type(altered.partition_result(partition=tp), AsyncKafkaFuture[None])
+        deleted = async_admin.delete_consumer_group_offsets(group_id="g", partitions=[])
+        assert_type(deleted.all(), AsyncKafkaFuture[None])
+        assert_type(await async_admin.delete_consumer_groups(group_ids=[]).all().get(), None)
+        classic = async_admin.describe_classic_groups(group_ids=["g"])
         assert_type(classic.described_groups(),
-                    "dict[str, asyncio.Future[ClassicGroupDescription]]")
+                    dict[str, AsyncKafkaFuture[ClassicGroupDescription]])
 
-    del _async, asyncio, concurrent
+    del _async
 
 
 def test_admin_group_rpc_typing_imports() -> None:
