@@ -800,59 +800,10 @@ static int callback_exception_of(const kafka_common_Error_t* e, PyObject** out) 
     return 0;
 }
 
-// Mirrors KafkaError._from_c field for field, from a BORROWED error:
-// (code, message | None, is_retriable, is_fatal, txn_requires_abort,
-//  callback_exception | None). `callback_exception` is the exception object a
-// Python callback raised (`callback_exception_of`), a new reference, which the
-// consumer swaps back in.
 // `error_is_fatal` (defined with the KafkaError accessors below) composes
 // RequestUtils.isFatalException from the exported predicates: 1, 0, or -1 with
 // the exception set. Used by the consumer and admin sections.
 static int error_is_fatal(const kafka_common_Error_t* e);
-
-static PyObject* error_to_py(const kafka_common_Error_t* e) {
-    kafka_common_Error_t *ffi_err = NULL;
-    const char* msg = NULL;
-    kafka_common_Error_e code = kafka_common_Error_UNKNOWN_SERVER_ERROR;
-    int8_t retriable = 0;
-    int8_t abortable = 0;
-    PyObject* exc = NULL;
-    if (ffi_raise((msg = kafka_common_Error_message_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((code = kafka_common_Error__enum_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((retriable = kafka_common_Error_is_retriable_error_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((abortable = kafka_common_Error_is_transaction_abortable_error_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || callback_exception_of(e, &exc) < 0) return NULL;
-    int fatal = error_is_fatal(e);
-    if (fatal < 0) return NULL;
-    PyObject* py_msg = msg ? PyUnicode_FromString(msg) : (Py_INCREF(Py_None), Py_None);
-    if (py_msg == NULL) return NULL;
-    PyObject* py_exc = exc ? exc : Py_None;
-    Py_INCREF(py_exc);
-    return Py_BuildValue("(iNOOON)",
-                         (int)code,
-                         py_msg,
-                         retriable ? Py_True : Py_False,
-                         fatal ? Py_True : Py_False,
-                         abortable ? Py_True : Py_False,
-                         py_exc);
-}
-
-// Same, consuming an OWNED error.
-static PyObject* owned_error_to_py(kafka_common_Error_t* e) {
-    kafka_common_Error_t *ffi_err = NULL;
-    PyObject* out = error_to_py(e);
-    ffi_unraisable((kafka_common_Error_destroy_err(e, &ffi_err), ffi_take(&ffi_err)));
-    return out;
-}
-
-// Returns a new reference to a (value, error) pair where `value` is a borrowed
-// reference and the error is an owned handle (NULL = None). Used by the
-// KafkaFuture wrapper and the consumer section.
-static PyObject* build_value_error(PyObject* value, kafka_common_Error_t* err) {
-    PyObject* py_err = err ? owned_error_to_py(err) : (Py_INCREF(Py_None), Py_None);
-    if (py_err == NULL) return NULL;
-    return Py_BuildValue("(ON)", value, py_err);
-}
 
 // (topic, partition, offset, timestamp, serialized_key_size,
 // serialized_value_size) from a BORROWED RecordMetadata; `offset` /
@@ -1252,16 +1203,38 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
     return PyLong_FromLong((long)n);
 }
 
-// ---- KafkaFuture<RecordMetadata> wrapper -----------------------------------
+// ---- KafkaFuture<T> wrapper ------------------------------------------------
 //
-// The owned kafka_common_KafkaFuture_t a blocking send returns. `get()`
-// blocks with the GIL released (driving the client runtime), copies the
-// BORROWED RecordMetadata's fields out and never destroys the metadata; the
-// future handle is destroyed in tp_dealloc.
+// The extension's future object over an OWNED kafka_common_KafkaFuture_t, the
+// value source of `confluent_kafka.common.KafkaFuture` /
+// `AsyncKafkaFuture` (CLAUDE.md, Python Binding Conventions, Futures). It never
+// blocks: `is_done()` reads the handle, `get_cb(cb)` queues the delivery on the
+// owning client's callbacks vector (inline for a future of no client), and
+// `get_if_done()` reads a future that is already done.
+//
+// The `void *` a future delivers is BORROWED from the handle (valid until the
+// handle is destroyed: `rust/src/ffi/kafka_future.rs`, module docs), so it is
+// converted while this object is alive, by the converter the creator chose:
+//   * a C converter id (KAFKA_FUTURE_CONV_*): VOID (a `Void` future, value ->
+//     None), RECORD_METADATA (the producer's metadata tuple), PYOBJECT (the
+//     value is a PyObject* this object keeps alive: `completed_future`);
+//   * or a Python callable, `conv(address)`, called with the value's address
+//     during the delivery, which reads it through the extension.
+// The handle is destroyed in tp_dealloc; a pending `get_cb` holds a reference
+// to this object, so the handle outlives every delivery.
+
+enum {
+    KAFKA_FUTURE_CONV_VOID = 0,
+    KAFKA_FUTURE_CONV_RECORD_METADATA = 1,
+    KAFKA_FUTURE_CONV_PYOBJECT = 2,
+};
 
 typedef struct {
     PyObject_HEAD
     kafka_common_KafkaFuture_t* handle;
+    int conv_id;          // used when `converter` is NULL
+    PyObject* converter;  // Python callable(address) -> value, or NULL
+    PyObject* keep;       // the value of a PYOBJECT future, kept alive, or NULL
 } KafkaFutureObject;
 
 static void KafkaFuture_dealloc(KafkaFutureObject* self) {
@@ -1270,50 +1243,64 @@ static void KafkaFuture_dealloc(KafkaFutureObject* self) {
         ffi_unraisable((kafka_common_KafkaFuture_destroy_err(self->handle, &ffi_err), ffi_take(&ffi_err)));
         self->handle = NULL;
     }
+    Py_CLEAR(self->converter);
+    Py_CLEAR(self->keep);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle);
+static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle, int conv_id, PyObject* converter);
 
-// get(timeout_ms=None) -> (meta_tuple | None, err_tuple | None), or None when
-// the wait timed out (Java's java.util.concurrent.TimeoutException, i.e.
-// kafka_common_Error_is_local_timeout_error_err on a future that is not done).
-static PyObject* KafkaFuture_get(KafkaFutureObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    PyObject* timeout_obj = Py_None;
-    if (!PyArg_ParseTuple(args, "|O", &timeout_obj)) return NULL;
-    long long timeout_ms = 0;
-    if (timeout_obj != Py_None) {
-        timeout_ms = PyLong_AsLongLong(timeout_obj);
-        if (timeout_ms == -1 && PyErr_Occurred()) return NULL;
-        if (timeout_ms < 0) timeout_ms = 0;
+// The Python value of the BORROWED `value` the future delivered, by its
+// converter: a new reference, or NULL with an exception set. GIL held.
+static PyObject* kafka_future_convert(KafkaFutureObject* self, void* value) {
+    if (self->converter != NULL) {
+        PyObject* address = PyLong_FromVoidPtr(value);
+        if (address == NULL) return NULL;
+        PyObject* out = PyObject_CallOneArg(self->converter, address);
+        Py_DECREF(address);
+        return out;
     }
-    void* out = NULL;
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
-    if (timeout_obj == Py_None) {
-        err = (out = kafka_common_KafkaFuture_get(self->handle, &ffi_err), ffi_take(&ffi_err));
-    } else {
-        err = (out = kafka_common_KafkaFuture_get_with_timeout(self->handle, (int64_t)timeout_ms, &ffi_err), ffi_take(&ffi_err));
+    switch (self->conv_id) {
+    case KAFKA_FUTURE_CONV_RECORD_METADATA:
+        if (value == NULL) Py_RETURN_NONE;
+        return metadata_to_py((const kafka_producer_RecordMetadata_t*)value);
+    case KAFKA_FUTURE_CONV_PYOBJECT: {
+        PyObject* obj = value ? (PyObject*)value : Py_None;
+        Py_INCREF(obj);
+        return obj;
     }
-    Py_END_ALLOW_THREADS
-    if (err != NULL) {
-        int8_t timed_out = 0;
-        int8_t done = 0;
-        if (ffi_raise((timed_out = kafka_common_Error_is_local_timeout_error_err(err, &ffi_err), ffi_take(&ffi_err)))
-            || (timed_out && ffi_raise((done = kafka_common_KafkaFuture_is_done_err(self->handle, &ffi_err), ffi_take(&ffi_err))))) {
-            ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err)));
+    case KAFKA_FUTURE_CONV_VOID:
+    default:
+        Py_RETURN_NONE;
+    }
+}
+
+// The `(value, error)` pair a delivery hands Python: `(value, None)` on
+// success; `(None, error_int)` with the OWNED error handle, which Python
+// converts and frees (`from_ffi_error`); `(None, exception)` when the converter
+// raised. Consumes `error`. A new reference, or NULL with an exception set.
+static PyObject* kafka_future_outcome(KafkaFutureObject* self, void* value, kafka_common_Error_t* error) {
+    if (error != NULL) {
+        PyObject* handle = error_handle_to_py(error);
+        if (handle == NULL) {
+            kafka_common_Error_t *ffi_err = NULL;
+            ffi_unraisable((kafka_common_Error_destroy_err(error, &ffi_err), ffi_take(&ffi_err)));
             return NULL;
         }
-        if (timed_out && !done) {
-            ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err)));
-            Py_RETURN_NONE;
-        }
-        return build_value_error(Py_None, err);
+        return Py_BuildValue("(ON)", Py_None, handle);
     }
-    PyObject* meta = metadata_to_py((const kafka_producer_RecordMetadata_t*)out);
-    if (meta == NULL) return NULL;
-    return Py_BuildValue("(NO)", meta, Py_None);
+    PyObject* converted = kafka_future_convert(self, value);
+    if (converted == NULL) {
+        PyObject *type = NULL, *exc = NULL, *tb = NULL;
+        PyErr_Fetch(&type, &exc, &tb);
+        PyErr_NormalizeException(&type, &exc, &tb);
+        if (exc != NULL && tb != NULL) PyException_SetTraceback(exc, tb);
+        Py_XDECREF(type);
+        Py_XDECREF(tb);
+        if (exc == NULL) return NULL;
+        return Py_BuildValue("(ON)", Py_None, exc);
+    }
+    return Py_BuildValue("(NO)", converted, Py_None);
 }
 
 static PyObject* KafkaFuture_is_done(KafkaFutureObject* self, PyObject* Py_UNUSED(ignored)) {
@@ -1323,9 +1310,27 @@ static PyObject* KafkaFuture_is_done(KafkaFutureObject* self, PyObject* Py_UNUSE
     return PyBool_FromLong(done ? 1 : 0);
 }
 
+// get_if_done() -> None while the future is pending, else the `(value, error)`
+// pair of kafka_future_outcome. A done future answers `kafka_common_KafkaFuture_get`
+// at once; for a future that waits for its client's report, that call first
+// runs the client's queued callbacks on this thread, so only the asyncio
+// classes, whose loop is that client's callback thread, call it.
+static PyObject* KafkaFuture_get_if_done(KafkaFutureObject* self, PyObject* Py_UNUSED(ignored)) {
+    kafka_common_Error_t *ffi_err = NULL;
+    int8_t done = 0;
+    if (ffi_raise((done = kafka_common_KafkaFuture_is_done_err(self->handle, &ffi_err), ffi_take(&ffi_err)))) return NULL;
+    if (!done) Py_RETURN_NONE;
+    void* out = NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    err = (out = kafka_common_KafkaFuture_get(self->handle, &ffi_err), ffi_take(&ffi_err));
+    Py_END_ALLOW_THREADS
+    return kafka_future_outcome(self, out, err);
+}
+
 // The queued `get`: the context keeps the Python future object -- and so the
-// C handle the BORROWED RecordMetadata belongs to -- alive until the
-// completion has copied the metadata out.
+// C handle the BORROWED value belongs to -- alive until the completion has
+// converted the value.
 typedef struct {
     PyObject* cb;
     KafkaFutureObject* fut;
@@ -1335,13 +1340,7 @@ static void kafka_future_get_cb(void* value, kafka_common_Error_t* error, void* 
     FutureGetCtx* ctx = (FutureGetCtx*)opaque;
     PyGILState_STATE g;
     if (!gil_ensure_unless_finalizing(&g)) return;
-    PyObject* pair;
-    if (error != NULL) {
-        pair = build_value_error(Py_None, error);
-    } else {
-        PyObject* meta = metadata_to_py((const kafka_producer_RecordMetadata_t*)value);
-        pair = meta ? Py_BuildValue("(NO)", meta, Py_None) : NULL;
-    }
+    PyObject* pair = kafka_future_outcome(ctx->fut, value, error);
     if (pair == NULL) {
         PyErr_WriteUnraisable(ctx->cb);
     } else {
@@ -1355,11 +1354,11 @@ static void kafka_future_get_cb(void* value, kafka_common_Error_t* error, void* 
     PyGILState_Release(g);
 }
 
-// get_cb(cb) -> None: the queued twin of get(). `cb(metadata_tuple | None,
-// error_tuple | None)` runs from the owning producer's callback pump
-// (`Producer__execute_callbacks` / `Producer_poll`) once the record completed,
-// or inline before this returns when the future belongs to no client. The
-// sync `SendFuture.result()` waits on it in slices, never in a native block.
+// get_cb(cb) -> None: `cb(value, error)` with kafka_future_outcome's pair, run
+// by the owning client's `__execute_callbacks` once the future completed (its
+// completion thread, the admin pump thread, or the event loop of an asyncio
+// client), or inline before this returns when the future belongs to no client.
+// A client's `_destroy` fires a still-pending one with LOCAL_ILLEGAL_STATE.
 static PyObject* KafkaFuture_get_cb(KafkaFutureObject* self, PyObject* args) {
     PyObject* cb;
     if (!PyArg_ParseTuple(args, "O", &cb)) return NULL;
@@ -1375,19 +1374,63 @@ static PyObject* KafkaFuture_get_cb(KafkaFutureObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+// set_converter(conv) -> None: the Python converter, `conv(address)`, replacing
+// the C one; for a creator that reads the value with extension functions.
+static PyObject* KafkaFuture_set_converter(KafkaFutureObject* self, PyObject* args) {
+    PyObject* conv;
+    if (!PyArg_ParseTuple(args, "O", &conv)) return NULL;
+    if (!PyCallable_Check(conv)) {
+        PyErr_SetString(PyExc_TypeError, "the converter must be callable");
+        return NULL;
+    }
+    Py_INCREF(conv);
+    Py_XSETREF(self->converter, conv);
+    Py_RETURN_NONE;
+}
+
+// completed_future(value, error=None) -> KafkaFuture: Java's
+// `KafkaFuture.completedFuture`, a future of no client from
+// `kafka_common_KafkaFuture_completed_future`, delivering `value` (kept alive
+// by the object), or failed with `error` (an exception, carried by a
+// LOCAL_CALLBACK core error) when given. Its deliveries run inline.
+static PyObject* KafkaFuture_completed_future(PyObject* Py_UNUSED(cls), PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    PyObject* value;
+    PyObject* error = Py_None;
+    if (!PyArg_ParseTuple(args, "O|O", &value, &error)) return NULL;
+    kafka_common_Error_t* result_error = NULL;
+    if (error != Py_None) {
+        result_error = callback_error_from_py(error);
+        if (result_error == NULL) return NULL;
+    }
+    kafka_common_KafkaFuture_t* handle = NULL;
+    kafka_common_Error_t* err =
+        (handle = kafka_common_KafkaFuture_completed_future_err(value, result_error, &ffi_err), ffi_take(&ffi_err));
+    if (ffi_raise(err)) return NULL;
+    KafkaFutureObject* f = (KafkaFutureObject*)KafkaFuture_wrap(handle, KAFKA_FUTURE_CONV_PYOBJECT, NULL);
+    if (f == NULL) return NULL;
+    Py_INCREF(value);
+    f->keep = value;
+    return (PyObject*)f;
+}
+
 static PyMethodDef KafkaFuture_methods[] = {
-    {"get", (PyCFunction)KafkaFuture_get, METH_VARARGS,
-     "get(timeout_ms=None) -> (metadata_tuple | None, error_tuple | None); None on timeout (blocking; the Python clients use get_cb)"},
-    {"get_cb", (PyCFunction)KafkaFuture_get_cb, METH_VARARGS,
-     "get_cb(cb) -> None; cb(metadata_tuple | None, error_tuple | None) queued on the owning producer's callbacks vector"},
     {"is_done", (PyCFunction)KafkaFuture_is_done, METH_NOARGS, "Whether the future completed"},
+    {"get_if_done", (PyCFunction)KafkaFuture_get_if_done, METH_NOARGS,
+     "get_if_done() -> None while pending, else (value, None) | (None, error_int) | (None, exception)"},
+    {"get_cb", (PyCFunction)KafkaFuture_get_cb, METH_VARARGS,
+     "get_cb(cb) -> None; cb(value, error) queued on the owning client's callbacks vector"},
+    {"set_converter", (PyCFunction)KafkaFuture_set_converter, METH_VARARGS,
+     "set_converter(conv) -> None; conv(address) converts the borrowed value"},
+    {"completed_future", (PyCFunction)KafkaFuture_completed_future, METH_VARARGS | METH_STATIC,
+     "completed_future(value, error=None) -> KafkaFuture of no client"},
     {NULL}
 };
 
 static PyTypeObject KafkaFutureType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "kafkanative.KafkaFuture",
-    .tp_doc = "Owned KafkaFuture<RecordMetadata> handle returned by a blocking send",
+    .tp_doc = "Owned kafka_common_KafkaFuture_t handle with its value converter",
     .tp_basicsize = sizeof(KafkaFutureObject),
     .tp_itemsize = 0,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -1395,11 +1438,17 @@ static PyTypeObject KafkaFutureType = {
     .tp_methods = KafkaFuture_methods,
 };
 
-static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle) {
+// Wraps an OWNED handle (destroyed here when the wrapper cannot be built) with
+// the converter `conv_id`, or the Python `converter` when not NULL.
+static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle, int conv_id, PyObject* converter) {
     kafka_common_Error_t *ffi_err = NULL;
     KafkaFutureObject* f = PyObject_New(KafkaFutureObject, &KafkaFutureType);
     if (f == NULL) { ffi_unraisable((kafka_common_KafkaFuture_destroy_err(handle, &ffi_err), ffi_take(&ffi_err))); return NULL; }
     f->handle = handle;
+    f->conv_id = conv_id;
+    Py_XINCREF(converter);
+    f->converter = converter;
+    f->keep = NULL;
     return (PyObject*)f;
 }
 
@@ -1523,7 +1572,7 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         return Py_BuildValue("(ON)", Py_None, error_handle_to_py(err));
     }
     delivery_ctx_release(ctx);
-    PyObject* py_fut = KafkaFuture_wrap(fut);
+    PyObject* py_fut = KafkaFuture_wrap(fut, KAFKA_FUTURE_CONV_RECORD_METADATA, NULL);
     if (py_fut == NULL) return NULL;
     return Py_BuildValue("(Ni)", py_fut, 0);
 }
@@ -10749,6 +10798,12 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     Py_INCREF(&KafkaFutureType);
     if (PyModule_AddObject(m, "KafkaFuture", (PyObject*)&KafkaFutureType) < 0) {
         Py_DECREF(&KafkaFutureType);
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_VOID", KAFKA_FUTURE_CONV_VOID) < 0
+        || PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_RECORD_METADATA", KAFKA_FUTURE_CONV_RECORD_METADATA) < 0
+        || PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_PYOBJECT", KAFKA_FUTURE_CONV_PYOBJECT) < 0) {
         Py_DECREF(m);
         return NULL;
     }
