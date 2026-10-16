@@ -34,7 +34,7 @@ class AuthorizationError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -9  # kafka_common_ErrorCode_AUTHORIZATION
+    _ffi_id: ClassVar[int] = -9  # kafka_common_Error_AUTHORIZATION
 
     def __init__(
         self,

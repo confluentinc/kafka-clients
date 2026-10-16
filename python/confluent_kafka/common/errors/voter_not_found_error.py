@@ -34,7 +34,7 @@ class VoterNotFoundError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 127  # kafka_common_ErrorCode_VOTER_NOT_FOUND
+    _ffi_id: ClassVar[int] = 127  # kafka_common_Error_VOTER_NOT_FOUND
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class FeatureUpdateFailedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 96  # kafka_common_ErrorCode_FEATURE_UPDATE_FAILED
+    _ffi_id: ClassVar[int] = 96  # kafka_common_Error_FEATURE_UPDATE_FAILED
 
     def __init__(
         self,

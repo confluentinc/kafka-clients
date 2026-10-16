@@ -77,7 +77,11 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     By default this mock will synchronously complete each send call
     successfully. However it can be configured to allow the user to control the
     completion of the call and supply an optional error for the producer to
-    raise. Sends complete, and their callbacks run, on the calling thread.
+    raise. Sends complete, and their callbacks run, on the calling thread. An
+    exception a callback raises propagates out of the call that completed the
+    record (``send()``, ``complete_next()``, ``error_next()``, ``flush()``,
+    ``commit_transaction()``, ``abort_transaction()``), whose future then never
+    completes, as from Java's mock.
 
     Java: ``org.apache.kafka.clients.producer.MockProducer<K, V>``.
     """

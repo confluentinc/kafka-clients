@@ -44,7 +44,7 @@ class NotLeaderOrFollowerError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 6  # kafka_common_ErrorCode_NOT_LEADER_OR_FOLLOWER
+    _ffi_id: ClassVar[int] = 6  # kafka_common_Error_NOT_LEADER_OR_FOLLOWER
 
     def __init__(
         self,

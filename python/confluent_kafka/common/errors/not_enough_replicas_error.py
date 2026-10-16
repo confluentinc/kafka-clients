@@ -38,7 +38,7 @@ class NotEnoughReplicasError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 19  # kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS
+    _ffi_id: ClassVar[int] = 19  # kafka_common_Error_NOT_ENOUGH_REPLICAS
 
     def __init__(
         self,

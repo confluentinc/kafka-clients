@@ -34,7 +34,7 @@ class InvalidPrincipalTypeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 67  # kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE
+    _ffi_id: ClassVar[int] = 67  # kafka_common_Error_INVALID_PRINCIPAL_TYPE
 
     def __init__(
         self,

@@ -281,6 +281,9 @@ impl std::fmt::Debug for State {
 /// RPCs will be added with their tiers. All futures returned are immediately
 /// resolved.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient")]
+// Java ships it in the clients test fixtures (clients/src/testFixtures since 4.4) for users to test against, as MockProducer / MockConsumer are public
+#[doc(alias = "public-in-rust")]
 pub struct MockAdminClient {
     state: Mutex<State>,
 }
@@ -297,6 +300,9 @@ pub struct MockAdminClient {
 /// counterpart, so those failures are [`Error::LocalIllegalArgument`] (like the
 /// mock's other argument errors), carrying the JDK's message text.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder")]
+// Java's nested MockAdminClient.Builder, the way users build the test-fixtures MockAdminClient above
+#[doc(alias = "public-in-rust")]
 pub struct Builder {
     cluster_id: String,
     brokers: Vec<Node>,
@@ -322,6 +328,7 @@ impl Builder {
     ///
     /// Mirrors Java's `public Builder()`, which calls `numBrokers(1)`
     /// (`MockAdminClient.java:137-139`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#Builder")]
     pub fn new() -> Self {
         let mut builder = Self {
             cluster_id: MockAdminClient::DEFAULT_CLUSTER_ID.to_string(),
@@ -343,6 +350,7 @@ impl Builder {
     }
 
     /// Sets the cluster id. Mirrors Java's `clusterId(String)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#clusterId")]
     pub fn set_cluster_id(mut self, cluster_id: &str) -> Self {
         self.cluster_id = cluster_id.to_string();
         self
@@ -362,6 +370,7 @@ impl Builder {
     /// non-negative count the only reachable one is a log-dir list shorter than
     /// `brokers` (after [`set_broker_log_dirs`](Self::set_broker_log_dirs)), where
     /// Java's `brokerLogDirs.subList(0, n)` throws.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#brokers")]
     pub fn set_brokers(self, brokers: Vec<Node>) -> Result<Self, Error> {
         // `Collection.size()` saturates at `Integer.MAX_VALUE`, so a length that
         // does not fit an `i32` becomes `i32::MAX`, as Java's `size()` reports it.
@@ -387,6 +396,7 @@ impl Builder {
     ///   `IllegalArgumentException`);
     /// - shrinking below the broker count while the log-dir list is shorter than
     ///   `num_brokers`: "toIndex = n" (Java's `IndexOutOfBoundsException`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#numBrokers")]
     pub fn set_num_brokers(mut self, num_brokers: i32) -> Result<Self, Error> {
         let current = self.brokers.len() as i64;
         if current >= i64::from(num_brokers) {
@@ -421,6 +431,7 @@ impl Builder {
     /// `IndexOutOfBoundsException` text, "Index i out of bounds for length n"
     /// (`ArrayList.get` → `Objects.checkIndex`), when `index` is not a broker
     /// index.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#controller")]
     pub fn set_controller(mut self, index: i32) -> Result<Self, Error> {
         let node = usize::try_from(index)
             .ok()
@@ -433,6 +444,7 @@ impl Builder {
     /// Replaces the per-broker log directories. Mirrors Java's
     /// `brokerLogDirs(List<List<String>>)`; like Java, the length is not
     /// checked against the broker count.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#brokerLogDirs")]
     pub fn set_broker_log_dirs(mut self, broker_log_dirs: Vec<Vec<String>>) -> Self {
         self.broker_log_dirs = broker_log_dirs;
         self
@@ -443,6 +455,7 @@ impl Builder {
     /// Mirrors Java's `defaultReplicationFactor(int)`. [`build`](Self::build)
     /// narrows it to 16 bits the way Java's `Integer.shortValue()` does: the
     /// value wraps, it is not clamped.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultReplicationFactor")]
     pub fn set_default_replication_factor(mut self, default_replication_factor: i32) -> Self {
         self.default_replication_factor = Some(default_replication_factor);
         self
@@ -453,6 +466,7 @@ impl Builder {
     /// The value is stored, but it has no effect yet: its only Java reader is
     /// `MockAdminClient.unregisterBroker`, which this client does not translate
     /// yet.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#usingRaftController")]
     pub fn set_using_raft_controller(mut self, using_raft_controller: bool) -> Self {
         self.using_raft_controller = using_raft_controller;
         self
@@ -460,6 +474,7 @@ impl Builder {
 
     /// Sets the partition count used when `createTopics` does not give one.
     /// Mirrors Java's `defaultPartitions(short)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultPartitions")]
     pub fn set_default_partitions(mut self, num_partitions: i16) -> Self {
         self.default_partitions = Some(num_partitions);
         self
@@ -467,6 +482,7 @@ impl Builder {
 
     /// Sets the finalized feature levels. Mirrors Java's
     /// `featureLevels(Map<String, Short>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#featureLevels")]
     pub fn set_feature_levels(mut self, feature_levels: HashMap<String, i16>) -> Self {
         self.feature_levels = feature_levels;
         self
@@ -474,6 +490,7 @@ impl Builder {
 
     /// Sets the minimum supported feature levels. Mirrors Java's
     /// `minSupportedFeatureLevels(Map<String, Short>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#minSupportedFeatureLevels")]
     pub fn set_min_supported_feature_levels(mut self, min_supported_feature_levels: HashMap<String, i16>) -> Self {
         self.min_supported_feature_levels = min_supported_feature_levels;
         self
@@ -481,6 +498,7 @@ impl Builder {
 
     /// Sets the maximum supported feature levels. Mirrors Java's
     /// `maxSupportedFeatureLevels(Map<String, Short>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#maxSupportedFeatureLevels")]
     pub fn set_max_supported_feature_levels(mut self, max_supported_feature_levels: HashMap<String, i16>) -> Self {
         self.max_supported_feature_levels = max_supported_feature_levels;
         self
@@ -488,6 +506,7 @@ impl Builder {
 
     /// Sets the defaults overlaid onto every group's configs. Mirrors Java's
     /// `defaultGroupConfigs(Map<String, String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultGroupConfigs")]
     pub fn set_default_group_configs(mut self, default_group_configs: HashMap<String, String>) -> Self {
         self.default_group_configs = default_group_configs;
         self
@@ -508,6 +527,7 @@ impl Builder {
     /// - the controller is no longer one of the brokers (for example
     ///   `set_controller(2)` followed by `set_num_brokers(1)`): "The controller
     ///   node must be in the list of brokers" (`MockAdminClient.java:282`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#build")]
     pub fn build(self) -> Result<MockAdminClient, Error> {
         let controller = match self.controller {
             Some(controller) => controller,
@@ -602,6 +622,7 @@ impl MockAdminClient {
     ///
     /// Mirrors Java's `public static Builder create()`
     /// (`MockAdminClient.java:120-122`), which returns `new Builder()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#create")]
     pub fn create() -> Builder {
         Builder::new()
     }
@@ -612,6 +633,7 @@ impl MockAdminClient {
     /// Mirrors Java's `public MockAdminClient()` (`MockAdminClient.java:225-227`),
     /// `this(Collections.singletonList(Node.noNode()), Node.noNode())`. It cannot
     /// fail: the controller is the only broker.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#MockAdminClient()")]
     pub fn new() -> Self {
         let node = Node::no_node().clone();
         Self::with_brokers_controller(vec![node.clone()], node)
@@ -633,6 +655,7 @@ impl MockAdminClient {
     /// controller node must be in the list of brokers", when `controller` is not
     /// one of `brokers` (Java's constructor calls `controller(Node)`, which
     /// throws `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#MockAdminClient(List,Node)")]
     pub fn with_brokers_controller(brokers: Vec<Node>, controller: Node) -> Result<Self, Error> {
         let broker_log_dirs = vec![Self::default_log_dirs(); brokers.len()];
         // Java passes `brokers.size()` as the `int defaultReplicationFactor`
@@ -663,6 +686,7 @@ impl MockAdminClient {
     /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
     /// controller node must be in the list of brokers", when `controller` is not
     /// one of the mock's brokers; the controller is then left unchanged.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#controller")]
     pub fn set_controller(&self, controller: Node) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         check_controller(&state.brokers, &controller)?;
@@ -747,6 +771,8 @@ impl MockAdminClient {
     ///
     /// Mirrors Java's `MockAdminClient.Builder.featureLevels` /
     /// `minSupportedFeatureLevels` / `maxSupportedFeatureLevels`.
+    // Java seeds the feature levels only through Builder.featureLevels and its min/max siblings; the C binding and tests reseed a built mock
+    #[doc(alias = "rust-only")]
     pub fn set_feature_levels(
         &self,
         feature_levels: HashMap<String, i16>,
@@ -765,6 +791,8 @@ impl MockAdminClient {
     /// Mirrors Java's `MockAdminClient.Builder.usingRaftController` (default
     /// `false`). Like [`set_feature_levels`](Self::set_feature_levels), a Java
     /// builder option becomes a setter on the constructed mock.
+    // Java sets this only through Builder.usingRaftController; the C binding and tests change it on a built mock
+    #[doc(alias = "rust-only")]
     pub fn set_using_raft_controller(&self, using_raft_controller: bool) {
         self.state.lock().unwrap().using_raft_controller = using_raft_controller;
     }
@@ -784,6 +812,7 @@ impl MockAdminClient {
     /// partitions.
     ///
     /// Mirrors `MockAdminClient.updateBeginningOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateBeginningOffsets")]
     pub fn update_beginning_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.beginning_offsets.extend(new_offsets);
@@ -793,6 +822,7 @@ impl MockAdminClient {
     /// partitions.
     ///
     /// Mirrors `MockAdminClient.updateEndOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateEndOffsets")]
     pub fn update_end_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.end_offsets.extend(new_offsets);
@@ -802,6 +832,7 @@ impl MockAdminClient {
     /// `list_consumer_group_offsets_with_group_specs` for the given partitions.
     ///
     /// Mirrors `MockAdminClient.updateConsumerGroupOffsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateConsumerGroupOffsets")]
     pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.committed_offsets.extend(new_offsets);
@@ -818,6 +849,8 @@ impl MockAdminClient {
     /// installs the whole list up front — so this message has no Java
     /// counterpart; it exists because indexing `brokerLogDirs` out of range
     /// would otherwise panic.
+    // Java sets these only through Builder.brokerLogDirs; the C binding and tests override one broker on a built mock
+    #[doc(alias = "rust-only")]
     pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let slot = usize::try_from(broker_id)
@@ -838,6 +871,7 @@ impl MockAdminClient {
     /// was already added, or if any partition names a broker the mock does not
     /// have as its leader, in its replica list, or in its ISR
     /// (`MockAdminClient.java:296-309`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#addTopic")]
     pub fn add_topic(
         &self,
         internal: bool,
@@ -908,6 +942,7 @@ impl MockAdminClient {
     ///
     /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// does not exist (`MockAdminClient.java:328-330`).
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#markTopicForDeletion")]
     pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let topic = state
@@ -930,6 +965,7 @@ impl MockAdminClient {
     /// Returns [`Error::LocalIllegalArgument`] with Java's message,
     /// `"No such topic as <name>"`, if the topic does not exist. Java throws a bare
     /// `RuntimeException`, which has no closer counterpart in the crate.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#setFetchesRemainingUntilVisible")]
     pub fn set_fetches_remaining_until_visible(
         &self,
         topic_name: &str,
@@ -945,6 +981,7 @@ impl MockAdminClient {
     }
 
     /// Causes the next `number_of_requests` operations to fail with a timeout.
+    #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#timeoutNextRequest")]
     pub fn timeout_next_request(&self, number_of_requests: i32) {
         self.state.lock().unwrap().timeout_next_requests = number_of_requests;
     }
@@ -1070,7 +1107,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 ///
 /// Corresponds to `MockAdminClient.getResourceDescription`.
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
-    match resource.resource_type() {
+    match resource.r#type() {
         config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
@@ -1131,7 +1168,7 @@ fn handle_incremental_resource_alteration(
     resource: &ConfigResource,
     ops: &[AlterConfigOp],
 ) -> Result<(), Error> {
-    match resource.resource_type() {
+    match resource.r#type() {
         config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
@@ -2050,7 +2087,8 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    future.complete_with_error(Error::unsupported_version("Not implemented yet"));
+                    // Java's message is "Not implement yet" (sic), `MockAdminClient.java:1231`.
+                    future.complete_with_error(Error::unsupported_version("Not implement yet"));
                 },
                 OffsetSpec::Earliest => {
                     let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);

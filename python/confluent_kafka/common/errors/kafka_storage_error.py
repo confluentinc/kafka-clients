@@ -50,7 +50,7 @@ class KafkaStorageError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 56  # kafka_common_ErrorCode_KAFKA_STORAGE_ERROR
+    _ffi_id: ClassVar[int] = 56  # kafka_common_Error_KAFKA_STORAGE_ERROR
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class TopicExistsError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 36  # kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS
+    _ffi_id: ClassVar[int] = 36  # kafka_common_Error_TOPIC_ALREADY_EXISTS
 
     def __init__(
         self,

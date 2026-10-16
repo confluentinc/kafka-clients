@@ -36,7 +36,7 @@ class TransactionCoordinatorFencedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 52  # kafka_common_ErrorCode_TRANSACTION_COORDINATOR_FENCED
+    _ffi_id: ClassVar[int] = 52  # kafka_common_Error_TRANSACTION_COORDINATOR_FENCED
 
     def __init__(
         self,

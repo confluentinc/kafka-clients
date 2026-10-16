@@ -36,7 +36,7 @@ class ControllerIdNotRegisteredError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 136  # kafka_common_ErrorCode_CONTROLLER_ID_NOT_REGISTERED
+    _ffi_id: ClassVar[int] = 136  # kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED
 
     def __init__(
         self,

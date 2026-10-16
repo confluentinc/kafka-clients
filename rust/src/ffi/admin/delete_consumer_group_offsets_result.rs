@@ -1,0 +1,121 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! C bindings for `org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult`.
+
+use crate::admin::DeleteConsumerGroupOffsetsResult;
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
+use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::topic_partition::{kafka_common_TopicPartition_t, topic_partition_ref};
+use crate::ffi::ffi_guard;
+use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
+
+/// Opaque handle to a [`DeleteConsumerGroupOffsetsResult`], owned by the
+/// caller and freed with [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`].
+#[repr(C)]
+pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
+    _private: [u8; 0],
+}
+
+/// Hands `result` to C, binding the futures it exposes to `ctx`.
+pub(crate) fn box_delete_consumer_group_offsets_result(
+    result: DeleteConsumerGroupOffsetsResult,
+    ctx: &FutureCtx,
+) -> *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t {
+    box_result(result, ctx)
+}
+
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> &'a ResultHandle<DeleteConsumerGroupOffsetsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DeleteConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<DeleteConsumerGroupOffsetsResult, _>` (in
+    // `box_delete_consumer_group_offsets_result`), as `result_ref` requires.
+    unsafe { result_ref(self_) }
+}
+
+/// `DeleteConsumerGroupOffsetsResult.partitionResult(TopicPartition
+/// partition)`: returns an owned `KafkaFuture<Void>` (its `get` delivers
+/// `NULL`) that succeeds once the offset of `partition` was deleted, freed with
+/// `kafka_common_KafkaFuture_destroy`. On failure it stores the owned
+/// translation of `IllegalArgumentException` in `*out_err` and returns `NULL`,
+/// when `partition` was not part of the request (Java throws it synchronously,
+/// so it is reported here rather than carried by the future). `partition` is
+/// borrowed and copied during the call.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, `partition` a valid topic-partition
+/// handle and `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+    self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+    partition: *const kafka_common_TopicPartition_t,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
+    let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
+    // which the caller keeps the handle alive.
+    let result = h.result.partition_result(unsafe { topic_partition_ref(partition) });
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |future| h.ctx.void_future(&future)) }
+}
+
+/// `DeleteConsumerGroupOffsetsResult.all()`: an owned `KafkaFuture<Void>`
+/// (its `get` delivers `NULL`) that succeeds once every offset was deleted,
+/// freed with `kafka_common_KafkaFuture_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
+    self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
+    let h = unsafe { handle(self_) };
+    h.ctx.void_future(&h.result.all())
+}
+
+/// Frees a result handle; null is a no-op. Futures taken from the result
+/// stay valid until they are destroyed themselves.
+///
+/// # Safety
+///
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
+    self_: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DeleteConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<DeleteConsumerGroupOffsetsResult, _>`, as `destroy_result` requires.
+    unsafe { destroy_result::<DeleteConsumerGroupOffsetsResult, _>(self_) }
+}

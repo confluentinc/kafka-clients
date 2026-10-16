@@ -1103,7 +1103,9 @@ pub(crate) fn producer_record_with_expected_transaction_status(
     } else {
         ABORTED_VALUE
     };
-    headers.add_key_value(TRANSACTION_STATUS_KEY, Some(status)).expect("add header");
+    headers
+        .add_with_key_value(TRANSACTION_STATUS_KEY, Some(status))
+        .expect("add header");
     ProducerRecord::with_partition_key_headers(
         topic.to_string(),
         partition,
@@ -1381,7 +1383,8 @@ async fn test_fencing_on_send() {
     )
     .await
     {
-        Err(error @ Error::ProducerFenced(_)) => assert_producer_fenced(&error),
+        // Java's `catch (ProducerFencedException e)`: an `instanceof` test.
+        Err(error) if error.is_producer_fenced_error() => {},
         Err(other) => panic!("Got an unexpected error from a fenced producer: {other:?}"),
         Ok(future) => match future.get().await {
             Ok(metadata) => panic!(
@@ -1390,13 +1393,15 @@ async fn test_fencing_on_send() {
                 metadata.topic(),
                 metadata.partition()
             ),
-            Err(error) => {
-                assert!(
-                    matches!(error, Error::InvalidProducerEpoch(_)),
-                    "expected the send future to fail with InvalidProducerEpoch, got {error:?}"
-                );
-                assert_eq!(error.message(), INVALID_PRODUCER_EPOCH_MESSAGE);
-            },
+            // Java's `assertInstanceOf(InvalidProducerEpochException.class, e.getCause())`.
+            // Only the class is checked: the message is the error code's default text
+            // when the broker rejects the record, but `maybeFailWithError`'s
+            // (`TransactionManager.java:1189-1191`) when one of producer1's earlier
+            // records, sent without waiting, already failed and this send is refused.
+            Err(error) => assert!(
+                error.is_invalid_producer_epoch_error(),
+                "expected the send future to fail with InvalidProducerEpoch, got {error:?}"
+            ),
         },
     }
 
@@ -3066,7 +3071,7 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
     admin.close().await;
     producer.close().await.expect("producer close");
     consumer
-        .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+        .close_with_options(CloseOptions::new_with_timeout(Duration::from_secs(1)))
         .await
         .expect("consumer close");
     ctx.cleanup().await;

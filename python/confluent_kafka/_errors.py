@@ -158,11 +158,18 @@ _CORE_KWARGS: dict[str, Callable[[str | None, dict[str, Any]], dict[str, Any]]] 
     },
     "DuplicateResourceError": lambda m, p: {"resource": p.get("resource"), "message": m},
     "ResourceNotFoundError": lambda m, p: {"resource": p.get("resource"), "message": m},
-    "CorrelationIdMismatchError": lambda m, p: {
-        "message": m,
-        "request_correlation_id": p["request_correlation_id"],
-        "response_correlation_id": p["response_correlation_id"],
-    },
+}
+
+# Constructor arguments the core cannot report, filled with a stand-in so the
+# error is still built through its Java constructor and its getters work.
+#
+# *(deviation)* ``CorrelationIdMismatchError``: Java's class sits in
+# ``common.requests``, "not a supported API", so the Rust payload is
+# crate-private and CLAUDE.md §4 gives it no C accessor. The two correlation ids
+# are therefore unknown on this side and read as -1, a value Java's counter
+# (which starts at 0) never assigns. Goes when the C FFI exposes them.
+_CORE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "CorrelationIdMismatchError": {"request_correlation_id": -1, "response_correlation_id": -1},
 }
 
 
@@ -179,14 +186,18 @@ def construct(cls: type[BaseException], message: str | None,
         if builder is not None and payload:
             error = make(**builder(message, payload))
         else:
-            error = make(message=message)
+            error = make(message=message, **_CORE_DEFAULTS.get(cls.__name__, {}))
     except (TypeError, RuntimeError):
         error = new(cls, message)
     return error
 
 
-def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseException:
-    """The Python error for a C ``kafka_common_Error_t`` handle (consumed).
+def from_ffi_error(handle: int, *, cause: BaseException | None = None,
+                   owned: bool = True) -> BaseException:
+    """The Python error for a C ``kafka_common_Error_t`` handle, freed here when
+    ``owned`` (an operation's result) and left alone when borrowed (a delivery
+    callback's error, or a source: ``kafka_common_Error_source`` returns a
+    borrowed handle, which its owner frees).
 
     The class is the one of the error's FFI id (unknown -> ``KafkaError``),
     built with the payload the FFI accessors expose. The cause chain
@@ -206,7 +217,7 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         if error_source is not None:
             source_handle: int = error_source(handle)
             if source_handle:
-                source_cause = from_ffi_error(source_handle)
+                source_cause = from_ffi_error(source_handle, owned=False)
     payload: dict[str, Any] | None = None
     error_payload = getattr(_lib, "KafkaError_payload", None)
     if error_payload is not None:
@@ -219,7 +230,8 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         from .common.kafka_error import KafkaError
 
         cls = KafkaError
-    _lib.KafkaError_destroy(handle)
+    if owned:
+        _lib.KafkaError_destroy(handle)
     error = construct(cls, message, payload)
     # Set after construction, so the constructor arguments do not carry it;
     # ``__reduce__`` (``_throwable.reduce``) keeps it for ``copy`` / ``pickle``.

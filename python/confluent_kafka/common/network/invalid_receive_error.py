@@ -34,7 +34,7 @@ class InvalidReceiveError(KafkaError):
 
     __module__ = "confluent_kafka.common.network"
 
-    _ffi_id: ClassVar[int] = -25  # kafka_common_ErrorCode_INVALID_RECEIVE
+    _ffi_id: ClassVar[int] = -25  # kafka_common_Error_INVALID_RECEIVE
 
     def __init__(
         self,

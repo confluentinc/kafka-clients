@@ -42,7 +42,7 @@ class WakeupError(KafkaError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -18  # kafka_common_ErrorCode_WAKEUP
+    _ffi_id: ClassVar[int] = -18  # kafka_common_Error_WAKEUP
 
     def __init__(self) -> None:
         _throwable.init(self, None, None)

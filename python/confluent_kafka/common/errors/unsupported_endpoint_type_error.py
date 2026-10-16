@@ -34,7 +34,7 @@ class UnsupportedEndpointTypeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 115  # kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE
+    _ffi_id: ClassVar[int] = 115  # kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE
 
     def __init__(
         self,
