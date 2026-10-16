@@ -42,6 +42,7 @@ from confluent_kafka.producer import (
     AsyncKafkaProducer, KafkaProducer, ProducerRecord, RecordMetadata,
 )
 
+from ..unit.producer_futures import async_failure, failure
 from .conftest import create_topic
 
 
@@ -172,7 +173,7 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="inside"),
                                callback=_recorder(calls, "inside"))
         producer.commit_transaction()
-        offset = future.result(timeout=30).offset()
+        offset = future.get(timeout=30).offset()
         assert calls == _callbacks_outside_then_inside(offset)
     finally:
         producer.close(timeout=0)
@@ -205,7 +206,7 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
                 record=ProducerRecord(topic=topic, key="key", value="inside"),
                 callback=_recorder(calls, "inside"))
             await producer.commit_transaction()
-            offset = (await asyncio.wait_for(future, 30)).offset()
+            offset = (await future.get(timeout=30)).offset()
             assert calls == _callbacks_outside_then_inside(offset)
             return offset
         finally:
@@ -274,7 +275,7 @@ def test_an_oversized_record_fails_with_record_too_large(
         future = producer.send(record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
                                callback=lambda metadata, exception: calls.append(
                                    (metadata, exception)))
-        error = future.exception(timeout=30)
+        error = failure(future, 30)
     finally:
         producer.close()
     assert error is not None
@@ -294,8 +295,7 @@ def test_an_oversized_async_record_fails_with_record_too_large(
             future = await producer.send(
                 record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
                 callback=lambda metadata, exception: calls.append((metadata, exception)))
-            await asyncio.wait((future,), timeout=30)
-            return future.exception()
+            return await async_failure(future, 30)
         finally:
             await producer.close()
 
@@ -337,7 +337,7 @@ def test_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_recor
         assert time.monotonic() - start < 5
         assert str(err.value) == _invalid_begin(configs["transactional.id"])
         producer.commit_transaction()
-        offset = future.result(timeout=30).offset()
+        offset = future.get(timeout=30).offset()
     finally:
         producer.close(timeout=0)
     assert _committed(kafka_broker, topic) == [(offset, "key", "value")]
@@ -363,7 +363,7 @@ def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its
             assert time.monotonic() - start < 5
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
             await producer.commit_transaction()
-            return (await asyncio.wait_for(future, 30)).offset()
+            return (await future.get(timeout=30)).offset()
         finally:
             await producer.close(timeout=0)
 
@@ -405,7 +405,7 @@ def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
     try:
         future = producer.send(record=ProducerRecord(topic=topic, partition=0, key=b"k",
                                                      value=b"v", headers=HEADERS))
-        assert future.result(timeout=30).offset() == 0
+        assert future.get(timeout=30).offset() == 0
     finally:
         producer.close()
     assert _consumed_headers(kafka_broker, topic) == HEADERS
@@ -420,7 +420,7 @@ def test_async_send_delivers_the_record_headers(kafka_broker: Any) -> None:
         try:
             future = await producer.send(record=ProducerRecord(
                 topic=topic, partition=0, key=b"k", value=b"v", headers=HEADERS))
-            assert (await asyncio.wait_for(future, 30)).offset() == 0
+            assert (await future.get(timeout=30)).offset() == 0
         finally:
             await producer.close()
 
@@ -458,11 +458,11 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
             commit = asyncio.ensure_future(producer.commit_transaction())
             await asyncio.wait_for(started.wait(), 60)
             await asyncio.sleep(0.5)
-            assert not commit.done() and not future.done() and finished == []
+            assert not commit.done() and not future.is_done() and finished == []
             release.set()
             await asyncio.wait_for(commit, 60)
             assert finished == [True]
-            return (await asyncio.wait_for(future, 30)).offset()
+            return (await future.get(timeout=30)).offset()
         finally:
             await producer.close(timeout=0)
 

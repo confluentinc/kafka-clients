@@ -558,6 +558,55 @@ def test_partitions_for_and_list_topics() -> None:
     assert consumer.list_topics() == {"t": infos}
 
 
+def test_the_duration_overloads_ignore_the_timeout() -> None:
+    # Java's mock forwards each Duration overload to the overload without it:
+    # the timeout is not read, so a negative or NaN one is no error either.
+    consumer = earliest()
+    partition = tp("t", 0)
+    consumer.assign(partitions=[partition])
+    consumer.update_beginning_offsets(new_offsets={partition: 2})
+    consumer.update_end_offsets(new_offsets={partition: 7})
+    for timeout in (1.0, -1, float("nan"), timedelta(seconds=-1)):
+        assert consumer.position(partition=partition, timeout=timeout) == 2
+        consumer.commit(timeout=timeout)
+        consumer.commit(offsets={partition: OffsetAndMetadata(offset=3)}, timeout=timeout)
+        assert consumer.committed(partitions={partition}, timeout=timeout) == {
+            partition: OffsetAndMetadata(offset=3)}
+        assert consumer.partitions_for(topic="t", timeout=timeout) == []
+        assert consumer.list_topics(timeout=timeout) == {}
+        assert consumer.beginning_offsets(partitions=[partition], timeout=timeout) == {partition: 2}
+        assert consumer.end_offsets(partitions=[partition], timeout=timeout) == {partition: 7}
+        with pytest.raises(UnsupportedVersionError) as e:
+            consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=timeout)
+        assert str(e.value) == "Not implemented yet."
+    consumer.close()
+    with pytest.raises(IllegalStateError):
+        consumer.position(partition=partition, timeout=1.0)
+
+
+def test_the_async_duration_overloads_ignore_the_timeout() -> None:
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(
+            offset_reset_strategy="earliest")
+        partition = tp("t", 0)
+        await consumer.assign(partitions=[partition])
+        consumer.update_beginning_offsets(new_offsets={partition: 2})
+        consumer.update_end_offsets(new_offsets={partition: 7})
+        assert await consumer.position(partition=partition, timeout=-1) == 2
+        await consumer.commit(offsets={partition: OffsetAndMetadata(offset=3)}, timeout=-1)
+        assert await consumer.committed(partitions={partition}, timeout=-1) == {
+            partition: OffsetAndMetadata(offset=3)}
+        assert await consumer.partitions_for(topic="t", timeout=-1) == []
+        assert await consumer.list_topics(timeout=-1) == {}
+        assert await consumer.beginning_offsets(partitions=[partition], timeout=-1) == {
+            partition: 2}
+        assert await consumer.end_offsets(partitions=[partition], timeout=-1) == {partition: 7}
+        with pytest.raises(UnsupportedVersionError):
+            await consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=-1)
+
+    asyncio.run(main())
+
+
 def test_current_lag() -> None:
     consumer = earliest()
     partition = tp("t", 0)

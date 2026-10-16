@@ -26,11 +26,13 @@ background completion thread, on ``AsyncKafkaProducer`` on the event loop, one
 at a time in completion order; an exception it raises is not propagated: the
 core logs it once, with Java's message and the exception's text (Threads and
 callbacks). On ``MockProducer`` and ``AsyncMockProducer`` it runs in the call
-that completes the record and propagates out of it, as from Java's mock. The record's future completes, and ``flush()``, the
-transaction-end calls and ``close()`` return, only after the callbacks of the
-records they cover returned, as Java fires the callbacks before completing the
-future. By rule 3 the asyncio producers also accept an ``async def`` callback,
-which they await on the event loop; this alias stays the synchronous form.
+that completes the record and propagates out of it, as from Java's mock. The
+record's future completes, and ``flush()``, the transaction-end calls and
+``close()`` return, only after the callbacks of the records they cover
+returned, as Java fires the callbacks before completing the future. By rule 3
+the asyncio producers also accept an ``async def`` callback, which they await
+on the event loop; the sync producers reject a coroutine function with
+``TypeError`` at ``send()``. This alias stays the synchronous form.
 
 The callback is called when the record sent to the server has been
 acknowledged. ``metadata`` is the metadata for the record that was sent (i.e.

@@ -38,6 +38,8 @@ from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.producer import MockProducer, ProducerRecord, RecordMetadata
 
+from .producer_futures import assert_send_throws
+
 TOPIC = "topic"
 GROUP_ID = "group"
 RECORD1 = ProducerRecord(topic=TOPIC, key="key1", value="value1")
@@ -116,7 +118,7 @@ def build_mock_producer(auto_complete: bool) -> MockProducer[str, str]:
 
 def is_error(future: Any) -> bool:
     try:
-        future.result()
+        future.get()
         return False
     except Exception:  # noqa: BLE001 - Java catches Exception
         return True
@@ -125,10 +127,10 @@ def is_error(future: Any) -> bool:
 def test_auto_complete_mock() -> None:
     producer = build_mock_producer(True)
     metadata = producer.send(record=RECORD1)
-    assert metadata.done(), "Send should be immediately complete"
+    assert metadata.is_done(), "Send should be immediately complete"
     assert not is_error(metadata), "Send should be successful"
-    assert metadata.result().offset() == 0, "Offset should be 0"
-    assert metadata.result().topic() == TOPIC
+    assert metadata.get().offset() == 0, "Offset should be 0"
+    assert metadata.get().topic() == TOPIC
     assert producer.history() == [RECORD1], "We should have the record in our history"
     producer.clear()
     assert len(producer.history()) == 0, "Clear should erase our history"
@@ -146,7 +148,7 @@ def test_partitioner() -> None:
                             value_serializer=string_serializer())
     record = ProducerRecord(topic=TOPIC, key="key", value="value")
     metadata = producer.send(record=record)
-    assert metadata.result().partition() == 0, "Partition should be correct"
+    assert metadata.get().partition() == 0, "Partition should be correct"
     producer.clear()
     assert len(producer.history()) == 0, "Clear should erase our history"
     producer.close()
@@ -155,24 +157,23 @@ def test_partitioner() -> None:
 def test_manual_completion() -> None:
     producer = build_mock_producer(False)
     md1 = producer.send(record=RECORD1)
-    assert not md1.done(), "Send shouldn't have completed"
+    assert not md1.is_done(), "Send shouldn't have completed"
     md2 = producer.send(record=RECORD2)
-    assert not md2.done(), "Send shouldn't have completed"
+    assert not md2.is_done(), "Send shouldn't have completed"
     assert producer.complete_next(), "Complete the first request"
     assert not is_error(md1), "Request should be successful"
-    assert not md2.done(), "Second request still incomplete"
+    assert not md2.is_done(), "Second request still incomplete"
     e = IllegalArgumentError(message="blah")
     assert producer.error_next(e=e), "Complete the second request with an error"
-    with pytest.raises(IllegalArgumentError) as err:
-        md2.result()
-    assert err.value is e
+    assert assert_send_throws(md2, IllegalArgumentError) is e, \
+        "Exception should be passed through."
     assert not producer.complete_next(), "No more requests to complete"
 
     md3 = producer.send(record=RECORD1)
     md4 = producer.send(record=RECORD2)
-    assert not md3.done() and not md4.done(), "Requests should not be completed."
+    assert not md3.is_done() and not md4.is_done(), "Requests should not be completed."
     producer.flush()
-    assert md3.done() and md4.done(), "Requests should be completed."
+    assert md3.is_done() and md4.is_done(), "Requests should be completed."
 
 
 def test_should_init_transactions() -> None:
@@ -386,13 +387,13 @@ def test_should_flush_on_commit_for_non_auto_complete_if_transactions_are_enable
     md1 = producer.send(record=RECORD1)
     md2 = producer.send(record=RECORD2)
 
-    assert not md1.done()
-    assert not md2.done()
+    assert not md1.is_done()
+    assert not md2.is_done()
 
     producer.commit_transaction()
 
-    assert md1.done()
-    assert md2.done()
+    assert md1.is_done()
+    assert md2.is_done()
 
 
 def test_should_drop_messages_on_abort_if_transactions_are_enabled() -> None:
@@ -416,9 +417,9 @@ def test_should_throw_on_abort_for_non_auto_complete_if_transactions_are_enabled
     producer.begin_transaction()
 
     md1 = producer.send(record=RECORD1)
-    assert not md1.done()
+    assert not md1.is_done()
     producer.abort_transaction()
-    assert md1.done()
+    assert md1.is_done()
 
 
 def test_should_preserve_committed_messages_on_abort_if_transactions_are_enabled() -> None:
@@ -743,9 +744,7 @@ def test_metadata_on_exception() -> None:
     metadata = producer.send(record=RECORD2, callback=callback)
     e = IllegalArgumentError(message="dummy exception")
     assert producer.error_next(e=e), "Complete the second request with an error"
-    with pytest.raises(IllegalArgumentError) as err:
-        metadata.result()
-    assert err.value is e
+    assert assert_send_throws(metadata, IllegalArgumentError) is e
     assert len(seen) == 1 and seen[0][1] is e
 
 

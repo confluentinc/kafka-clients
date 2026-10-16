@@ -28,7 +28,8 @@ leader_epoch)`` without ``metadata`` is rejected, as in Java. The stubs are
 
 from __future__ import annotations
 
-from typing import overload
+import functools
+from typing import Any, overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
@@ -108,3 +109,11 @@ class OffsetAndMetadata:
     def __str__(self) -> str:
         return ("OffsetAndMetadata{offset=" + str(self._offset) + ", leaderEpoch="
                 + java_str(self.leader_epoch()) + ", metadata='" + self._metadata + "'}")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild through the public constructor by keyword (``pickle``,
+        ``copy``): Java's class is ``Serializable``, and the three-argument form
+        ``(offset, leader_epoch, metadata)`` sets every field Java saves
+        (CLAUDE.md, Python Binding Conventions, Types, JDK interfaces)."""
+        return (functools.partial(type(self), offset=self._offset,
+                                  leader_epoch=self._leader_epoch, metadata=self._metadata), ())

@@ -53,11 +53,13 @@ from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.null_pointer_error import NullPointerError
 
+from ._record_future import complete_record
 from ._send import call_callback
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
     from confluent_kafka.common import Cluster, MetricName, PartitionInfo
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -80,7 +82,8 @@ class _Completion:
 
     __slots__ = ("_offset", "_metadata", "_future", "_callback", "_tp", "_producer")
 
-    def __init__(self, offset: int, metadata: RecordMetadata, future: Any,
+    def __init__(self, offset: int, metadata: RecordMetadata,
+                 future: _KafkaFutureImpl[RecordMetadata],
                  callback: Callable[..., object] | None, tp: TopicPartition,
                  producer: MockProducerCore[Any, Any]) -> None:
         self._offset = offset
@@ -106,14 +109,12 @@ class _Completion:
                              lambda: self._settle(e))
 
     def _settle(self, e: RuntimeError | None) -> None:
-        if self._future.done():
-            return  # an asyncio future its awaiter cancelled
-        if e is None:
-            self._future.set_result(RecordMetadata(
-                topic_partition=self._tp, base_offset=self._offset, batch_index=0,
-                timestamp=_NO_TIMESTAMP, serialized_key_size=0, serialized_value_size=0))
-        else:
-            self._future.set_exception(e)
+        # The record's future (a _KafkaFutureImpl, under the KafkaFuture send()
+        # returned): its dependants run here, in the completing call. Any error
+        # is an ordinary failure, a CancelledError included (complete_record).
+        complete_record(self._future, RecordMetadata(
+            topic_partition=self._tp, base_offset=self._offset, batch_index=0,
+            timestamp=_NO_TIMESTAMP, serialized_key_size=0, serialized_value_size=0), e)
 
 
 class MockProducerCore(Generic[K, V]):
@@ -400,11 +401,12 @@ class MockProducerCore(Generic[K, V]):
         settle()
 
     def _send(self, record: ProducerRecord[K, V], callback: Callable[..., object] | None,
-              future: Any) -> Any:
+              future: _KafkaFutureImpl[RecordMetadata]) -> None:
         """Java's ``send(record, callback)``: adds the record to the sent
         records (or to the transaction's), completing it now when
         ``auto_complete``, else on ``complete_next`` / ``error_next`` /
-        ``flush``. ``future`` is the (not yet completed) future to return."""
+        ``flush``. ``future`` is the Python state, not yet completed, of the
+        future the caller returns."""
         with self._lock:
             if self._closed:
                 raise IllegalStateError(message="MockProducer is already closed.")
@@ -439,7 +441,6 @@ class MockProducerCore(Generic[K, V]):
                 completion.complete(None)
             else:
                 self._completions.append(completion)
-            return future
 
     def _flush(self) -> None:
         with self._lock:
