@@ -136,7 +136,22 @@ Further legacy tests, by name:
   ``test_describe_delegation_token_owners_filter`` and ``test_delegation_token_arguments``;
   ``list_transactions_filters_keep_each_column_apart`` -> ``test_producer_and_transaction_arguments``.
 
+Added by the Apache Kafka 4.4 bump and the password-redaction change (#220), where the
+legacy file had them:
+* ``unregister_controller_follows_the_mock_raft_controller_setting`` ->
+  ``test_mock_admin_client.py`` (``test_unregister_controller_without_a_raft_controller_is_unsupported``,
+  ``test_unregister_controller_with_a_raft_controller_completes``) and
+  ``test_async_mock_admin_client.py`` (``test_unregister_controller_follows_the_raft_controller_setting``);
+  the real client's ``unregister_controller`` is ``test_admin_client_topics.py``;
+* ``config_entry_repr_redacts_sensitive_value`` -> ``test_admin_value_types.py`` (the
+  ``ConfigEntry`` ``str()`` prints ``Redacted`` for a sensitive entry, even a null one),
+  ``delegation_token_repr_hides_the_hmac`` -> ``test_admin_common_types.py``
+  (``hmac=[*******]``), and ``test_alter_config_op_redacts_a_sensitive_entry`` below.
+
 Legacy-only surface, dropped (the thing tested no longer exists):
+* ``set_using_raft_controller_rejects_a_real_client``: the legacy mock mixin sat on the real
+  client's class; the new ``MockAdminClient`` is its own class and takes Java's
+  ``usingRaftController`` builder argument;
 * ``*_handles_survive_gc_of_intermediate_objects`` (``b2``, ``b3``, ``b4``, ``handle``): the
   legacy code kept raw C result handles alive across Python objects; the new package frees
   its payloads itself (``test_free_functions_free_their_own_payloads``,
@@ -510,3 +525,15 @@ def test_scram_empty_password_reaches_the_mock() -> None:
     with pytest.raises(UnsupportedVersionError) as e:
         admin(1).alter_user_scram_credentials(alterations=[upsertion])
     assert str(e.value) == "Not implemented yet"
+
+
+def test_alter_config_op_redacts_a_sensitive_entry() -> None:
+    """``AlterConfigOp.toString`` prints its ``ConfigEntry``, whose ``toString`` prints
+    ``Redacted`` for a sensitive value (KAFKA password redaction, #220), so a password
+    set through an alteration never reaches a log line."""
+    entry = ConfigEntry(name="ssl.key.password", value="secret", source=ConfigEntry.ConfigSource.UNKNOWN,
+                        is_sensitive=True, is_read_only=False, synonyms=[],
+                        type=ConfigEntry.ConfigType.PASSWORD, documentation=None)
+    op = AlterConfigOp(config_entry=entry, operation_type=AlterConfigOp.OpType.SET)
+    assert "secret" not in str(op)
+    assert "value=Redacted" in str(op)
