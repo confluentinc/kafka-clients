@@ -1896,21 +1896,61 @@ fn downcast_offsets_for_leader_epoch(response: &ClientResponse) -> Option<&Offse
 /// manually via `seek` between the time the OffsetFetch was issued and
 /// the response arrived; Java does the same in
 /// `OffsetsRequestManager.offsetsForInitializingPartitions`.
+///
+/// # Lock order
+///
+/// The `SubscriptionState` guard is NEVER held while calling into
+/// `Metadata` (`update_last_seen_epoch_if_newer`, `current_leader`), which
+/// locks `Metadata`'s inner mutex. The only permitted nesting of the two is
+/// `Metadata` -> `SubscriptionState`: `Metadata::update` holds its inner
+/// mutex while running `ConsumerMetadata`'s retain callbacks, which lock
+/// `SubscriptionState`. This function runs on the committed-offset fetch's
+/// completion task, which on a multi-thread runtime runs concurrently with
+/// the background loop's `Metadata::update`; taking the two locks in the
+/// opposite order deadlocked both tasks for good (audit finding C4-03).
+/// Java never nests them this way either: in
+/// `ConsumerUtils.refreshCommittedOffsets` every `metadata.*` and
+/// `subscriptions.*` call is its own synchronized call. Hence two phases:
+/// [`committed_positions_for_initializing_partitions`] (Metadata calls, no
+/// subscription guard held), then [`seek_to_committed_positions`] (one
+/// subscription guard, no Metadata calls).
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#refreshOffsets")]
 fn refresh_offsets(
     offsets: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
     subscription_state: &Mutex<SubscriptionState>,
     metadata: &ConsumerMetadata,
 ) {
-    // Snapshot the currently initializing partitions before acquiring
-    // the write lock (Java reads via subscriptionState.initializingPartitions()).
+    let positions = committed_positions_for_initializing_partitions(offsets, subscription_state, metadata);
+    seek_to_committed_positions(positions, subscription_state);
+}
+
+/// First phase of [`refresh_offsets`]: keep the non-null committed offsets of
+/// the partitions that are still initializing (Java's
+/// `offsetsForInitializingPartitions`), update the last-seen leader epoch for
+/// each and compute the position to seek to (the `metadata.*` calls of Java's
+/// `refreshCommittedOffsets`).
+///
+/// Must be called WITHOUT the `SubscriptionState` guard held: it takes that
+/// guard only for the initializing-partitions snapshot, and releases it
+/// before calling into `Metadata` (see the lock-order note on
+/// [`refresh_offsets`]). The leader is computed before the `is_assigned`
+/// check rather than after it as in Java; `Metadata::current_leader` is a
+/// pure read, so computing it for a partition that turns out to be
+/// unassigned has no effect.
+fn committed_positions_for_initializing_partitions<'a>(
+    offsets: &'a HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+    subscription_state: &Mutex<SubscriptionState>,
+    metadata: &ConsumerMetadata,
+) -> Vec<(&'a TopicPartition, &'a OffsetAndMetadata, FetchPosition)> {
+    // Java reads via subscriptionState.initializingPartitions(). The guard is
+    // dropped at the end of this block, before any Metadata call.
     let currently_initializing = {
         let guard = subscription_state.lock().expect("SubscriptionState mutex poisoned");
         guard.initializing_partitions()
     };
 
     let metadata_arc = metadata.metadata_arc();
-    let mut subs = subscription_state.lock().expect("SubscriptionState mutex poisoned");
+    let mut positions = Vec::new();
     for (tp, oam) in offsets {
         let Some(oam) = oam.as_ref() else {
             // No committed offset for this partition — Java's
@@ -1920,18 +1960,76 @@ fn refresh_offsets(
         if !currently_initializing.contains(tp) {
             continue;
         }
-        // Update the last-seen epoch first, then seek if still assigned.
+        // Java updates the last-seen epoch first, before the isAssigned check.
         if let Some(epoch) = oam.leader_epoch() {
             let _ = metadata_arc.update_last_seen_epoch_if_newer(tp, epoch);
         }
-        if !subs.is_assigned(tp) {
-            // Partition was unassigned between request and response —
-            // skip the seek (Java: same isAssigned guard).
-            continue;
-        }
         let leader_and_epoch = metadata_arc.current_leader(tp);
-        let position = FetchPosition::with_leader(oam.offset(), oam.leader_epoch(), leader_and_epoch);
-        let _ = subs.seek_unvalidated(tp, position);
+        positions.push((
+            tp,
+            oam,
+            FetchPosition::with_leader(oam.offset(), oam.leader_epoch(), leader_and_epoch),
+        ));
+    }
+    positions
+}
+
+/// Second phase of [`refresh_offsets`]: under one `SubscriptionState`
+/// guard, seek each partition that is still assigned and still initializing
+/// to its committed position (the `subscriptions.*` calls of Java's
+/// `refreshCommittedOffsets`). Makes no `Metadata` call (see the lock-order
+/// note on [`refresh_offsets`]); logs after the guard is released.
+///
+/// The still-initializing check repeats phase 1's
+/// `offsetsForInitializingPartitions` filter under the guard that performs
+/// the seek. `refresh_offsets` runs on a spawned completion task, so between
+/// the two phases the background loop may process a user `seek` /
+/// `seek_to_beginning` / `seek_to_end` (or anything else that gives the
+/// partition a position or puts it in reset) for that partition; seeking it
+/// to the committed offset afterwards would overwrite the user's position.
+/// In Java the filter and the seek both run on the network thread, so no
+/// such event can come in between. A partition that is no longer
+/// initializing is skipped without a log line, as Java's
+/// `offsetsForInitializingPartitions` drops it silently.
+fn seek_to_committed_positions(
+    positions: Vec<(&TopicPartition, &OffsetAndMetadata, FetchPosition)>,
+    subscription_state: &Mutex<SubscriptionState>,
+) {
+    enum Outcome {
+        Seeked,
+        NotAssigned,
+        NoLongerInitializing,
+    }
+    let outcomes: Vec<Outcome> = {
+        let mut subs = subscription_state.lock().expect("SubscriptionState mutex poisoned");
+        let currently_initializing = subs.initializing_partitions();
+        positions
+            .iter()
+            .map(|(tp, _, position)| {
+                // It's possible that the partition is no longer assigned when
+                // the response is received, so ignore seeking if that's the
+                // case (Java: same isAssigned guard).
+                if !subs.is_assigned(tp) {
+                    Outcome::NotAssigned
+                } else if !currently_initializing.contains(*tp) {
+                    Outcome::NoLongerInitializing
+                } else {
+                    let _ = subs.seek_unvalidated(tp, position.clone());
+                    Outcome::Seeked
+                }
+            })
+            .collect()
+    };
+    for ((tp, oam, position), outcome) in positions.iter().zip(outcomes) {
+        match outcome {
+            Outcome::Seeked => {
+                log::info!("Setting offset for partition {} to the committed offset {}", tp, position);
+            },
+            Outcome::NotAssigned => {
+                log::info!("Ignoring the returned {} since its partition {} is no longer assigned", oam, tp);
+            },
+            Outcome::NoLongerInitializing => {},
+        }
     }
 }
 
@@ -2443,6 +2541,229 @@ mod tests {
         let subs = subscription_state.lock().unwrap();
         let position = subs.position(&tp).expect("position lookup").expect("position present");
         assert_eq!(position.offset, 99);
+    }
+
+    /// `refresh_offsets` calls into `Metadata` and seeks in two separate
+    /// phases (lock order, audit finding C4-03). A partition unassigned
+    /// between them must be skipped — no seek, no panic — while the others
+    /// are still seeked, and its last-seen epoch must still be updated:
+    /// Java's `ConsumerUtils.refreshCommittedOffsets` calls
+    /// `metadata.updateLastSeenEpochIfNewer` BEFORE the
+    /// `subscriptions.isAssigned` check.
+    #[test]
+    fn refresh_offsets_skips_partition_unassigned_between_metadata_and_seek_phases() {
+        let config = ConsumerConfig::new(&HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+        let metadata = Arc::new(ConsumerMetadata::with_config(
+            &config,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        // Metadata with leader epoch 1 for every partition of "t", so the
+        // last-seen epoch is known and a newer committed epoch replaces it.
+        metadata.add_transient_topics(HashSet::from(["t".to_string()]));
+        let response = RequestTestUtils::metadata_update_with_cluster_id(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &HashMap::from([("t".to_string(), 2)]),
+            &|_tp: &TopicPartition| Some(1),
+        );
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+
+        let tp0 = TopicPartition::new("t".to_string(), 0);
+        let tp1 = TopicPartition::new("t".to_string(), 1);
+        assert_eq!(Some(1), metadata.metadata_arc().last_seen_leader_epoch(&tp0));
+        subs.lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone(), tp1.clone()]))
+            .expect("assign");
+        let offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = [&tp0, &tp1]
+            .into_iter()
+            .map(|tp| {
+                (
+                    tp.clone(),
+                    Some(OffsetAndMetadata::with_leader_epoch_metadata(10, Some(5), "").expect("oam")),
+                )
+            })
+            .collect();
+
+        let positions = super::committed_positions_for_initializing_partitions(&offsets, &subs, &metadata);
+        assert_eq!(2, positions.len(), "both partitions are initializing");
+        // tp0 is unassigned between the Metadata phase and the seek phase.
+        subs.lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp1.clone()]))
+            .expect("assign");
+        super::seek_to_committed_positions(positions, &subs);
+
+        let guard = subs.lock().unwrap();
+        assert!(!guard.is_assigned(&tp0), "tp0 must not be re-added by the seek");
+        assert_eq!(
+            10,
+            guard.position(&tp1).expect("tp1").expect("tp1 position").offset,
+            "the partition still assigned is seeked to its committed offset"
+        );
+        drop(guard);
+        assert_eq!(
+            Some(5),
+            metadata.metadata_arc().last_seen_leader_epoch(&tp0),
+            "Java updates the last-seen epoch before the isAssigned check"
+        );
+        assert_eq!(Some(5), metadata.metadata_arc().last_seen_leader_epoch(&tp1));
+    }
+
+    /// `refresh_offsets` runs on a spawned completion task, so the background
+    /// loop can process a user seek for a partition between the snapshot of
+    /// initializing partitions (phase 1) and the seek (phase 2). Java's
+    /// `OffsetsRequestManager.offsetsForInitializingPartitions` filter and
+    /// `ConsumerUtils.refreshCommittedOffsets` run on the network thread
+    /// together with the seek event processing, so a partition the user
+    /// seeked is never overwritten with the committed offset. Phase 2 must
+    /// re-check that the partition is still initializing.
+    #[test]
+    fn refresh_offsets_does_not_overwrite_user_seek_between_metadata_and_seek_phases() {
+        let config = ConsumerConfig::new(&HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+        let metadata = Arc::new(ConsumerMetadata::with_config(
+            &config,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        bootstrap_metadata_with_topic(&metadata, "t", 3);
+
+        let tp0 = TopicPartition::new("t".to_string(), 0);
+        let tp1 = TopicPartition::new("t".to_string(), 1);
+        let tp2 = TopicPartition::new("t".to_string(), 2);
+        subs.lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone(), tp1.clone(), tp2.clone()]))
+            .expect("assign");
+        let offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = [&tp0, &tp1, &tp2]
+            .into_iter()
+            .map(|tp| {
+                (
+                    tp.clone(),
+                    Some(OffsetAndMetadata::with_leader_epoch_metadata(10, Some(1), "").expect("oam")),
+                )
+            })
+            .collect();
+
+        let positions = super::committed_positions_for_initializing_partitions(&offsets, &subs, &metadata);
+        assert_eq!(3, positions.len(), "all three partitions are initializing");
+        // Between the two phases the user seeks tp0 to an offset and tp1 to
+        // the beginning (seek_to_beginning requests an offset reset).
+        {
+            let mut guard = subs.lock().unwrap();
+            guard.seek(&tp0, 42).expect("seek tp0");
+            guard
+                .request_offset_reset(&tp1, AutoOffsetResetStrategy::EARLIEST)
+                .expect("seek_to_beginning tp1");
+        }
+        super::seek_to_committed_positions(positions, &subs);
+
+        let guard = subs.lock().unwrap();
+        assert_eq!(
+            42,
+            guard.position(&tp0).expect("tp0").expect("tp0 position").offset,
+            "Java never overwrites a user seek with the committed offset: tp0 is no longer initializing"
+        );
+        assert!(
+            guard.is_offset_reset_needed(&tp1).expect("tp1"),
+            "Java never overwrites a user seek_to_beginning with the committed offset: tp1 must still await reset"
+        );
+        assert_eq!(
+            10,
+            guard.position(&tp2).expect("tp2").expect("tp2 position").offset,
+            "the partition still initializing is seeked to its committed offset"
+        );
+    }
+
+    /// Audit finding C4-03. Java's `ConsumerUtils.refreshCommittedOffsets`
+    /// never holds the `SubscriptionState` monitor while calling into
+    /// `Metadata`; the only nesting is `Metadata` -> `SubscriptionState`
+    /// (`ConsumerMetadata.retainTopic` during `Metadata.update`). So applying
+    /// committed offsets concurrently with a metadata update cannot deadlock.
+    /// The committed-offset fetch's completion task and the background loop's
+    /// `Metadata::update` run on different worker threads of a multi-thread
+    /// runtime; plain threads model that here. The wait is bounded so a
+    /// deadlock fails the test instead of hanging it.
+    #[test]
+    fn refresh_offsets_concurrent_with_metadata_update_does_not_deadlock() {
+        for run in 1..=3 {
+            let config = ConsumerConfig::new(&HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("group.id".to_string(), "g".to_string()),
+            ]))
+            .expect("config");
+            let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+            let metadata = Arc::new(ConsumerMetadata::with_config(
+                &config,
+                Arc::clone(&subs),
+                ClusterResourceListeners::new(),
+            ));
+            let n = 64;
+            let response = bootstrap_metadata_with_topic(&metadata, "t", n);
+            let tps: HashSet<TopicPartition> = (0..n).map(|p| TopicPartition::new("t".to_string(), p)).collect();
+            let offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = tps
+                .iter()
+                .map(|tp| {
+                    (
+                        tp.clone(),
+                        Some(OffsetAndMetadata::with_leader_epoch_metadata(10, Some(1), "").expect("oam")),
+                    )
+                })
+                .collect();
+
+            let iterations = 2_000;
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<&'static str>();
+            {
+                let (subs, metadata, done_tx) = (Arc::clone(&subs), Arc::clone(&metadata), done_tx.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        {
+                            let mut s = subs.lock().unwrap();
+                            s.assign_from_user(HashSet::new()).expect("unassign");
+                            s.assign_from_user(tps.clone()).expect("assign");
+                        }
+                        super::refresh_offsets(&offsets, subs.as_ref(), metadata.as_ref());
+                    }
+                    let _ = done_tx.send("refresh_offsets");
+                });
+            }
+            {
+                let metadata = Arc::clone(&metadata);
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+                    }
+                    let _ = done_tx.send("metadata.update");
+                });
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut finished = Vec::new();
+            while finished.len() < 2 {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match done_rx.recv_timeout(remaining) {
+                    Ok(name) => finished.push(name),
+                    Err(_) => break,
+                }
+            }
+            assert_eq!(
+                finished.len(),
+                2,
+                "run {run}: Java finishes both (it never calls into Metadata while holding the \
+                 SubscriptionState monitor); DEADLOCK: after 10 s only {finished:?} finished"
+            );
+        }
     }
 
     // -----------------------------------------------------------------

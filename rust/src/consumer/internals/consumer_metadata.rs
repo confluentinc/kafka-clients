@@ -89,6 +89,15 @@ impl ConsumerMetadata {
     ) -> Self {
         let inner = Arc::new(Mutex::new(ConsumerMetadataInner { transient_topics: HashSet::new() }));
 
+        // Lock order: `Metadata::update` runs the two retain callbacks below
+        // while holding `Metadata`'s inner mutex, so they nest
+        // `Metadata` -> `SubscriptionState`. That is the ONLY permitted
+        // nesting of the two (Java's is the same: `ConsumerMetadata.retainTopic`
+        // runs inside the `Metadata.update` monitor). Never call into
+        // `Metadata` while holding the `SubscriptionState` guard: on a
+        // multi-thread runtime that deadlocks against a concurrent update
+        // (audit finding C4-03; see `offsets_request_manager::refresh_offsets`).
+
         // ── retain_topic_fn: name-only retain (client-side regex, explicit names,
         //    transient topics) ────────────────────────────────────────────────
         let retain_subscription = Arc::clone(&subscription);
