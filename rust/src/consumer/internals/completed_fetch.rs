@@ -3632,6 +3632,65 @@ mod tests {
         }
     }
 
+    /// A compressed stream cut off partway returns the records decompressed
+    /// before the cut, and the codec's failure comes on the next call: Java
+    /// returns the records in hand (`CompletedFetch.java:299-305`) and reports
+    /// the failure as `KafkaException("Failed to decompress record stream", e)`
+    /// (`DefaultRecordBatch.java:651-652`). The record counts and the text after
+    /// `stream: ` come from the codec libraries — gzip decodes up to the cut,
+    /// the others only whole blocks — so a new version of one may change them.
+    #[test]
+    fn test_compressed_batch_cut_off_partway_returns_its_records_then_fails() {
+        const VALUE_SIZE: usize = 1000;
+        let batch = batch_of_values(300, VALUE_SIZE);
+        // (codec, records before the cut, the codec's failure).
+        let cases = [
+            (Compression::gzip().build(), 142, "unexpected end of file"),
+            (Compression::snappy().build(), 129, "failed to fill whole buffer"),
+            (Compression::lz4().build(), 129, "failed to fill whole buffer"),
+            (Compression::zstd().build(), 129, "incomplete frame"),
+        ];
+        for (compression, count, failure) in cases {
+            // The first half of the compressed records, re-framed and re-signed
+            // so the cut is the only fault.
+            let whole = compressed_by_record(&batch, &compression);
+            let records_length = whole.len() - RecordBatch::RECORD_BATCH_OVERHEAD;
+            let mut buf = whole[..RecordBatch::RECORD_BATCH_OVERHEAD + records_length / 2].to_vec();
+            let length = (buf.len() - AbstractRecords::LOG_OVERHEAD) as i32;
+            put_i32(&mut buf, RecordBatch::LENGTH_OFFSET, length);
+            recompute_crc(&mut buf);
+            for check_crcs in [false, true] {
+                let mut cf = new_completed_fetch(0, buf.clone());
+                let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
+                let first = cf
+                    .fetch_records::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
+                    .expect("the records before the cut are returned");
+                assert_eq!(
+                    (0..count).map(|n| (n, VALUE_SIZE)).collect::<Vec<_>>(),
+                    first
+                        .iter()
+                        .map(|r| (r.offset(), *r.value().expect("a value")))
+                        .collect::<Vec<_>>(),
+                    "{compression:?} check.crcs={check_crcs}"
+                );
+                let err = cf
+                    .fetch_records::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
+                    .expect_err("the cut surfaces on the next call");
+                assert_eq!(SEEK_PAST_MESSAGE, err.message());
+                let cause = cause(&err);
+                assert!(matches!(cause, Error::KafkaError(_)), "{cause:?}");
+                assert_eq!(
+                    format!(
+                        "Record batch for partition test-0 at offset 0 is invalid, cause: Failed to decompress \
+                         record stream: {failure}"
+                    ),
+                    cause.message(),
+                    "{compression:?} check.crcs={check_crcs}"
+                );
+            }
+        }
+    }
+
     /// An uncompressed batch of `count` records from offset 0, with null keys
     /// and `value_size`-byte text values (`value-{offset} ` repeated).
     fn batch_of_values(count: i32, value_size: usize) -> Vec<u8> {
@@ -3701,6 +3760,81 @@ mod tests {
             let mut cf = new_completed_fetch(0, buf);
             let read = fetch_all_lengths(&mut cf, 7);
             assert_eq!((0..300).map(|n| (n, 1000)).collect::<Vec<_>>(), read, "{compression:?}");
+        }
+    }
+
+    /// A record that crosses a chunk boundary keeps its bytes: the stream moves
+    /// it whole into the next chunk, the one copy it makes. The values are read
+    /// with `BytesDeserializer`, as the C and Python bindings read them, which
+    /// hands each one out as a slice of its chunk (§27), and are compared byte
+    /// for byte once every poll is done, so a chunk changed after its records
+    /// were handed out would show too.
+    #[test]
+    fn test_compressed_records_crossing_chunks_keep_their_bytes() {
+        const RECORD_COUNT: i32 = 300;
+        const VALUE_SIZE: usize = 1000;
+        let batch = batch_of_values(RECORD_COUNT, VALUE_SIZE);
+        // The first chunk ends inside a record, not between two.
+        let records = &batch[RecordBatch::RECORD_BATCH_OVERHEAD..];
+        let mut record_end = 0;
+        while record_end < RECORD_CHUNK_SIZE {
+            let (size, size_length) =
+                ByteUtils::read_varint(&records[record_end..]).expect("a record starts with its size");
+            record_end += size_length + size as usize;
+        }
+        assert_ne!(RECORD_CHUNK_SIZE, record_end, "a record crosses the first chunk's end");
+
+        let deserializer = crate::common::serialization::BytesDeserializer::new();
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        for compression in codecs() {
+            let mut cf = new_completed_fetch(0, compressed_by_record(&batch, &compression));
+            let mut read = Vec::new();
+            loop {
+                let records = cf
+                    .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 7)
+                    .expect("the records are valid");
+                if records.is_empty() {
+                    break;
+                }
+                read.extend(records);
+            }
+            assert_eq!(RECORD_COUNT as usize, read.len(), "{compression:?}");
+            for (offset, record) in (0..).zip(&read) {
+                let expected: Vec<u8> = format!("value-{offset} ").bytes().cycle().take(VALUE_SIZE).collect();
+                assert_eq!(offset, record.offset(), "{compression:?}");
+                assert_eq!(None, record.key(), "{compression:?}");
+                assert_eq!(
+                    Some(&expected[..]),
+                    record.value().map(|v| &v[..]),
+                    "{compression:?} offset {offset}"
+                );
+            }
+        }
+    }
+
+    /// A fetch from the middle of a compressed batch skips the records below
+    /// the fetch offset, reading each off the stream and dropping it, as Java
+    /// skips them (`CompletedFetch.java:229-230`). Brokers return whole
+    /// batches, so this is the usual case.
+    #[test]
+    fn test_compressed_batch_fetched_from_its_middle_skips_the_records_before() {
+        for compression in codecs() {
+            let mut cf = new_completed_fetch(6, new_multi_batch_records(0, 1, 10, compression.clone()));
+            let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+            let records = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .expect("the batch is valid");
+            assert_eq!(
+                vec![6, 7, 8, 9],
+                records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>(),
+                "{compression:?}"
+            );
+            for record in &records {
+                let n = record.offset();
+                assert_eq!(Some(&format!("key-{n}")), record.key(), "{compression:?}");
+                assert_eq!(Some(&format!("value-{n}")), record.value(), "{compression:?}");
+            }
+            assert_eq!(10, cf.next_fetch_offset(), "{compression:?}");
         }
     }
 
@@ -3923,6 +4057,45 @@ mod tests {
                     records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>(),
                     "{compression:?} {control_type:?}"
                 );
+            }
+        }
+    }
+
+    /// Under READ_UNCOMMITTED a compressed control batch is read like any other
+    /// and its records are dropped one by one, as Java opens every batch's
+    /// `streamingIterator` and skips control records
+    /// (`CompletedFetch.java:226, 234-239`). The aborted transaction's records
+    /// are returned too, whichever marker the batch holds.
+    #[test]
+    fn test_compressed_control_batch_is_skipped_under_read_uncommitted() {
+        const PRODUCER_ID: i64 = 42;
+        for compression in codecs() {
+            for control_type in [ControlRecordType::Abort, ControlRecordType::Commit] {
+                // The marker at offset 2, then two more control records.
+                let mut buf = batch_full(0, 2, PRODUCER_ID, true, false);
+                buf.extend_from_slice(&compressed_by_record(
+                    &marker_batch(2, 3, PRODUCER_ID, control_type),
+                    &compression,
+                ));
+                buf.extend_from_slice(&batch_full(5, 2, PRODUCER_ID, true, false));
+                let mut cf = CompletedFetch::with_full(
+                    make_subscriptions(),
+                    Arc::new(BufferSupplier::create()),
+                    tp("test", 0),
+                    partition_data_with_aborted_txn(buf, PRODUCER_ID, 0),
+                    test_aggregator(),
+                    0,
+                );
+                let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+                let records = cf
+                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .expect("the batches are valid");
+                assert_eq!(
+                    vec![0, 1, 5, 6],
+                    records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>(),
+                    "{compression:?} {control_type:?}"
+                );
+                assert_eq!(7, cf.next_fetch_offset(), "{compression:?} {control_type:?}");
             }
         }
     }
