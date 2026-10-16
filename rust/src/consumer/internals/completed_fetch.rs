@@ -22,7 +22,9 @@
 //! Per-record allocation budget (expected, asserted in Phase 7b's
 //! `FetchCollector` allocation test): only the user-supplied
 //! `Deserializer<T>` allocations for the key and value `T`, plus the
-//! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8).
+//! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8), plus,
+//! for a compressed batch, the buffer each record is decompressed into, the
+//! one Java allocates per record ([`RecordStream`]).
 //! Specifically preserved here:
 //!
 //! - `partition_data.records: Option<Vec<u8>>` arrives owning the fetch
@@ -36,7 +38,7 @@
 //! - Per-record reads go through `peek_current_record`, which parses a
 //!   borrowing `DefaultRecordRef` directly out of the batch's record bytes
 //!   on demand — the key and value bytes are `&[u8]` slices into the fetch
-//!   buffer (or, for compressed batches, into the chunk the record was
+//!   buffer (or, for compressed batches, into the buffer the record was
 //!   decompressed into). We never copy key/value bytes out of the buffer;
 //!   the only deep copy of record payload is whatever the user's
 //!   `Deserializer<T>` does internally.
@@ -50,8 +52,8 @@
 //!   copies — neither across batches nor within a batch. Compressed batches
 //!   are decompressed one record at a time, as `poll()` asks for them, the way
 //!   Java's `streamingIterator` reads them ([`RecordStream`]): each record is
-//!   read into a chunk shared with the records around it and borrowed from
-//!   there. A whole batch is never decompressed into one buffer, since a few
+//!   read into a buffer of its own, as Java reads it, and borrowed from there.
+//!   A whole batch is never decompressed into one buffer, since a few
 //!   kilobytes of compressed data can expand to gigabytes.
 //!
 //! # READ_COMMITTED
@@ -93,7 +95,7 @@
 #![expect(dead_code)]
 
 use std::collections::BinaryHeap;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::sync::{Arc, Mutex};
 
 use bytes::Buf;
@@ -127,21 +129,14 @@ use crate::fetch_response_data::{AbortedTransaction, PartitionData};
 /// Sentinel value: a partition leader epoch that is unknown / unset.
 const NO_PARTITION_LEADER_EPOCH: i32 = -1;
 
-/// The size the chunks a compressed batch's records are decompressed into grow
-/// to ([`RecordStream`]): the first is sized to the batch and each refill
-/// doubles it, up to this. Large enough that a chunk holds many ordinary
-/// records, so they cost no allocation each; small next to what a batch can
-/// expand to.
-const RECORD_CHUNK_SIZE: usize = 64 * 1024;
-
-/// How many times its compressed size a batch is taken to expand to when its
-/// first chunk is sized ([`RecordStream::open`]). Ordinary data expands by
-/// less; data that expands by more gets chunks that double from there.
-const EXPECTED_EXPANSION: usize = 4;
-
-/// The least a batch's first chunk holds: room for a small record and its size
-/// field, so a batch that is tiny once compressed is not refilled at once.
-const MIN_FIRST_CHUNK_SIZE: usize = 256;
+/// The most room a compressed record is given before its bytes have arrived
+/// ([`RecordStream::read_record`]). Java allocates a record's declared size at
+/// once (`ByteBuffer.allocate(sizeOfBodyInBytes)`, `DefaultRecord.java:302`),
+/// trusting the size up to `maxRecordBodySize`; a record declared bigger than
+/// this grows as its bytes are decompressed instead, so a forged size costs no
+/// more than the bytes behind it, and in Rust a failed allocation aborts the
+/// process where Java throws `OutOfMemoryError`.
+const MAX_RECORD_PREALLOCATION: usize = 64 * 1024;
 
 /// The most bytes a record's size field takes: a varint holding an `i32`.
 const MAX_RECORD_SIZE_LENGTH: usize = 5;
@@ -310,7 +305,7 @@ struct BatchCursor {
     record_source: RecordSource,
     /// Byte offset of the next record to decode, relative to the start of
     /// the current batch's record section. Unused for a compressed batch,
-    /// whose stream drops each record from the front of its chunk instead.
+    /// whose stream holds the current record in a buffer of its own instead.
     record_byte_offset: usize,
     /// Number of records left to decode in the current batch.
     records_remaining: i32,
@@ -328,9 +323,9 @@ enum RecordSource {
     None,
     /// Uncompressed: record bytes are `memory_records.buffer()[range]`.
     Borrowed(std::ops::Range<usize>),
-    /// Compressed: records are decompressed as the cursor reaches them, into
-    /// refcounted chunks, so per-record key/value slices can be handed out
-    /// zero-copy via [`bytes::Bytes::slice_ref`] (§27). Boxed, as the
+    /// Compressed: records are decompressed as the cursor reaches them, each
+    /// into a refcounted buffer of its own, so per-record key/value slices can
+    /// be handed out zero-copy via [`bytes::Bytes::slice_ref`] (§27). Boxed, as the
     /// decompressor is large next to the other variants.
     Stream(Box<RecordStream>),
 }
@@ -363,40 +358,47 @@ enum PendingRecordSource {
 /// This is the state of Java's `DefaultRecordBatch.StreamRecordIterator` —
 /// the decompression stream over the batch's records
 /// (`DefaultRecordBatch.java:279-297, 635-670`) — held by the cursor, which
-/// does the counting `RecordIterator` does (DoD #7). Java reads each record
-/// into a buffer of its own (`DefaultRecord.readFrom(InputStream, ...)`).
-/// This reads records into chunks of up to [`RECORD_CHUNK_SIZE`] bytes shared
-/// by the records in them, so an ordinary record costs no allocation, and
-/// hands each record out as a slice of its chunk (§27). A record bigger than a
-/// chunk gets a chunk of its own size. A chunk is freed once the stream has
-/// moved past it and no record handed out from it is left.
+/// does the counting `RecordIterator` does (DoD #7). Each record is read into
+/// a buffer of its own, as Java reads it (`DefaultRecord.readFrom(InputStream,
+/// ...)`, `DefaultRecord.java:286-310`): its size field, then as many bytes as
+/// it declares, in one allocation. The record is handed out as a slice of that
+/// buffer (§27), which lives for as long as the user holds any of it, so what
+/// a batch's records pin once handed out is their own size and nothing more.
+/// Single-record batches are common, from producers that send at a low rate
+/// per partition and from compacted topics, and a poll can return hundreds of
+/// them.
 ///
-/// So a compressed batch takes the codec's own state, one chunk and one
+/// The stream is read through a buffer of the size Java gives the codec's
+/// `ChunkedBytesStream` ([`Compression::decompression_output_size`]), the
+/// standard library's [`io::BufReader`] standing in for that class: a record's
+/// size field is read a byte at a time, and a small record a few bytes at a
+/// time, and each such read would otherwise go to the codec.
+///
+/// So a compressed batch takes the codec's own state, the read buffer and one
 /// record, whatever its decompressed size. The whole batch is never
 /// decompressed at once: a few kilobytes of compressed data can expand to
 /// gigabytes, and in Rust a failed allocation aborts the process where Java
-/// throws `OutOfMemoryError`.
+/// throws `OutOfMemoryError`. For the same reason a record is given room for
+/// its declared size up front only up to [`MAX_RECORD_PREALLOCATION`]; a
+/// bigger one grows as its bytes arrive ([`Self::read_record`]).
 ///
-/// The first chunk is sized to the batch and the next ones double from there
-/// (see [`Self::open`] and [`Self::refill`]): a record keeps its chunk alive
-/// for as long as the user holds it, so a full chunk for every small batch
-/// would pin many times the records' own size. Single-record batches are
-/// common, from producers that send at a low rate per partition and from
-/// compacted topics, and a poll can return hundreds of them.
+/// This costs one allocation per record beyond the deserializer's output,
+/// which is all `consumer-threading.md` §27 budgets for the receive path. It
+/// is the cost Java pays, taken so that a record pins only its own bytes:
+/// records read into a chunk shared with the records around them kept the
+/// whole chunk alive for as long as any one of them was held.
 struct RecordStream {
-    /// The decompression stream over the batch's records section.
-    reader: DecompressingReader<io::Cursor<bytes::Bytes>>,
-    /// Decompressed bytes not yet consumed: the current record first, then
-    /// whatever was read after it.
-    chunk: bytes::Bytes,
-    /// How many bytes the next refill reads the chunk up to, at least: the
-    /// first chunk's estimate from the compressed size, doubled by each refill
-    /// up to [`RECORD_CHUNK_SIZE`].
-    chunk_size: usize,
+    /// The decompression stream over the batch's records section, read
+    /// through a buffer of the codec's size.
+    reader: io::BufReader<DecompressingReader<io::Cursor<bytes::Bytes>>>,
+    /// The record last read, its size field first, less what
+    /// [`Self::consume`] dropped: the whole record, or as much of it as the
+    /// stream held.
+    record: bytes::Bytes,
     /// Whether `reader` has reached the end of the stream.
     eof: bool,
-    /// The error `reader` failed with, held back until the bytes read before
-    /// it have been used up — where Java's stream would report it.
+    /// The error `reader` failed with, kept so that every later read reports
+    /// it rather than reading on.
     error: Option<io::Error>,
 }
 
@@ -404,36 +406,31 @@ impl RecordStream {
     /// Opens the decompression stream over a batch's `records` section. Reads
     /// nothing yet, except what the codec reads to set itself up (a gzip
     /// header).
-    ///
-    /// The first chunk is sized from the compressed length, the one measure of
-    /// the batch's size there is before decompressing it: [`EXPECTED_EXPANSION`]
-    /// times it, between [`MIN_FIRST_CHUNK_SIZE`] and [`RECORD_CHUNK_SIZE`]. So
-    /// a batch of a few records gets a chunk a little bigger than they are, and
-    /// a batch of 16 KiB compressed or more gets a full chunk. A batch that
-    /// expands by more than that, as text does under gzip or zstd, gets chunks
-    /// that double from the estimate ([`Self::refill`]), so what its records
-    /// pin stays within about twice their size. The librdkafka client sizes its
-    /// lz4 output buffer from the compressed length the same way.
     fn open(records: bytes::Bytes, compression_type: CompressionType, magic: i8) -> io::Result<Self> {
-        let chunk_size = records
-            .len()
-            .saturating_mul(EXPECTED_EXPANSION)
-            .clamp(MIN_FIRST_CHUNK_SIZE, RECORD_CHUNK_SIZE);
-        let reader = Compression::of(compression_type)
-            .build()
-            .wrap_for_input(io::Cursor::new(records), magic)?;
-        Ok(Self { reader, chunk: bytes::Bytes::new(), chunk_size, eof: false, error: None })
+        let compression = Compression::of(compression_type).build();
+        // Defined for every codec; an uncompressed batch's records are borrowed
+        // in place and never reach here.
+        let buffer_size = compression.decompression_output_size().map_err(io::Error::other)?;
+        let reader = compression.wrap_for_input(io::Cursor::new(records), magic)?;
+        Ok(Self {
+            reader: io::BufReader::with_capacity(buffer_size, reader),
+            record: bytes::Bytes::new(),
+            eof: false,
+            error: None,
+        })
     }
 
-    /// The decompressed bytes not yet consumed, starting with the current
-    /// record once [`Self::next_record`] has read it.
-    fn chunk(&self) -> &bytes::Bytes {
-        &self.chunk
+    /// The buffer the current record was read into, once [`Self::next_record`]
+    /// has read it: the record's bytes and nothing else.
+    fn record(&self) -> &bytes::Bytes {
+        &self.record
     }
 
-    /// Reads the next record to the front of the chunk and returns the bytes
-    /// there: the whole record; as much of it as the stream holds, for the
-    /// record parser to reject; or nothing, once the stream has ended.
+    /// Reads the next record, once the one before it has been consumed, and
+    /// returns its bytes: the whole record; as much of it as the stream holds,
+    /// for the record parser to reject; or nothing, once the stream has ended.
+    /// A record is kept until it is consumed, so reading it again, after a
+    /// deserializer failed on it, reads nothing more.
     ///
     /// # Errors
     ///
@@ -441,17 +438,19 @@ impl RecordStream {
     /// `StreamRecordIterator.readNext` reports any `IOException` this way
     /// (`DefaultRecordBatch.java:646-654`).
     fn next_record(&mut self) -> Result<&[u8], InvalidRecordError> {
-        if !self.fill_record()
-            && let Some(e) = &self.error
-        {
+        if self.record.is_empty() && !self.eof && self.error.is_none() {
+            self.read_record();
+        }
+        if let Some(e) = &self.error {
             return Err(DefaultRecordBatch::decompression_error(e));
         }
-        Ok(&self.chunk)
+        Ok(&self.record)
     }
 
-    /// Drops the record just read, its first `consumed` bytes, from the chunk.
+    /// Drops the record just read, its first `consumed` bytes. Its buffer is
+    /// let go of when the next record is read, or with the stream.
     fn consume(&mut self, consumed: usize) {
-        self.chunk.advance(consumed.min(self.chunk.len()));
+        self.record.advance(consumed.min(self.record.len()));
     }
 
     /// Whether any bytes follow the records read so far: Java's
@@ -463,8 +462,15 @@ impl RecordStream {
     ///
     /// The stream failed before its end, with Java's text for that.
     fn has_remaining(&mut self) -> Result<bool, InvalidRecordError> {
-        if self.fill_to(1) {
+        if !self.record.is_empty() {
             return Ok(true);
+        }
+        if !self.eof && self.error.is_none() {
+            match self.reader.fill_buf() {
+                Ok([]) => self.eof = true,
+                Ok(_) => return Ok(true),
+                Err(e) => self.error = Some(e),
+            }
         }
         match &self.error {
             Some(e) => Err(InvalidRecordError::new(format!(
@@ -474,76 +480,69 @@ impl RecordStream {
         }
     }
 
-    /// Reads until the chunk holds the whole record at its front, and says
-    /// whether it does. A record the stream ends or fails inside of is not
-    /// whole; a record whose size field is malformed is, as no more bytes
-    /// would change what the parser makes of it.
-    fn fill_record(&mut self) -> bool {
-        // The record's size comes first.
-        self.fill_to(MAX_RECORD_SIZE_LENGTH);
-        match ByteUtils::read_varint(&self.chunk) {
-            Ok((size, size_length)) => match usize::try_from(size) {
-                Ok(size) => self.fill_to(size_length.saturating_add(size)),
-                Err(_) => true,
-            },
-            Err(_) => self.chunk.len() >= MAX_RECORD_SIZE_LENGTH,
-        }
-    }
-
-    /// Reads until the chunk holds at least `needed` bytes, the stream ends
-    /// or it fails, and says whether the chunk holds them.
-    fn fill_to(&mut self, needed: usize) -> bool {
-        if self.chunk.len() < needed && !self.eof && self.error.is_none() {
-            self.refill(needed);
-        }
-        self.chunk.len() >= needed
-    }
-
-    /// Moves the bytes not yet consumed into a new chunk and reads after them,
-    /// up to `chunk_size` bytes in all, or up to `needed` for a record bigger
-    /// than that, and doubles `chunk_size` for the next refill, up to
-    /// [`RECORD_CHUNK_SIZE`]: a batch whose first chunk turns out small for it
-    /// gets chunks that grow with it rather than a full chunk at once.
+    /// Reads the next record into a buffer of its own, as Java's
+    /// `DefaultRecord.readFrom(InputStream, ...)` does
+    /// (`DefaultRecord.java:286-310`): the size field a byte at a time, then
+    /// the body. The size field is kept in front of the body, so the record is
+    /// parsed as an uncompressed batch's records are. A size that is malformed
+    /// or negative is left to the parser, which has Java's text for each; no
+    /// more of the stream would change what it makes of them.
     ///
-    /// The chunk grows only as bytes arrive, so a size read from the data is
-    /// never allocated before the data is there, as in
-    /// [`DefaultRecord::read_from_stream`]: a record bigger than the chunk
-    /// doubles it each time it fills, and the last step stops at the record's
-    /// size, so the record ends up in a chunk of its own size rather than one
-    /// up to twice it. Growing is fallible (`try_reserve_exact`), so an
-    /// allocation that cannot be met fails the stream instead of aborting the
-    /// process.
-    fn refill(&mut self, needed: usize) {
-        // The bytes the new chunk is to hold.
-        let target = needed.max(self.chunk_size);
-        let mut chunk = Vec::new();
-        if let Err(e) = chunk.try_reserve_exact(self.chunk_size.max(self.chunk.len())) {
+    /// The buffer is allocated once, at the record's size, up to
+    /// [`MAX_RECORD_PREALLOCATION`]; a bigger record's buffer grows only as its
+    /// bytes arrive, doubling each time it fills, and the last step stops at
+    /// the record's size, so the record ends up in a buffer of exactly its
+    /// size. Allocating is fallible (`try_reserve_exact`), so an allocation
+    /// that cannot be met fails the stream instead of aborting the process. A
+    /// record the stream ends or fails inside of is kept as far as it was
+    /// read, for the parser to reject.
+    fn read_record(&mut self) {
+        let mut size_bytes = [0u8; MAX_RECORD_SIZE_LENGTH];
+        let mut size_length = 0;
+        while size_length < MAX_RECORD_SIZE_LENGTH {
+            let Some(byte) = self.read_byte() else {
+                self.record = bytes::Bytes::copy_from_slice(&size_bytes[..size_length]);
+                return;
+            };
+            size_bytes[size_length] = byte;
+            size_length += 1;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let size_bytes = &size_bytes[..size_length];
+        let size = ByteUtils::read_varint(size_bytes)
+            .ok()
+            .and_then(|(size, _)| usize::try_from(size).ok());
+        let Some(size) = size else {
+            self.record = bytes::Bytes::copy_from_slice(size_bytes);
+            return;
+        };
+        let total = size_length + size;
+        let mut record = Vec::new();
+        if let Err(e) = record.try_reserve_exact(total.min(MAX_RECORD_PREALLOCATION)) {
             self.error = Some(e.into());
             return;
         }
-        self.chunk_size = (self.chunk_size * 2).min(RECORD_CHUNK_SIZE);
-        chunk.extend_from_slice(&self.chunk);
-        loop {
-            if chunk.len() == chunk.capacity() {
-                let step = chunk.len().min(target - chunk.len());
-                if let Err(e) = chunk.try_reserve_exact(step) {
+        record.extend_from_slice(size_bytes);
+        while record.len() < total {
+            if record.len() == record.capacity() {
+                let step = record.len().min(total - record.len());
+                if let Err(e) = record.try_reserve_exact(step) {
                     self.error = Some(e.into());
                     break;
                 }
             }
-            // `take` stops the read at the capacity: a full chunk is not grown
-            // to find out whether more follows, and `read_to_end` grows a buffer
-            // only past what it was given room for.
-            let wanted = chunk.capacity().min(target) - chunk.len();
-            match (&mut self.reader).take(wanted as u64).read_to_end(&mut chunk) {
+            // `take` stops the read at the room there is: `read_to_end` grows a
+            // buffer only past what it was given room for, and keeps the bytes
+            // read before a failure.
+            let wanted = record.capacity() - record.len();
+            match (&mut self.reader).take(wanted as u64).read_to_end(&mut record) {
                 Ok(read) if read < wanted => {
                     self.eof = true;
                     break;
                 },
-                Ok(_) if chunk.len() >= target => break,
                 Ok(_) => {},
-                // `read_to_end` keeps the bytes read before the failure, and the
-                // records in them are still handed out.
                 Err(e) => {
                     self.error = Some(e);
                     break;
@@ -551,7 +550,27 @@ impl RecordStream {
             }
         }
         // Adopts the allocation; nothing is copied.
-        self.chunk = bytes::Bytes::from(chunk);
+        self.record = bytes::Bytes::from(record);
+    }
+
+    /// The next byte of the stream, or nothing once it has ended or failed,
+    /// the failure kept in `error`.
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.eof || self.error.is_some() {
+            return None;
+        }
+        let byte = match self.reader.fill_buf() {
+            Ok(buffered) => buffered.first().copied(),
+            Err(e) => {
+                self.error = Some(e);
+                return None;
+            },
+        };
+        match byte {
+            Some(_) => self.reader.consume(1),
+            None => self.eof = true,
+        }
+        byte
     }
 }
 
@@ -559,8 +578,7 @@ impl std::fmt::Debug for RecordStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The decompressor has no `Debug` of its own.
         f.debug_struct("RecordStream")
-            .field("chunk_len", &self.chunk.len())
-            .field("chunk_size", &self.chunk_size)
+            .field("record_len", &self.record.len())
             .field("eof", &self.eof)
             .field("error", &self.error)
             .finish_non_exhaustive()
@@ -954,8 +972,7 @@ impl CompletedFetch {
                 let topic_str: &str = &self.topic_arc;
                 // §27: the refcounted buffer that owns this record's key/value
                 // bytes. `BytesDeserializer::deserialize_from_shared` slices it
-                // (slice_ref) with no copy; other deserializers ignore it. The
-                // clone is an O(1) refcount bump.
+                // (slice_ref) with no copy; other deserializers ignore it.
                 let source_bytes = self
                     .current_record_source_bytes()
                     .expect("record source must exist while peeking");
@@ -976,7 +993,7 @@ impl CompletedFetch {
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
+                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, source_bytes, key_bytes)
                         .map(Some),
                 };
                 // Java's `parseRecord` is two sequential `try` blocks and the first
@@ -991,7 +1008,7 @@ impl CompletedFetch {
                     match record.value() {
                         None => Ok(None),
                         Some(value_bytes) => value_deserializer
-                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, source_bytes, value_bytes)
                             .map(Some),
                     }
                 };
@@ -1086,11 +1103,11 @@ impl CompletedFetch {
     /// `nextFetchedRecord` calls before it takes the next batch (`:185`).
     ///
     /// For a compressed batch this drops the batch's [`RecordStream`] — its
-    /// decompressor and its chunk — before the next batch's stream is opened,
-    /// so a fetch holds one stream at a time, not two. Records a zero-copy
-    /// deserializer sliced from a chunk keep their own reference, so for them
-    /// the chunk lives on until they are dropped. `drain()`, Java's other
-    /// caller, drops the whole cursor instead.
+    /// decompressor, read buffer and last record — before the next batch's
+    /// stream is opened, so a fetch holds one stream at a time, not two.
+    /// Records a zero-copy deserializer sliced from their buffers keep their
+    /// own reference, so each such buffer lives on until its record is dropped.
+    /// `drain()`, Java's other caller, drops the whole cursor instead.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeCloseRecordStream")]
     fn maybe_close_record_stream(&mut self) {
         if let Some(cursor) = self.cursor.as_mut() {
@@ -1288,14 +1305,14 @@ impl CompletedFetch {
     ///
     /// For an uncompressed batch this is the whole `MemoryRecords` buffer (the
     /// borrowed record slice is a subslice of it); for a compressed batch it is
-    /// the chunk the current record was decompressed into. Clones are O(1)
-    /// refcount bumps. Returns `None` when no batch's record bytes are held.
-    fn current_record_source_bytes(&self) -> Option<bytes::Bytes> {
+    /// the buffer the current record was decompressed into. Returns `None` when
+    /// no batch's record bytes are held.
+    fn current_record_source_bytes(&self) -> Option<&bytes::Bytes> {
         let cursor = self.cursor.as_ref()?;
         match &cursor.record_source {
             RecordSource::None => None,
-            RecordSource::Borrowed(_) => Some(cursor.memory_records.buffer_bytes().clone()),
-            RecordSource::Stream(stream) => Some(stream.chunk().clone()),
+            RecordSource::Borrowed(_) => Some(cursor.memory_records.buffer_bytes()),
+            RecordSource::Stream(stream) => Some(stream.record()),
         }
     }
 
@@ -1338,9 +1355,9 @@ impl CompletedFetch {
         let records_bytes = match &cursor.record_source {
             RecordSource::None => return Ok(None),
             RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
-            // The current record is at the front of the chunk, and
+            // The current record is in a buffer of its own, and
             // `record_byte_offset` stays 0.
-            RecordSource::Stream(stream) => &stream.chunk()[..],
+            RecordSource::Stream(stream) => &stream.record()[..],
         };
         if cursor.record_byte_offset >= records_bytes.len()
             || ends_inside_record_size(&records_bytes[cursor.record_byte_offset..])
@@ -2290,8 +2307,8 @@ mod tests {
     }
 
     /// Exercises the compressed-batch decode path (`RecordSource::Stream`):
-    /// records are decompressed one at a time into a shared chunk, then each
-    /// record's key/value is borrowed from it — same observable result as the
+    /// records are decompressed one at a time, each into a buffer of its own,
+    /// then its key/value is borrowed from it — same observable result as the
     /// uncompressed path.
     #[test]
     fn test_simple_compressed() {
@@ -3443,13 +3460,14 @@ mod tests {
     /// The cursor lets go of an exhausted batch's record stream before it takes
     /// the next batch, as Java closes a batch's record stream before taking the
     /// next (`maybeCloseRecordStream()`, `CompletedFetch.java:180-185, 190`), so
-    /// a fetch never holds two batches' decompressors and chunks at once. The
-    /// test keeps its own reference to the first batch's chunk and makes the
-    /// second batch fail: once that failure is reported, the test's reference
-    /// must be the only one left. The second batch fails either its checksum,
-    /// before any stream is opened for it, or its first read. Releasing the
-    /// first stream only when the second is installed would fail the checksum
-    /// case, since a batch that fails its checks installs nothing.
+    /// a fetch never holds two batches' decompressors and buffers at once. The
+    /// test keeps its own reference to the first batch's last record, whose
+    /// buffer the stream holds until it reads another record or is dropped, and
+    /// makes the second batch fail: once that failure is reported, the test's
+    /// reference must be the only one left. The second batch fails either its
+    /// checksum, before any stream is opened for it, or its first read.
+    /// Releasing the first stream only when the second is installed would fail
+    /// the checksum case, since a batch that fails its checks installs nothing.
     #[test]
     fn test_exhausted_inflated_batch_is_released_before_the_next_is_inflated() {
         // (check.crcs, whether the second batch is re-signed after it is garbled,
@@ -3479,8 +3497,9 @@ mod tests {
             assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
             let first_batch = cf
                 .current_record_source_bytes()
+                .cloned()
                 .expect("the exhausted first batch is still the cursor's current one");
-            assert!(!first_batch.is_unique(), "the cursor shares the first batch's chunk");
+            assert!(!first_batch.is_unique(), "the cursor shares the first batch's last record");
 
             let err = cf
                 .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
@@ -3804,7 +3823,7 @@ mod tests {
 
     /// A compressed batch is read across polls: a poll asking for fewer records
     /// than the batch holds leaves the stream where it stopped, and the next
-    /// poll carries on from there, across chunks and into the next batch.
+    /// poll carries on from there and into the next batch.
     #[test]
     fn test_compressed_batches_are_read_across_polls() {
         for compression in codecs() {
@@ -3832,7 +3851,7 @@ mod tests {
                 assert_eq!(Some(&format!("value-{n}")), record.value(), "{compression:?}");
             }
 
-            // Values bigger than a chunk, so records also span chunk boundaries.
+            // Values of a kilobyte, so records also span the read buffer's refills.
             let buf = compressed_by_record(&batch_of_values(300, 1000), &compression);
             let mut cf = new_completed_fetch(0, buf);
             let read = fetch_all_lengths(&mut cf, 7);
@@ -3840,36 +3859,34 @@ mod tests {
         }
     }
 
-    /// A record that crosses a chunk boundary keeps its bytes: the stream moves
-    /// it whole into the next chunk, the one copy it makes. The values are read
-    /// with `BytesDeserializer`, as the C and Python bindings read them, which
-    /// hands each one out as a slice of its chunk (§27), and are compared byte
-    /// for byte once every poll is done, so a chunk changed after its records
-    /// were handed out would show too.
+    /// A record read partly from the stream's read buffer and partly past it
+    /// keeps its bytes. Records of a kilobyte straddle a refill of snappy's and
+    /// lz4's 2 KiB buffer about every other record and of gzip's and zstd's
+    /// 16 KiB buffer about every sixteenth
+    /// ([`Compression::decompression_output_size`]), as a record's size divides
+    /// neither. The values are read with `BytesDeserializer`, as the C and
+    /// Python bindings read them, which hands each one out as a slice of its
+    /// buffer (§27), and are compared byte for byte once every poll is done, so
+    /// a buffer changed after its record was handed out would show too.
     #[test]
-    fn test_compressed_records_crossing_chunks_keep_their_bytes() {
+    fn test_compressed_records_crossing_read_buffer_refills_keep_their_bytes() {
         const RECORD_COUNT: i32 = 300;
         const VALUE_SIZE: usize = 1000;
         let batch = batch_of_values(RECORD_COUNT, VALUE_SIZE);
-        // A chunk after the first holds RECORD_CHUNK_SIZE bytes from a record's
-        // start, and no run of these records adds up to exactly that, so a
-        // record crosses every chunk's end.
-        let mut records = &batch[RecordBatch::RECORD_BATCH_OVERHEAD..];
-        let mut sizes = Vec::new();
-        while !records.is_empty() {
-            let (size, size_length) = ByteUtils::read_varint(records).expect("a record starts with its size");
-            sizes.push(size_length + size as usize);
-            records = &records[size_length + size as usize..];
-        }
-        for start in 0..sizes.len() {
-            let mut run = 0;
-            for size in &sizes[start..] {
-                run += size;
-                assert_ne!(RECORD_CHUNK_SIZE, run, "the records from {start} end exactly at a chunk's end");
-                if run > RECORD_CHUNK_SIZE {
-                    break;
-                }
-            }
+        let (size, size_length) = ByteUtils::read_varint(&batch[RecordBatch::RECORD_BATCH_OVERHEAD..])
+            .expect("a record starts with its size");
+        let record_size = size_length + size as usize;
+        for compression in codecs() {
+            let buffer_size = compression.decompression_output_size().expect("a codec has a buffer size");
+            assert!(
+                record_size < buffer_size,
+                "{compression:?}: a record is read through the buffer"
+            );
+            assert_ne!(
+                0,
+                buffer_size % record_size,
+                "{compression:?}: the records would end at every refill"
+            );
         }
 
         let deserializer = crate::common::serialization::BytesDeserializer::new();
@@ -3944,7 +3961,7 @@ mod tests {
     }
 
     /// A record of a compressed batch whose deserializer fails stays where it
-    /// is across polls: the next poll reads it again from the stream's chunk,
+    /// is across polls: the next poll reads it again from the stream's buffer,
     /// and once the deserializer succeeds the poll carries on from there. Java
     /// re-deserializes the last record "so the user can retry after fixing
     /// whatever state they like" (`CompletedFetch.java:275-278`).
@@ -3986,11 +4003,11 @@ mod tests {
         }
     }
 
-    /// A record bigger than a chunk is read whole: its chunk grows to the
-    /// record as its bytes are decompressed.
+    /// A record bigger than [`MAX_RECORD_PREALLOCATION`] is read whole: its
+    /// buffer grows to the record as its bytes are decompressed.
     #[test]
-    fn test_compressed_record_bigger_than_a_chunk_is_read_whole() {
-        const BIG: usize = 3 * RECORD_CHUNK_SIZE + 17;
+    fn test_compressed_record_bigger_than_the_preallocation_is_read_whole() {
+        const BIG: usize = 3 * MAX_RECORD_PREALLOCATION + 17;
         for compression in codecs() {
             let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
                 BIG + 512,
@@ -4013,19 +4030,19 @@ mod tests {
         }
     }
 
-    /// A record bigger than a chunk ends up in a chunk of its own size: the
-    /// chunk doubles as the record's bytes arrive and the last step stops at the
-    /// record's size ([`RecordStream::refill`]), so the record keeps its own
-    /// size allocated, not up to twice it. The value is a byte past a power of
-    /// two, where doubling overshoots most: a `Vec` grown by `read_to_end` kept
-    /// 2 MiB for it. The record is read with `BytesDeserializer`, which keeps
-    /// its chunk alive with the chunk's whole capacity, and what it keeps is
-    /// measured once the fetch has dropped the stream, so the codec's own
-    /// buffers, which it frees, are not in the figure (lz4 reads through block
-    /// buffers of the frame's block size, 4 MiB for a frame written in one
-    /// piece).
+    /// A record bigger than [`MAX_RECORD_PREALLOCATION`] ends up in a buffer of
+    /// exactly its size: the buffer doubles as the record's bytes arrive and
+    /// the last step stops at the record's size ([`RecordStream::read_record`]),
+    /// so the record keeps its own size allocated, not up to twice it. The
+    /// value is a byte past a power of two, where doubling overshoots most: a
+    /// `Vec` grown by `read_to_end` kept 2 MiB for it. The record is read with
+    /// `BytesDeserializer`, which keeps its buffer alive with the buffer's whole
+    /// capacity, and what it keeps is measured once the fetch has dropped the
+    /// stream, so the codec's own buffers, which it frees, are not in the
+    /// figure (lz4 reads through block buffers of the frame's block size, 4 MiB
+    /// for a frame written in one piece).
     #[test]
-    fn test_compressed_record_bigger_than_a_chunk_keeps_a_chunk_of_its_size() {
+    fn test_compressed_record_bigger_than_the_preallocation_keeps_a_buffer_of_its_size() {
         const VALUE_SIZE: usize = 1024 * 1024 + 1;
         // The record's bytes around its value: its size field, attributes,
         // deltas, key length and header count.
@@ -4055,15 +4072,15 @@ mod tests {
         }
     }
 
-    /// A compressed batch is decompressed a chunk at a time, never whole: reading
-    /// one that decompresses to more than a mebibyte allocates no single block
-    /// bigger than 256 KiB, under every codec. Its records are compressed one
-    /// write each, as a producer appends them, so lz4 frames them in the 64 KiB
-    /// blocks Java's producer writes. (zstd's decoder state is allocated by its C
-    /// library, which the tracker does not see; its window is bounded by the
-    /// frame.)
+    /// A compressed batch is decompressed a record at a time, never whole:
+    /// reading one that decompresses to more than a mebibyte allocates no single
+    /// block bigger than 256 KiB, under every codec. Its records are compressed
+    /// one write each, as a producer appends them, so lz4 frames them in the
+    /// 64 KiB blocks Java's producer writes. (zstd's decoder state is allocated
+    /// by its C library, which the tracker does not see; its window is bounded
+    /// by the frame.)
     #[test]
-    fn test_compressed_batch_is_decompressed_a_chunk_at_a_time() {
+    fn test_compressed_batch_is_decompressed_a_record_at_a_time() {
         const RECORD_COUNT: i32 = 1100;
         const VALUE_SIZE: usize = 1000;
         const MAX_ALLOCATION: usize = 256 * 1024;
@@ -4089,20 +4106,26 @@ mod tests {
         }
     }
 
-    /// A small compressed batch keeps chunks sized to it, not a whole
-    /// [`RECORD_CHUNK_SIZE`] chunk, which 500 single-record batches in one poll
-    /// made 32 MiB: the first chunk is sized from the compressed length and the
-    /// next ones double from there ([`RecordStream::open`],
-    /// [`RecordStream::refill`]), so a batch read with `BytesDeserializer`,
-    /// whose records are slices of their chunks and keep them alive, pins about
-    /// its records' own size whether its data compresses ten times over or not
-    /// at all. What the chunks keep is measured against the same batch
-    /// uncompressed, whose records slice the fetch buffer, so the records
-    /// vector and the records themselves cancel out, and once the fetch has
-    /// dropped the stream, so the codec's own buffers, which it frees, are not
-    /// in the figure.
+    /// A compressed batch's records keep their own size once handed out, and
+    /// nothing more, whether their data compresses ten times over or not at
+    /// all: each is read into a buffer of exactly its size
+    /// ([`RecordStream::read_record`]), which a record read with
+    /// `BytesDeserializer`, a slice of it, keeps alive, plus the reference
+    /// count `Bytes` allocates when a buffer is first sliced. Records read into
+    /// shared 64 KiB chunks kept a chunk per batch, 32 MiB for 500
+    /// single-record batches in one poll. What the records keep is measured
+    /// against the same batch uncompressed, whose records slice the fetch
+    /// buffer, so the records vector and the records themselves cancel out, and
+    /// once the fetch has dropped the stream, so the codec's own buffers, which
+    /// it frees, are not in the figure. The shapes below measured their
+    /// records' size exactly, or up to 24 bytes a record over it: the
+    /// uncompressed batch's own reference count, allocated when its fetch
+    /// buffer is first sliced, cancels one of the compressed batch's.
     #[test]
-    fn test_compressed_small_batch_keeps_chunks_sized_to_it() {
+    fn test_compressed_batch_records_keep_their_own_size() {
+        /// The reference count `Bytes` allocates when a buffer is first sliced,
+        /// with room to spare.
+        const SLICE_OVERHEAD: usize = 64;
         /// Bytes no codec compresses: a linear congruential generator's top bytes.
         fn noise(size: usize) -> Vec<u8> {
             let mut state: u32 = 12345;
@@ -4155,17 +4178,16 @@ mod tests {
                 for (value, record) in values.iter().zip(&records) {
                     assert_eq!(Some(&value[..]), record.value().map(|v| &v[..]), "{shape}, {compression:?}");
                 }
-                let chunks = kept - plain_kept;
-                // Twice the records, as the chunks double; the first chunk, which
-                // the estimate bounds; and room for the chunks' reference counts.
-                let most = 2 * records_size + EXPECTED_EXPANSION * compressed_size + 2 * MIN_FIRST_CHUNK_SIZE;
+                let buffers = kept - plain_kept;
+                let least = isize::try_from(records_size).unwrap();
+                let most = least + isize::try_from(SLICE_OVERHEAD * values.len()).unwrap();
                 assert!(
-                    (1..=isize::try_from(most).unwrap()).contains(&chunks),
-                    "{shape}, {compression:?}: the chunks keep {chunks} bytes for {records_size} bytes of records \
-                     ({compressed_size} compressed; at most {most})"
+                    (least..=most).contains(&buffers),
+                    "{shape}, {compression:?}: the records keep {buffers} bytes for {records_size} bytes of records \
+                     ({compressed_size} compressed; between {least} and {most})"
                 );
                 eprintln!(
-                    "{shape}, {compression:?}: {chunks} bytes of chunks kept for {records_size} bytes of records, \
+                    "{shape}, {compression:?}: {buffers} bytes kept for {records_size} bytes of records, \
                      {compressed_size} compressed"
                 );
             }
@@ -4387,40 +4409,51 @@ mod tests {
         }
     }
 
-    /// §27 per-record allocation budget for a compressed batch: records are
-    /// read out of the stream's chunks in place, so a compressed batch costs
-    /// nothing per record beyond what an uncompressed one does — only the
-    /// decompressor, its block buffers and one buffer per chunk. Mirrors
-    /// [`test_per_record_loop_is_pure_counter_no_sensor_record`], with a budget
-    /// for the whole batch rather than per record: the batch decompresses to
-    /// about four chunks, and measured 13 to 26 allocations under the four
-    /// codecs, so a single allocation per record (2000) cannot hide in it.
+    /// Per-record allocation budget for a compressed batch: one allocation per
+    /// record beyond an uncompressed batch's, the buffer the record is read
+    /// into, as Java allocates one per record
+    /// (`DefaultRecord.readFrom(InputStream, ...)`), and nothing else per
+    /// record — the decompressor, its block buffers and the read buffer are
+    /// allocated once per batch ([`RecordStream`]). This is one more per record
+    /// than `consumer-threading.md` §27 budgets for the receive path, which
+    /// allows only the deserializer's output. Mirrors
+    /// [`test_per_record_loop_is_pure_counter_no_sensor_record`]: the same
+    /// batch is read uncompressed first, and the compressed read may allocate
+    /// one more per record plus a fixed number for the stream, so a second
+    /// allocation per record (2000) cannot hide in the budget: it measured
+    /// 2006 to 2019 allocations under the four codecs for 2000 records, against
+    /// 3 for the batch uncompressed.
     #[test]
     fn test_compressed_per_record_allocation_budget() {
         const RECORD_COUNT: i32 = 2000;
-        const ALLOC_BUDGET: usize = 100;
+        /// The stream's own allocations: the decompressor, its block buffers,
+        /// the read buffer and the box the stream is held in.
+        const STREAM_BUDGET: usize = 64;
         let batch = batch_of_values(RECORD_COUNT, 100);
-        for compression in codecs() {
-            let mut cf = new_completed_fetch(0, compressed_by_record(&batch, &compression));
-            let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let allocations = |buf: Vec<u8>| {
+            let mut cf = new_completed_fetch(0, buf);
             cf.ensure_cursor();
-            let (alloc_count, n_records) = {
-                let _guard = crate::AllocTrackingGuard::new();
-                crate::AllocTrackingGuard::reset();
-                let recs = cf
-                    .fetch_records::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, RECORD_COUNT)
-                    .unwrap();
-                (crate::AllocTrackingGuard::count(), recs.len())
-            };
-            assert_eq!(RECORD_COUNT as usize, n_records, "{compression:?}");
+            let _guard = crate::AllocTrackingGuard::new();
+            let records = cf
+                .fetch_records::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, RECORD_COUNT)
+                .expect("the batch is valid");
+            assert_eq!(RECORD_COUNT as usize, records.len());
+            crate::AllocTrackingGuard::count()
+        };
+        let plain = allocations(batch.clone());
+        let budget = plain + RECORD_COUNT as usize + STREAM_BUDGET;
+        for compression in codecs() {
+            let compressed = allocations(compressed_by_record(&batch, &compression));
             assert!(
-                alloc_count <= ALLOC_BUDGET,
-                "{compression:?}: {alloc_count} allocs for {RECORD_COUNT} compressed records (budget \
-                 {ALLOC_BUDGET}). A per-record allocation entered the compressed read path (§27)."
+                compressed <= budget,
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \
+                 uncompressed (budget {budget}: one per record and {STREAM_BUDGET} for the stream). A second \
+                 per-record allocation entered the compressed read path."
             );
             eprintln!(
-                "{compression:?} compressed batch: {alloc_count} allocs for {RECORD_COUNT} records \
-                 (max allowed {ALLOC_BUDGET})"
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \
+                 uncompressed (budget {budget})"
             );
         }
     }
