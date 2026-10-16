@@ -17,8 +17,10 @@
 *(deviation)* Java's interface, with its three ``deserialize`` overloads, is one
 callable shape whose headers are always passed (CLAUDE.md, Python Binding
 Conventions, Serialization). A deserializer is any callable of that shape; the
-protocol exists for the type checker. ``None`` data is Java's null, and the
-deserializer decides what it maps to.
+protocol exists for the type checker. The consumer does not call a
+deserializer for a null key or value: the record's field is ``None``, as in
+Java's ``CompletedFetch``. ``None`` data reaches a deserializer only when it is
+called directly, and then it decides what null maps to.
 """
 
 from __future__ import annotations

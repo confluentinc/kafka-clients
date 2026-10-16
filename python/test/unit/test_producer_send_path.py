@@ -63,6 +63,13 @@ from confluent_kafka.producer import (
 from confluent_kafka.producer._base import CLOSED_WHILE_SENDING_MESSAGE
 from confluent_kafka.producer._send import MetadataTuple
 
+from .producer_futures import (
+    assert_send_throws,
+    async_assert_send_throws,
+    async_failure,
+    failure,
+)
+
 TOPIC = "topic"
 RECORD = ProducerRecord(topic=TOPIC, key=b"k", value=b"v")
 UNREACHABLE = {"bootstrap.servers": "127.0.0.1:59999", "max.block.ms": 100}
@@ -195,20 +202,20 @@ def test_a_record_taken_at_once_is_returned_pending_and_completes_on_the_complet
         returned.append(True)
         assert time.monotonic() - started < 1.0
         assert len(fake.calls) == 1
-        assert not future.done()
-        assert future in p._futures  # noqa: SLF001
+        assert not future.is_done()
+        assert future._impl in p._futures  # noqa: SLF001
         assert seen == []
         deliverer = _deliver_on_a_thread(fake.calls[0], failed=failed)
         assert deliverer != threading.get_ident()
         if failed:
-            exception = future.exception(timeout=5)
+            exception = failure(future, 5)
             assert type(exception) is KafkaTimeoutError
             assert str(exception) == BOOM
             assert seen == [(deliverer, True, -1, exception)]
         else:
-            assert future.result(timeout=5).offset() == 7
+            assert future.get(timeout=5).offset() == 7
             assert seen == [(deliverer, True, 0, None)]
-        assert future not in p._futures  # noqa: SLF001
+        assert future._impl not in p._futures  # noqa: SLF001
     finally:
         p.close(timeout=0)
 
@@ -284,19 +291,20 @@ async def test_an_async_record_taken_at_once_is_returned_pending_and_completes_o
         future = await p.send(record=RECORD, callback=_recorder(seen, returned))
         returned.append(True)
         assert len(fake.calls) == 1
-        assert not future.done()
-        assert future in p._futures  # noqa: SLF001
+        assert not future.is_done()
+        assert future._impl in p._futures  # noqa: SLF001
         assert seen == []
         deliverer = _deliver_on_a_thread(fake.calls[0], failed=failed)
         assert deliverer != threading.get_ident()
         if failed:
-            with pytest.raises(KafkaTimeoutError, match=BOOM) as raised:
-                await asyncio.wait_for(future, 5)
-            assert seen == [(threading.get_ident(), True, -1, raised.value)]
+            exception = await async_failure(future, 5)
+            assert type(exception) is KafkaTimeoutError
+            assert str(exception) == BOOM
+            assert seen == [(threading.get_ident(), True, -1, exception)]
         else:
-            assert (await asyncio.wait_for(future, 5)).offset() == 7
+            assert (await future.get(timeout=5)).offset() == 7
             assert seen == [(threading.get_ident(), True, 0, None)]
-        assert future not in p._futures  # noqa: SLF001
+        assert future._impl not in p._futures  # noqa: SLF001
     finally:
         await p.close(timeout=0)
 
@@ -382,11 +390,10 @@ async def test_send_goes_through_producer_send_cb_only(
     if asynchronous:
         ap = AsyncKafkaProducer(configs=UNREACHABLE)
         try:
-            with pytest.raises(KafkaTimeoutError):
-                await asyncio.wait_for(await ap.send(record=RECORD), 30)
+            await async_assert_send_throws(await ap.send(record=RECORD), KafkaTimeoutError, 30)
         finally:
             await ap.close()
     else:
         with KafkaProducer(configs=UNREACHABLE) as p:
-            assert type(p.send(record=RECORD).exception(timeout=30)) is KafkaTimeoutError
+            assert_send_throws(p.send(record=RECORD), KafkaTimeoutError, 30)
     assert (len(send), len(send_cb)) == (0, 1)

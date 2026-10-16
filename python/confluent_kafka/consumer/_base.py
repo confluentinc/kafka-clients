@@ -75,6 +75,8 @@ from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdE
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_deserializer
+from confluent_kafka.common.config.config_error import ConfigError
+from confluent_kafka.common.serialization._supply import _resolve_class as resolve_class
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
@@ -142,6 +144,7 @@ GROUP_ID_NOT_DEFINED_MESSAGE = ("To use the group management or offset commit AP
                                 "provide a valid group.id in the consumer configuration.")
 
 _GROUP_ID = "group.id"
+_CLIENT_ID = "client.id"
 
 # Java's ConsumerConfig keys of a deserializer given through the config route.
 _KEY_DESERIALIZER = "key.deserializer"
@@ -180,12 +183,28 @@ CLOSE_FAILED_MESSAGE = "Failed to close kafka consumer"
 # without the Duration.
 _NO_TIMEOUT = -1
 
+# The core's message for a negative timeout given to a `_with_timeout` entry
+# point (the FFI's `ms`, `Error::local_illegal_argument`), used where Java's
+# Duration overload makes no negative check of its own (overload_timeout_ms).
+TIMEOUT_NEGATIVE_MESSAGE = "Timeout must not be negative"
+
 # The ids of the consumers whose callback this context is delivering. A
 # ContextVar rather than a thread-local: the listener of an async consumer is
 # awaited inside the task that delivers it, and another task on the same loop
 # is not inside the callback (it must hit the single-owner guard).
 _IN_CALLBACK: contextvars.ContextVar[frozenset[int]] = contextvars.ContextVar(
     "confluent_kafka_consumer_in_callback", default=frozenset())
+
+# How often a close() waiting for the uses in flight looks for an awaiting
+# call whose event loop has closed meanwhile (_finish_close).
+_ABANDONED_RECHECK_S = 0.1
+
+# How long close() waits at most, once it reported a coroutine callback left on
+# a closed loop, for the core to end the call that delivered it
+# (AsyncConsumer._a_close, abandoned_call_wait_s, capped by the close's own
+# timeout): the core completes that call once it has the report, and releases
+# its guard before it queues the completion.
+ABANDONED_CALL_END_S = 5.0
 
 _OPEN = "open"
 _CLOSING = "closing"
@@ -207,6 +226,20 @@ def _wraps_its_source(error: int) -> bool:
     return bool(source) and _lib.KafkaError_code(source) == _LOCAL_CALLBACK and (
         _lib.KafkaError_message(error)
         == "LocalCallbackError: " + _lib.KafkaError_message(source))
+
+
+def _parse_class_key(originals: dict[str, Any], key: str) -> None:
+    """The checks Java's ``ConfigDef`` makes on a deserializer's ``CLASS`` key
+    while it parses the configs, before the consumer is built: an unresolvable
+    name, or a value that is neither a name nor a class, raises
+    ``ConfigError`` (``resolve_serde`` constructs the class later)."""
+    value = originals.get(key)
+    if value is None or inspect.isclass(value):
+        return
+    if isinstance(value, str):
+        resolve_class(key, value)
+        return
+    raise ConfigError(name=key, value=value, message="Expected a Class instance or class name.")
 
 
 class _ListenerAdapter:
@@ -245,22 +278,51 @@ class _ListenerAdapter:
         return state._run_listener(self._listener, method, partitions, callback_id)
 
 
-def poll_timeout_ms(timeout: Duration) -> int:
-    """``poll(Duration)``'s timeout in whole milliseconds, rounded down as Java's
+def _duration_millis(timeout: Duration) -> int:
+    """A ``Duration`` in whole milliseconds, rounded down as Java's
     ``Duration.toMillis()``: a ``timedelta`` exactly, from its integer fields, a
-    number through ``float()``. A negative one raises Java's ``Timer`` message,
-    ``Invalid negative timeout -N``; one that does not fit a signed 64-bit
+    number through ``float()``. One that does not fit a signed 64-bit
     millisecond count raises ``OverflowError``, infinity included, and ``NaN``
-    ``ValueError`` (see ``duration_to_ms``)."""
+    ``ValueError`` (see ``duration_to_ms``); a negative one is returned."""
     if isinstance(timeout, timedelta):
         millis = ((timeout.days * 86_400 + timeout.seconds) * 1_000
                   + timeout.microseconds // 1_000)
     else:
         millis = math.floor(float(timeout) * 1000.0)
-    if millis < 0:
-        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
     if millis > _LONG_MAX:
         raise OverflowError(f"timeout of {millis} ms does not fit a signed 64-bit integer")
+    return millis
+
+
+def poll_timeout_ms(timeout: Duration) -> int:
+    """``poll(Duration)``'s timeout in whole milliseconds (``_duration_millis``).
+    A negative one raises Java's ``Timer`` message, ``Invalid negative timeout
+    -N``."""
+    millis = _duration_millis(timeout)
+    if millis < 0:
+        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
+    return millis
+
+
+def overload_timeout_ms(timeout: Duration | None, *, timer: bool) -> int:
+    """The ``timeout`` of a ``Duration`` overload in whole milliseconds
+    (``_duration_millis``), for its ``_with_timeout`` entry point; ``None``
+    (not given) is ``_NO_TIMEOUT``, the overload without it.
+
+    A negative one cannot cross the C extension, where a negative count selects
+    the overload without the timeout (CLAUDE.md, Python Binding Conventions,
+    Implementation over the FFI, exception 1), so it raises
+    ``IllegalArgumentError`` here: with Java's ``Timer`` message (``Invalid
+    negative timeout -N``) where Java builds a ``Timer`` from it (``timer``:
+    ``commitSync``, ``position``), else with the message of the core's
+    ``_with_timeout`` entry points, ``TIMEOUT_NEGATIVE_MESSAGE``, as Java's
+    method makes no negative check of its own."""
+    if timeout is None:
+        return _NO_TIMEOUT
+    millis = _duration_millis(timeout)
+    if millis < 0:
+        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}" if timer
+                                   else TIMEOUT_NEGATIVE_MESSAGE)
     return millis
 
 
@@ -283,6 +345,17 @@ def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[To
     "Topic partitions to assign to cannot have null or empty topic")."""
     return [_BLANK_TOPIC_PARTITION if tp is None or tp.topic() is None else tp
             for tp in partitions]
+
+
+def abandoned_call_wait_s(close_timeout_ms: int) -> float:
+    """How long ``close()`` waits for the core to end a call whose coroutine
+    callback it reported for a closed loop (``AsyncConsumer._a_close``):
+    ``ABANDONED_CALL_END_S``, capped by the close's own timeout
+    (``close_args``' milliseconds, ``-1`` for the default close timeout, which
+    is longer), so ``close(timeout=0)`` does not wait."""
+    if close_timeout_ms < 0:
+        return ABANDONED_CALL_END_S
+    return min(ABANDONED_CALL_END_S, close_timeout_ms / 1000.0)
 
 
 def close_args(option: CloseOptions | None) -> tuple[int, int]:
@@ -324,6 +397,10 @@ class _Use:
             if state._state == _CLOSING and state._closing_thread != thread:
                 # Java's close() holds the consumer's lock (acquire()).
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+            if any(user != thread for user in state._use_threads):
+                # An awaiting call left on a closed event loop can never end
+                # its use: end it first, so it does not hold the consumer.
+                state._release_abandoned()
             if any(user != thread for user in state._use_threads):
                 # Java's acquire(): another thread is inside the consumer.
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -371,8 +448,9 @@ class _ConsumerState:
     is inside the consumer, the consumer stays open, as in Java). Once closed, it
     waits for the uses still counted before it frees the handle. A waiting call is
     one use, covering its submission, its wait and its callbacks; an awaiting call
-    whose event loop has closed can never resume, so its use is ended at the start
-    of the next awaiting call and in ``close()`` (``_release_abandoned``).
+    whose event loop has closed can never resume, so its use is ended by the next
+    call that meets it, by the next awaiting call and in ``close()``
+    (``_release_abandoned``).
     """
 
     def __init__(self) -> None:
@@ -412,6 +490,10 @@ class _ConsumerState:
         # AsyncConsumer: the tasks awaiting a coroutine listener method, which
         # the delivering call waits for before it returns.
         self._listener_tasks: set[asyncio.Task[None]] = set()
+        # AsyncConsumer: the coroutine callbacks deferred to a task and not yet
+        # reported to the core, by callback id, with the task's loop. One whose
+        # loop has closed can never report: _release_abandoned reports it.
+        self._unacked: dict[int, asyncio.AbstractEventLoop] = {}
         # AsyncConsumer: a coroutine commit callback's exception a poll could
         # not raise without losing its records, raised by the next awaited call
         # (_keep_error, _raise_deferred_error).
@@ -428,34 +510,66 @@ class _ConsumerState:
     def _start(self, configs: dict[str, Any], key_deserializer: Deserializer[Any] | None,
                value_deserializer: Deserializer[Any] | None) -> None:
         """Java's ``KafkaConsumer(configs, keyDeserializer, valueDeserializer)``:
-        parse ``configs``, take the deserializers (an argument wins over the
-        config key; neither means ``bytes_deserializer()``), build the core
-        consumer (which reports the keys it does not know). A given
+        parse ``configs``, build the core consumer (which reports the keys it
+        does not know), then take the deserializers (an argument wins over the
+        config key; neither means ``bytes_deserializer()``). A given
         deserializer argument replaces its config key, which is then not parsed
-        (``ConsumerConfig.appendDeserializerToConfig``). A construction failure
-        raises its typed error after closing the deserializers built so far."""
+        (``ConsumerConfig.appendDeserializerToConfig``).
+
+        A deserializer the config route builds is configured with the user's
+        configs and the consumer's ``client.id``, the one the core generated
+        when none is set (``consumer-<group.id>-<n>``), as Java's
+        ``Deserializers`` passes ``config.originals(singletonMap(CLIENT_ID_CONFIG,
+        clientId))``: so it is constructed once the core consumer exists, the
+        core holding the id *(deviation: Java builds it before the bootstrap
+        metadata, the core resolves the bootstrap hosts first)*. Its checks
+        that Java's ``ConfigDef`` makes while it parses the configs (an
+        unresolvable name, an instance) and the arguments' checks run first.
+
+        A construction failure raises its typed error after closing the
+        deserializers built so far, and the core consumer when it was built."""
         given = [key for key, argument in ((_KEY_DESERIALIZER, key_deserializer),
                                            (_VALUE_DESERIALIZER, value_deserializer))
                  if argument is not None]
         originals, native = prepare(configs, client="consumer", given_serdes=given)
-        key = cast("Deserializer[Any]", resolve_serde(
-            key_deserializer, originals, _KEY_DESERIALIZER, is_key=True,
-            default=bytes_deserializer()))
-        value: Deserializer[Any] | None = None
+        arguments: list[Deserializer[Any]] = []
         try:
-            value = cast("Deserializer[Any]", resolve_serde(
-                value_deserializer, originals, _VALUE_DESERIALIZER, is_key=False,
-                default=bytes_deserializer()))
+            for argument, config_key, is_key in ((key_deserializer, _KEY_DESERIALIZER, True),
+                                                 (value_deserializer, _VALUE_DESERIALIZER,
+                                                  False)):
+                if argument is not None:
+                    arguments.append(cast("Deserializer[Any]", resolve_serde(
+                        argument, originals, config_key, is_key=is_key,
+                        default=bytes_deserializer())))
+                else:
+                    _parse_class_key(originals, config_key)
             handle, error = _lib.Consumer_KafkaConsumer_new(native)
         except BaseException:
-            close_if_defined(key)
-            if value is not None:
-                close_if_defined(value)
+            for argument in arguments:
+                close_if_defined(argument)
             raise
         if error:
-            close_if_defined(key)
-            close_if_defined(value)
+            for argument in arguments:
+                close_if_defined(argument)
             raise from_ffi_error(error)
+        key: Deserializer[Any] | None = None
+        try:
+            serde_configs = dict(originals)
+            serde_configs[_CLIENT_ID] = _lib.Consumer_client_id(handle)
+            key = cast("Deserializer[Any]", resolve_serde(
+                key_deserializer, serde_configs, _KEY_DESERIALIZER, is_key=True,
+                default=bytes_deserializer()))
+            value = cast("Deserializer[Any]", resolve_serde(
+                value_deserializer, serde_configs, _VALUE_DESERIALIZER, is_key=False,
+                default=bytes_deserializer()))
+        except BaseException:
+            # The key deserializer built or given, and a given value one (one
+            # the config route builds is built last, so nothing fails after it).
+            for built in (key if key is not None else key_deserializer, value_deserializer):
+                if built is not None:
+                    close_if_defined(built)
+            _lib.Consumer_destroy(handle)
+            raise
         self._key_deserializer = key
         self._value_deserializer = value
         self._h = handle
@@ -503,6 +617,9 @@ class _ConsumerState:
                     return False
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             if any(user != thread for user in self._use_threads):
+                # A call left on a closed event loop does not hold the consumer.
+                self._release_abandoned()
+            if any(user != thread for user in self._use_threads):
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             self._state = _CLOSING
             self._closing_thread = thread
@@ -523,7 +640,10 @@ class _ConsumerState:
             self._state = _CLOSED
             self._release_abandoned()
             while self._uses:
-                self._lifecycle.wait()
+                # An awaiting call whose loop closes while this waits can never
+                # end its use: look for one again at each short wait.
+                self._lifecycle.wait(_ABANDONED_RECHECK_S)
+                self._release_abandoned()
             handle, self._h = self._h, 0
             reentrant, self._reentrant_handle = self._reentrant_handle, 0
         # What is left for an event loop that has closed is freed.
@@ -537,16 +657,40 @@ class _ConsumerState:
         close_if_defined(self._key_deserializer)
         close_if_defined(self._value_deserializer)
 
-    def _release_abandoned(self) -> None:
+    def _release_abandoned(self) -> bool:
         """End the use of every awaiting call whose event loop has closed: its
         task can never resume, so its use would never end and ``close()`` would
         wait for it for good. Its result is freed through ``_undelivered``, or
         on arrival if it has not arrived. While its native call still runs, the
         core refuses a close (``ConcurrentModificationError``), so the handle is
-        not freed under it."""
+        not freed under it.
+
+        A coroutine callback deferred to a task on such a loop (``_unacked``)
+        can never report either, and the core waits for its report before it
+        completes the call that delivered it, refusing ``close()`` meanwhile:
+        it is reported failed with ``CancelledError``, as ``asyncio.run``'s
+        shutdown would have cancelled its task.
+
+        Called by the guard of every call when another thread holds a use
+        (``_Use``), by every awaiting call, by ``close()`` before it begins and
+        while it waits for the uses in flight. Whether it reported a callback."""
         for waiter, use in list(self._async_waiters.items()):
             if waiter[0].is_closed() and self._async_waiters.pop(waiter, None) is use:
                 use.release()
+        # Its task never ends either: the calls on other loops must not wait
+        # for it (_wait_on_loop).
+        for task in [t for t in self._listener_tasks if t.get_loop().is_closed()]:
+            self._listener_tasks.discard(task)
+        reported = False
+        for callback_id, loop in list(self._unacked.items()):
+            if loop.is_closed() and self._unacked.pop(callback_id, None) is loop:
+                with self._lifecycle:
+                    if self._h:
+                        _lib.Consumer__set_callback_result(
+                            self._h, callback_id,
+                            asyncio.CancelledError("the event loop awaiting the callback closed"))
+                        reported = True
+        return reported
 
     # ---- callbacks: the caller-thread window ------------------------------
     def _in_callback(self) -> bool:
@@ -1256,9 +1400,10 @@ class _ConsumerState:
         return self._void_spec(_lib.Consumer_seek_cb, partition.topic(),
                                partition.partition(), offset)
 
-    def _commit_spec(self, offsets: Any) -> tuple[Any, Any, Any, bool]:
+    def _commit_spec(self, offsets: Any, timeout_ms: int = _NO_TIMEOUT
+                     ) -> tuple[Any, Any, Any, bool]:
         spec = None if offsets is None else offsets_to_spec(offsets)
-        return self._void_spec(_lib.Consumer_commit_sync_cb, spec, _NO_TIMEOUT, wakeable=True)
+        return self._void_spec(_lib.Consumer_commit_sync_cb, spec, timeout_ms, wakeable=True)
 
     def _commit_nowait_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any, bool]:
         # Not wakeable: Java's commitAsync waits for its offsets through
@@ -1266,11 +1411,13 @@ class _ConsumerState:
         # (AsyncKafkaConsumer.java:1126-1140), so it never throws WakeupException.
         return self._void_spec(_lib.Consumer_commit_async_cb, spec, adapter)
 
-    def _position_spec(self, partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
+    def _position_spec(self, partition: TopicPartition, timeout_ms: int = _NO_TIMEOUT
+                       ) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_position_cb, int, partition.topic(),
-                                partition.partition(), _NO_TIMEOUT, wakeable=True)
+                                partition.partition(), timeout_ms, wakeable=True)
 
-    def _committed_spec(self, partitions: list[TopicPartition]) -> tuple[Any, Any, Any, bool]:
+    def _committed_spec(self, partitions: list[TopicPartition], timeout_ms: int = _NO_TIMEOUT
+                        ) -> tuple[Any, Any, Any, bool]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndMetadata | None]:
             result = to_offset_map(raw or {})
             # Java maps a partition without a committed offset to null.
@@ -1279,10 +1426,10 @@ class _ConsumerState:
             return result
 
         return self._value_spec(_lib.Consumer_committed_cb, convert, tp_to_spec(partitions),
-                                _NO_TIMEOUT, wakeable=True)
+                                timeout_ms, wakeable=True)
 
-    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int]
-                                ) -> tuple[Any, Any, Any, bool]:
+    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int],
+                                timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndTimestamp | None]:
             result = to_offset_and_timestamp_map(raw or {})
             # Java maps a partition without an offset for its timestamp to null.
@@ -1291,21 +1438,22 @@ class _ConsumerState:
             return result
 
         return self._value_spec(_lib.Consumer_offsets_for_times_cb, convert,
-                                timestamps_to_spec(timestamps_to_search), _NO_TIMEOUT)
+                                timestamps_to_spec(timestamps_to_search), timeout_ms)
 
-    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition]
-                           ) -> tuple[Any, Any, Any, bool]:
+    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition],
+                           timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(fn, lambda raw: to_long_map(raw or {}), tp_to_spec(partitions),
-                                _NO_TIMEOUT)
+                                timeout_ms)
 
-    def _partitions_for_spec(self, topic: str) -> tuple[Any, Any, Any, bool]:
+    def _partitions_for_spec(self, topic: str, timeout_ms: int = _NO_TIMEOUT
+                             ) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_partitions_for_cb,
-                                lambda raw: to_partition_info_list(raw or []), topic, _NO_TIMEOUT,
+                                lambda raw: to_partition_info_list(raw or []), topic, timeout_ms,
                                 wakeable=True)
 
-    def _list_topics_spec(self) -> tuple[Any, Any, Any, bool]:
+    def _list_topics_spec(self, timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_list_topics_cb,
-                                lambda raw: to_topics_map(raw or {}), _NO_TIMEOUT, wakeable=True)
+                                lambda raw: to_topics_map(raw or {}), timeout_ms, wakeable=True)
 
     def _close_spec(self, timeout_ms: int, operation_code: int) -> tuple[Any, Any, Any, bool]:
         def resolve(payload: tuple[Any, ...]) -> None:
@@ -1367,6 +1515,36 @@ class _ConsumerState:
                 raise IllegalArgumentError(
                     message="Topic partitions collection to assign to cannot be null")
         return blank_null_topic_partitions(partitions)
+
+    def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
+                    group: bool = False, handle_timed: bool = False) -> int:
+        """``overload_timeout_ms`` for a ``Duration`` overload, in Java's order
+        (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
+        Order); ``_NO_TIMEOUT`` when ``timeout`` is not given.
+
+        The closed check comes first. Inside a callback, an overload whose
+        ``ConsumerHandle`` form has no timeout (every one but ``position``,
+        ``handle_timed``) is refused with ``ConcurrentModificationError``, as
+        ``partitions_for`` and ``list_topics`` are refused without one
+        (``_refuse_inside_callback``) *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*. Then, inside one use of
+        the handle, as Java checks the timeout after ``acquireAndEnsureOpen()``:
+        another thread inside the consumer raises
+        ``ConcurrentModificationError``; for a negative timeout, a consumer
+        without a ``group.id`` raises ``InvalidGroupIdError`` where Java's body
+        checks it before the timeout (``group``: ``commitSync``, ``committed``),
+        then the negative timeout ``IllegalArgumentError``."""
+        if timeout is None:
+            return _NO_TIMEOUT
+        self._check_open()
+        if not handle_timed and self._in_callback():
+            with self._use():
+                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+        with self._use():
+            millis = _duration_millis(timeout)
+            if millis < 0 and group and not self._group_id_defined:
+                raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
+            return overload_timeout_ms(timeout, timer=timer)
 
     def _check_not_null(self, op: str, value: object) -> None:
         """Java's null check of ``op``'s argument (``_NULL_ARGUMENT``), after
@@ -1457,7 +1635,13 @@ class _ConsumerState:
         """Run ``op`` through the guard-free ConsumerHandle. Its plain forms
         are called here, inside the drain that runs the callback: they wait on
         the consumer's background task, which keeps running while a callback
-        is pending (``consumer-threading.md`` §31)."""
+        is pending (``consumer-threading.md`` §31).
+
+        Of the ``Duration`` overloads the handle has only ``position``'s
+        (``kafka_consumer_ConsumerHandle_position_with_timeout``); the others
+        are refused inside a callback when a ``timeout`` is given
+        (``_timeout_ms``), as ``partitions_for`` and ``list_topics``, which
+        have no handle form, are refused."""
         handle = self._handle()
         if op == "commit":
             (offsets,) = args
@@ -1485,12 +1669,12 @@ class _ConsumerState:
             raise_if_error(getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions)))
             return None
         if op == "position":
-            (partition,) = args
+            partition, timeout_ms = args
             position, error = _lib.ConsumerHandle_position(
-                handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
+                handle, partition.topic(), partition.partition(), timeout_ms)
             while self._own_wake_raised(error):
                 position, error = _lib.ConsumerHandle_position(
-                    handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
+                    handle, partition.topic(), partition.partition(), timeout_ms)
             raise_if_error(error)
             return int(position)
         if op == "committed":

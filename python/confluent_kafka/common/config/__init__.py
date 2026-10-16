@@ -14,14 +14,16 @@
 
 """``confluent_kafka.common.config``: Java's ``org.apache.kafka.common.config``.
 
-It holds ``ConfigError`` (Java's ``ConfigException``). The config classes
-themselves are not translated: their keys are the keys of ``configs``
+It holds ``ConfigResource`` and ``ConfigError`` (Java's ``ConfigException``).
+The config classes are not translated: their keys are the keys of ``configs``
 (CLAUDE.md, Python Binding Conventions, Scope).
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .config_resource import ConfigResource as ConfigResource
+
+__all__: list[str] = ["ConfigResource"]
 
 # BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
 from .config_error import ConfigError as ConfigError

@@ -99,20 +99,21 @@ import os
 import signal
 import threading
 import time
-from concurrent.futures import Future
 from types import FrameType
 from typing import Any
 
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
 from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import KafkaProducer, ProducerRecord, RecordMetadata
+
+from .producer_futures import failure
 
 INIT_TXN_TIMEOUT_MSG = ("InitTransactions timed out - did not complete coordinator discovery or "
                         "receive the InitProducerId response within max.block.ms.")
@@ -207,7 +208,7 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
                              value_serializer=string_serializer())
     entered = threading.Event()
     release = threading.Event()
-    futures: list[Future[RecordMetadata]] = []
+    futures: list[KafkaFuture[RecordMetadata]] = []
 
     def callback(md: RecordMetadata, e: Exception | None) -> None:
         entered.set()
@@ -252,7 +253,7 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     assert 0.4 <= elapsed < 10, elapsed
     # Closed properly: the record failed, and the producer is closed.
     (future,) = futures
-    assert isinstance(future.exception(timeout=0), KafkaTimeoutError)
+    assert isinstance(failure(future, 0), KafkaTimeoutError)
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"

@@ -32,14 +32,13 @@ import asyncio
 import threading
 import time
 import uuid
-from concurrent.futures import Future
 from typing import Any
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import KafkaConsumer
@@ -47,6 +46,7 @@ from confluent_kafka.producer import (
     AsyncKafkaProducer, KafkaProducer, ProducerRecord, RecordMetadata,
 )
 
+from ..unit.producer_futures import async_failure, failure
 from .conftest import KAFKA_BIN, create_topic
 
 
@@ -177,7 +177,7 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="inside"),
                                callback=_recorder(calls, "inside"))
         producer.commit_transaction()
-        offset = future.result(timeout=30).offset()
+        offset = future.get(timeout=30).offset()
         assert calls == _callbacks_outside_then_inside(offset)
     finally:
         producer.close(timeout=0)
@@ -210,7 +210,7 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
                 record=ProducerRecord(topic=topic, key="key", value="inside"),
                 callback=_recorder(calls, "inside"))
             await producer.commit_transaction()
-            offset = (await asyncio.wait_for(future, 30)).offset()
+            offset = (await future.get(timeout=30)).offset()
             assert calls == _callbacks_outside_then_inside(offset)
             return offset
         finally:
@@ -279,7 +279,7 @@ def test_an_oversized_record_fails_with_record_too_large(
         future = producer.send(record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
                                callback=lambda metadata, exception: calls.append(
                                    (metadata, exception)))
-        error = future.exception(timeout=30)
+        error = failure(future, 30)
     finally:
         producer.close()
     assert error is not None
@@ -299,8 +299,7 @@ def test_an_oversized_async_record_fails_with_record_too_large(
             future = await producer.send(
                 record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
                 callback=lambda metadata, exception: calls.append((metadata, exception)))
-            await asyncio.wait((future,), timeout=30)
-            return future.exception()
+            return await async_failure(future, 30)
         finally:
             await producer.close()
 
@@ -341,7 +340,7 @@ def test_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_recor
         assert time.monotonic() - start < 5
         assert str(err.value) == _invalid_begin(configs["transactional.id"])
         producer.commit_transaction()
-        offset = future.result(timeout=30).offset()
+        offset = future.get(timeout=30).offset()
     finally:
         producer.close(timeout=0)
     assert _committed(kafka_broker, topic) == [(offset, "key", "value")]
@@ -367,7 +366,7 @@ def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its
             assert time.monotonic() - start < 5
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
             await producer.commit_transaction()
-            return (await asyncio.wait_for(future, 30)).offset()
+            return (await future.get(timeout=30)).offset()
         finally:
             await producer.close(timeout=0)
 
@@ -409,7 +408,7 @@ def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
     try:
         future = producer.send(record=ProducerRecord(topic=topic, partition=0, key=b"k",
                                                      value=b"v", headers=HEADERS))
-        assert future.result(timeout=30).offset() == 0
+        assert future.get(timeout=30).offset() == 0
     finally:
         producer.close()
     assert _consumed_headers(kafka_broker, topic) == HEADERS
@@ -424,7 +423,7 @@ def test_async_send_delivers_the_record_headers(kafka_broker: Any) -> None:
         try:
             future = await producer.send(record=ProducerRecord(
                 topic=topic, partition=0, key=b"k", value=b"v", headers=HEADERS))
-            assert (await asyncio.wait_for(future, 30)).offset() == 0
+            assert (await future.get(timeout=30)).offset() == 0
         finally:
             await producer.close()
 
@@ -462,11 +461,11 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
             commit = asyncio.ensure_future(producer.commit_transaction())
             await asyncio.wait_for(started.wait(), 60)
             await asyncio.sleep(0.5)
-            assert not commit.done() and not future.done() and finished == []
+            assert not commit.done() and not future.is_done() and finished == []
             release.set()
             await asyncio.wait_for(commit, 60)
             assert finished == [True]
-            return (await asyncio.wait_for(future, 30)).offset()
+            return (await future.get(timeout=30)).offset()
         finally:
             await producer.close(timeout=0)
 
@@ -558,10 +557,10 @@ def test_a_send_with_cached_metadata_is_taken_on_the_calling_thread(
     producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
     try:
         first = producer.send(record=_record(topic, 0, b"a"))
-        assert first.result(timeout=30).offset() == 0
+        assert first.get(timeout=30).offset() == 0
         second = producer.send(record=_record(topic, 0, b"b"))
         assert handovers == ["queued", "inline"]
-        assert second.result(timeout=30).offset() == 1
+        assert second.get(timeout=30).offset() == 1
     finally:
         producer.close()
 
@@ -578,10 +577,10 @@ def test_an_async_send_with_cached_metadata_is_taken_on_the_calling_thread(
             configs={"bootstrap.servers": kafka_broker.external_bootstrap})
         try:
             first = await producer.send(record=_record(topic, 0, b"a"))
-            assert (await asyncio.wait_for(first, 30)).offset() == 0
+            assert (await first.get(timeout=30)).offset() == 0
             second = await producer.send(record=_record(topic, 0, b"b"))
             assert handovers == ["queued", "inline"]
-            assert (await asyncio.wait_for(second, 30)).offset() == 1
+            assert (await second.get(timeout=30)).offset() == 1
         finally:
             await producer.close()
 
@@ -618,9 +617,9 @@ def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread
         # With the topic's metadata cached, a record to partition 0 is taken
         # at once (the test above).
         warm_up = producer.send(record=_record(topic, 0, b"warm-up"))
-        assert warm_up.result(timeout=30).offset() == 0
+        assert warm_up.get(timeout=30).offset() == 0
         tried.clear()
-        firsts: list[Future[RecordMetadata]] = []
+        firsts: list[KafkaFuture[RecordMetadata]] = []
         waiting = threading.Thread(
             target=lambda: firsts.append(producer.send(record=_record(topic, 1, b"a"))))
         waiting.start()
@@ -628,14 +627,14 @@ def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread
         second = producer.send(record=_record(topic, 0, b"b"))
         # The second was taken inside send(); the first is not handed over yet.
         assert handovers == ["queued", "inline"]
-        assert second.result(timeout=30).offset() == 1
+        assert second.get(timeout=30).offset() == 1
         assert _records_of(kafka_broker, topic, 0, from_offset=1, window=3.0) == [(1, b"b")]
         assert waiting.is_alive(), "the first send() still waits for its partition"
         _add_partitions(kafka_broker, topic, 2)
         waiting.join(60)
         assert not waiting.is_alive()
         (first,) = firsts
-        assert first.result(timeout=60).partition() == 1
+        assert first.get(timeout=60).partition() == 1
         assert handovers == ["queued", "inline", "queued"]
     finally:
         producer.close()

@@ -41,6 +41,10 @@
 //! admin.py's inner `None`), and
 //! [`delete_consumer_group_offsets_on_inactive_group`] is what observes the
 //! present → absent transition end to end.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;

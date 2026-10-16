@@ -26,8 +26,10 @@ The listener runs on the caller's thread, inside the call that delivers it
 and the rebalance does not advance until it returns; it may call back into its
 consumer (``commit()``, ``seek()``, ``position()``, …). On the async consumers a
 method may be ``async def``: it is awaited on the event loop (Threads and
-callbacks); its calls back into the consumer block the loop while they run (the
-core's reentrant ``ConsumerHandle`` has no ``_async`` forms).
+callbacks); its calls back into the consumer block the loop while they run (a call
+made from inside a listener goes through the ``ConsumerHandle`` and waits on its blocking
+form, because the listener runs inside the consumer's own waiting call, which cannot drain
+a queued completion meanwhile).
 """
 
 from __future__ import annotations

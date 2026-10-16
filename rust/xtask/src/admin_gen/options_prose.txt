@@ -1,0 +1,203 @@
+# Docstring text the generator does not derive from Javadoc (`cargo xtask
+# generate-admin-options`; format in rust/xtask/src/admin_gen/mod.rs, `Prose`).
+# `module`: the module docstring after its title; `class` / `method <name>`: the
+# docstring literal, unindented. A `*` block applies to every class without its own.
+=== * method timeout_ms
+"""With ``timeout_ms``: set the timeout in milliseconds for this operation or
+``None`` if the default api timeout for the AdminClient should be used, and
+return this object. Without: the timeout in milliseconds, or ``None``."""
+=== AbstractOptions module
+Java's ``abstract`` class is a base class whose construction raises ``TypeError``;
+it gets no keyword constructor, and its subclasses construct as Java's do (CLAUDE.md,
+Python Binding Conventions, Class family). Its type parameter
+``T extends AbstractOptions`` only stands for the class itself, so the setter returns
+``typing.Self``. ``timeoutMs()`` and ``timeoutMs(Integer)`` share one name: one
+method, two stubs; its argument defaults to ``_args.UNSET``, so an explicit ``None``
+sets Java's ``null`` instead of reading (Signatures).
+"""
+=== AbstractOptions class
+"""The common APIs shared by the Options classes of the admin client commands.
+
+Java: ``org.apache.kafka.clients.admin.AbstractOptions`` (``abstract``).
+"""
+=== AbstractOptions method timeout_ms
+"""With ``timeout_ms``: set the timeout in milliseconds for this operation or
+``None`` if the default api timeout for the AdminClient should be used, and
+return this object.
+
+Without: the timeout in milliseconds for this operation or ``None`` if the
+default api timeout for the AdminClient should be used.
+"""
+=== CreateTopicsOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field, the parent's ``timeout_ms`` first, then ``validate_only`` and
+``retry_on_quota_violation`` in Java's field order (CLAUDE.md, Python Binding
+Conventions, Signatures). Each keyword given, ``None`` included, calls its setter; one
+left out leaves the field at Java's starting value. Java re-declares ``timeoutMs``
+(binary compatibility with 0.11) with its own return type; so does this class.
+"""
+=== DescribeTopicsOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field (CLAUDE.md, Python Binding Conventions, Signatures). Each setter shares its name
+with its getter: one method, two stubs, no argument reading and one argument setting.
+The arguments are not nullable, so their default is ``None`` ("not given": read).
+"""
+=== DescribeTopicsOptions method include_authorized_operations
+"""With ``include_authorized_operations``: set it and return this object.
+Without: whether to include the authorized operations."""
+=== DescribeTopicsOptions method partition_size_limit_per_response
+"""With ``partition_size_limit_per_response``: set the maximum number of
+partitions to be returned in a single response, and return this object.
+
+This option is only effective when using topic names (not topic IDs), and will
+not be effective if it is larger than the server-side configuration
+``max.request.partition.size.limit``.
+
+Without: the maximum number of partitions per response.
+"""
+=== DescribeFeaturesOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field (CLAUDE.md, Python Binding Conventions, Signatures). ``nodeId`` starts as
+``OptionalInt.empty()``, which has no value of the setter's type (``int``), so the stub
+writes ``node_id: int = ...``. The setter stores ``OptionalInt.of(nodeId)``, which is
+the ``int`` itself here, as ``OptionalInt`` is ``int | None`` (Types).
+"""
+=== DescribeFeaturesOptions method node_id
+"""With ``node_id``: set the node id to which the request should be sent, and
+return this object.
+
+Without: the node id to which the request should be sent. If the node id is
+empty (``None``), the request will be sent to the arbitrary controller/broker.
+"""
+=== ListGroupsOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field, named after the field, not the setter: ``group_states`` calls
+``in_group_states``, ``types`` calls ``with_types``, ``protocol_types`` calls
+``with_protocol_types`` (CLAUDE.md, Python Binding Conventions, Signatures). The
+setters store a changed value: ``null`` or empty becomes ``Set.of()``, anything else a
+``Set.copyOf`` copy. ``Set.copyOf``'s ``NullPointerException`` on a ``null`` element is an
+implicit dereference of the argument, not a check, so it is not translated.
+Java's sets are immutable, so the getters return a new ``set`` each call. The static
+factories are ``@staticmethod``\\ s.
+"""
+=== ListGroupsOptions method for_consumer_groups
+"""Only consumer groups will be returned by ``list_groups()``.
+
+This operation sets filters on group type and protocol type which select
+consumer groups."""
+=== ListGroupsOptions method for_share_groups
+"""Only share groups will be returned by ``list_groups()``.
+
+This operation sets a filter on group type which select share groups."""
+=== ListGroupsOptions method for_streams_groups
+"""Only streams groups will be returned by ``list_groups()``.
+
+This operation sets a filter on group type which select streams groups."""
+=== ListGroupsOptions method in_group_states
+"""If group_states is set, only groups in these states will be returned by
+``list_groups()``. Otherwise, all groups are returned.
+
+This operation is supported by brokers with version 2.6.0 or later."""
+=== ListGroupsOptions method with_protocol_types
+"""If protocol types is set, only groups of these protocol types will be
+returned by ``list_groups()``. Otherwise, all groups are returned."""
+=== ListGroupsOptions method with_types
+"""If types is set, only groups of these types will be returned by
+``list_groups()``. Otherwise, all groups are returned."""
+=== ListTopicsOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field (CLAUDE.md, Python Binding Conventions, Signatures). Java's ``equals`` /
+``hashCode`` / ``toString`` are ``__eq__`` / ``__hash__`` / ``__str__`` (Idiom
+translations); like Java's they read ``listInternal`` only, not ``timeoutMs``.
+"""
+=== ListTopicsOptions method list_internal
+"""Set whether we should list internal topics.
+
+:param list_internal: Whether we should list internal topics.
+:return: This ListTopicsOptions object.
+"""
+=== CreateDelegationTokenOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field (CLAUDE.md, Python Binding Conventions, Signatures). Two Java setters write
+``maxLifetimeMs``: ``maxLifetimeMs(long)`` and the ``@Deprecated``
+``maxlifeTimeMs(long)``; the keyword ``max_lifetime_ms`` calls the one named like the
+field, and the deprecated pair (setter and getter) is not generated (Class family).
+``owner()`` returns ``Optional.ofNullable(owner)``, so the field can hold ``null``:
+the setter's argument is nullable, and, as it shares its name with the getter,
+defaults to ``_args.UNSET`` so that ``owner(owner=None)`` sets ``null``.
+``renewers`` is not nullable (it starts as ``new LinkedList<>()``, Java has no null branch
+or Javadoc for it, and the admin client iterates it), so ``renewers()`` with no argument
+reads and ``None`` is "not given" (Signatures, Nullability).
+
+Not generated (deprecated): ``maxlifeTimeMs(long)``, ``maxlifeTimeMs()``.
+"""
+=== CreateDelegationTokenOptions method renewers
+"""With ``renewers``: set the renewers and return this object. Without: the
+renewers."""
+=== CreateDelegationTokenOptions method owner
+"""With ``owner``: set the owner (``None`` for none) and return this object.
+Without: the owner, or ``None``."""
+=== CreateDelegationTokenOptions method max_lifetime_ms
+"""With ``max_lifetime_ms``: set the maximum lifetime in milliseconds and return
+this object. Without: the maximum lifetime in milliseconds."""
+=== RemoveMembersFromConsumerGroupOptions module
+Java has a constructor that takes arguments, so the class keeps only Java's
+constructors, ``(members)`` and ``()``, as one keyword-only constructor; every
+combination is one of them, so there is no ``java_forms`` check (CLAUDE.md, Python
+Binding Conventions, Signatures). ``members=None`` is the same as leaving it out: the
+``()`` form, which removes all members. Java's setter ``reason(String)`` returns
+``void``, so ``reason(reason=…)`` returns ``None``; it shares its name with the getter,
+and its argument is nullable ("an optional reason"), so it defaults to ``_args.UNSET``.
+"""
+=== RemoveMembersFromConsumerGroupOptions method reason
+"""With ``reason``: sets an optional reason (returns ``None``, as Java's
+``void``). Without: the reason, or ``None``."""
+=== ListTransactionsOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field, named after the field (``filtered_states`` calls ``filter_states``, …) (CLAUDE.md,
+Python Binding Conventions, Signatures). Java's ``hashCode`` hashes the two set
+fields, so they are stored as ``frozenset``\\ s (hashable) and their getters return a new
+``set``. ``new HashSet<>(null)`` is an implicit dereference, not a check: a ``None``
+argument raises what ``frozenset(None)`` raises. Like Java, ``toString`` prints
+``timeoutMs`` but ``equals`` / ``hashCode`` leave it out.
+"""
+=== ListTransactionsOptions method filter_states
+"""Filter only the transactions that are in a specific set of states. If no filter
+is specified or if the passed set of states is empty, then transactions in all
+states will be returned.
+
+:param states: the set of states to filter by
+:return: this object
+"""
+=== ListTransactionsOptions method filtered_states
+"""Returns the set of states to be filtered or empty if no states have been
+specified (empty means that no states are filtered and all transactions will be
+returned)."""
+=== ListTransactionsOptions method filtered_producer_ids
+"""Returns the set of producerIds that are being filtered or empty if none have
+been specified (empty means that no producerIds are filtered and all transactions
+will be returned)."""
+=== ListTransactionsOptions method filtered_duration
+"""Returns the duration ms value being filtered (negative value means
+transactions are not filtered by duration)."""
+=== ListTransactionsOptions method filtered_transactional_id_pattern
+"""Returns transactional ID being filtered (empty means no transactional IDs are
+filtered and all transactions will be returned)."""
+=== DescribeProducersOptions module
+Java builds it with setters, so the constructor also takes one keyword per setter
+field (CLAUDE.md, Python Binding Conventions, Signatures); ``brokerId`` starts
+``OptionalInt.empty()``, so the stub writes ``broker_id: int = ...``. Java's
+``toString`` prints the ``OptionalInt`` as ``OptionalInt[5]`` / ``OptionalInt.empty``;
+``equals`` / ``hashCode`` read ``brokerId`` and ``timeoutMs``.
+"""
+=== DescribeProducersOptions method broker_id
+"""With ``broker_id``: set the broker id and return this object. Without: the
+broker id, or ``None`` when not set."""
+=== ListOffsetsOptions module
+Java has a constructor that takes an argument, so the class keeps only Java's
+constructors, ``()`` and ``(isolationLevel)``, as one keyword-only constructor
+(CLAUDE.md, Python Binding Conventions, Signatures). ``()`` calls
+``this(IsolationLevel.READ_UNCOMMITTED)``, a Java-given default, so ``isolation_level``
+defaults to that enum constant; every combination is a Java form, so there is no
+``java_forms`` check. ``isolationLevel`` is ``final``: there is no setter.
+"""

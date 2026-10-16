@@ -18,8 +18,10 @@
 // Used by:
 //   - the Rust MultilanguageAdmin client (under tests/common)
 //   - the Python gRPC servers (python/grpc_server.py, sync, driving
-//     admin.py AdminClient/MockAdminClient; grpc_server_async.py, asyncio,
-//     driving AsyncAdminClient/AsyncMockAdminClient)
+//     confluent_kafka.admin's KafkaAdminClient/MockAdminClient;
+//     grpc_server_async.py, asyncio, driving AsyncKafkaAdminClient/
+//     AsyncMockAdminClient), both through the admin facade in
+//     python/grpc_translate.py
 //   - the C++ gRPC server (c/grpc_server/server.cc), which drives the
 //     bare *sync* C entry points (kafka_admin_AdminClient_*)
 //
@@ -29,6 +31,11 @@
 // consumer_service.proto. Redeclaring any of them here would be a duplicate
 // symbol in the shared `confluent.kafka.test` package.
 //
+// The comments below that name `admin.py` and its helpers (`_acl_binding_rows`,
+// `NewTopic._to_spec`, …) describe the legacy Python admin binding this
+// contract was first written against. That binding is removed; the Python arm
+// now runs on `confluent_kafka.admin`.
+//
 // Naming convention: where an admin message would collide with one already in
 // the package (`ListTopicsResponse` and `TopicListing` are taken by the
 // consumer service), the admin message carries an `Admin` prefix.
@@ -36,8 +43,8 @@
 // Like the producer and consumer services, blocking calls are awaited
 // server-side: the unary RPC response IS the resolved result. Java's Admin
 // methods return `*Result` objects holding one `KafkaFuture` per key, but no
-// binding hands those futures across the language boundary — Python's
-// `_run_sync` returns an already-resolved dict and the C `_async` entry points
+// binding hands those futures across the language boundary — the Python
+// facade returns already-resolved data and the C `_async` entry points
 // fire their callback with a fully-built result struct. So there are no futures
 // and no streaming on the wire; per-key granularity is preserved by the
 // per-key result envelope below, not by per-key futures.
@@ -225,7 +232,8 @@ service AdminService {
   //     every backend composes the same way: `all()` first, then `users()` +
   //     `description(user)` when `all()` fails (`rust/tests/common/
   //     admin_backend.rs`, `c/grpc_server/server.cc`, and the Python
-  //     extension's `assemble_scram` behind admin.py, which returns
+  //     facade's `g_describe_user_scram_credentials` in
+  //     `python/grpc_translate.py`, which returns
   //     `{user: UserScramCredentialsDescription | KafkaError}`). It is
   //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
   //     a user to hang on, so [Listings] does not apply.

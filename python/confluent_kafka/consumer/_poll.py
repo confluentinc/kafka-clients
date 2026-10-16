@@ -19,7 +19,9 @@ The native ``_confluentkafka.ConsumerRecords`` batch owns the fetched bytes; its
 records hand out ``memoryview`` keys and values into it. This module runs the
 user's deserializers over those views on the caller's thread and builds the
 ``ConsumerRecords``; ``bytes_deserializer()`` copies (its choice),
-``memoryview_deserializer()`` borrows.
+``memoryview_deserializer()`` borrows. A null key or value (a ``None`` view) is
+not passed to its deserializer: the record's field is ``None``, as Java's
+``CompletedFetch.parseRecord`` leaves it (Serialization).
 
 A failing deserializer ends the batch where Java's ``FetchCollector`` ends it:
 the records deserialized before the failing one are returned, and the
@@ -155,12 +157,17 @@ def deserialize_batch(
         value_buffer: memoryview | None = nr.value
         headers = nr.headers
         error: RecordDeserializationError | None = None
-        try:
-            key = key_deserializer(topic, key_buffer, headers)
-        except Exception as exc:  # noqa: BLE001 - wrapped as Java does
-            error = _deserialization_error(
-                origin.KEY, tp, nr, key_buffer, value_buffer, headers, exc)
-        if error is None:
+        # Java's CompletedFetch.parseRecord: `keyBytes == null ? null :
+        # deserialize(...)`, and the same for the value.
+        key: object = None
+        value: object = None
+        if key_buffer is not None:
+            try:
+                key = key_deserializer(topic, key_buffer, headers)
+            except Exception as exc:  # noqa: BLE001 - wrapped as Java does
+                error = _deserialization_error(
+                    origin.KEY, tp, nr, key_buffer, value_buffer, headers, exc)
+        if error is None and value_buffer is not None:
             try:
                 value = value_deserializer(topic, value_buffer, headers)
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does

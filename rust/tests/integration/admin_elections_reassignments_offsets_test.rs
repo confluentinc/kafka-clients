@@ -32,6 +32,10 @@
 //! With only `integration-tests` enabled the `__rust` arm is the whole
 //! expansion, and it drives the same production `Admin` trait against the same
 //! broker as the single-backend tests these scenarios were converted from.
+//!
+//! References below to `admin.py` (and `python/test/unit/test_admin.py`) name the
+//! legacy Python admin binding and its tests, which are removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

@@ -1,0 +1,165 @@
+# Docstring text the generator does not derive from Javadoc (`cargo xtask
+# generate-admin-results`; format in rust/xtask/src/admin_gen/mod.rs, `Prose`).
+# `module`: the module docstring after its title; `class` / `method <name>` /
+# `nested <Class>`: the docstring literal, unindented.
+=== ListTopicsResult module
+Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
+builds it (CLAUDE.md, Python Binding Conventions, Class family). One future; Java's
+``listings()`` / ``names()`` are ``then_apply`` views of it (Futures). ``Map::values``
+is no ``Set``, so ``listings()`` yields a ``list``; ``Map::keySet`` yields a ``set``
+(Types).
+"""
+=== CreateTopicsResult module
+Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new`` builds
+it (CLAUDE.md, Python Binding Conventions, Class family). Its futures carry Java's
+public nested ``TopicMetadataAndConfig``, which no public signature reaches, so it is
+the private helper ``_TopicMetadataAndConfig`` (decision log, entry 6); the public
+methods are ``then_apply`` views of those futures (Futures). The package-private
+constant ``UNKNOWN`` is ``_UNKNOWN``. On a result the client builds
+(``_of_client``), the futures are the core's per-topic ``values()`` futures and
+``config`` / ``topic_id`` / ``num_partitions`` / ``replication_factor`` return the
+core's own future of the topic, which fails with ``IllegalArgumentError`` for a topic
+that was not part of the call, with no Python-side check. On a result built through
+``_new`` (the mock's), they call ``then_apply`` on ``futures.get(topic)`` as Java's
+do, which throws ``NullPointerException`` for a topic that was not part of the call;
+they raise ``NullPointerError`` the same way.
+"""
+=== DeleteConsumerGroupOffsetsResult module
+Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
+builds it (CLAUDE.md, Python Binding Conventions, Class family). Its methods make a new
+future completed from the stored future's ``when_complete``: Java's
+``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl`` (Futures). The stored
+map's values are Java's internal ``Errors``, carried as what ``Errors.exception()``
+gives (``None`` for ``NONE``; ``_internals``). The client's future is read from the
+core's per-partition futures (``_conversions.outcomes``), each partition's error kept
+as it stands, which the methods answer as Java's answer the map Java's future holds.
+"""
+=== DescribeTransactionsResult module
+Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
+builds it (CLAUDE.md, Python Binding Conventions, Class family). Its map is keyed by
+Java's internal ``CoordinatorKey``, the private helper ``_CoordinatorKey``
+(``_internals``); ``all()`` is ``allOf(...).thenApply(...)`` keyed by ``idValue``.
+"""
+=== ListTransactionsResult module
+Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
+builds it (CLAUDE.md, Python Binding Conventions, Class family). It holds a future of a
+map of futures (one per broker), both of the client's kind, so ``by_broker_id()`` is a
+future of a ``dict`` of futures of that kind. The methods make a new future completed
+from ``when_complete`` (Java's ``new KafkaFutureImpl<>()`` is the private
+``_KafkaFutureImpl``); ``all()`` is a ``then_apply`` of ``all_by_broker_id()``. Java builds the listings as ``List``\\ s, so a
+``Collection<TransactionListing>`` is a ``list`` (Types).
+"""
+=== ListOffsetsResult nested ListOffsetsResultInfo
+"""The offset, timestamp and leader epoch listed for one partition.
+
+Java: ``org.apache.kafka.clients.admin.ListOffsetsResult.ListOffsetsResultInfo``.
+"""
+=== DescribeClusterResult method controller
+"""Returns a future which yields the current controller node.
+
+When using ``bootstrap.servers``, the controller refer to a random broker. When
+using ``bootstrap.controllers``, it refers to the current voter leader.
+"""
+=== DeleteTopicsResult method topic_id_values
+"""Use when ``Admin.delete_topics()`` used a ``TopicIdCollection``: a map from
+topic IDs to futures which can be used to check the status of individual
+deletions if the request used topic IDs. Otherwise return ``None``."""
+=== DeleteTopicsResult method topic_name_values
+"""Use when ``Admin.delete_topics()`` used a ``TopicNameCollection``: a map from
+topic names to futures which can be used to check the status of individual
+deletions if the request used topic names. Otherwise return ``None``."""
+=== DeleteTopicsResult method all
+"""A future which succeeds only if all the topic deletions succeed."""
+=== CreateTopicsResult method config
+"""Returns a future that provides topic configs for the topic when the request
+completes.
+
+If broker version doesn't support replication factor in the response, it fails
+with ``UnsupportedVersionError``. If broker returned an error for topic configs,
+it fails with the appropriate error; for example ``TopicAuthorizationError`` if
+user does not have permission to describe topic configs. Note that the values
+for the type and documentation fields will be ``None``.
+"""
+=== CreateTopicsResult method topic_id
+"""Returns a future that provides topic ID for the topic when the request
+completes; it fails as ``config(topic=…)`` does."""
+=== CreateTopicsResult method num_partitions
+"""Returns a future that provides number of partitions in the topic when the
+request completes; it fails as ``config(topic=…)`` does."""
+=== CreateTopicsResult method replication_factor
+"""Returns a future that provides replication factor for the topic when the
+request completes; it fails as ``config(topic=…)`` does."""
+=== DeleteConsumerGroupOffsetsResult method partition_result
+"""Return a future which can be used to check the result for a given partition."""
+=== DescribeTransactionsResult method description
+"""Get the description of a specific transactional ID: a future which completes
+when the transaction description of a particular transactional ID is available.
+
+Raises ``IllegalArgumentError`` if the ``transactional_id`` was not included in
+the respective call to ``Admin.describe_transactions()``.
+"""
+=== DescribeTransactionsResult method all
+"""Get a future which returns a map of the transaction descriptions requested in
+the respective call to ``Admin.describe_transactions()``.
+
+If the description fails on any of the transactional IDs in the request, then
+this future will also fail.
+"""
+=== ListTransactionsResult method all
+"""Get all transaction listings. If any of the underlying requests fail, then the
+future returned from this method will also fail with the first encountered error.
+
+The future completes when all transaction listings are available and fails after
+any non-retriable error.
+"""
+=== ListTransactionsResult method by_broker_id
+"""Get a future which returns a map containing the underlying listing future for
+each broker in the cluster. This is useful, for example, if a partial listing of
+transactions is sufficient, or if you want more granular error details.
+
+The top-level future may fail if the admin client is unable to lookup the
+available brokers in the cluster; the futures in the map complete individually.
+"""
+=== ListTransactionsResult method all_by_broker_id
+"""Get all transaction listings in a map which is keyed by the ID of respective
+broker that is currently managing them. If any of the underlying requests fail,
+then the future returned from this method will also fail with the first
+encountered error.
+
+This future completes when all transaction listings are available and fails
+after any non-retriable error.
+"""
+=== DeleteConsumerGroupsResult class
+"""The result of the ``Admin.delete_consumer_groups()`` call.
+
+Java: ``org.apache.kafka.clients.admin.DeleteConsumerGroupsResult``.
+"""
+=== DescribeProducersResult nested PartitionProducerState
+"""The active producers of one partition.
+
+Java: ``org.apache.kafka.clients.admin.DescribeProducersResult.PartitionProducerState``.
+"""
+=== RenewDelegationTokenResult class
+"""The result of the ``Admin.renew_delegation_token()`` call.
+
+Java: ``org.apache.kafka.clients.admin.RenewDelegationTokenResult`` (whose Javadoc
+links ``expireDelegationToken`` by mistake).
+"""
+=== AlterReplicaLogDirsResult method values
+"""Return a map from ``TopicPartitionReplica`` to the future which holds the status of
+the individual replica movement.
+
+The future of a replica completes with ``None`` when its movement succeeded; else it
+fails with one of: ``ClusterAuthorizationError`` (CLUSTER_AUTHORIZATION_FAILED, 31),
+``InvalidTopicError`` (INVALID_TOPIC_EXCEPTION, 17), ``LogDirNotFoundError``
+(LOG_DIR_NOT_FOUND, 57), ``ReplicaNotAvailableError`` (REPLICA_NOT_AVAILABLE, 9),
+``KafkaStorageError`` (KAFKA_STORAGE_ERROR, 56), ``UnknownServerError``
+(UNKNOWN_SERVER_ERROR, -1).
+"""
+=== AlterReplicaLogDirsResult method all
+"""Return a future which succeeds if all the replica movements have succeeded; else
+it fails with an error described in ``values()``."""
+=== ElectLeadersResult method partitions
+"""Get a future for the topic partitions for which a leader election was attempted. If
+the election succeeded then the value for a topic partition is ``None``; otherwise the
+election failed and the value is the error."""
