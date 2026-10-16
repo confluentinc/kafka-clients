@@ -70,6 +70,22 @@ impl Type {
     }
 }
 
+/// Renders the Java constant name (`BROKER_LOGGER`, `UNKNOWN`, ...): Java's
+/// `ConfigResource.Type` does not override `toString()`, so `Enum.toString()`
+/// returns that name.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Type::Group => "GROUP",
+            Type::ClientMetrics => "CLIENT_METRICS",
+            Type::BrokerLogger => "BROKER_LOGGER",
+            Type::Broker => "BROKER",
+            Type::Topic => "TOPIC",
+            Type::Unknown => "UNKNOWN",
+        })
+    }
+}
+
 /// A class representing resources that have configs.
 ///
 /// Corresponds to `org.apache.kafka.common.config.ConfigResource`.
@@ -143,9 +159,44 @@ mod tests {
         assert_eq!(Type::Unknown.id(), 0);
     }
 
+    /// New test, no Java original: every `Type` renders its Java constant name,
+    /// as Java's `Enum.toString()` does (`ConfigResource.java:38-44`).
+    #[test]
+    fn type_display_matches_java_constant_names() {
+        for (resource_type, java) in [
+            (Type::Group, "GROUP"),
+            (Type::ClientMetrics, "CLIENT_METRICS"),
+            (Type::BrokerLogger, "BROKER_LOGGER"),
+            (Type::Broker, "BROKER"),
+            (Type::Topic, "TOPIC"),
+            (Type::Unknown, "UNKNOWN"),
+        ] {
+            assert_eq!(resource_type.to_string(), java);
+        }
+    }
+
     #[test]
     fn for_id_unknown_falls_back() {
         assert_eq!(Type::for_id(99), Type::Unknown);
+    }
+
+    /// Translated from `ConfigResourceTest.shouldGetTypeFromId`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResourceTest#shouldGetTypeFromId")]
+    fn should_get_type_from_id() {
+        assert_eq!(Type::Topic, Type::for_id(2));
+        assert_eq!(Type::Broker, Type::for_id(4));
+        assert_eq!(Type::ClientMetrics, Type::for_id(16));
+        assert_eq!(Type::Group, Type::for_id(32));
+    }
+
+    /// Translated from `ConfigResourceTest.shouldReturnUnknownForUnknownCode`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResourceTest#shouldReturnUnknownForUnknownCode")]
+    fn should_return_unknown_for_unknown_code() {
+        assert_eq!(Type::Unknown, Type::for_id(-1));
+        assert_eq!(Type::Unknown, Type::for_id(0));
+        assert_eq!(Type::Unknown, Type::for_id(1));
     }
 
     #[test]

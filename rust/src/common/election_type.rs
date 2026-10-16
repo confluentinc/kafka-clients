@@ -82,9 +82,30 @@ impl ElectionType {
     }
 }
 
+/// Renders the Java constant name (`PREFERRED`, `UNCLEAN`): Java's
+/// `ElectionType` does not override `toString()`, so `Enum.toString()` returns
+/// the constant name, as `Enum.name()` does.
+impl std::fmt::Display for ElectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// New test, no Java original: every `ElectionType` renders its Java
+    /// constant name, as Java's `Enum.toString()` does (`ElectionType.java:30`).
+    #[test]
+    fn display_matches_java_constant_names() {
+        for (election_type, java) in [
+            (ElectionType::Preferred, "PREFERRED"),
+            (ElectionType::Unclean, "UNCLEAN"),
+        ] {
+            assert_eq!(election_type.to_string(), java);
+        }
+    }
 
     #[test]
     fn value_matches_java() {

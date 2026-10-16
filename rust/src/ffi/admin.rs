@@ -11073,9 +11073,9 @@ impl GroupListingInner {
     fn new(listing: &GroupListing) -> Self {
         Self {
             group_id_c: to_cstring(listing.group_id()),
-            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
+            group_type_c: listing.group_type().map(|t| to_cstring(&t.to_string())),
             protocol_c: to_cstring(listing.protocol()),
-            group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
+            group_state_c: listing.group_state().map(|s| to_cstring(&s.to_string())),
             is_simple_consumer_group: listing.is_simple_consumer_group(),
         }
     }
@@ -11673,8 +11673,8 @@ impl ConsumerGroupDescriptionInner {
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
             partition_assignor_c: to_cstring(description.partition_assignor()),
-            group_type_c: to_cstring(description.group_type().name()),
-            group_state_c: to_cstring(description.group_state().name()),
+            group_type_c: to_cstring(&description.group_type().to_string()),
+            group_state_c: to_cstring(&description.group_state().to_string()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
@@ -12043,7 +12043,7 @@ impl ClassicGroupDescriptionInner {
             protocol_data_c: to_cstring(description.protocol_data()),
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
-            state_c: to_cstring(description.state().name()),
+            state_c: to_cstring(&description.state().to_string()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
@@ -28213,6 +28213,48 @@ mod tests {
             assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported)));
             assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
+    }
+
+    /// The group type and state cross to C as Java's `toString()` text
+    /// (`PreparingRebalance`, `Consumer`), which the C header documents, not as
+    /// the constant names `GroupState::name()` and friends return
+    /// (`PREPARING_REBALANCE`). A two-word state tells the two apart.
+    #[test]
+    fn group_type_and_state_cross_as_java_to_string_text() {
+        let listing = GroupListingInner::new(&GroupListing::new(
+            "g",
+            Some(GroupType::Consumer),
+            "consumer",
+            Some(GroupState::PreparingRebalance),
+        ));
+        assert_eq!(opt_text(&listing.group_type_c), Some("Consumer"));
+        assert_eq!(opt_text(&listing.group_state_c), Some("PreparingRebalance"));
+
+        let consumer = ConsumerGroupDescriptionInner::new(&ConsumerGroupDescription::new(
+            "g",
+            false,
+            vec![],
+            "range",
+            GroupType::Classic,
+            GroupState::CompletingRebalance,
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(text(&consumer.group_type_c), "Classic");
+        assert_eq!(text(&consumer.group_state_c), "CompletingRebalance");
+
+        let classic = ClassicGroupDescriptionInner::new(&ClassicGroupDescription::new(
+            "cg",
+            "consumer",
+            "range",
+            vec![],
+            ClassicGroupState::PreparingRebalance,
+            None,
+            None,
+        ));
+        assert_eq!(text(&classic.state_c), "PreparingRebalance");
     }
 
     #[test]
