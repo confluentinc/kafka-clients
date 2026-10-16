@@ -193,6 +193,32 @@ impl Compression {
         }
     }
 
+    /// The size of the buffer a decompression stream is read through: Java's
+    /// `decompressionOutputSize()`, the intermediate buffer its
+    /// `ChunkedBytesStream` copies the codec's output into, 16 KiB for gzip and
+    /// zstd and 2 KiB for snappy and lz4 (`GzipCompression.java:80-83`,
+    /// `ZstdCompression.java:106-109`, `SnappyCompression.java:67-72`,
+    /// `Lz4Compression.java:67-72`). A reader gives it to the [`io::BufReader`]
+    /// it wraps [`Self::wrap_for_input`]'s reader in, that type standing in for
+    /// `ChunkedBytesStream`.
+    ///
+    /// # Errors
+    ///
+    /// No compression has no such buffer: Java's interface default throws
+    /// `UnsupportedOperationException` (`Compression.java:61-63`), which
+    /// `NoCompression` does not override.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#decompressionOutputSize")]
+    pub fn decompression_output_size(&self) -> Result<usize, Error> {
+        match self {
+            Self::None => Err(Error::unsupported_version(format!(
+                "Size of decompression buffer is not defined for this compression type={}",
+                self.compression_type().name()
+            ))),
+            Self::Gzip(_) | Self::Zstd(_) => Ok(16 * 1024),
+            Self::Snappy | Self::Lz4(_) => Ok(2 * 1024),
+        }
+    }
+
     /// Wrap a writer with a compressing output stream.
     ///
     /// The returned writer compresses data written to it. Call `finish()` on the

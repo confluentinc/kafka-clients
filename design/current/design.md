@@ -580,7 +580,12 @@ Receive-path zero-copy holds:
 - `CompletedFetch` owns the fetched bytes once.
 - The buffer is *moved*, never cloned, into a lazy `BatchCursor`
   (`completed_fetch.rs:250`).
-- Compressed batches are decompressed once per batch.
+- Compressed batches are decompressed a record at a time, each record into
+  a buffer of its own, as Java's `DefaultRecord.readFrom(InputStream, ...)`
+  reads it (`RecordStream` in `completed_fetch.rs`); the whole batch is
+  never decompressed at once. That buffer is the one per-record
+  allocation beyond the deserializer's output, and a record handed out
+  zero-copy pins only its own bytes.
 - The topic name is one `Arc<str>` per fetch (`topic_arc`, `:180`), cloned
   per record.
 - `Deserializer<T>` is a sync trait taking `&[u8]`

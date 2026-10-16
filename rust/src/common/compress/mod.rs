@@ -553,4 +553,23 @@ mod tests {
             assert_eq!(result, data, "Large data round-trip failed for {:?}", compression_type);
         }
     }
+
+    /// Java's `decompressionOutputSize()`: 16 KiB for gzip and zstd
+    /// (`GzipCompression.java:80-83`, `ZstdCompression.java:106-109`), 2 KiB
+    /// for snappy and lz4 (`SnappyCompression.java:67-72`,
+    /// `Lz4Compression.java:67-72`), and for no compression the interface
+    /// default's error (`Compression.java:61-63`).
+    #[test]
+    fn test_decompression_output_size_matches_java() {
+        assert_eq!(16 * 1024, Compression::gzip().build().decompression_output_size().unwrap());
+        assert_eq!(16 * 1024, Compression::zstd().build().decompression_output_size().unwrap());
+        assert_eq!(2 * 1024, Compression::snappy().build().decompression_output_size().unwrap());
+        assert_eq!(2 * 1024, Compression::lz4().build().decompression_output_size().unwrap());
+        let error = Compression::NONE.decompression_output_size().unwrap_err();
+        assert!(matches!(error, crate::common::Error::UnsupportedVersion(_)), "{error:?}");
+        assert_eq!(
+            "Size of decompression buffer is not defined for this compression type=none",
+            error.message()
+        );
+    }
 }
