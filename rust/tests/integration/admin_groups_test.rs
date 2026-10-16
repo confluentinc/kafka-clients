@@ -80,6 +80,10 @@
 //!     — a stable classic group with a joined member. That stays covered by the
 //!     unit tests in `src/consumer/internals/consumer_protocol.rs` and
 //!     `src/admin/internals/describe_classic_groups_handler.rs`.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;

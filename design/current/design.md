@@ -8,9 +8,8 @@ it stands. The dated, step-by-step record of how it got here lives in
 **Last verified against the tree:** 2026-09-27
 **Coverage:** Producer (including idempotence and transactions), Consumer
 (KIP-848) and AdminClient are all translated. The C FFI and the Python bindings
-cover all three: the `confluent_kafka` Python package covers the producer and
-the consumer, and the admin client has a separate, older module
-(`python/admin.py`).
+cover all three: the `confluent_kafka` Python package covers the producer, the
+consumer and the admin client (`confluent_kafka.admin`).
 
 > **Paths:** the repository has three top-level directories, `rust/`, `python/`
 > and `c/` (see [structure.md](structure.md#top-level)). Paths in this document
@@ -1285,10 +1284,18 @@ schedules; it never runs a callback.
     method is awaited there and reports through the extension's
     `Consumer__set_callback_result(h, callback_id, error)`, which passes a
     `NULL` result to the C function, the listener methods being void.
-- **Admin.** The sync `admin.py` clients wait through `SyncWaiter`
-  (`_sync_wait.py`) on `Admin_resolve_cb`: one pump thread per client drains
-  `Admin__execute_callbacks`, and each caller waits for its own completion in
-  100 ms slices.
+- **Futures and the admin client.** Every future the package hands out is a
+  `KafkaFuture` (sync clients) or `AsyncKafkaFuture` (async clients) in
+  `confluent_kafka.common`: over a core `kafka_common_KafkaFuture_t` through
+  the extension's future object (`is_done`, `get_cb`), or over Python state
+  for the mocks and the dependants (`then_apply`, `when_complete`, `all_of`).
+  `get()` only waits, in short slices, and raises `ExecutionError` with the
+  failure as its `__cause__`. An admin RPC returns its `*Result` at once, as
+  Java's; the Result's per-key futures are the core's, completed through
+  `get_cb` when the response arrives. The sync `KafkaAdminClient` has one
+  daemon pump thread that drains `Admin__execute_callbacks` when the client's
+  notify hook fires, so `then_apply` functions and `when_complete` actions run
+  there; `AsyncKafkaAdminClient` drains on its event loop.
 - **One drainer per client.** `<Client>__execute_callbacks` keeps the GIL from
   the first callback of a drain to the last, rather than releasing it after
   each callback and taking it again for the next. A second thread entering
@@ -1359,9 +1366,8 @@ Deviations recorded in the package's module docstrings:
   `common.requests`, so the Rust payload is crate-private and the C API has no
   accessor for them (CLAUDE.md §4).
 
-`admin.py` is the older admin binding. It is paused and outside the
-conventions, and keeps its flat `KafkaError` and positional value types through
-the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+The admin binding is `confluent_kafka.admin`, generated from the same
+conventions over the same FFI. `grpc_server.py`,
 `grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
 multilanguage tests, and `soak/` holds the long-running soak client.
 

@@ -25,9 +25,11 @@ the result of each operation -- are queued in the client's callback vector and
 run by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
 producer's completion thread, or the event loop of the async producer, which
 the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs
-a callback). Both families reuse the same entry points and differ only in the
-future type a completion resolves and where the user's callback runs (CLAUDE.md,
-Python Binding Conventions, Implementation over the FFI and Threads and
+a callback). Both families reuse the same entry points: a record's completion
+completes the same Python state (a ``_KafkaFutureImpl``), and they differ only
+in the future ``send()`` hands out over it (``KafkaFuture`` /
+``AsyncKafkaFuture``) and where the user's callback runs (CLAUDE.md, Python
+Binding Conventions, Futures, Implementation over the FFI and Threads and
 callbacks).
 
 Backpressure is Java's: ``send()`` returns only once its record is with the
@@ -52,14 +54,16 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future
-from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+# The slice waits live in the shared ``_wait`` module; re-exported for the producers.
+from confluent_kafka._wait import WAIT_SLICE_S as WAIT_SLICE_S
+from confluent_kafka._wait import result_sliced as result_sliced
+from confluent_kafka._wait import wait_sliced as wait_sliced
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.kafka_error import KafkaError
@@ -74,6 +78,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from confluent_kafka import Duration
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -117,10 +122,6 @@ def closed_while_sending() -> KafkaError:
 # ProducerConfig.MAX_BLOCK_MS_CONFIG and its default (60 s).
 _MAX_BLOCK_MS = "max.block.ms"
 _DEFAULT_MAX_BLOCK_MS = 60000
-
-# The slice a sync wait sleeps in, so Ctrl+C is seen promptly (CLAUDE.md,
-# Python Binding Conventions, Threads and callbacks).
-WAIT_SLICE_S = 0.1
 
 # The message of a wait from a delivery callback that ran out of max.block.ms:
 # the completion it waits for can only run on the thread the callback blocks.
@@ -230,64 +231,18 @@ def free_error(error: int) -> None:
         _lib.KafkaError_destroy(error)
 
 
-def wait_sliced(event: threading.Event, deadline: float | None = None,
-                on_interrupt: Callable[[], None] | None = None) -> bool:
-    """Wait for ``event`` in :data:`WAIT_SLICE_S` slices, up to ``deadline``
-    (``time.monotonic()``) when given; whether it was set.
-
-    A Ctrl+C (``KeyboardInterrupt``) does not end the wait: the operation goes
-    on, as the producer lets an operation finish, and the first interrupt is
-    raised once the wait is over (a second one meanwhile is dropped, as Java
-    keeps only the first interrupt). ``on_interrupt`` runs at the first one."""
-    interrupted: KeyboardInterrupt | None = None
-    try:
-        while True:
-            try:
-                while not event.wait(WAIT_SLICE_S):
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return False
-                return True
-            except KeyboardInterrupt as exc:
-                if interrupted is None:
-                    interrupted = exc
-                    if on_interrupt is not None:
-                        on_interrupt()
-    finally:
-        if interrupted is not None:
-            raise interrupted
-
-
-_T = TypeVar("_T")
-
-
-def result_sliced(future: Future[_T]) -> _T:
-    """``future.result()``, waited for as :func:`wait_sliced` waits: in
-    :data:`WAIT_SLICE_S` slices, a Ctrl+C letting the wait end and then raised
-    instead of the result."""
-    interrupted: KeyboardInterrupt | None = None
-    try:
-        while True:
-            try:
-                return future.result(WAIT_SLICE_S)
-            except FutureTimeoutError:
-                continue
-            except KeyboardInterrupt as exc:
-                if interrupted is None:
-                    interrupted = exc
-    finally:
-        if interrupted is not None:
-            raise interrupted
-
-
-def wait_futures(futures: list[Any]) -> None:
-    """Wait (as :func:`wait_sliced`) until every future of ``futures`` is done."""
+def wait_futures(futures: list[_KafkaFutureImpl[Any]]) -> None:
+    """Wait (as :func:`wait_sliced`) until every record future of ``futures``
+    (the Python state under each ``KafkaFuture`` a ``send()`` returned) is
+    done: the internal wait of ``flush()`` and ``commit_transaction()``, never
+    a public ``get()``."""
     if not futures:
         return
     all_done = threading.Event()
     lock = threading.Lock()
     remaining = len(futures)
 
-    def one_done(_future: Any) -> None:
+    def one_done(_future: _KafkaFutureImpl[Any]) -> None:
         nonlocal remaining
         with lock:
             remaining -= 1
@@ -296,7 +251,7 @@ def wait_futures(futures: list[Any]) -> None:
             all_done.set()
 
     for future in futures:
-        future.add_done_callback(one_done)
+        future._add_listener(one_done)
     wait_sliced(all_done)
 
 
@@ -409,7 +364,7 @@ class _ProducerState:
         self._uses = 0
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
-        self._futures: set[Any] = set()
+        self._futures: set[_KafkaFutureImpl[Any]] = set()
         # Bound once: every completion untracks its record's future with it.
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
@@ -564,7 +519,7 @@ class _ProducerState:
                                      headers)
         return native, topic, partition
 
-    def _track(self, future: Any) -> None:
+    def _track(self, future: _KafkaFutureImpl[Any]) -> None:
         """Track a sent record's future until its completion untracks it, right
         after completing it (``_discard_future``), so a flush() or
         commit_transaction() waits for the records sent before it. Untracking
@@ -572,10 +527,9 @@ class _ProducerState:
         loop a scheduled callback per record. A record can complete before
         ``send()`` gets here (on the sync producer's completion thread): its
         future is then already done, and untracked at once. The sync ``send()``
-        fast path does not call this: it checks its completion's own flag, as
-        ``concurrent.futures.Future.done()`` takes the future's lock."""
+        does not call this: it checks its completion's own flag."""
         self._futures.add(future)
-        if future.done():
+        if future.is_done():
             self._futures.discard(future)
 
     def _close_serializers(self) -> None:
