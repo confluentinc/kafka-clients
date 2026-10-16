@@ -349,6 +349,8 @@ from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import InvalidTopicError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 
+from .admin_futures import assert_future_throws
+
 UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 SHORT = 300
 LIST_GROUPS_FAILED = "Failed to find brokers to send ListGroups"
@@ -388,16 +390,14 @@ def test_invalid_topic_names_delete_topics() -> None:
     ``test_admin_client.py``). Java's ``null`` name is not a Java-typed call here."""
     with _admin() as admin:
         futures = admin.delete_topics(topics=[""]).topic_name_values() or {}
-        with pytest.raises(InvalidTopicError):
-            futures[""].result()
+        assert_future_throws(futures[""], InvalidTopicError)
 
 
 def test_invalid_topic_names_describe_topics() -> None:
     """``testInvalidTopicNames``, its ``describeTopics`` part."""
     with _admin() as admin:
         futures = admin.describe_topics(topic_names=[""]).topic_name_values() or {}
-        with pytest.raises(InvalidTopicError):
-            futures[""].result()
+        assert_future_throws(futures[""], InvalidTopicError)
 
 
 def test_describe_topics_timeout_when_no_broker_responds() -> None:
@@ -410,8 +410,7 @@ def test_describe_topics_timeout_when_no_broker_responds() -> None:
         result = admin.describe_topics(
             topic_names=["test-topic"], options=DescribeTopicsOptions(timeout_ms=200))
         future = (result.topic_name_values() or {})["test-topic"]
-        with pytest.raises(KafkaTimeoutError):
-            future.result(timeout=30)
+        assert_future_throws(future, KafkaTimeoutError, timeout=30)
         duration_ms = (time.monotonic() - start) * 1000
         assert 150 <= duration_ms < 30000
 

@@ -195,6 +195,8 @@ from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
 )
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 
+from .admin_futures import failure
+
 
 def admin(num_brokers: int = 3) -> MockAdminClient:
     return MockAdminClient.create().num_brokers(num_brokers=num_brokers).build()
@@ -204,11 +206,12 @@ def created(client: MockAdminClient, name: str, partitions: int = 1,
             replication_factor: int = 1) -> None:
     client.create_topics(new_topics=[NewTopic(
         name=name, num_partitions=partitions, replication_factor=replication_factor)]
-    ).all().result()
+    ).all().get()
 
 
 def error_of(future: Any) -> BaseException:
-    error: BaseException | None = future.exception()
+    """The error ``future.get()`` raises an ``ExecutionError`` from."""
+    error = failure(future)
     assert error is not None
     return error
 
@@ -220,9 +223,9 @@ def test_create_topics_with_configs() -> None:
     result = client.create_topics(new_topics=[NewTopic(
         name="configured", num_partitions=1, replication_factor=1
     ).configs(configs={"cleanup.policy": "compact"})])
-    result.all().result()
+    result.all().get()
     config = client.describe_configs(resources=[ConfigResource(
-        type=ConfigResource.Type.TOPIC, name="configured")]).all().result()
+        type=ConfigResource.Type.TOPIC, name="configured")]).all().get()
     (entry,) = next(iter(config.values())).entries()
     assert (entry.name(), entry.value()) == ("cleanup.policy", "compact")
     assert entry.is_sensitive() is False and entry.is_read_only() is False
@@ -234,8 +237,8 @@ def test_create_topics_broker_defaults() -> None:
     client = admin(2)
     result = client.create_topics(new_topics=[NewTopic(
         name="defaults", num_partitions=None, replication_factor=None)])
-    assert result.num_partitions(topic="defaults").result() == 1
-    assert result.replication_factor(topic="defaults").result() == 2
+    assert result.num_partitions(topic="defaults").get() == 1
+    assert result.replication_factor(topic="defaults").get() == 2
 
 
 def test_create_topics_validate_only_has_no_effect_on_the_mock() -> None:
@@ -244,8 +247,8 @@ def test_create_topics_validate_only_has_no_effect_on_the_mock() -> None:
     client = admin(1)
     client.create_topics(
         new_topics=[NewTopic(name="validated", num_partitions=1, replication_factor=1)],
-        options=CreateTopicsOptions().validate_only(validate_only=True)).all().result()
-    assert "validated" in client.list_topics().names().result()
+        options=CreateTopicsOptions().validate_only(validate_only=True)).all().get()
+    assert "validated" in client.list_topics().names().get()
 
 
 def test_create_topics_replicas_assignments_form() -> None:
@@ -254,15 +257,15 @@ def test_create_topics_replicas_assignments_form() -> None:
     client = admin(3)
     topic = NewTopic(name="assigned", replicas_assignments={0: [0, 1], 1: [1, 2]})
     result = client.create_topics(new_topics=[topic])
-    result.all().result()
-    assert result.num_partitions(topic="assigned").result() == 1
-    assert result.replication_factor(topic="assigned").result() == 3
+    result.all().get()
+    assert result.num_partitions(topic="assigned").get() == 1
+    assert result.replication_factor(topic="assigned").get() == 3
 
 
 def test_create_topics_empty_batch() -> None:
     result = admin(1).create_topics(new_topics=[])
     assert result.values() == {}
-    result.all().result()
+    result.all().get()
 
 
 # ---- listTopics ---------------------------------------------------------------
@@ -272,14 +275,14 @@ def test_list_topics_lists_listings_by_name() -> None:
     created(client, "beta")
     created(client, "alpha")
     listings = client.list_topics(
-        options=ListTopicsOptions().list_internal(list_internal=True)).listings().result()
+        options=ListTopicsOptions().list_internal(list_internal=True)).listings().get()
     assert {listing.name() for listing in listings} == {"alpha", "beta"}
     assert all(listing.is_internal() is False for listing in listings)
     assert all(listing.topic_id() for listing in listings)
 
 
 def test_list_topics_empty() -> None:
-    assert admin(1).list_topics().names().result() == set()
+    assert admin(1).list_topics().names().get() == set()
 
 
 def test_list_topics_call_failure_fails_the_one_future() -> None:
@@ -289,7 +292,7 @@ def test_list_topics_call_failure_fails_the_one_future() -> None:
     result = client.list_topics()
     assert isinstance(error_of(result.names()), KafkaTimeoutError)
     assert isinstance(error_of(result.listings()), KafkaTimeoutError)
-    assert client.list_topics().names().result() == set()
+    assert client.list_topics().names().get() == set()
 
 
 # ---- describeTopics / deleteTopics --------------------------------------------
@@ -304,7 +307,7 @@ def test_describe_topics_partial_failure() -> None:
     missing = error_of(values["missing"])
     assert isinstance(missing, UnknownTopicOrPartitionError)
     assert str(missing) == "Topic missing not found."
-    described = values["described"].result()
+    described = values["described"].get()
     assert described.name() == "described"
     assert described.is_internal() is False
     # Java's mock completes with an empty ISR and no authorized operations reported.
@@ -323,11 +326,11 @@ def test_describe_topics_partial_failure() -> None:
 def test_describe_topics_by_ids() -> None:
     client = admin(1)
     topic_id = client.create_topics(new_topics=[NewTopic(
-        name="by-id", num_partitions=1, replication_factor=1)]).topic_id(topic="by-id").result()
+        name="by-id", num_partitions=1, replication_factor=1)]).topic_id(topic="by-id").get()
     values = client.describe_topics(
         topics=TopicCollection.of_topic_ids(topics=[topic_id])).topic_id_values()
     assert values is not None and list(values) == [topic_id]
-    described = values[topic_id].result()
+    described = values[topic_id].get()
     assert described.name() == "by-id" and described.topic_id() == topic_id
 
 
@@ -338,11 +341,11 @@ def test_delete_topics_partial_failure() -> None:
         topics=TopicCollection.of_topic_names(topics=["doomed", "never-existed"])
     ).topic_name_values()
     assert values is not None
-    assert values["doomed"].result() is None
+    assert values["doomed"].get() is None
     missing = error_of(values["never-existed"])
     assert isinstance(missing, UnknownTopicOrPartitionError)
     assert str(missing) == "Topic never-existed does not exist."
-    assert client.list_topics().names().result() == set()
+    assert client.list_topics().names().get() == set()
 
 
 def test_create_existing_topic_is_that_topics_failure_only() -> None:
@@ -353,8 +356,8 @@ def test_create_existing_topic_is_that_topics_failure_only() -> None:
         NewTopic(name="fresh", num_partitions=2, replication_factor=1)])
     values = result.values()
     assert isinstance(error_of(values["existing"]), TopicExistsError)
-    assert values["fresh"].result() is None
-    assert result.num_partitions(topic="fresh").result() == 2
+    assert values["fresh"].get() is None
+    assert result.num_partitions(topic="fresh").get() == 2
 
 
 # ---- configs ------------------------------------------------------------------
@@ -366,9 +369,9 @@ def test_describe_configs_entry_fields_and_logger_resource() -> None:
     logger = ConfigResource(type=ConfigResource.Type.BROKER_LOGGER, name="0")
     client.incremental_alter_configs(configs={topic: [AlterConfigOp(
         config_entry=ConfigEntry(name="retention.ms", value="60000"),
-        operation_type=AlterConfigOp.OpType.SET)]}).all().result()
+        operation_type=AlterConfigOp.OpType.SET)]}).all().get()
     described = client.describe_configs(resources=[topic, logger]).values()
-    config = described[topic].result()
+    config = described[topic].get()
     entry = config.get(name="retention.ms")
     assert entry is not None and entry.value() == "60000"
     # Java's mock builds entries with new ConfigEntry(name, value): source and type
@@ -388,7 +391,7 @@ def test_describe_configs_entry_fields_and_logger_resource() -> None:
 def test_describe_configs_empty_batch() -> None:
     result = admin(1).describe_configs(resources=[])
     assert result.values() == {}
-    assert result.all().result() == {}
+    assert result.all().get() == {}
 
 
 def test_incremental_alter_configs_two_ops_on_one_resource() -> None:
@@ -401,13 +404,13 @@ def test_incremental_alter_configs_two_ops_on_one_resource() -> None:
         AlterConfigOp(config_entry=ConfigEntry(name="segment.ms", value="2000"),
                       operation_type=AlterConfigOp.OpType.SET)]})
     assert list(result.values()) == [resource]  # two ops, one result key
-    result.all().result()
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+    result.all().get()
+    config = client.describe_configs(resources=[resource]).values()[resource].get()
     assert {entry.name() for entry in config.entries()} == {"retention.ms", "segment.ms"}
     client.incremental_alter_configs(configs={resource: [AlterConfigOp(
         config_entry=ConfigEntry(name="retention.ms", value=None),
-        operation_type=AlterConfigOp.OpType.DELETE)]}).all().result()
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+        operation_type=AlterConfigOp.OpType.DELETE)]}).all().get()
+    config = client.describe_configs(resources=[resource]).values()[resource].get()
     assert {entry.name() for entry in config.entries()} == {"segment.ms"}
 
 
