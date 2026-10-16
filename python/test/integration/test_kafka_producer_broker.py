@@ -14,23 +14,28 @@
 
 """The producer against a broker, where Java's ``KafkaProducerTest`` scripts a
 ``MockClient`` the binding cannot inject: the errors ``KafkaProducer.doSend``
-rethrows out of ``send()`` (``KafkaProducer.java:1150-1162``) rather than
+rethrows out of ``send()`` (``KafkaProducer.java:1143-1155``) rather than
 giving to the callback and the future, which need the topic's metadata first
 (the record then stays in the accumulator, so its callback runs later, with
 the batch's outcome);
 
 the record size check, which runs after the metadata wait too
-(``KafkaProducer.java:1103-1105``); and an open transaction, which
-``begin_transaction()`` without a drain needs. Skips without Docker
-(``kafka_broker``)."""
+(``KafkaProducer.java:1103-1105``); an open transaction, which a second
+``begin_transaction()`` needs; and the non-blocking send, whose record taken on
+the calling thread needs the topic's metadata cached, and whose send waiting
+for a partition that appears later must hold back no other thread's record.
+Skips without Docker (``kafka_broker``)."""
 
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
+from concurrent.futures import Future
 from typing import Any
 
+import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
@@ -42,7 +47,7 @@ from confluent_kafka.producer import (
     AsyncKafkaProducer, KafkaProducer, ProducerRecord, RecordMetadata,
 )
 
-from .conftest import create_topic
+from .conftest import KAFKA_BIN, create_topic
 
 
 def _topic(broker: Any) -> str:
@@ -131,7 +136,7 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
 def _outside_then_inside(inside_offset: int) -> list[tuple[int, str, str]]:
     """What a read_committed consumer reads after the two sends below and the
     commit: both records. Java's doSend appends the record to the accumulator
-    before maybeAddPartition throws (KafkaProducer.java:1027-1039), and the
+    before maybeAddPartition throws (KafkaProducer.java:1110-1120), and the
     Sender holds the batch until its partition joins a transaction, so the send
     that raised is committed with the transaction, ahead of the one inside it."""
     return [(0, "key", "outside"), (inside_offset, "key", "inside")]
@@ -249,7 +254,7 @@ RECORD_TOO_LARGE = [
 
 def _assert_record_too_large(topic: str, calls: list[tuple[RecordMetadata, Exception | None]],
                              error: BaseException, message: str) -> None:
-    # doSend's catch (ApiException e) (KafkaProducer.java:1137-1149) gives the
+    # doSend's catch (ApiException e) (KafkaProducer.java:1130-1142) gives the
     # same exception to the callback, with metadata of no offset for the
     # record's topic-partition (-1, the record naming none), and to the failed
     # future.
@@ -315,14 +320,13 @@ def test_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_recor
     # Critic 75 N1: a record sent in the open transaction stays in that
     # transaction: a second begin_transaction() fails at once with the
     # transaction manager's invalid transition, and the commit_transaction()
-    # after it drains and commits the record (producer-transactions.md §13).
-    # Updated for the branch C API, which has no hook to hold a record's
-    # handover (master's Producer_test_set_paused): its beginTransaction drains
-    # the submission queue first, as every transaction-control operation does,
-    # so the second begin waits for the record to reach the producer, which
-    # takes one metadata round trip, well under max.block.ms (60 s); and the
-    # record may be acknowledged before the commit, so whether its future is
-    # still pending at the second begin is not checked.
+    # after it commits the record (producer-transactions.md §13). send()
+    # returned once the record reached the producer, as Java's returns once
+    # doSend appended it, so the second begin has nothing to wait for. The
+    # branch C API has no hook to hold a record's delivery (master's
+    # Producer_test_set_paused), and the record may be acknowledged before the
+    # commit, so whether its future is still pending at the second begin is
+    # not checked.
     topic = _topic(kafka_broker)
     configs = _configs(kafka_broker)
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
@@ -468,3 +472,170 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
 
     offset = asyncio.run(main())
     assert _committed(kafka_broker, topic) == [(offset, "key", "value")]
+
+
+# ===========================================================================
+# The non-blocking send: a record taken on the calling thread, and a send
+# waiting on another thread
+# ===========================================================================
+
+
+def _handovers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Where each record's handover completed, from the ``resolve`` of
+    ``Producer_try_send_cb``: ``"inline"`` inside the call, on the calling
+    thread, for a record the producer took (or refused) at once; ``"queued"``
+    later, from the callback pump, for one queued on the submission task."""
+    handovers: list[str] = []
+    real = _lib.Producer_try_send_cb
+
+    def spy(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> Any:
+        caller = threading.get_ident()
+        inside = True
+
+        def resolved(error: int) -> None:
+            handovers.append("inline" if inside and threading.get_ident() == caller else "queued")
+            resolve(error)
+
+        try:
+            return real(c_producer, native, on_completion, resolved)
+        finally:
+            inside = False
+
+    monkeypatch.setattr(_lib, "Producer_try_send_cb", spy)
+    return handovers
+
+
+def _add_partitions(broker: Any, topic: str, partitions: int) -> None:
+    """Grow ``topic`` to ``partitions`` partitions via kafka-topics.sh inside
+    the container."""
+    rc, out = broker.exec([
+        f"{KAFKA_BIN}/kafka-topics.sh", "--bootstrap-server", broker.internal_bootstrap,
+        "--alter", "--topic", topic, "--partitions", str(partitions),
+    ])
+    if rc not in (0, None):
+        raise RuntimeError(f"adding partitions failed (rc={rc}): {out!r}")
+
+
+def _record(topic: str, partition: int, value: bytes) -> ProducerRecord[Any, Any]:
+    """Java's ``ProducerRecord(topic, partition, key, value)`` with a null key."""
+    return ProducerRecord(topic=topic, partition=partition, key=None, value=value)
+
+
+def _records_of(broker: Any, topic: str, partition: int, *, from_offset: int,
+                window: float) -> list[tuple[int, bytes | None]]:
+    """The ``(offset, value)`` of the records of ``topic``-``partition`` from
+    ``from_offset`` that arrive within ``window`` seconds, read back with the
+    binding's consumer."""
+    consumer: KafkaConsumer[Any, Any] = KafkaConsumer(configs={
+        "bootstrap.servers": broker.external_bootstrap, "group.protocol": "consumer",
+        "group.id": f"py-records-{uuid.uuid4().hex[:12]}", "enable.auto.commit": False})
+    try:
+        tp = TopicPartition(topic=topic, partition=partition)
+        consumer.assign(partitions=[tp])
+        consumer.seek(partition=tp, offset=from_offset)
+        records: list[tuple[int, bytes | None]] = []
+        deadline = time.monotonic() + window
+        while time.monotonic() < deadline:
+            records.extend((r.offset(), None if r.value() is None else bytes(r.value()))
+                           for r in consumer.poll(timeout=0.5))
+        return records
+    finally:
+        consumer.close()
+
+
+def test_a_send_with_cached_metadata_is_taken_on_the_calling_thread(
+        kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's send() appends the record on the calling thread, after blocking
+    # in waitOnMetadata for the first record of a topic (KafkaProducer.java:
+    # 1065-1111). Here the producer takes a record at once only with its
+    # topic's metadata cached: the first record is queued on the submission
+    # task, whose send() waits for the metadata, and its handover completes
+    # from the callback pump, the caller's send() waiting for it; the next
+    # one, with the metadata cached, is appended on the calling thread and its
+    # handover completes inside send().
+    topic = _topic(kafka_broker)
+    handovers = _handovers(monkeypatch)
+    producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
+    try:
+        first = producer.send(record=_record(topic, 0, b"a"))
+        assert first.result(timeout=30).offset() == 0
+        second = producer.send(record=_record(topic, 0, b"b"))
+        assert handovers == ["queued", "inline"]
+        assert second.result(timeout=30).offset() == 1
+    finally:
+        producer.close()
+
+
+def test_an_async_send_with_cached_metadata_is_taken_on_the_calling_thread(
+        kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The async peer of the test above: the second record's handover
+    # completes inside send(), on the loop.
+    topic = _topic(kafka_broker)
+    handovers = _handovers(monkeypatch)
+
+    async def main() -> None:
+        producer = AsyncKafkaProducer(
+            configs={"bootstrap.servers": kafka_broker.external_bootstrap})
+        try:
+            first = await producer.send(record=_record(topic, 0, b"a"))
+            assert (await asyncio.wait_for(first, 30)).offset() == 0
+            second = await producer.send(record=_record(topic, 0, b"b"))
+            assert handovers == ["queued", "inline"]
+            assert (await asyncio.wait_for(second, 30)).offset() == 1
+        finally:
+            await producer.close()
+
+    asyncio.run(main())
+
+
+def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread(
+        kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's send() blocks in waitOnMetadata, up to max.block.ms, for a
+    # partition the topic does not have yet (KafkaProducer.java:1195-1226),
+    # which holds back its caller's next record but no other thread's. Here
+    # such a record is queued on the submission task, which leaves it to wait
+    # for the partition on a task of its own, and its send() waits for that
+    # handover; another thread's record, to a partition the producer can take
+    # at once, is appended on that thread and reaches the broker while the
+    # first still waits (the C API's try_send tries the producer first,
+    # whatever the submission queue holds). Once the partition appears, the
+    # first record is handed over and its send() returns.
+    topic = _topic(kafka_broker)  # one partition
+    handovers = _handovers(monkeypatch)
+    tried = threading.Event()
+    spied = _lib.Producer_try_send_cb
+
+    def signalling(*args: Any) -> Any:
+        try:
+            return spied(*args)
+        finally:
+            tried.set()
+
+    monkeypatch.setattr(_lib, "Producer_try_send_cb", signalling)
+    producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap,
+                                      "max.block.ms": 60000})
+    try:
+        # With the topic's metadata cached, a record to partition 0 is taken
+        # at once (the test above).
+        warm_up = producer.send(record=_record(topic, 0, b"warm-up"))
+        assert warm_up.result(timeout=30).offset() == 0
+        tried.clear()
+        firsts: list[Future[RecordMetadata]] = []
+        waiting = threading.Thread(
+            target=lambda: firsts.append(producer.send(record=_record(topic, 1, b"a"))))
+        waiting.start()
+        assert tried.wait(30)  # the first record is queued, its send() waiting
+        second = producer.send(record=_record(topic, 0, b"b"))
+        # The second was taken inside send(); the first is not handed over yet.
+        assert handovers == ["queued", "inline"]
+        assert second.result(timeout=30).offset() == 1
+        assert _records_of(kafka_broker, topic, 0, from_offset=1, window=3.0) == [(1, b"b")]
+        assert waiting.is_alive(), "the first send() still waits for its partition"
+        _add_partitions(kafka_broker, topic, 2)
+        waiting.join(60)
+        assert not waiting.is_alive()
+        (first,) = firsts
+        assert first.result(timeout=60).partition() == 1
+        assert handovers == ["queued", "inline", "queued"]
+    finally:
+        producer.close()

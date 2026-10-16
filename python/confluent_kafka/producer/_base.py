@@ -17,34 +17,38 @@
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
 call the C FFI through the C extension (``_confluentkafka``). Every operation
 uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
-methods"): a send is ``kafka_producer_Producer_send_with_callback_cb``, which
-queues the record on the core's submission task, and a flush, close or
-transaction-control call is its ``_cb`` twin. The completions -- the
-``Callback`` of each record, the handover of each record to the producer and
-the result of each operation -- are queued in the client's callback vector and
-run by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
+methods"): a send is ``kafka_producer_Producer_try_send_with_callback``,
+which hands the record to the producer on the calling thread when it can take
+it at once and otherwise queues it on the core's submission task, which gives a
+record it still cannot hand over a task of its own to wait on; a flush, close
+or transaction-control call is its ``_cb`` twin. The completions -- the
+``Callback`` of each record, the handover of each record that waited and the
+result of each operation -- are queued in the client's callback vector and run
+by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
 producer's completion thread, or the event loop of the async producer, which
-the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs
-a callback). Both families reuse the same entry points and differ only in the
-future type a completion resolves and where the user's callback runs (CLAUDE.md,
-Python Binding Conventions, Implementation over the FFI and Threads and
-callbacks).
+the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs a
+callback). The handover of a record taken, or refused, at once is reported on
+the calling thread instead, inside the send. Both families reuse the same
+entry points and differ only in the future type a completion resolves and
+where the user's callback runs (CLAUDE.md, Python Binding Conventions,
+Implementation over the FFI and Threads and callbacks).
 
 Backpressure is Java's: ``send()`` returns only once its record is with the
-producer, as Java's returns once ``doSend`` appended it. The submission task
-hands records to the producer one at a time, in order, and there the metadata
-wait and the wait for ``buffer.memory`` space are bounded by ``max.block.ms``.
-``send()`` waits for that handover on an internal future, which the
-``send_with_callback_cb`` completion resolves, then returns the record's own
-future, which the record's delivery callback completes, or raises what Java's
-``doSend`` rethrows. So a record not yet in the buffer has a caller waiting for
-it: at most one per sending thread or task.
-
-*(deviation)* The submission task waits for one record at a time, so the k-th
-caller waiting behind a full buffer can wait up to k × ``max.block.ms`` before
-its record fails, where each Java ``send()`` waits at most ``max.block.ms``,
-whatever the number of sending threads. A ``send()`` from a sync producer's
-callback does not wait (see ``producer``).
+producer, as Java's returns once ``doSend`` appended it. The producer's
+non-blocking ``try_send`` runs on the calling thread first and takes the
+record at once in the common case (its topic's metadata known, the buffer with
+room). Otherwise the record is queued for the submission task, which hands it
+to the producer on a task of its own, where the metadata wait and the wait for
+``buffer.memory`` space are bounded by ``max.block.ms``, as in Java. ``send()``
+waits for that handover on an internal future, which the handover completion
+resolves, then returns the record's own future, which the record's delivery
+callback completes, or raises what Java's ``doSend`` rethrows. So one caller's
+records reach the producer in sending order, a record not yet in the buffer
+has a caller waiting for it, at most one per sending thread or task, and each
+waits at most ``max.block.ms`` whatever the number of callers, as with Java's
+blocking ``send()``. The wait is on a core task, not in a blocking native
+call: a sync ``send()`` sees Ctrl+C, raising it once the record is handed
+over, and an async one does not block its loop.
 """
 
 from __future__ import annotations
@@ -396,7 +400,9 @@ class _ProducerState:
     producer down) and waits for the calls in flight to end before it frees the
     handle. A use covers only the native call itself, never a wait for a
     completion, so a ``close()`` from a delivery callback waits for nothing that
-    the callback's thread must first run.
+    the callback's thread must first run. The one native call that waits in the
+    core is a ``send()`` from a delivery callback (see ``Producer.send``), which
+    the core's close wakes.
     """
 
     def __init__(self) -> None:

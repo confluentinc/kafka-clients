@@ -14,9 +14,12 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension hands each record to the C API's queued send
-(``kafka_producer_Producer_send_with_callback_cb``) with a delivery callback,
-which the producer's callback pump (``kafka_producer_Producer__execute_callbacks``)
+The C extension hands each record to the C API's non-blocking send
+(``kafka_producer_Producer_try_send_with_callback``, which queues the record
+on the core's submission task only when the producer cannot take it at once),
+or, for a sync producer's send() from any producer's delivery callback, to its
+blocking send, with a delivery callback, which the producer's callback pump
+(``kafka_producer_Producer__execute_callbacks``)
 runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields
 as a tuple (``None`` when there is none), the BORROWED error handle as an int
 (0 for none) and the id the callback reports under. :func:`completion_to_python`
@@ -41,7 +44,6 @@ runs on another event loop, or is an ``async def``.
 from __future__ import annotations
 
 import inspect
-import logging
 import threading
 from typing import TYPE_CHECKING, cast
 
@@ -54,9 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = ["MetadataTuple", "call_callback", "completion_to_python", "failure_metadata",
-           "in_callback", "invoke_callback", "log_unreported_callback_error", "run_callback"]
-
-_LOG = logging.getLogger("confluent_kafka.producer")
+           "in_any_callback", "in_callback", "invoke_callback", "run_callback"]
 
 # A coroutine callback given to the synchronous producer.
 _COROUTINE_CALLBACK_MESSAGE = "a coroutine send() callback requires an AsyncProducer"
@@ -144,9 +144,9 @@ def invoke_callback(producer: object, callback: Callable[..., object] | None,
     """:func:`call_callback`, returning the exception the callback raised, if
     any, instead of raising it.
 
-    The caller is the producer's completion thread, which reports it to the
-    core (see the module docstring), and the next callback must still run. It
-    is not logged here: the core logs it once, as Java's
+    The caller is the thread running the producer's callbacks; it reports the
+    exception to the core (see the module docstring), and the next callback
+    must still run. It is not logged here: the core logs it once, as Java's
     ``ProducerBatch.completeFutureAndFireCallbacks`` does.
     """
     try:
@@ -156,19 +156,13 @@ def invoke_callback(producer: object, callback: Callable[..., object] | None,
     return None
 
 
-def log_unreported_callback_error(metadata: RecordMetadata, error: BaseException) -> None:
-    """Log a callback's exception that has no core report to go to, with the
-    message the core logs a reported one with (Java's
-    ``ProducerBatch.completeFutureAndFireCallbacks``): the callback of a
-    completion the core does not deliver: a record sent from a ``send()``
-    callback, which does not wait for its handover, and that the Rust
-    ``send()`` rejected before the accumulator, so Python completes it itself.
-    Every other callback's exception is reported, and only the core logs it."""
-    _LOG.error("Error executing user-provided callback on message for topic-partition '%s'",
-               f"{metadata.topic()}-{metadata.partition()}", exc_info=error)
-
-
 def in_callback(producer: object) -> bool:
     """Whether the current thread is running a delivery callback of
     ``producer`` (Java's ``Thread.currentThread() == this.ioThread``)."""
     return getattr(_callback_scope, "producer", None) is producer
+
+
+def in_any_callback() -> bool:
+    """Whether the current thread is running a delivery callback of any
+    producer, and so blocks a thread some producer's completions run on."""
+    return getattr(_callback_scope, "producer", None) is not None
