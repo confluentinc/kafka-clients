@@ -811,24 +811,20 @@ async fn test_async_consumer_seek_and_commit_with_broker_failures() {
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
 /// wait until the poller has received exactly `num_records` records.
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
-    test_utils::wait_until_true_with_timeout(
+    test_utils::wait_for_condition_with_timeout(
         || {
             let received = poller.received_messages() == num_records;
             async move { received }
         },
-        &format!("Consumer did not receive expected {num_records}."),
         timeout_ms,
-        100,
+        || {
+            format!(
+                "Consumer did not receive expected {num_records}. It received {}",
+                poller.received_messages()
+            )
+        },
     )
     .await;
-    // Java's lazy message also reports the count; the helper takes a fixed
-    // message, so report it here (the wait above already passed).
-    assert_eq!(
-        poller.received_messages(),
-        num_records,
-        "Consumer did not receive expected {num_records}. It received {}",
-        poller.received_messages()
-    );
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
@@ -844,10 +840,17 @@ async fn test_async_subscribe_when_topic_unavailable() {
     let new_topic_partition = TopicPartition::new(new_topic.clone(), 0);
     let num_records: usize = 1000;
 
+    // Java sets `max.poll.interval.ms` to 6000, which outlasts its in-process
+    // broker restart below: nothing polls while the brokers are down. Restarting
+    // the Docker brokers one by one takes far longer (about 45 s on CI). With 6000
+    // the member goes stale when the brokers return, loses its partitions and
+    // rejoins. If phase 1 ended before its first auto-commit, it then resets to
+    // offset 0 and receives 2000 records instead of 1000. 120000 covers the
+    // restart, so the consumer survives the outage as Java's does.
     let mut consumer = create_consumer(
         &ctx,
         &HashMap::from([
-            ("max.poll.interval.ms".to_string(), "6000".to_string()),
+            ("max.poll.interval.ms".to_string(), "120000".to_string()),
             ("metadata.max.age.ms".to_string(), "100".to_string()),
         ]),
     );
