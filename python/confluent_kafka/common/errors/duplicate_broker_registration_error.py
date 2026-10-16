@@ -36,7 +36,7 @@ class DuplicateBrokerRegistrationError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 101  # kafka_common_ErrorCode_DUPLICATE_BROKER_REGISTRATION
+    _ffi_id: ClassVar[int] = 101  # kafka_common_Error_DUPLICATE_BROKER_REGISTRATION
 
     def __init__(
         self,

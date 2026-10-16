@@ -55,7 +55,7 @@ impl ListTransactionsResult {
     pub fn all(&self) -> KafkaFuture<Vec<TransactionListing>> {
         self.all_by_broker_id()
             .then_apply(|map: HashMap<i32, Vec<TransactionListing>>| {
-                map.into_values().flatten().collect::<Vec<TransactionListing>>()
+                Ok(map.into_values().flatten().collect::<Vec<TransactionListing>>())
             })
     }
 

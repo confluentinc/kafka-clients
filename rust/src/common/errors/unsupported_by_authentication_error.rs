@@ -32,5 +32,6 @@ kafka_error_type! {
     extends: [
         is_kafka_error,
         is_api_error,
+        is_unsupported_by_authentication_error,
     ],
 }

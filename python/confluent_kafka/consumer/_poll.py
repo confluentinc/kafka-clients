@@ -28,7 +28,12 @@ rethrows only for an empty fetch). The core has already moved the positions past
 the whole batch, so the caller seeks each partition back to its first record
 that is not returned, which leaves the failing record's position where Java
 leaves it: ``seek(partition=e.topic_partition(), offset=e.offset() + 1)`` skips
-it, and otherwise the next poll fetches and fails on it again.
+it, and otherwise the next poll fetches and fails on it again. A poll that does
+not return its records at all (Ctrl+C or a cancellation while it waited, or
+during those seeks back) seeks each partition back to its first fetched record
+instead (``fetched_positions``, ``Deserialized.unreturned``): Java's
+``AsyncKafkaConsumer.poll`` never loses records the positions have moved past
+(``AsyncKafkaConsumer.java:940-960``).
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ from .consumer_record import ConsumerRecord
 from .consumer_records import ConsumerRecords
 from .offset_and_metadata import OffsetAndMetadata
 
-__all__ = ["Deserialized", "deserialize_batch"]
+__all__ = ["Deserialized", "deserialize_batch", "fetched_positions"]
 
 
 class Deserialized(NamedTuple):
@@ -55,6 +60,31 @@ class Deserialized(NamedTuple):
     records: ConsumerRecords[Any, Any]
     error: RecordDeserializationError | None
     rewind: list[tuple[TopicPartition, int]]
+
+    def unreturned(self) -> list[tuple[TopicPartition, int]]:
+        """The positions to seek back to when ``records`` is not returned
+        either: each partition's first record in ``records``, else its
+        ``rewind`` position."""
+        positions: dict[TopicPartition, int] = {}
+        for record in self.records:
+            positions.setdefault(TopicPartition(topic=record.topic(), partition=record.partition()),
+                                 record.offset())
+        for tp, offset in self.rewind:
+            positions.setdefault(tp, offset)
+        return list(positions.items())
+
+
+def fetched_positions(native_records: Any) -> list[tuple[TopicPartition, int]]:
+    """Each partition's first record in a native ``ConsumerRecords`` batch
+    (``None`` for an empty poll) that is not returned: the positions to seek
+    back to, since the core has moved the positions past the whole batch."""
+    if native_records is None:
+        return []
+    positions: dict[TopicPartition, int] = {}
+    for i in range(native_records.count()):
+        nr = native_records.get(i)
+        positions.setdefault(TopicPartition(topic=nr.topic, partition=nr.partition), nr.offset)
+    return list(positions.items())
 
 
 def _deserialization_error(

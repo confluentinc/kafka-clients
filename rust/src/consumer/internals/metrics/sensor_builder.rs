@@ -87,7 +87,7 @@ impl<'a> SensorBuilder<'a> {
     pub(crate) fn with_avg(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance(name, self.tags.clone())?;
-            self.sensor.add_metric_name(metric_name, Box::new(Avg::new()))?;
+            self.sensor.add_with_metric_name(metric_name, Box::new(Avg::new()))?;
         }
         Ok(self)
     }
@@ -97,7 +97,7 @@ impl<'a> SensorBuilder<'a> {
     pub(crate) fn with_min(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance(name, self.tags.clone())?;
-            self.sensor.add_metric_name(metric_name, Box::new(Min::new()))?;
+            self.sensor.add_with_metric_name(metric_name, Box::new(Min::new()))?;
         }
         Ok(self)
     }
@@ -107,7 +107,7 @@ impl<'a> SensorBuilder<'a> {
     pub(crate) fn with_max(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance(name, self.tags.clone())?;
-            self.sensor.add_metric_name(metric_name, Box::new(Max::new()))?;
+            self.sensor.add_with_metric_name(metric_name, Box::new(Max::new()))?;
         }
         Ok(self)
     }
@@ -117,7 +117,7 @@ impl<'a> SensorBuilder<'a> {
     pub(crate) fn with_value(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance(name, self.tags.clone())?;
-            self.sensor.add_metric_name(metric_name, Box::new(Value::new()))?;
+            self.sensor.add_with_metric_name(metric_name, Box::new(Value::new()))?;
         }
         Ok(self)
     }

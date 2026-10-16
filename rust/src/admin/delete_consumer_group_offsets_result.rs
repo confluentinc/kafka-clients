@@ -63,7 +63,7 @@ impl DeleteConsumerGroupOffsetsResult {
         let partition = partition.clone();
         Ok(self
             .future
-            .then_apply_try(move |topic_partitions| match sub_level_error(&topic_partitions, &partition) {
+            .then_apply(move |topic_partitions| match sub_level_error(&topic_partitions, &partition) {
                 Some(error) => Err(error),
                 None => Ok(()),
             }))
@@ -79,7 +79,7 @@ impl DeleteConsumerGroupOffsetsResult {
         // which is unspecified anyway).
         let mut partitions: Vec<TopicPartition> = self.partitions.iter().cloned().collect();
         partitions.sort_by_key(|tp| (tp.topic().to_string(), tp.partition()));
-        self.future.then_apply_try(move |topic_partitions| {
+        self.future.then_apply(move |topic_partitions| {
             for partition in &partitions {
                 if let Some(error) = sub_level_error(&topic_partitions, partition) {
                     return Err(error);

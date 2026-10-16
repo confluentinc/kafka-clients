@@ -42,7 +42,7 @@ class StreamsTopologyDescriptionUpdateFailedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 135  # kafka_common_ErrorCode_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
+    _ffi_id: ClassVar[int] = 135  # kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
 
     def __init__(
         self,

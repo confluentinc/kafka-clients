@@ -103,7 +103,6 @@ use crate::common::TopicPartition;
 use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
 use crate::common::header::RecordHeaders;
-use crate::common::memory::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::{
@@ -111,6 +110,7 @@ use crate::common::record::internal::{
     DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion,
 };
 use crate::common::serialization::Deserializer;
+use crate::common::utils::internals::BufferSupplier;
 use crate::consumer::internals::FetchConfig;
 use crate::consumer::internals::FetchMetricsAggregator;
 use crate::consumer::internals::SubscriptionState;
@@ -739,7 +739,7 @@ impl CompletedFetch {
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
-                        .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
+                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
                 // Java's `parseRecord` is two sequential `try` blocks and the first
@@ -754,7 +754,7 @@ impl CompletedFetch {
                     match record.value() {
                         None => Ok(None),
                         Some(value_bytes) => value_deserializer
-                            .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
                             .map(Some),
                     }
                 };

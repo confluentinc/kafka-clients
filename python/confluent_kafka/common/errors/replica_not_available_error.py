@@ -42,7 +42,7 @@ class ReplicaNotAvailableError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 9  # kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 9  # kafka_common_Error_REPLICA_NOT_AVAILABLE
 
     @java_forms(
         Form("message"),

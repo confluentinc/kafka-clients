@@ -39,7 +39,7 @@ class DisconnectError(RetriableError):
 
     INSTANCE: ClassVar[DisconnectError]
 
-    _ffi_id: ClassVar[int] = -11  # kafka_common_ErrorCode_DISCONNECT
+    _ffi_id: ClassVar[int] = -11  # kafka_common_Error_DISCONNECT
 
     def __init__(
         self,

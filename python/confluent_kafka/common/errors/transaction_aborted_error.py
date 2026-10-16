@@ -40,7 +40,7 @@ class TransactionAbortedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -17  # kafka_common_ErrorCode_TRANSACTION_ABORTED
+    _ffi_id: ClassVar[int] = -17  # kafka_common_Error_TRANSACTION_ABORTED
 
     @java_forms(
         Form("message", "cause"),

@@ -37,7 +37,7 @@ class SecurityDisabledError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 54  # kafka_common_ErrorCode_SECURITY_DISABLED
+    _ffi_id: ClassVar[int] = 54  # kafka_common_Error_SECURITY_DISABLED
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class NotControllerError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 41  # kafka_common_ErrorCode_NOT_CONTROLLER
+    _ffi_id: ClassVar[int] = 41  # kafka_common_Error_NOT_CONTROLLER
 
     def __init__(
         self,

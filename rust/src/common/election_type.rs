@@ -35,6 +35,7 @@ impl ElectionType {
     /// Returns the wire-protocol byte value used to encode this election type.
     ///
     /// Mirrors the public `byte value` field on Java's `ElectionType`.
+    #[doc(alias = "org.apache.kafka.common.ElectionType#value")]
     pub fn value(&self) -> i8 {
         match self {
             Self::Preferred => 0,
@@ -77,8 +78,9 @@ impl ElectionType {
     /// All election types, in declaration order.
     ///
     /// Mirrors `ElectionType.values()`.
-    pub fn values() -> [Self; 2] {
-        [Self::Preferred, Self::Unclean]
+    #[doc(alias = "org.apache.kafka.common.ElectionType#values")]
+    pub fn values() -> &'static [Self] {
+        &[Self::Preferred, Self::Unclean]
     }
 }
 

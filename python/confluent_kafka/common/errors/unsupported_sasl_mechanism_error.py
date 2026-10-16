@@ -38,7 +38,7 @@ class UnsupportedSaslMechanismError(AuthenticationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 33  # kafka_common_ErrorCode_UNSUPPORTED_SASL_MECHANISM
+    _ffi_id: ClassVar[int] = 33  # kafka_common_Error_UNSUPPORTED_SASL_MECHANISM
 
     def __init__(
         self,

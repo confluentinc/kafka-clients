@@ -34,7 +34,7 @@ class RebootstrapRequiredError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 129  # kafka_common_ErrorCode_REBOOTSTRAP_REQUIRED
+    _ffi_id: ClassVar[int] = 129  # kafka_common_Error_REBOOTSTRAP_REQUIRED
 
     def __init__(
         self,

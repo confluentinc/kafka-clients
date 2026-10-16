@@ -41,7 +41,7 @@ class BufferExhaustedError(TimeoutError):
 
     __module__ = "confluent_kafka.producer"
 
-    _ffi_id: ClassVar[int] = -28  # kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED
+    _ffi_id: ClassVar[int] = -28  # kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED
 
     def __init__(
         self,

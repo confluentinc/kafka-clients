@@ -21,6 +21,8 @@
 /// factors used by the rate stats are exactly Java's `TimeUnit` semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+// translates the JDK's java.util.concurrent.TimeUnit, outside Kafka's audience rules; the public MetricConfig::set_time_window, Rate and Meter take it
+#[doc(alias = "rust-only")]
 pub enum TimeUnit {
     /// Nanoseconds.
     Nanoseconds,

@@ -34,7 +34,7 @@ class InvalidFetchSessionEpochError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 71  # kafka_common_ErrorCode_INVALID_FETCH_SESSION_EPOCH
+    _ffi_id: ClassVar[int] = 71  # kafka_common_Error_INVALID_FETCH_SESSION_EPOCH
 
     def __init__(
         self,

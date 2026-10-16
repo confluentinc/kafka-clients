@@ -39,7 +39,7 @@ class UnsupportedCompressionTypeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 76  # kafka_common_ErrorCode_UNSUPPORTED_COMPRESSION_TYPE
+    _ffi_id: ClassVar[int] = 76  # kafka_common_Error_UNSUPPORTED_COMPRESSION_TYPE
 
     def __init__(
         self,

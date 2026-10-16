@@ -49,7 +49,7 @@ class AuthenticationError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -7  # kafka_common_ErrorCode_AUTHENTICATION
+    _ffi_id: ClassVar[int] = -7  # kafka_common_Error_AUTHENTICATION
 
     @java_forms(
         Form("message"),
