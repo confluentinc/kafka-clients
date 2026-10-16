@@ -1403,6 +1403,26 @@ impl Dflt {
     }
 }
 
+/// Parameters Java passes `null` for at a real call site although no shorter
+/// constructor defaults them, so the nullability rule of CLAUDE.md (Signatures,
+/// Nullability: "a required parameter is `T | None` ... when Java gives null a
+/// meaning for it") cannot be derived from the constructor alone: (Java class,
+/// parameter, evidence).
+const NULLABLE_EVIDENCE: [(&str, &str, &str); 2] = [
+    (
+        "org.apache.kafka.common.errors.RecordDeserializationException",
+        "key_buffer",
+        "CompletedFetch.newRecordDeserializationException passes record.key(), null for a record without a key \
+         (CompletedFetch.java:341-349, the call at :347; ShareCompletedFetch.java:369 likewise)",
+    ),
+    (
+        "org.apache.kafka.common.errors.RecordDeserializationException",
+        "value_buffer",
+        "CompletedFetch.newRecordDeserializationException passes record.value(), null for a tombstone \
+         (CompletedFetch.java:341-349, the call at :347; ShareCompletedFetch.java:369 likewise)",
+    ),
+];
+
 #[derive(Clone, Debug)]
 struct PyParam {
     name: String,
@@ -1415,6 +1435,9 @@ struct PyParam {
     /// constructor assigns null to the field this parameter fills), so the
     /// stubs of the forms that require it take `T | None` too.
     field_nullable: bool,
+    /// Java passes null for it at a real call site ([`NULLABLE_EVIDENCE`]), so
+    /// the constructor takes `T | None` and the getter returns `T | None`.
+    evidenced: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1784,7 +1807,8 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         let field_nullable = forms
             .iter()
             .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
-        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable });
+        let evidenced = NULLABLE_EVIDENCE.iter().any(|(c, q, _)| *c == info.java_fqn && q == p);
+        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable, evidenced });
     }
 
     // The java_forms table, replicated (`_args.java_forms`): a set of given
@@ -2153,7 +2177,7 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
     Ok(match &p.default {
         // A required cause is given as None for a null cause (CLAUDE.md,
         // Errors).
-        Dflt::Required if p.name == "cause" => format!("{}: {ty} | None", p.name),
+        Dflt::Required if p.name == "cause" || p.evidenced => format!("{}: {ty} | None", p.name),
         Dflt::Required => format!("{}: {ty}", p.name),
         Dflt::NoneDefault if ty == "Any" => format!("{}: Any = None", p.name),
         Dflt::NoneDefault => format!("{}: {ty} | None = None", p.name),
@@ -2176,7 +2200,7 @@ fn stub_param(
         // A required `message` or `cause` still takes Java's null (see the
         // model's `nullable`), so its stub says so; mypy otherwise rejects a
         // call the runtime accepts.
-        if (p.field_nullable || p.name == "message" || p.name == "cause") && ty != "Any" {
+        if (p.field_nullable || p.evidenced || p.name == "message" || p.name == "cause") && ty != "Any" {
             return Ok(format!("{}: {ty} | None", p.name));
         }
         return Ok(format!("{}: {ty}", p.name));
@@ -2517,7 +2541,8 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 let fty = g
                     .field_type(&info.java_fqn, f)
                     .ok_or_else(|| anyhow::anyhow!("{}: getter of unknown field `{f}`", info.java_fqn))?;
-                if field_nullable(&model, &attr, &fty) {
+                let evidenced = model.params.iter().any(|q| q.evidenced && attr == format!("_{}", q.name));
+                if evidenced || field_nullable(&model, &attr, &fty) {
                     ret = format!("{ret} | None");
                 }
                 format!("return self.{attr}")

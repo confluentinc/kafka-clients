@@ -515,9 +515,16 @@ def test_record_deserialization_constructors() -> None:
     # Every Java constructor takes the cause, so a null one is cause=None.
     n = RecordDeserializationError(
         origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
-        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,  # type: ignore[arg-type]
+        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
         headers=(), message="m", cause=None)
     assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+    # A record without a key (CompletedFetch passes record.key(), null) or a
+    # tombstone keeps the other buffer.
+    k = RecordDeserializationError(
+        origin=origin.KEY, partition=_TP, offset=3, timestamp=1,
+        timestamp_type=TimestampType.CREATE_TIME, key_buffer=None, value_buffer=b"v",
+        headers=(), message="m", cause=None)
+    assert k.key_buffer() is None and bytes(k.value_buffer() or b"") == b"v"
 
 
 def test_record_deserialization_has_only_the_full_constructor() -> None:
