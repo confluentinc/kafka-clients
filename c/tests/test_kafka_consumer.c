@@ -74,9 +74,9 @@ static void test_kafka_consumer_new_succeeds(void) {
     kafka_consumer_KafkaConsumer_destroy(kc);
 }
 
-// The config's setters are the typed twins of the property map. Only
-// `bootstrap.servers` has no default, so it alone must come from the map.
-static void test_kafka_consumer_new_via_setters(void) {
+// The map is the config's only input, as in Java: a missing `bootstrap.servers`
+// is the `ConfigException`, and a `client.id` in the map reaches the consumer.
+static void test_kafka_consumer_new_from_map(void) {
     kafka_Map_t *props = kafka_Map_new();
     kafka_common_Error_t *err = NULL;
     kafka_consumer_ConsumerConfig_t *config = kafka_consumer_ConsumerConfig_new(props, &err);
@@ -86,33 +86,20 @@ static void test_kafka_consumer_new_via_setters(void) {
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
     err = NULL;
-    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"ignored:1");
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
+    kafka_Map_put(props, (void *)"group.id", (void *)"map-group");
+    kafka_Map_put(props, (void *)"group.protocol", (void *)"consumer");
+    kafka_Map_put(props, (void *)"client.id", (void *)"map-client");
     config = kafka_consumer_ConsumerConfig_new(props, &err);
     TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(config);
     kafka_Map_destroy(props);
 
-    kafka_List_t *servers = kafka_List_new();
-    kafka_List_add(servers, (void *)"localhost:9092");
-    kafka_consumer_ConsumerConfig_set_bootstrap_servers(config, servers);
-    kafka_List_destroy(servers);
-    kafka_consumer_ConsumerConfig_set_group_id(config, "setter-group");
-    kafka_consumer_ConsumerConfig_set_group_protocol(config, "consumer");
-    kafka_consumer_ConsumerConfig_set_client_id(config, "setter-client");
-
-    TEST_ASSERT_EQUAL_STRING("setter-group", kafka_consumer_ConsumerConfig_group_id(config));
-    TEST_ASSERT_EQUAL_STRING("consumer", kafka_consumer_ConsumerConfig_group_protocol(config));
-    TEST_ASSERT_EQUAL_STRING("setter-client", kafka_consumer_ConsumerConfig_client_id(config));
-    kafka_List_t *got = kafka_consumer_ConsumerConfig_bootstrap_servers(config); /* owned list of owned strings */
-    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(got));
-    TEST_ASSERT_EQUAL_STRING("localhost:9092", (const char *)kafka_List_get(got, 0));
-    kafka_List_destroy(got);
-
-    kafka_consumer_KafkaConsumer_t *kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
     TEST_ASSERT_NULL(err);
     kafka_consumer_ConsumerConfig_destroy(config);
-    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer__as_Consumer(kc);
-    TEST_ASSERT_EQUAL_STRING("setter-client", kafka_consumer_Consumer_client_id(consumer));
-    kafka_consumer_KafkaConsumer_destroy(kc);
+    TEST_ASSERT_EQUAL_STRING("map-client", kafka_consumer_Consumer_client_id(consumer));
+    kafka_consumer_Consumer_destroy(consumer);
 }
 
 // Deserializer interfaces are passed as borrowed `Deserializer_t` views of
@@ -337,7 +324,7 @@ static void test_kafka_consumer_destroy_wakes_a_waiting_poll_cb(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_consumer_new_succeeds);
-    RUN_TEST(test_kafka_consumer_new_via_setters);
+    RUN_TEST(test_kafka_consumer_new_from_map);
     RUN_TEST(test_kafka_consumer_new_with_string_deserializers);
     RUN_TEST(test_kafka_consumer_classic_protocol_rejected);
     RUN_TEST(test_kafka_consumer_subscribe);

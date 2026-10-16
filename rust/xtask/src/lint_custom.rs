@@ -2368,6 +2368,17 @@ const CBINDGEN_TOML: &str = "cbindgen.toml";
 /// `Class#method` marker; a marker naming a method only by name matches its
 /// widest overload, and an interface member without a modifier is `public`.
 /// A method marked with a field, or unmarked, is not checked here.
+///
+/// **Configurations:** a [`RUST_ONLY`] public method of a type translating a
+/// subclass of `AbstractConfig` (`ConsumerConfig`, `ProducerConfig`,
+/// `AdminClientConfig`) must take a trait object: the only Rust-only methods
+/// such a class may have are the setters CLAUDE.md §2 prescribes for a
+/// class-valued key (`ProducerConfig::set_partitioner`). A typed getter or
+/// setter of a plain key is reported. A getter freezes the key's Java type,
+/// which Java changes in minors (`linger.ms` was a `long`, an `int`, then a
+/// `long` again), and a setter skips the `ConfigDef` validators that
+/// `new(&props)` runs; so the string map stays the only typed input, and the
+/// typed getters the client reads are `pub(crate)`.
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].
@@ -2846,6 +2857,69 @@ fn parse_public_list(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+impl PublicAudience {
+    /// The configuration half (see the type's docs): every [`RUST_ONLY`] public
+    /// method of a type translating a subclass of [`ABSTRACT_CONFIG`] is a typed
+    /// accessor of a configuration key unless it takes a trait object. Returns
+    /// how many such methods were inspected.
+    fn check_configs(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") || !has_tag(&item.attrs, RUST_ONLY) {
+                continue;
+            }
+            let Some(owner) = &item.owner else { continue };
+            let Some(class) = krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .and_then(|attrs| java_markers(&attrs).iter().find_map(|marker| self.index.resolve(marker)))
+            else {
+                continue;
+            };
+            let qualified = format!(".{ABSTRACT_CONFIG}");
+            if !class.supertypes.iter().any(|s| s == ABSTRACT_CONFIG || s.ends_with(&qualified)) {
+                continue;
+            }
+            checked += 1;
+            if item
+                .types
+                .iter()
+                .any(|(role, ty)| role.starts_with("parameter") && names_trait_object(ty))
+            {
+                continue;
+            }
+            findings.push(format!(
+                "{}: `{owner}::{}` is a typed accessor of a configuration key on `{}`, a translation of an \
+                 `AbstractConfig`: make it `pub(crate)` so the string map stays the only typed input (`new(&props)` \
+                 validates it as Java's `ConfigDef` does), or take a trait object for a class-valued key (CLAUDE.md §2)",
+                file.display(),
+                item.name,
+                class.marker()
+            ));
+        }
+        checked
+    }
+}
+
+/// Java's base class of every client configuration,
+/// `org.apache.kafka.common.config.AbstractConfig`, as a `supertypes` entry
+/// names it.
+const ABSTRACT_CONFIG: &str = "AbstractConfig";
+
+/// Whether `ty` holds a trait object anywhere: `Box<dyn Partitioner<K, V>>`,
+/// `Vec<Arc<dyn ConsumerInterceptor<K, V>>>`. `impl Trait` does not count:
+/// `impl Into<String>` is a plain string.
+fn names_trait_object(ty: &syn::Type) -> bool {
+    struct Finder(bool);
+    impl syn::visit::Visit<'_> for Finder {
+        fn visit_type_trait_object(&mut self, _: &syn::TypeTraitObject) {
+            self.0 = true;
+        }
+    }
+    let mut finder = Finder(false);
+    syn::visit::Visit::visit_type(&mut finder, ty);
+    finder.0
+}
+
 impl Rule for PublicAudience {
     fn name(&self) -> &'static str {
         "check-public-audience"
@@ -2872,7 +2946,9 @@ impl Rule for PublicAudience {
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
         let mut used = BTreeSet::new();
-        let checked = self.check_rust(krate, findings, &mut used) + self.check_c(krate, findings, &mut used);
+        let checked = self.check_rust(krate, findings, &mut used)
+            + self.check_c(krate, findings, &mut used)
+            + self.check_configs(krate, findings);
         // `check-java-name` lets a `rust-only` public method through.
         used.extend(
             unmarked_public_methods(krate)
@@ -2907,6 +2983,9 @@ impl Rule for PublicAudience {
    (an interface member without a modifier is): make the others `pub(crate)`,
    or tag the method #[doc(alias = \"public-in-rust\")] with the reason.
    A tag on an item that would pass without it is reported: remove it.
+   A Rust-only method of a configuration (a subclass of `AbstractConfig`) may
+   only set a class-valued key through a trait object: a typed getter or setter
+   of a plain key is `pub(crate)`, and users configure through the string map.
    A public signature naming a crate-private type is caught by rustc's
    `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }
@@ -3376,6 +3455,20 @@ mod tests {
             #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
             #[doc(alias = "public-in-rust")]
             pub struct MockConsumer;
+            #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
+            pub struct ConsumerConfig;
+            impl ConsumerConfig {
+                // Typed accessors of a plain key: findings.
+                #[doc(alias = "rust-only")]
+                pub fn request_timeout_ms(&self) -> i32 { 0 }
+                #[doc(alias = "rust-only")]
+                pub fn set_client_id(self, client_id: impl Into<String>) -> Self { self }
+                // A class-valued key set through a trait object (CLAUDE.md §2).
+                #[doc(alias = "rust-only")]
+                pub fn set_partitioner(self, partitioner: Box<dyn Partitioner>) -> Self { self }
+            }
+            #[doc(alias = "rust-only")]
+            pub trait Partitioner {}
             pub struct Unmarked;
             #[doc(alias = "rust-only")]
             pub struct Allowed;
@@ -3448,6 +3541,13 @@ mod tests {
         }
     }
 
+    /// `ConsumerConfig`, a subclass of `AbstractConfig`.
+    fn config_class() -> java::JavaClass {
+        let mut class = class("clients.consumer", &["ConsumerConfig"]);
+        class.supertypes = vec!["AbstractConfig".to_string()];
+        class
+    }
+
     fn fixture_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("xtask-public-audience-{name}-{}", std::process::id()))
     }
@@ -3465,6 +3565,7 @@ mod tests {
                 classes: vec![
                     class("clients.consumer", &["KafkaConsumer"]),
                     class("clients.consumer", &["MockConsumer"]),
+                    config_class(),
                     class("clients.consumer.internals", &["Fetcher"]),
                     class("common.network", &["Selector"]),
                     class("common", &["Cluster"]),
@@ -3473,6 +3574,7 @@ mod tests {
             },
             public: [
                 PUBLIC_CONSUMER,
+                "org.apache.kafka.clients.consumer.ConsumerConfig",
                 "org.apache.kafka.common.errors.TopicAuthorizationException",
             ]
             .into_iter()
@@ -3615,6 +3717,28 @@ mod tests {
             "; Java declares it as `org.apache.kafka.common.TopicPartition`"
         );
         assert_eq!(rule.misplaced_ffi_class("Nothing"), "");
+    }
+
+    #[test]
+    fn test_typed_accessor_of_a_config_key_is_a_finding() {
+        let findings = run("config");
+        let file = fixture_dir("config").join("lib.rs").display().to_string();
+        let finding = |method: &str| {
+            format!(
+                "{file}: `ConsumerConfig::{method}` is a typed accessor of a configuration key on \
+                 `org.apache.kafka.clients.consumer.ConsumerConfig`, a translation of an `AbstractConfig`: make it \
+                 `pub(crate)` so the string map stays the only typed input (`new(&props)` validates it as Java's \
+                 `ConfigDef` does), or take a trait object for a class-valued key (CLAUDE.md §2)"
+            )
+        };
+        let mut typed = with(&findings, "typed accessor of a configuration key");
+        typed.sort();
+        assert_eq!(typed, [finding("request_timeout_ms"), finding("set_client_id")]);
+        // A class-valued key set through a trait object is CLAUDE.md §2's shape,
+        // and `impl Into<String>` is not a trait object.
+        assert!(with(&findings, "set_partitioner").is_empty(), "{findings:#?}");
+        // The only findings on the class are those two: its tags are not needless.
+        assert_eq!(with(&findings, "ConsumerConfig").len(), 2, "{findings:#?}");
     }
 
     #[test]

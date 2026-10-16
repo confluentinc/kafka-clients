@@ -340,8 +340,9 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
         (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
         (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
     ]);
+    // `bootstrap.resolve.timeout.ms` stays at its default of 0, asserted by the
+    // crate's `consumer_config::tests::test_bootstrap_resolve_timeout_ms`.
     let config = ConsumerConfig::new(&props).unwrap();
-    assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
     let error =
         KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
             .err()
