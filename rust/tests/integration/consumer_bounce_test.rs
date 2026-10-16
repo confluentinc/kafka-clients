@@ -809,29 +809,22 @@ async fn test_async_consumer_seek_and_commit_with_broker_failures() {
 }
 
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
-/// wait until the poller has received exactly `num_records` records, polling
-/// every 100 ms (`TestUtils.waitForCondition`'s default).
-///
-/// The failure message is Java's lazy one, with the count received. It also
-/// names the error that stopped the poller, if one did: Java's
-/// `ShutdownableThread` logs the exception that ends `doWork`, while the Rust
-/// poller only stores it ([`ConsumerAssignmentPoller::thrown_error`]).
+/// wait until the poller has received exactly `num_records` records.
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
-    let start = std::time::Instant::now();
-    loop {
-        let received = poller.received_messages();
-        if received == num_records {
-            return;
-        }
-        if start.elapsed() > Duration::from_millis(timeout_ms) {
-            let stopped = poller
-                .thrown_error()
-                .map(|e| format!("; the poller stopped on {e:?}"))
-                .unwrap_or_default();
-            panic!("Consumer did not receive expected {num_records}. It received {received}{stopped}");
-        }
-        tokio::time::sleep(Duration::from_millis(timeout_ms.min(100))).await;
-    }
+    test_utils::wait_for_condition_with_timeout(
+        || {
+            let received = poller.received_messages() == num_records;
+            async move { received }
+        },
+        timeout_ms,
+        || {
+            format!(
+                "Consumer did not receive expected {num_records}. It received {}",
+                poller.received_messages()
+            )
+        },
+    )
+    .await;
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
