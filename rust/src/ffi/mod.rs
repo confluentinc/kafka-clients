@@ -506,7 +506,7 @@ mod tests {
             "kafka_common_resource_PatternType_code",
             "kafka_common_resource_ResourceType_code",
         ];
-        const EXPECTED: [(&str, &str); 74] = [
+        const EXPECTED: [(&str, &str); 72] = [
             ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
             (
                 "kafka_admin_ConfigEntry_ConfigSource__enum",
@@ -519,14 +519,6 @@ mod tests {
             ("kafka_admin_ConsumerGroupDescription_group_epoch", "-2"),
             ("kafka_admin_ConsumerGroupDescription_target_assignment_epoch", "-2"),
             ("kafka_admin_DeleteAclsResult_FilterResult_error", "null()"),
-            (
-                "kafka_admin_DeleteTopicsResult__enum",
-                "kafka_admin_DeleteTopicsResult_BY_TOPIC_ID",
-            ),
-            (
-                "kafka_admin_DescribeTopicsResult__enum",
-                "kafka_admin_DescribeTopicsResult_BY_TOPIC_ID",
-            ),
             ("kafka_admin_FeatureMetadata_finalized_features_epoch", "-2"),
             (
                 "kafka_admin_FeatureUpdate_UpgradeType__enum",

@@ -2770,6 +2770,9 @@ mod tests {
             field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: crate::java::JavaKind::Class,
+            is_abstract: false,
+            supertypes: Vec::new(),
         }
     }
 

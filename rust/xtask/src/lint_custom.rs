@@ -69,6 +69,7 @@ trait Rule {
 fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
+        Box::new(EnumTranslation::new(ctx)),
         Box::new(NoPublicField),
         Box::new(NoFixedSizeArray),
         Box::new(JavaName::new(ctx)),
@@ -546,9 +547,11 @@ fn cfg_implies_test(pred: &syn::Meta) -> bool {
 /// The fix is structural rather than an attribute. A variant may carry data only
 /// as a single wrapped type, which then carries its own forward compatibility —
 /// `#[non_exhaustive]` on the wrapped struct, or private fields. This also
-/// matches the Java source: every data-carrying enum here translates a Java
-/// class hierarchy (a Java enum cannot give its constants per-constant shapes),
-/// so one named type per variant is the faithful shape.
+/// matches the Java source: a data-carrying enum translates a Java class
+/// hierarchy (a Java enum cannot give its constants per-constant shapes), so
+/// one named type per variant is the faithful shape. That the Java type is a
+/// hierarchy is [`EnumTranslation`]'s check, not this one's: a newtype variant
+/// passes here whatever it wraps.
 ///
 /// Marking the *variant* `#[non_exhaustive]` is deliberately not the rule: on a
 /// tuple variant that attribute makes the variant wholly private to other crates
@@ -604,6 +607,100 @@ impl Rule for NoDataCarryingEnumVariants {
        Gzip(GzipCompression),   // instead of Gzip { level: i32 }
    The struct then carries forward compatibility (private fields, or
    #[non_exhaustive]); do NOT mark the variant itself."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-enum-translation
+// ---------------------------------------------------------------------------
+
+/// Checks that a public enum translates a Java enum or a Java class hierarchy,
+/// never a plain class (CLAUDE.md §3, forward compatibility).
+///
+/// A Java class keeps its state in private fields behind getters, so a later
+/// minor can add a field, change how one is stored, or add a constructor. An
+/// enum makes its variants and their payloads public API instead: another
+/// crate matches them and destructures what they carry, so the same Java
+/// change breaks it. That is why a class becomes a struct with private fields
+/// (`check-no-public-field`), and an enum stands for a Java type only when
+/// Java's own type is a closed set of shapes:
+///   - a Java `enum`;
+///   - a class hierarchy, each variant one subclass: an `interface`, an
+///     `abstract` class, or a class that some class of its package extends
+///     (`OffsetSpec` and its nested `EarliestSpec`, `LatestSpec`, ...).
+///
+/// A class nothing extends — `DescribeTopicsResult`, whose two nullable maps
+/// once became `ByTopicId` / `ByTopicName` variants — is a finding, however
+/// convenient the enum is for an invariant Java enforces in its constructor.
+///
+/// Scope: every `pub enum` of [`NoDataCarryingEnumVariants`]'s scope with a
+/// class marker (`#[doc(alias = "org.apache.kafka.<package>.<Class>")]`, no
+/// `#member`) the Java index resolves; a marker it cannot resolve is
+/// `check-java-name`'s. Runs only when the `kafka` submodule is checked out.
+struct EnumTranslation {
+    index: JavaIndex,
+}
+
+impl EnumTranslation {
+    fn new(ctx: &Context) -> Self {
+        EnumTranslation { index: (*ctx.java).clone() }
+    }
+}
+
+impl Rule for EnumTranslation {
+    fn name(&self) -> &'static str {
+        "check-enum-translation"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0usize;
+        for module in krate.modules.values() {
+            if !module.file_public_path {
+                continue;
+            }
+            for item in &module.items {
+                let syn::Item::Enum(e) = item else { continue };
+                if !matches!(e.vis, syn::Visibility::Public(_)) {
+                    continue;
+                }
+                for marker in java_markers(&e.attrs).iter().filter(|m| !m.contains('#')) {
+                    let Some(class) = self.index.resolve(marker) else {
+                        continue;
+                    };
+                    checked += 1;
+                    let is_hierarchy =
+                        class.is_abstract || class.kind == java::JavaKind::Interface || self.index.has_subclass(class);
+                    if class.kind == java::JavaKind::Enum || is_hierarchy {
+                        continue;
+                    }
+                    let kind = match class.kind {
+                        java::JavaKind::Record => "a record",
+                        _ => "a class",
+                    };
+                    findings.push(format!(
+                        "{}: `{}` is an enum but translates `{marker}`, {kind} that is neither a Java enum nor \
+                         extended by any class",
+                        module.file.display(),
+                        e.ident
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Translate the class as a struct with private fields, its constructor and getters, as Java declares
+   them. An invariant Java checks in its constructor stays a check there, not a choice of variants."
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        self.index.is_empty().then(|| {
+            format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            )
+        })
     }
 }
 
@@ -2962,6 +3059,9 @@ mod tests {
             field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: java::JavaKind::Class,
+            is_abstract: false,
+            supertypes: Vec::new(),
         }
     }
 
@@ -3692,5 +3792,110 @@ mod error_predicate_tests {
                 "{finding}\n  does not end with\n{expected}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod enum_translation_tests {
+    use super::*;
+
+    /// A crate whose every public enum exercises one outcome of
+    /// `check-enum-translation`.
+    const FIXTURE_LIB: &str = r#"
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+        pub enum DescribeTopicsResult { ByTopicId(u8), ByTopicName(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.TopicRecord")]
+        pub enum TopicRecord { A(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
+        pub enum OffsetSpec { Earliest, Latest }
+        #[doc(alias = "org.apache.kafka.common.TopicCollection")]
+        pub enum TopicCollection { Ids(u8) }
+        #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+        pub enum MetricValueProvider { Gauge(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
+        pub enum OpType { Set }
+        #[doc(alias = "org.apache.kafka.clients.admin.Unknown")]
+        pub enum Unresolved { A }
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues")]
+        pub enum MemberMarker { A }
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+        pub(crate) enum CratePrivate { A }
+        mod private {
+            #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+            pub enum Unreachable { A }
+        }
+    "#;
+
+    fn class(
+        package: &str,
+        path: &[&str],
+        kind: java::JavaKind,
+        is_abstract: bool,
+        supertypes: &[&str],
+    ) -> java::JavaClass {
+        java::JavaClass {
+            module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
+            package: package.to_string(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            methods: BTreeSet::new(),
+            overloads: Vec::new(),
+            fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
+            deprecated: false,
+            is_test: false,
+            kind,
+            is_abstract,
+            supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_enum_translating_a_plain_class_or_record_is_a_finding() {
+        use java::JavaKind::{Class, Enum, Interface, Record};
+        let dir = std::env::temp_dir().join(format!("xtask-enum-translation-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let rule = EnumTranslation {
+            index: JavaIndex {
+                classes: vec![
+                    class("clients.admin", &["DescribeTopicsResult"], Class, false, &[]),
+                    class("clients.admin", &["TopicRecord"], Record, false, &[]),
+                    class("clients.admin", &["OffsetSpec"], Class, false, &[]),
+                    class("clients.admin", &["OffsetSpec", "EarliestSpec"], Class, false, &["OffsetSpec"]),
+                    class("common", &["TopicCollection"], Class, true, &[]),
+                    class("common.metrics", &["MetricValueProvider"], Interface, false, &[]),
+                    class("clients.admin", &["AlterConfigOp", "OpType"], Enum, false, &[]),
+                    // A subclass in the test tree does not make a hierarchy.
+                    class("clients.admin", &["TestResult"], Class, false, &["DescribeTopicsResult"]),
+                ]
+                .into_iter()
+                .map(|mut c| {
+                    c.is_test = c.path == ["TestResult"];
+                    c
+                })
+                .collect(),
+            },
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `DescribeTopicsResult` is an enum but translates \
+                     `org.apache.kafka.clients.admin.DescribeTopicsResult`, a class that is neither a Java enum nor \
+                     extended by any class"
+                ),
+                format!(
+                    "{file}: `TopicRecord` is an enum but translates `org.apache.kafka.clients.admin.TopicRecord`, a \
+                     record that is neither a Java enum nor extended by any class"
+                ),
+            ]
+        );
+        // The six public enums with a class marker the index resolves.
+        assert_eq!(checked, 6);
     }
 }
