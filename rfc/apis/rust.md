@@ -146,7 +146,7 @@ while (true) {
 #### Rust
 
 ```rust
-let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
     config, Box::new(ByteArrayDeserializer::new()), Box::new(ByteArrayDeserializer::new()),
 )?;
 consumer.subscribe_with_topics(vec!["foo".into(), "bar".into()]).await?;
@@ -349,7 +349,9 @@ impl<K, V> ProducerRecord<K, V> {
 
 The equivalent of the Java `Consumer<K, V>` interface is a trait. Applications use `KafkaConsumer<K, V>` which implements the trait, just like in Java.
 
-Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait is an `#[async_trait]`, so each async method actually returns `Pin<Box<dyn Future<Output = Result<..., Error>> + Send + '_>>`. Unlike Java's `KafkaFuture`, a Rust future is lazy: the operation does not start until it is `.await`ed.
+Every method that blocks in Java is `async` in Rust. The Rust type system is very different than Java’s. The trait's asynchronous methods return `impl Future<Output = ...> + Send` rather than being declared `async fn`, so the futures are `Send` even in generic code over `impl Consumer<K, V>`, and calls on a `KafkaConsumer` or through generic code allocate no boxed future. Implementations write them as ordinary `async fn`s. Unlike Java's `KafkaFuture`, a Rust future is lazy: the operation does not start until it is `.await`ed.
+
+Returning `impl Future` makes `Consumer<K, V>` not dyn-compatible. To hold different consumer implementations behind one type, as a Java `List<Consumer<K, V>>` would, use `DynConsumer<K, V>`: every `Consumer` implements it automatically, and it returns each future boxed, so only callers that go through `dyn` pay for the allocation.
 
 The `Consumer<K, V>` trait and its type parameters are both `Send + 'static` because their ownership can be transferred between threads and their lifetime can exist for the duration of the program.
 
@@ -358,7 +360,6 @@ Most of the methods of the `Consumer<K, V>` trait take a mutable reference to th
 Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns an `UnsupportedVersion` error for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
 
 ```rust
-#[async_trait]
 pub trait Consumer<K, V>: Send + 'static
 where
     K: Send + 'static,
@@ -373,103 +374,103 @@ where
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>; // currently always returns None
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
     // --- Subscription and assignment ---
-    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
-    async fn subscribe_with_topics_listener(
+    fn subscribe_with_topics(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
+    fn subscribe_with_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), Error>;
-    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
-    async fn subscribe_with_pattern_listener(
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> impl Future<Output = Result<(), Error>> + Send;
+    fn subscribe_with_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), Error>;
-    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error>;
-    async fn unsubscribe(&mut self) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn assign(&mut self, partitions: Vec<TopicPartition>) -> impl Future<Output = Result<(), Error>> + Send;
+    fn unsubscribe(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
     // --- Fetching ---
-    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
+    fn poll(&mut self, timeout: Duration) -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
     // --- Committing ---
-    async fn commit_sync(&mut self) -> Result<(), Error>;
-    async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
-    async fn commit_sync_with_offsets(
+    fn commit_sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_sync_with_timeout(&mut self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), Error>;
-    async fn commit_sync_with_offsets_timeout(
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
-    ) -> Result<(), Error>;
-    async fn commit_async(&mut self) -> Result<(), Error>;
-    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
-    async fn commit_async_with_offsets_callback(
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_async(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> impl Future<Output = Result<(), Error>> + Send;
+    fn commit_async_with_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
     // --- Positioning ---
-    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
-    async fn seek_with_offset_and_metadata(
+    fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> impl Future<Output = Result<(), Error>> + Send;
+    fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), Error>;
-    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
-    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
-    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
-    async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
-    async fn committed(
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn position(&mut self, partition: &TopicPartition) -> impl Future<Output = Result<i64, Error>> + Send;
+    fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> impl Future<Output = Result<i64, Error>> + Send;
+    fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
-    async fn committed_with_timeout(
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
+    fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
     // --- Metadata and offset lookup ---
-    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
-    async fn partitions_for_with_timeout(
+    fn partitions_for(&mut self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
+    fn partitions_for_with_timeout(
         &mut self,
         topic: &str,
         timeout: Duration,
-    ) -> Result<Vec<PartitionInfo>, Error>;
-    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
-    async fn list_topics_with_timeout(
+    ) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
+    fn list_topics(&mut self) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send;
+    fn list_topics_with_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
-    async fn offsets_for_times(
+    ) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send;
+    fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
-    async fn offsets_for_times_with_timeout(
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
+    fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
-    async fn beginning_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
-    async fn beginning_offsets_with_timeout(
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
+    fn beginning_offsets(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
+    fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, Error>;
-    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
-    async fn end_offsets_with_timeout(
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
+    fn end_offsets(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
+    fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
     // --- Flow control ---
-    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
-    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
+    fn pause(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn resume(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
     // --- Lifecycle ---
-    async fn enforce_rebalance(&mut self) -> Result<(), Error>;
-    async fn enforce_rebalance_with_reason(&mut self, reason: &str) -> Result<(), Error>;
-    async fn close(&mut self) -> Result<(), Error>;
+    fn enforce_rebalance(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn enforce_rebalance_with_reason(&mut self, reason: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
     // Java's deprecated close(Duration) is not translated; pass a timeout through CloseOptions.
-    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+    fn close_with_options(&mut self, options: CloseOptions) -> impl Future<Output = Result<(), Error>> + Send;
     fn wakeup(&self);
     fn handle(&self) -> ConsumerHandle;
 }
@@ -478,16 +479,19 @@ where
 The application uses `KafkaConsumer<K, V>`.
 
 ```rust
-impl KafkaConsumer {
-    pub fn new<K, V>(
+impl<K, V> KafkaConsumer<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    pub fn new(
         config: ConsumerConfig,
         key_deserializer: Box<dyn Deserializer<K>>,
         value_deserializer: Box<dyn Deserializer<V>>,
-    ) -> Result<Box<dyn Consumer<K, V>>, Error>
-    where
-        K: Send + Sync + 'static,
-        V: Send + Sync + 'static;
+    ) -> Result<Self, Error>;
 }
+
+impl<K, V> Consumer<K, V> for KafkaConsumer<K, V> { /* ... */ }
 ```
 
 The `ConsumerRecord` looks like this:
@@ -777,12 +781,12 @@ async fn run() -> Result<(), Error> {
         handle.wakeup();
     });
 
-    let result = consume_loop(&mut *consumer).await;
+    let result = consume_loop(&mut consumer).await;
     let close_result = consumer.close().await;
     result.and(close_result)
 }
 
-async fn consume_loop(consumer: &mut dyn Consumer<String, String>) -> Result<(), Error> {
+async fn consume_loop<C: Consumer<String, String>>(consumer: &mut C) -> Result<(), Error> {
     loop {
         let records = match consumer.poll(Duration::from_secs(30)).await {
             Ok(records) => records,
@@ -837,7 +841,7 @@ fn bootstrap_servers() -> String {
     std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".to_string())
 }
 
-fn create_kafka_consumer() -> Result<Box<dyn Consumer<String, String>>, Error> {
+fn create_kafka_consumer() -> Result<KafkaConsumer<String, String>, Error> {
     let props = HashMap::from([
         (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
         (ConsumerConfig::GROUP_ID_CONFIG.to_string(), GROUP_ID.to_string()),
