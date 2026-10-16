@@ -485,9 +485,10 @@ impl RecordStream {
     /// (`DefaultRecord.java:286-310`): the size field a byte at a time, then
     /// the body. The size field is kept in front of the body, so the record is
     /// parsed as an uncompressed batch's records are. A size that is
-    /// malformed, negative or above Java's maximum is left to the parser,
-    /// which has Java's text for each, and the body is not read; no more of
-    /// the stream would change what it makes of them.
+    /// malformed, negative or above Java's maximum is kept without its body,
+    /// for the record's reader to refuse with Java's text for each
+    /// ([`record_size_is_premature_eof`], [`read_record`]); no more of the
+    /// stream would change what it makes of them.
     ///
     /// The buffer is allocated once, at the record's size, up to
     /// [`MAX_RECORD_PREALLOCATION`]; a bigger record's buffer grows only as its
@@ -1363,12 +1364,12 @@ impl CompletedFetch {
             // `record_byte_offset` stays 0.
             RecordSource::Stream(stream) => &stream.record()[..],
         };
+        let from_stream = matches!(cursor.record_source, RecordSource::Stream(_));
         if cursor.record_byte_offset >= records_bytes.len()
-            || ends_inside_record_size(&records_bytes[cursor.record_byte_offset..])
+            || record_size_is_premature_eof(&records_bytes[cursor.record_byte_offset..], from_stream)
         {
             return Ok(None);
         }
-        let from_stream = matches!(cursor.record_source, RecordSource::Stream(_));
         // A parse failure here is bad input (the record body is malformed),
         // not a logic bug: the receive path no longer re-walks the batch's
         // records on load, so this is the first time the record body is
@@ -1478,7 +1479,7 @@ impl CompletedFetch {
             let records_bytes = stream
                 .next_record()
                 .map_err(|e| invalid_batch_error(&self.partition, batch.base_offset, e.message()))?;
-            if ends_inside_record_size(records_bytes) {
+            if record_size_is_premature_eof(records_bytes, true) {
                 return Err(premature_eof_error(&self.partition));
             }
             let (record, consumed) = self.read_control_record(batch, records_bytes, true)?;
@@ -1867,14 +1868,21 @@ fn premature_eof_error(partition: &TopicPartition) -> Error {
     )))
 }
 
-/// Whether `records` end before a record's size does, so no record starts at
-/// their front. Java reports this as a premature EOF: the buffer reader runs
-/// out of bytes (`BufferUnderflowException`, `DefaultRecordBatch.java:308`), and
-/// the stream reader takes the end of the stream for a continuation byte
-/// (`IllegalArgumentException`, `:650`). A stream that fails rather than ends
+/// Whether the size of the record at the front of `records` does not end
+/// where Java's reader needs it to, which Java reports as a premature EOF.
+/// `records` may end inside it, so the buffer reader runs out of bytes
+/// (`BufferUnderflowException`, `DefaultRecordBatch.java:308`). Or, for a
+/// record read off a compressed stream (`from_stream`), its fifth byte may not
+/// be its last: the stream reader takes the end of the stream for a
+/// continuation byte, so it cannot tell a size the stream ends inside from
+/// one too long, and fails on a fifth continuation byte either way
+/// (`IllegalArgumentException`, `:648-650`). An uncompressed record's size too
+/// long is left to the parser, as Java's buffer reader lets that
+/// `IllegalArgumentException` through. A stream that fails rather than ends
 /// inside the size is reported by [`RecordStream::next_record`] first.
-fn ends_inside_record_size(records: &[u8]) -> bool {
-    records.len() < MAX_RECORD_SIZE_LENGTH && records.iter().all(|b| b & 0x80 != 0)
+fn record_size_is_premature_eof(records: &[u8], from_stream: bool) -> bool {
+    let size = &records[..records.len().min(MAX_RECORD_SIZE_LENGTH)];
+    (from_stream || size.len() < MAX_RECORD_SIZE_LENGTH) && size.iter().all(|b| b & 0x80 != 0)
 }
 
 /// Parses the record at the front of `records`, the rest of `batch`'s record
@@ -3728,6 +3736,56 @@ mod tests {
         }
     }
 
+    /// A compressed batch's record whose size is negative, too long or zero
+    /// fails with the text of Java's stream reader, after the records before
+    /// it are returned. A negative size is refused before the body is read
+    /// (`DefaultRecord.java:293-294`), the five-byte `i32::MIN` too. A size
+    /// whose fifth byte is not its last is a premature EOF: the stream reader
+    /// takes the end of the stream for a continuation byte, so it cannot tell
+    /// the two apart (`DefaultRecordBatch.java:648-650`). A body of no bytes
+    /// has no attributes byte to read (`DefaultRecord.java:335, 372-373`).
+    #[test]
+    fn test_compressed_record_with_a_negative_too_long_or_zero_size_is_invalid() {
+        let invalid = |cause: &str| format!("Record batch for partition test-0 at offset 0 is invalid, cause: {cause}");
+        let varint = |size: i32| {
+            let mut field = Vec::new();
+            ByteUtils::write_varint(size, &mut field).expect("the size is written");
+            field
+        };
+        // (the second record's size field, its fault)
+        let cases = [
+            (varint(-1), invalid("Invalid record size: -1 is negative.")),
+            (varint(i32::MIN), invalid("Invalid record size: -2147483648 is negative.")),
+            (
+                vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+                "Incorrect declared batch size for partition test-0, premature EOF reached \
+                 (declared record count exceeds the records present in the batch)"
+                    .to_string(),
+            ),
+            (varint(0), invalid("Found invalid record structure")),
+        ];
+        let batch = batch_with_overridden_record_count(0, 1, 2);
+        for (size, cause) in &cases {
+            // One whole record, then a second record's size and a few bytes
+            // after it.
+            let second = [&size[..], b"body"].concat();
+            let records = [&batch[RecordBatch::RECORD_BATCH_OVERHEAD..], &second[..]];
+            for compression in codecs() {
+                let buf = compressed_batch_with_records(&batch, &records, &compression);
+                for check_crcs in [false, true] {
+                    let (offsets, fault) = records_then_fault(&buf, check_crcs);
+                    assert_eq!(vec![0], offsets, "{compression:?} size {size:02X?}");
+                    assert!(matches!(fault, Error::InvalidRecord(_)), "{fault:?}");
+                    assert_eq!(
+                        *cause,
+                        fault.message(),
+                        "{compression:?} size {size:02X?} check.crcs={check_crcs}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A compressed batch holding more records than it declares fails with the
     /// records-remaining text the uncompressed path uses, after the declared
     /// records are returned.
@@ -4128,6 +4186,193 @@ mod tests {
         }
     }
 
+    /// A compressed record's size is trusted no further than the bytes behind
+    /// it, under every codec. A record declaring the most Java allows,
+    /// `SOFT_MAX_ARRAY_LENGTH`, with four bytes of body fails where the stream
+    /// ends, having been given no more room than [`MAX_RECORD_PREALLOCATION`];
+    /// Java allocates the declared size at once (`DefaultRecord.java:302`). One
+    /// declaring a byte more is refused with a mebibyte of body behind it and
+    /// nothing allocated for the body, as Java refuses it before allocating
+    /// (`DefaultRecord.java:299-301`). The largest allocation of each fetch is
+    /// measured against that of the same batch whose second record declares
+    /// 100 bytes and has four, so the codec's own buffers, which can be bigger
+    /// than `MAX_RECORD_PREALLOCATION` (zstd reads its input through 128 KiB),
+    /// are not counted against the record.
+    #[test]
+    fn test_compressed_record_size_is_trusted_no_further_than_its_bytes() {
+        let max = AbstractRecords::SOFT_MAX_ARRAY_LENGTH;
+        let batch = batch_with_overridden_record_count(0, 1, 2);
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        // A record's size field followed by `body`.
+        let record = |size: i32, body: &[u8]| {
+            let mut record = Vec::new();
+            ByteUtils::write_varint(size, &mut record).expect("the size is written");
+            record.extend_from_slice(body);
+            record
+        };
+        // The batch's whole first record, then `second`, fetched: the fault
+        // and the largest allocation of the fetch.
+        let fetch = |second: &[u8], compression: &Compression| {
+            let records = [&batch[RecordBatch::RECORD_BATCH_OVERHEAD..], second];
+            let mut cf = new_completed_fetch(0, compressed_batch_with_records(&batch, &records, compression));
+            let _guard = crate::AllocTrackingGuard::new();
+            let first = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .expect("the first record is returned");
+            assert_eq!(1, first.len(), "{compression:?}");
+            let err = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .expect_err("the second record fails");
+            (cause(&err).message().to_string(), crate::AllocTrackingGuard::max_allocation())
+        };
+        let invalid =
+            |cause: String| format!("Record batch for partition test-0 at offset 0 is invalid, cause: {cause}");
+        let ends_early = |size: i32| {
+            invalid(format!(
+                "Invalid record size: expected {size} bytes in record payload, but the record payload reached EOF."
+            ))
+        };
+        let cases = [
+            (record(max, b"body"), ends_early(max)),
+            (
+                record(max + 1, &text_value(1, 1024 * 1024)),
+                invalid(format!(
+                    "Invalid record size: {} exceeds the configured maximum record size of {max}.",
+                    max + 1
+                )),
+            ),
+        ];
+        for compression in codecs() {
+            let (fault, codec_largest) = fetch(&record(100, b"body"), &compression);
+            assert_eq!(ends_early(100), fault, "{compression:?}");
+            for (second, cause) in &cases {
+                let (fault, largest) = fetch(second, &compression);
+                assert_eq!(*cause, fault, "{compression:?}");
+                assert!(
+                    largest <= codec_largest.max(MAX_RECORD_PREALLOCATION),
+                    "{compression:?}: the largest allocation was {largest} bytes, against {codec_largest} for a record \
+                     declaring 100 bytes ({fault})"
+                );
+                eprintln!(
+                    "{compression:?}: largest allocation {largest} bytes, {codec_largest} for 100 bytes ({fault})"
+                );
+            }
+        }
+    }
+
+    /// [`RecordStream::next_record`] reads only the size of a record declaring
+    /// more than Java's maximum, `SOFT_MAX_ARRAY_LENGTH`, and leaves its body
+    /// in the stream, under every codec: Java refuses the size before reading
+    /// on (`DefaultRecord.java:299-301`).
+    #[test]
+    fn test_record_above_the_maximum_size_is_read_without_its_body() {
+        use std::io::Write;
+        let mut size = Vec::new();
+        ByteUtils::write_varint(AbstractRecords::SOFT_MAX_ARRAY_LENGTH + 1, &mut size).expect("the size is written");
+        let body = text_value(1, 1024 * 1024);
+        for compression in codecs() {
+            let mut compressed = Vec::new();
+            let mut writer = compression
+                .wrap_for_output(&mut compressed, RecordBatch::MAGIC_VALUE_V2)
+                .expect("the codec opens");
+            writer.write_all(&size).expect("the size compresses");
+            writer.write_all(&body).expect("the body compresses");
+            writer.finish().expect("the stream closes");
+            let mut stream =
+                RecordStream::open(compressed.into(), compression.compression_type(), RecordBatch::MAGIC_VALUE_V2)
+                    .expect("the stream opens");
+            let record = stream.next_record().expect("the size is read");
+            assert!(
+                record == &size[..],
+                "{compression:?}: {} bytes were read, the size is {}",
+                record.len(),
+                size.len()
+            );
+            stream.consume(size.len());
+            let mut rest = Vec::new();
+            stream.reader.read_to_end(&mut rest).expect("the stream decompresses");
+            assert!(
+                rest == body,
+                "{compression:?}: {} bytes were left in the stream, the body is {}",
+                rest.len(),
+                body.len()
+            );
+        }
+    }
+
+    /// Compressed records bigger than the stream's read buffer are read whole
+    /// and keep their bytes, each in a buffer of exactly its size, under every
+    /// codec. Their size fields and bodies come to 20 000 bytes, more than
+    /// every codec's read buffer ([`Compression::decompression_output_size`])
+    /// and less than [`MAX_RECORD_PREALLOCATION`], so the record is read partly
+    /// out of the read buffer and partly past it; and to a byte less than,
+    /// exactly and a byte more than `MAX_RECORD_PREALLOCATION`: the two largest
+    /// records given their room at once, and the smallest whose buffer grows,
+    /// by its last byte ([`RecordStream::read_record`]). Each sits between two
+    /// small records, and all three are read with `BytesDeserializer` and
+    /// compared byte for byte once the fetch is done, so a record read from the
+    /// wrong place, or a buffer changed after its record was handed out, would
+    /// show. What the records keep is measured once the fetch has dropped the
+    /// stream, as in
+    /// [`test_compressed_record_bigger_than_the_preallocation_keeps_a_buffer_of_its_size`].
+    #[test]
+    fn test_compressed_records_bigger_than_the_read_buffer_keep_their_bytes() {
+        /// What the fetch keeps besides the big record: the small records,
+        /// the records vector and the reference counts the values share.
+        const BOOKKEEPING: usize = 4096;
+        let deserializer = crate::common::serialization::BytesDeserializer::new();
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        for total in [
+            20_000,
+            MAX_RECORD_PREALLOCATION - 1,
+            MAX_RECORD_PREALLOCATION,
+            MAX_RECORD_PREALLOCATION + 1,
+        ] {
+            // The value that makes the record at offset 1 `total` bytes long,
+            // its size field included.
+            let target = i32::try_from(total).unwrap();
+            let value_size = (0..target)
+                .find(|&size| DefaultRecord::do_size_in_bytes_with_key_size_value_size(1, 0, -1, size, &[]) == target)
+                .expect("a value makes the record that long");
+            let values = [text_value(0, 10), text_value(1, value_size as usize), text_value(2, 10)];
+            let batch = batch_of(&values);
+            let records = &batch[RecordBatch::RECORD_BATCH_OVERHEAD..];
+            let (size, size_length) = ByteUtils::read_varint(records).expect("a record starts with its size");
+            let (size, second_size_length) =
+                ByteUtils::read_varint(&records[size_length + size as usize..]).expect("a record starts with its size");
+            assert_eq!(total, second_size_length + size as usize, "the record is {total} bytes long");
+            for compression in codecs() {
+                assert!(
+                    compression.decompression_output_size().expect("a codec has a buffer size") < total,
+                    "{compression:?}: the record is bigger than the read buffer"
+                );
+                let mut cf = new_completed_fetch(0, compressed_by_record(&batch, &compression));
+                cf.ensure_cursor();
+                let (read, kept) = {
+                    let _guard = crate::AllocTrackingGuard::new();
+                    let read = cf
+                        .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 10)
+                        .expect("the batch is valid");
+                    (read, crate::AllocTrackingGuard::net_bytes())
+                };
+                assert_eq!(values.len(), read.len(), "{compression:?} {total}");
+                for ((offset, value), record) in (0..).zip(&values).zip(&read) {
+                    assert_eq!(offset, record.offset(), "{compression:?} {total}");
+                    assert!(
+                        record.value().is_some_and(|read| read[..] == value[..]),
+                        "{compression:?} {total}: the value at offset {offset} differs"
+                    );
+                }
+                let kept = usize::try_from(kept).unwrap();
+                assert!(
+                    (total..=total + BOOKKEEPING).contains(&kept),
+                    "{compression:?}: the records keep {kept} bytes allocated for a record of {total}"
+                );
+                eprintln!("{compression:?}: {kept} bytes kept for a record of {total}");
+            }
+        }
+    }
+
     /// A compressed batch is decompressed a record at a time, never whole:
     /// reading one that decompresses to more than a mebibyte allocates no single
     /// block bigger than 256 KiB, under every codec. Its records are compressed
@@ -4428,40 +4673,45 @@ mod tests {
     }
 
     /// A compressed control batch whose stream ends inside a later record's
-    /// size fails with the premature-EOF text, as Java's stream reader reports
-    /// it (`DefaultRecordBatch.java:650`), before any of the batch's records is
+    /// size, or whose later record's size runs past its fifth byte, fails with
+    /// the premature-EOF text, as Java's stream reader reports both
+    /// (`DefaultRecordBatch.java:648-650`), before any of the batch's records is
     /// consumed.
     #[test]
-    fn test_compressed_control_batch_ending_inside_a_record_size_is_premature_eof() {
+    fn test_compressed_control_batch_with_a_record_size_cut_off_or_too_long_is_premature_eof() {
         const PRODUCER_ID: i64 = 42;
-        for compression in codecs() {
-            // The marker, then the first byte of a second record's size.
-            let mut marker = marker_batch(0, 1, PRODUCER_ID, ControlRecordType::Abort);
-            put_i32(&mut marker, RecordBatch::RECORDS_COUNT_OFFSET, 2);
-            let records = [&marker[RecordBatch::RECORD_BATCH_OVERHEAD..], &[0x80][..]];
-            let buf = compressed_batch_with_records(&marker, &records, &compression);
-            let mut cf = CompletedFetch::with_full(
-                make_subscriptions(),
-                Arc::new(BufferSupplier::create()),
-                tp("test", 0),
-                partition_data_with_aborted_txn(buf, PRODUCER_ID, 0),
-                test_aggregator(),
-                0,
-            );
-            let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
-            let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
-                .expect_err("the second control record's size is cut off");
-            assert_eq!(SEEK_PAST_MESSAGE, err.message());
-            let cause = cause(&err);
-            assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
-            assert_eq!(
-                "Incorrect declared batch size for partition test-0, premature EOF reached \
-                 (declared record count exceeds the records present in the batch)",
-                cause.message(),
-                "{compression:?}"
-            );
-            assert_eq!(0, cf.next_fetch_offset, "{compression:?}");
+        // The first byte of a size; a size too long, and a byte after it.
+        let sizes: [&[u8]; 2] = [&[0x80], &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]];
+        for size in sizes {
+            for compression in codecs() {
+                // The marker, then the second record's size.
+                let mut marker = marker_batch(0, 1, PRODUCER_ID, ControlRecordType::Abort);
+                put_i32(&mut marker, RecordBatch::RECORDS_COUNT_OFFSET, 2);
+                let records = [&marker[RecordBatch::RECORD_BATCH_OVERHEAD..], size];
+                let buf = compressed_batch_with_records(&marker, &records, &compression);
+                let mut cf = CompletedFetch::with_full(
+                    make_subscriptions(),
+                    Arc::new(BufferSupplier::create()),
+                    tp("test", 0),
+                    partition_data_with_aborted_txn(buf, PRODUCER_ID, 0),
+                    test_aggregator(),
+                    0,
+                );
+                let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+                let err = cf
+                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .expect_err("the second control record's size does not end");
+                assert_eq!(SEEK_PAST_MESSAGE, err.message());
+                let cause = cause(&err);
+                assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+                assert_eq!(
+                    "Incorrect declared batch size for partition test-0, premature EOF reached \
+                     (declared record count exceeds the records present in the batch)",
+                    cause.message(),
+                    "{compression:?} size {size:02X?}"
+                );
+                assert_eq!(0, cf.next_fetch_offset, "{compression:?} size {size:02X?}");
+            }
         }
     }
 
