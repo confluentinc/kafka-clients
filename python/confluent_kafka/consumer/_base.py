@@ -1406,14 +1406,35 @@ class _ConsumerState:
                     message="Topic partitions collection to assign to cannot be null")
         return blank_null_topic_partitions(partitions)
 
-    def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False) -> int:
-        """``overload_timeout_ms`` after the closed check, which comes first
+    def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
+                    group: bool = False, handle_timed: bool = False) -> int:
+        """``overload_timeout_ms`` for a ``Duration`` overload, in Java's order
         (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
-        Order); ``_NO_TIMEOUT`` when ``timeout`` is not given."""
+        Order); ``_NO_TIMEOUT`` when ``timeout`` is not given.
+
+        The closed check comes first. Inside a callback, an overload whose
+        ``ConsumerHandle`` form has no timeout (every one but ``position``,
+        ``handle_timed``) is refused with ``ConcurrentModificationError``, as
+        ``partitions_for`` and ``list_topics`` are refused without one
+        (``_refuse_inside_callback``) *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*. Then, inside one use of
+        the handle, as Java checks the timeout after ``acquireAndEnsureOpen()``:
+        another thread inside the consumer raises
+        ``ConcurrentModificationError``; for a negative timeout, a consumer
+        without a ``group.id`` raises ``InvalidGroupIdError`` where Java's body
+        checks it before the timeout (``group``: ``commitSync``, ``committed``),
+        then the negative timeout ``IllegalArgumentError``."""
         if timeout is None:
             return _NO_TIMEOUT
         self._check_open()
-        return overload_timeout_ms(timeout, timer=timer)
+        if not handle_timed and self._in_callback():
+            with self._use():
+                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+        with self._use():
+            millis = _duration_millis(timeout)
+            if millis < 0 and group and not self._group_id_defined:
+                raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
+            return overload_timeout_ms(timeout, timer=timer)
 
     def _check_not_null(self, op: str, value: object) -> None:
         """Java's null check of ``op``'s argument (``_NULL_ARGUMENT``), after
@@ -1508,11 +1529,9 @@ class _ConsumerState:
 
         Of the ``Duration`` overloads the handle has only ``position``'s
         (``kafka_consumer_ConsumerHandle_position_with_timeout``); the others
-        (``commit``, ``committed``, ``offsets_for_times``,
-        ``beginning_offsets``, ``end_offsets``) go through its form without a
-        timeout, bounded by ``default.api.timeout.ms``, their ``timeout``
-        checked but not passed (``partitions_for`` and ``list_topics`` have no
-        handle form and are refused inside a callback)."""
+        are refused inside a callback when a ``timeout`` is given
+        (``_timeout_ms``), as ``partitions_for`` and ``list_topics``, which
+        have no handle form, are refused."""
         handle = self._handle()
         if op == "commit":
             (offsets,) = args

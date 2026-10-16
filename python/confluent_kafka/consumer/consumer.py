@@ -33,7 +33,11 @@ The ``Duration`` overloads of ``commitSync``, ``position``, ``committed``,
 ``partitionsFor``, ``listTopics``, ``offsetsForTimes``, ``beginningOffsets`` and
 ``endOffsets`` are the optional ``timeout`` of their method (Signatures,
 Timeouts): ``None`` calls the overload without it, a given one the
-``kafka_consumer_Consumer_*_with_timeout`` entry point.
+``kafka_consumer_Consumer_*_with_timeout`` entry point. Inside a callback this
+consumer delivers, only ``position`` takes a ``timeout``; the others raise
+``ConcurrentModificationError`` for one, as ``partitions_for`` and
+``list_topics`` are refused there with or without it *(deviation: inside a
+listener the core's handle has no timed form; goes when it has)*.
 
 Not generated, their FFI entry point being missing (the name looked for, after
 the ``kafka_consumer_Consumer_`` prefix, in parentheses):
@@ -210,7 +214,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         rebalance, ``WakeupError`` if ``wakeup()`` is called before or while this
         method is called, ``AuthorizationError`` if not authorized,
         ``IllegalArgumentError`` if ``timeout`` is negative, and ``KafkaError``
-        for any other unrecoverable error.
+        for any other unrecoverable error. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
         self._c_commit(offsets, timeout)
 
@@ -323,7 +329,9 @@ class Consumer(Generic[K, V], _ConsumerState):
 
         This call waits up to ``timeout`` for the offsets,
         ``default.api.timeout.ms`` without one, and raises ``TimeoutError`` if
-        they cannot be fetched before it expires.
+        they cannot be fetched before it expires. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
         return self._c_committed(partitions, timeout)
 
@@ -384,7 +392,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``IllegalArgumentError`` if a target timestamp or the
         ``timeout`` is negative, ``UnsupportedVersionError`` if the broker does
         not support looking up the offsets by timestamp, and ``TimeoutError``
-        if the offsets cannot be fetched before the timeout expires.
+        if the offsets cannot be fetched before the timeout expires. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
         return self._c_offsets_for_times(timestamps_to_search, timeout)
 
@@ -393,7 +403,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         """Get the first offset for the given partitions. This method does not
         change the current consumer position of the partitions, and waits up to
         ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
-        once it expires; a zero ``timeout`` returns an empty map at once)."""
+        once it expires; a zero ``timeout`` returns an empty map at once).
+        Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*."""
         return self._c_beginning_offsets(partitions, timeout)
 
     def end_offsets(self, *, partitions: Iterable[TopicPartition],
@@ -403,7 +416,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         the last stable offset under ``read_committed``). This method does not
         change the current consumer position of the partitions, and waits up to
         ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
-        once it expires; a zero ``timeout`` returns an empty map at once)."""
+        once it expires; a zero ``timeout`` returns an empty map at once).
+        Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*."""
         return self._c_end_offsets(partitions, timeout)
 
     def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
@@ -498,7 +514,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
                   timeout: Duration | None = None) -> None:
-        timeout_ms = self._timeout_ms(timeout, timer=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
             self._reentrant_use("commit", offsets)
             return
@@ -518,7 +534,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
     def _c_position(self, partition: TopicPartition, timeout: Duration | None = None) -> int:
-        timeout_ms = self._timeout_ms(timeout, timer=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
@@ -528,7 +544,7 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_committed(self, partitions: Iterable[TopicPartition],
                      timeout: Duration | None = None
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
-        timeout_ms = self._timeout_ms(timeout)
+        timeout_ms = self._timeout_ms(timeout, group=True)
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(

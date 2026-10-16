@@ -348,7 +348,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
                         timeout: Duration | None = None) -> None:
-        timeout_ms = self._timeout_ms(timeout, timer=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
             self._reentrant_use("commit", offsets)
             return
@@ -369,7 +369,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _a_position(self, partition: TopicPartition,
                           timeout: Duration | None = None) -> int:
-        timeout_ms = self._timeout_ms(timeout, timer=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
@@ -378,7 +378,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def _a_committed(self, partitions: Iterable[TopicPartition],
                            timeout: Duration | None = None
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
-        timeout_ms = self._timeout_ms(timeout)
+        timeout_ms = self._timeout_ms(timeout, group=True)
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(

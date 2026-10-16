@@ -413,13 +413,11 @@ def test_verify_poll_times_out_during_metadata_update() -> None:
 
 def test_committed_throws_timeout_error_for_no_response() -> None:
     # testCommittedThrowsTimeoutExceptionForNoResponse: Java's
-    # committed(partitions, Duration.ofMillis(1000)); the Duration form is
-    # not generated, its entry point being missing, so default.api.timeout.ms
-    # bounds it.
-    with new_consumer(**{"default.api.timeout.ms": 1000}) as consumer:
+    # committed(partitions, Duration.ofMillis(1000)).
+    with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         with pytest.raises(KafkaTimeoutError) as e:
-            consumer.committed(partitions={TP0})
+            consumer.committed(partitions={TP0}, timeout=1.0)
         assert str(e.value) == ("Timeout of 1000ms expired before the last committed offset for "
                                 "partitions [test-0] could be determined. Try tuning "
                                 "default.api.timeout.ms larger to relax the threshold.")
@@ -885,6 +883,298 @@ def test_an_async_timeout_beyond_a_long_raises_before_the_ffi_and_the_consumer_s
         await consumer.close(option=CloseOptions.timeout(0))
         with pytest.raises(IllegalStateError) as e:
             consumer.assignment()
+        assert str(e.value) == CLOSED
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# The Duration overloads (Signatures, Timeouts): the optional ``timeout``
+# ---------------------------------------------------------------------------
+# A given timeout calls the `_with_timeout` entry point, None the overload
+# without it, bounded by default.api.timeout.ms; Java's own TimeoutException
+# messages carry the bound that applied.
+COMMITTED_TIMEOUT = ("Timeout of {}ms expired before the last committed offset for partitions "
+                     "[test-0] could be determined. Try tuning default.api.timeout.ms larger to "
+                     "relax the threshold.")
+TIMED: dict[str, tuple[Callable[..., Any], str]] = {
+    "commit": (lambda c, **t: c.commit(offsets={TP0: OffsetAndMetadata(offset=1)}, **t),
+               "Timeout of {}ms expired before successfully committing offsets"),
+    "position": (lambda c, **t: c.position(partition=TP0, **t),
+                 "Timeout of {}ms expired before the position for partition test-0 could be "
+                 "determined"),
+    "committed": (lambda c, **t: c.committed(partitions={TP0}, **t), COMMITTED_TIMEOUT),
+    "offsets_for_times": (lambda c, **t: c.offsets_for_times(timestamps_to_search={TP0: 0}, **t),
+                          "Failed to get offsets by times in {}ms"),
+    "beginning_offsets": (lambda c, **t: c.beginning_offsets(partitions=[TP0], **t),
+                          "Failed to get offsets by times in {}ms"),
+    "end_offsets": (lambda c, **t: c.end_offsets(partitions=[TP0], **t),
+                    "Failed to get offsets by times in {}ms"),
+}
+# partitionsFor / listTopics: Java throws at once for a zero timeout; the
+# untimed overload waits out default.api.timeout.ms. An expired lookup has
+# either of two messages, depending on which side the deadline reaches first:
+# the request manager's (Java's TopicMetadataRequestManager) or the
+# application side's wait for the event.
+METADATA_EXPIRED_BY_MANAGER = "Timeout expired while fetching topic metadata"
+METADATA: dict[str, tuple[Callable[..., Any], str, set[str]]] = {
+    "partitions_for": (lambda c, **t: c.partitions_for(topic=TOPIC, **t),
+                       "Timeout of 0ms expired before partitions for topic test could be "
+                       "determined",
+                       {METADATA_EXPIRED_BY_MANAGER,
+                        "Timeout expired while waiting for TopicMetadata"}),
+    "list_topics": (lambda c, **t: c.list_topics(**t),
+                    "Timeout of 0ms expired before all topics' metadata could be listed",
+                    {METADATA_EXPIRED_BY_MANAGER,
+                     "Timeout expired while waiting for AllTopicsMetadata"}),
+}
+# Every Duration overload, with Java's negative-timeout message: a Timer's where
+# Java builds one from the timeout (commitSync, position), else the core's.
+NEGATIVE: dict[str, tuple[Callable[..., Any], str]] = {
+    **{name: (call, "Invalid negative timeout {}") for name, (call, _) in TIMED.items()
+       if name in ("commit", "position")},
+    **{name: (call, "Timeout must not be negative") for name, (call, _) in TIMED.items()
+       if name not in ("commit", "position")},
+    **{name: (call, "Timeout must not be negative") for name, (call, _, _) in METADATA.items()},
+}
+
+
+@pytest.mark.parametrize("method", sorted(TIMED))
+def test_a_duration_overload_waits_up_to_its_timeout(method: str) -> None:
+    call, message = TIMED[method]
+    # default.api.timeout.ms bounds the untimed overload, the timeout the timed one.
+    with new_consumer(**{"default.api.timeout.ms": 300}) as consumer:
+        consumer.assign(partitions=[TP0])
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer)
+        assert str(e.value) == message.format(300)
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer, timeout=0.2)
+        assert str(e.value) == message.format(200)
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer, timeout=timedelta(milliseconds=150))
+        assert str(e.value) == message.format(150)
+
+
+@pytest.mark.parametrize("method", sorted(METADATA))
+def test_a_metadata_duration_overload_waits_up_to_its_timeout(method: str) -> None:
+    call, zero, expired = METADATA[method]
+    with new_consumer(**{"default.api.timeout.ms": 300}) as consumer:
+        started = time.monotonic()
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer, timeout=0)
+        assert str(e.value) == zero
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer, timeout=0.2)
+        assert str(e.value) in expired
+        with pytest.raises(KafkaTimeoutError) as e:
+            call(consumer)
+        assert str(e.value) in expired
+        assert time.monotonic() - started < WAIT
+
+
+def test_a_zero_timeout_returns_the_offsets_lookups_at_once() -> None:
+    # AsyncKafkaConsumer: offsetsForTimes returns the empty results,
+    # beginningOffsets / endOffsets an empty map, without waiting.
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
+        started = time.monotonic()
+        assert consumer.offsets_for_times(timestamps_to_search={TP0: 0}, timeout=0) == {TP0: None}
+        assert consumer.beginning_offsets(partitions=[TP0], timeout=0) == {}
+        assert consumer.end_offsets(partitions=[TP0], timeout=timedelta(0)) == {}
+        assert time.monotonic() - started < WAIT
+
+
+@pytest.mark.parametrize("method", sorted(NEGATIVE))
+def test_a_duration_overload_rejects_a_negative_timeout(method: str) -> None:
+    call, message = NEGATIVE[method]
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        with pytest.raises(IllegalArgumentError) as e:
+            call(consumer, timeout=-1)
+        assert str(e.value) == message.format(-1000)
+        with pytest.raises(IllegalArgumentError) as e:
+            call(consumer, timeout=timedelta(microseconds=-500))
+        assert str(e.value) == message.format(-1)
+        assert consumer.assignment() == {TP0}
+
+
+@pytest.mark.parametrize("method", sorted(NEGATIVE))
+def test_a_duration_overload_raises_overflow_and_nan_before_the_ffi(method: str) -> None:
+    call, _ = NEGATIVE[method]
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        with pytest.raises(OverflowError) as e:
+            call(consumer, timeout=1e300)
+        assert str(e.value) == TOO_LONG
+        with pytest.raises(OverflowError):
+            call(consumer, timeout=float("inf"))
+        with pytest.raises(ValueError):
+            call(consumer, timeout=float("nan"))
+        assert consumer.assignment() == {TP0}
+
+
+@pytest.mark.parametrize("method", sorted(NEGATIVE))
+def test_a_duration_overload_checks_the_closed_state_first(method: str) -> None:
+    call, _ = NEGATIVE[method]
+    consumer = new_consumer()
+    consumer.close(option=CloseOptions.timeout(0))
+    for timeout in (-1, float("nan")):
+        with pytest.raises(IllegalStateError) as e:
+            call(consumer, timeout=timeout)
+        assert str(e.value) == CLOSED
+
+
+# The Duration overloads whose ConsumerHandle form has no timeout.
+UNTIMED_IN_CALLBACK = ("commit", "committed", "offsets_for_times", "beginning_offsets",
+                       "end_offsets")
+
+
+@pytest.mark.parametrize("method", UNTIMED_IN_CALLBACK + tuple(sorted(METADATA)))
+def test_a_timeout_inside_a_callback_is_refused_where_the_handle_has_no_timed_form(
+        method: str) -> None:
+    # Inside a callback the call goes through the core's ConsumerHandle, which
+    # has a timed form of position only: the others are refused for a given
+    # timeout, as partitions_for / list_topics are refused there, rather than
+    # waiting default.api.timeout.ms (deviation: goes when the handle has one).
+    call = TIMED[method][0] if method in TIMED else METADATA[method][0]
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(offsets: Any, exception: Any) -> None:
+            for timeout in (0, -1, 1.0):
+                try:
+                    call(consumer, timeout=timeout)
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [ConcurrentModificationError] * 3
+        assert {str(e) for e in raised} == {CONCURRENT}
+
+
+def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(offsets: Any, exception: Any) -> None:
+            try:
+                consumer.position(partition=TP0, timeout=0.2)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        started = time.monotonic()
+        consumer.commit(offsets={})
+        assert time.monotonic() - started < WAIT
+        (error,) = raised
+        assert isinstance(error, KafkaTimeoutError)
+        assert str(error) == TIMED["position"][1].format(200)
+
+
+@pytest.mark.parametrize("method", sorted(NEGATIVE))
+def test_a_negative_timeout_from_another_thread_meets_the_guard_first(method: str) -> None:
+    # Java checks the timeout after acquireAndEnsureOpen(): a call while
+    # another thread is inside the consumer raises
+    # ConcurrentModificationException, whatever its timeout.
+    call, _ = NEGATIVE[method]
+    with new_consumer() as consumer:
+        inside, leave = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with consumer._use():  # noqa: SLF001
+                inside.set()
+                leave.wait(WAIT)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert inside.wait(WAIT)
+            with pytest.raises(ConcurrentModificationError) as e:
+                call(consumer, timeout=-1)
+            assert str(e.value) == CONCURRENT
+        finally:
+            leave.set()
+            holder.join(WAIT)
+
+
+@pytest.mark.parametrize("method", sorted(NEGATIVE))
+def test_a_negative_timeout_without_a_group_id(method: str) -> None:
+    # Java's commitSync and committed check the group.id before the timeout
+    # (throwIfGroupIdNotDefined); the others reach the timeout check.
+    call, message = NEGATIVE[method]
+    with new_consumer(group_id=None) as consumer:
+        consumer.assign(partitions=[TP0])
+        if method in ("commit", "committed"):
+            with pytest.raises(InvalidGroupIdError) as e:
+                call(consumer, timeout=-1)
+            assert str(e.value) == NO_GROUP_ID
+        else:
+            with pytest.raises(IllegalArgumentError) as e:
+                call(consumer, timeout=-1)
+            assert str(e.value) == message.format(-1000)
+
+
+def test_the_duration_overloads_are_keyword_only() -> None:
+    with new_consumer() as consumer:
+        c: Any = consumer
+        for positional in (lambda: c.commit(None, 1.0), lambda: c.position(TP0, 1.0),
+                           lambda: c.committed({TP0}, 1.0), lambda: c.partitions_for(TOPIC, 1.0),
+                           lambda: c.list_topics(1.0),
+                           lambda: c.offsets_for_times({TP0: 0}, 1.0),
+                           lambda: c.beginning_offsets([TP0], 1.0),
+                           lambda: c.end_offsets([TP0], 1.0)):
+            with pytest.raises(TypeError):
+                positional()
+
+
+def test_the_async_duration_overloads() -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs=configs(**{"default.api.timeout.ms": 300}))
+        await consumer.assign(partitions=[TP0])
+        cases: list[tuple[Callable[..., Any], str]] = [
+            (lambda **t: consumer.commit(offsets={TP0: OffsetAndMetadata(offset=1)}, **t),
+             TIMED["commit"][1]),
+            (lambda **t: consumer.position(partition=TP0, **t), TIMED["position"][1]),
+            (lambda **t: consumer.committed(partitions={TP0}, **t), COMMITTED_TIMEOUT),
+            (lambda **t: consumer.offsets_for_times(timestamps_to_search={TP0: 0}, **t),
+             TIMED["offsets_for_times"][1]),
+            (lambda **t: consumer.beginning_offsets(partitions=[TP0], **t),
+             TIMED["beginning_offsets"][1]),
+            (lambda **t: consumer.end_offsets(partitions=[TP0], **t), TIMED["end_offsets"][1]),
+        ]
+        for call, message in cases:
+            with pytest.raises(KafkaTimeoutError) as e:
+                await call()
+            assert str(e.value) == message.format(300)
+            with pytest.raises(KafkaTimeoutError) as e:
+                await call(timeout=0.2)
+            assert str(e.value) == message.format(200)
+            with pytest.raises(IllegalArgumentError):
+                await call(timeout=-1)
+            with pytest.raises(OverflowError):
+                await call(timeout=float("inf"))
+        with pytest.raises(KafkaTimeoutError) as e:
+            await consumer.partitions_for(topic=TOPIC, timeout=0)
+        assert str(e.value) == METADATA["partitions_for"][1]
+        with pytest.raises(KafkaTimeoutError) as e:
+            await consumer.list_topics(timeout=0)
+        assert str(e.value) == METADATA["list_topics"][1]
+        with pytest.raises(IllegalArgumentError) as e:
+            await consumer.position(partition=TP0, timeout=-1)
+        assert str(e.value) == "Invalid negative timeout -1000"
+        with pytest.raises(IllegalArgumentError) as e:
+            await consumer.list_topics(timeout=-1)
+        assert str(e.value) == "Timeout must not be negative"
+        with pytest.raises(TypeError):
+            await consumer.position(TP0, 1.0)  # type: ignore[misc]
+        assert await consumer.end_offsets(partitions=[TP0], timeout=0) == {}
+        await consumer.close(option=CloseOptions.timeout(0))
+        with pytest.raises(IllegalStateError) as e:
+            await consumer.committed(partitions={TP0}, timeout=-1)
         assert str(e.value) == CLOSED
 
     asyncio.run(main())

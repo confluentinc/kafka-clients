@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if sys.version_info >= (3, 11):
@@ -259,6 +260,18 @@ def _consumer_family_types(c: object = None) -> None:
                 "dict[TopicPartition, OffsetAndTimestamp | None]")
     assert_type(kc.metrics(), "dict[MetricName, Metric]")
     assert_type(kc.group_metadata(), ConsumerGroupMetadata)
+    # The Duration overloads: an optional timeout, seconds or a timedelta.
+    assert_type(kc.commit(timeout=1.0), None)
+    assert_type(kc.commit(offsets={}, timeout=timedelta(seconds=1)), None)
+    assert_type(kc.position(partition=tp, timeout=1.0), int)
+    assert_type(kc.committed(partitions=[tp], timeout=1.0),
+                "dict[TopicPartition, OffsetAndMetadata | None]")
+    assert_type(kc.partitions_for(topic="t", timeout=1.0), "list[PartitionInfo]")
+    assert_type(kc.list_topics(timeout=1.0), "dict[str, list[PartitionInfo]]")
+    assert_type(kc.offsets_for_times(timestamps_to_search={tp: 0}, timeout=1.0),
+                "dict[TopicPartition, OffsetAndTimestamp | None]")
+    assert_type(kc.beginning_offsets(partitions=[tp], timeout=1.0), "dict[TopicPartition, int]")
+    assert_type(kc.end_offsets(partitions=[tp], timeout=None), "dict[TopicPartition, int]")
     # The overload stubs accept each Java form.
     kc.subscribe(topics=["t"])
     kc.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
