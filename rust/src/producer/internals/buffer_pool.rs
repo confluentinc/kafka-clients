@@ -589,7 +589,21 @@ impl BufferPool {
         // The wait duration is measured with `time.nanoseconds()` bracketing the wait, as in
         // Java, and recorded even when the wait ends in timeout / close (Java's `finally`).
         let start_wait_ns = self.time.nanoseconds();
-        let waiting_time_elapsed = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
+        // A zero budget never parks. Java's `moreMemory.await(0, NANOSECONDS)` returns
+        // `false` at once; `tokio::time::timeout(0, ..)` would instead register a timer
+        // and park this task until the runtime's time driver fires it, so the "would
+        // block" answer would depend on a runtime worker being free to mind the driver.
+        // `KafkaProducer::try_send` reaches here with a zero budget through `block_on`
+        // from a foreign thread (the C FFI, which keeps the Python GIL across the call),
+        // and the worker running the Sender may at that moment be waiting for that same
+        // GIL in a delivery callback: the timer never fired and both sides waited
+        // forever. Answering without a timer is what `try_send` promises, and what Java
+        // does.
+        let waiting_time_elapsed = if remaining.is_zero() {
+            true
+        } else {
+            tokio::time::timeout(remaining, more_memory.notified()).await.is_err()
+        };
         let end_wait_ns = self.time.nanoseconds();
         self.record_wait_time((end_wait_ns - start_wait_ns).max(0))?;
 
@@ -1212,6 +1226,29 @@ mod tests {
             matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)),
             "Should be a BufferExhausted error"
         );
+    }
+
+    /// Rust-only: a zero budget answers `BufferExhausted` without a timer.
+    ///
+    /// `KafkaProducer::try_send` allocates with `max_block_ms = 0` through `block_on`
+    /// from a thread outside the runtime, and the C FFI does so while holding the
+    /// Python GIL; a timer there needs a runtime worker to fire it, and that worker
+    /// may be waiting for the GIL. The runtime below has no time driver at all, so a
+    /// `tokio::time::timeout` would panic ("A Tokio 1.x context was found, but timers
+    /// are disabled"): the test passes only if no timer is involved.
+    #[test]
+    fn test_zero_budget_gives_up_without_a_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(async {
+            let pool = BufferPool::new_for_test(2, 1);
+            let _buffer = pool.allocate(1, 0).await.unwrap();
+            let result = pool.allocate(2, 0).await;
+            assert!(
+                matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)),
+                "Should be a BufferExhausted error"
+            );
+            assert_eq!(0, pool.queued(), "the waiter must leave the queue on the way out");
+        });
     }
 
     /// Translated from `BufferPoolTest.testBlockTimeout`.
