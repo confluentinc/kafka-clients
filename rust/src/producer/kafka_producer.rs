@@ -1533,31 +1533,33 @@ impl<K, V> KafkaProducer<K, V> {
     /// - [`Error::Timeout`] if initializing the transaction takes longer than
     ///   `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#initTransactions")]
-    pub async fn init_transactions(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:711`), fed to
-        // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:715`) after a
-        // successful await. Timed with the injected `time`, as Java times with its
-        // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager
-                .lock()
-                .unwrap()
-                .initialize_transactions(false, &mut pending_requests)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
-            .await?;
-        // Java records only after a successful await (`:715`), so the `?` above must
-        // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
-        self.producer_metrics.record_init(self.time.nanoseconds() - start);
-        transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
-        Ok(())
+    pub fn init_transactions(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:711`), fed to
+            // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:715`) after a
+            // successful await. Timed with the injected `time`, as Java times with its
+            // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .initialize_transactions(false, &mut pending_requests)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
+                .await?;
+            // Java records only after a successful await (`:715`), so the `?` above must
+            // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
+            self.producer_metrics.record_init(self.time.nanoseconds() - start);
+            transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
+            Ok(())
+        }
     }
 
     /// Should be called before the start of each new transaction. Note that prior
@@ -1649,48 +1651,50 @@ impl<K, V> KafkaProducer<K, V> {
     /// The producer first resolves the metadata for the topics in `offsets`
     /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction")]
-    pub async fn send_offsets_to_transaction(
+    pub fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: &dyn ConsumerGroupMetadata,
-    ) -> Result<(), Error> {
-        Self::throw_if_invalid_group_metadata(group_metadata)?;
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            Self::throw_if_invalid_group_metadata(group_metadata)?;
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
 
-        // Java 800: an empty map is a no-op, and in particular does not consult the
-        // transaction state at all. It is also left unmetered — Java starts the timer
-        // inside the `if (!offsets.isEmpty())` block, after this check.
-        if offsets.is_empty() {
-            return Ok(());
+            // Java 800: an empty map is a no-op, and in particular does not consult the
+            // transaction state at all. It is also left unmetered — Java starts the timer
+            // inside the `if (!offsets.isEmpty())` block, after this check.
+            if offsets.is_empty() {
+                return Ok(());
+            }
+
+            // Java: `long start = time.nanoseconds()` inside the non-empty branch
+            // (`KafkaProducer.java:801`), before the KIP-1319 metadata wait, so that wait
+            // is part of the recorded duration; recorded after a successful await (`:808`).
+            let start = self.time.nanoseconds();
+
+            // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
+            // ids before the manager builds the request. No manager guard is held
+            // across this await (`producer-transactions.md` §4).
+            let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
+            let wait_ms = self.await_topic_metadata(&topics).await?;
+            let remaining_ms = (self.max_block_ms - wait_ms).max(0);
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager.lock().unwrap().send_offsets_to_transaction(
+                    offsets,
+                    ConsumerGroupMetadataImpl::copy_of(group_metadata),
+                    &mut pending_requests,
+                )?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_send_offsets(self.time.nanoseconds() - start);
+            Ok(())
         }
-
-        // Java: `long start = time.nanoseconds()` inside the non-empty branch
-        // (`KafkaProducer.java:801`), before the KIP-1319 metadata wait, so that wait
-        // is part of the recorded duration; recorded after a successful await (`:808`).
-        let start = self.time.nanoseconds();
-
-        // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
-        // ids before the manager builds the request. No manager guard is held
-        // across this await (`producer-transactions.md` §4).
-        let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
-        let wait_ms = self.await_topic_metadata(&topics).await?;
-        let remaining_ms = (self.max_block_ms - wait_ms).max(0);
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager.lock().unwrap().send_offsets_to_transaction(
-                offsets,
-                ConsumerGroupMetadataImpl::copy_of(group_metadata),
-                &mut pending_requests,
-            )?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_send_offsets(self.time.nanoseconds() - start);
-        Ok(())
     }
 
     /// Request a partial metadata refresh for the given topics and await the next
@@ -1765,23 +1769,25 @@ impl<K, V> KafkaProducer<K, V> {
     /// - Any previous fatal or abortable error the producer has encountered
     /// - [`Error::Timeout`] if committing takes longer than `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#commitTransaction")]
-    pub async fn commit_transaction(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:873`),
-        // recorded after a successful await (`:877`).
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::COMMIT_TXN_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_commit_txn(self.time.nanoseconds() - start);
-        Ok(())
+    pub fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:873`),
+            // recorded after a successful await (`:877`).
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::COMMIT_TXN_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_commit_txn(self.time.nanoseconds() - start);
+            Ok(())
+        }
     }
 
     /// Aborts the ongoing transaction. Any unflushed produce messages will be
@@ -1812,28 +1818,30 @@ impl<K, V> KafkaProducer<K, V> {
     /// - Any previous fatal error the producer has encountered
     /// - [`Error::Timeout`] if aborting takes longer than `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#abortTransaction")]
-    pub async fn abort_transaction(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        kafka_info!(self.log_context, "Aborting incomplete transaction");
-        // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:908`),
-        // taken after the log line, recorded after a successful await (`:912`).
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            // `Caller::App`: this runs on the application task (rules §1).
-            transaction_manager
-                .lock()
-                .unwrap()
-                .begin_abort(&mut pending_requests, Caller::App)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::ABORT_TXN_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_abort_txn(self.time.nanoseconds() - start);
-        Ok(())
+    pub fn abort_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            kafka_info!(self.log_context, "Aborting incomplete transaction");
+            // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:908`),
+            // taken after the log line, recorded after a successful await (`:912`).
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                // `Caller::App`: this runs on the application task (rules §1).
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .begin_abort(&mut pending_requests, Caller::App)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::ABORT_TXN_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_abort_txn(self.time.nanoseconds() - start);
+            Ok(())
+        }
     }
 
     /// The shared [`TransactionManager`], or the error Java's
@@ -2679,53 +2687,55 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     /// (e.g. the C FFI layer). The slices are passed directly through to the
     /// accumulator's batch buffer without any intermediate allocation.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#send")]
-    pub async fn send(
+    pub fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Box<dyn Callback>>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.ensure_not_closed()?;
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send {
+        async move {
+            self.ensure_not_closed()?;
 
-        let now_ms = self.now_ms();
-        let cluster_and_wait_time = match self
-            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+            let now_ms = self.now_ms();
+            let cluster_and_wait_time = match self
+                .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+                .await
+            {
+                Ok(cwt) => cwt,
+                Err(e) => {
+                    // Java 1067-1072, as in `do_send`.
+                    let e = self.relabel_if_closed_while_sending(e);
+                    if e.is_api_error() {
+                        // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                        // no partition is computed yet, so the record's own, if it names one.
+                        let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, record.topic(), partition, callback);
+                    }
+                    return Err(e);
+                },
+            };
+            let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
+            let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
+            let cluster = cluster_and_wait_time.cluster;
+
+            let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
+
+            // Java's `doSend` appends `record.headers().toArray()`
+            // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
+            // written straight into the batch buffer, as on the typed path.
+            self.do_send_bytes(
+                &record_topic,
+                partition,
+                timestamp,
+                key,
+                value,
+                record_headers.to_array(),
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+            )
             .await
-        {
-            Ok(cwt) => cwt,
-            Err(e) => {
-                // Java 1067-1072, as in `do_send`.
-                let e = self.relabel_if_closed_while_sending(e);
-                if e.is_api_error() {
-                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
-                    // no partition is computed yet, so the record's own, if it names one.
-                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
-                    return self.handle_api_error(e, record.topic(), partition, callback);
-                }
-                return Err(e);
-            },
-        };
-        let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
-        let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
-        let cluster = cluster_and_wait_time.cluster;
-
-        let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
-
-        // Java's `doSend` appends `record.headers().toArray()`
-        // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
-        // written straight into the batch buffer, as on the typed path.
-        self.do_send_bytes(
-            &record_topic,
-            partition,
-            timestamp,
-            key,
-            value,
-            record_headers.to_array(),
-            callback,
-            now_ms,
-            remaining_wait_ms,
-            &cluster,
-        )
-        .await
+        }
     }
 }
 

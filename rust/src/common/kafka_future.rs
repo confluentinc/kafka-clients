@@ -159,8 +159,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// Returns the error from the underlying operation if it failed.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
-    pub async fn get(&self) -> Result<T, Error> {
-        self.inner.get().await
+    pub fn get(&self) -> impl Future<Output = Result<T, Error>> + Send {
+        async move { self.inner.get().await }
     }
 
     /// Await the result of this future with a timeout.
@@ -179,8 +179,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
     /// the underlying operation if it failed.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
-    pub async fn get_with_timeout(&self, timeout: Duration) -> Result<T, Error> {
-        self.inner.get_with_timeout(timeout).await
+    pub fn get_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<T, Error>> + Send {
+        async move { self.inner.get_with_timeout(timeout).await }
     }
 
     /// Whether this future is complete.

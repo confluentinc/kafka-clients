@@ -1203,6 +1203,13 @@ fn scan(src: &str) -> Vec<Scanned> {
                         });
                     }
                 } else if matches!(next, Some(Tok::Punct('=' | ';')))
+                    // A declared name follows its type, which ends in a name, a
+                    // `>` or a `]`. A name ending an initializer does not
+                    // (`= CommonClientConfigs.GROUP_ID_CONFIG;`, `= ONE_UUID;`),
+                    // nor does an annotation argument (`@A(value = 1)`): taken
+                    // for a declaration, it overwrote the visibility of the real
+                    // field of that name with the implicit one.
+                    && matches!(toks.get(i.wrapping_sub(1)), Some(Tok::Ident(_) | Tok::Punct('>' | ']')))
                     && name != "\"\""
                     && name != "0"
                     && !KEYWORDS.contains(&name.as_str())
@@ -1741,6 +1748,37 @@ mod tests {
         assert_eq!(vis(&kind, "code"), Some(Visibility::Public));
         assert_eq!(vis(&kind, "A"), Some(Visibility::Public));
         assert_eq!(vis(&kind, "rank"), Some(Visibility::Package));
+    }
+
+    #[test]
+    fn a_name_ending_an_initializer_is_not_a_field() {
+        let src = r#"
+            package x;
+            public class Config {
+                public static final String GROUP_ID_CONFIG = CommonClientConfigs.GROUP_ID_CONFIG;
+                public static final Uuid ONE_UUID = new Uuid(0L, 1L);
+                public static final Uuid METADATA_TOPIC_ID = ONE_UUID;
+                static final String INTERNAL_CONFIG = "internal.x";
+                private static final int MAX = 5;
+                public static final List<String> NAMES = List.of();
+                public static final int[] SIZES = {1, 2};
+                @SuppressWarnings(value = "unused") public static final long NO_TIMESTAMP = -1L;
+            }
+        "#;
+        let config = class_of(src, &["Config"]);
+        assert_eq!(
+            config.field_visibility.into_iter().collect::<Vec<_>>(),
+            [
+                ("GROUP_ID_CONFIG".to_string(), Visibility::Public),
+                ("INTERNAL_CONFIG".to_string(), Visibility::Package),
+                ("MAX".to_string(), Visibility::Private),
+                ("METADATA_TOPIC_ID".to_string(), Visibility::Public),
+                ("NAMES".to_string(), Visibility::Public),
+                ("NO_TIMESTAMP".to_string(), Visibility::Public),
+                ("ONE_UUID".to_string(), Visibility::Public),
+                ("SIZES".to_string(), Visibility::Public),
+            ]
+        );
     }
 
     fn class_of(src: &str, path: &[&str]) -> JavaClass {

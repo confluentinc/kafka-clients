@@ -440,18 +440,16 @@ impl ConsumerConfig {
 
     /// Config key: `metadata.max.age.ms`.
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
-    /// Config key: `metadata.recovery.strategy`.
-    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = "metadata.recovery.strategy";
-    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`.
-    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
-        "metadata.recovery.rebootstrap.trigger.ms";
 
     /// Config key: `exclude.internal.topics`.
     pub const EXCLUDE_INTERNAL_TOPICS_CONFIG: &'static str = "exclude.internal.topics";
     /// Default value of `exclude.internal.topics`.
     pub const DEFAULT_EXCLUDE_INTERNAL_TOPICS: bool = true;
     /// Config key: `internal.throw.on.fetch.stable.offset.unsupported`.
-    pub const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &'static str =
+    ///
+    /// Package-private in Java (`ConsumerConfig.java:370`), like every
+    /// `internal.*` key: Java may remove it in a minor release.
+    pub(crate) const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &'static str =
         "internal.throw.on.fetch.stable.offset.unsupported";
     /// Config key: `isolation.level`.
     pub const ISOLATION_LEVEL_CONFIG: &'static str = "isolation.level";
@@ -476,12 +474,6 @@ impl ConsumerConfig {
 
     /// Config key: `security.providers`.
     pub const SECURITY_PROVIDERS_CONFIG: &'static str = "security.providers";
-    /// Config key: `security.protocol`.
-    pub const SECURITY_PROTOCOL_CONFIG: &'static str = "security.protocol";
-    /// Config key: `sasl.mechanism`.
-    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
-    /// Config key: `sasl.jaas.config`.
-    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Config key: `config.providers`.
     pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
@@ -780,14 +772,17 @@ impl ConsumerConfig {
                 Self::METADATA_MAX_AGE_CONFIG => {
                     config.metadata_max_age_ms = parse_i64(key, value)?;
                 },
-                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
+                        return Err(Error::config_name_value(
+                            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG,
+                            value,
+                        ));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
-                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ConsumerConfig` (`:717-721`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
@@ -863,19 +858,19 @@ impl ConsumerConfig {
                 Self::SECURITY_PROVIDERS_CONFIG => {
                     config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
                 },
-                Self::SECURITY_PROTOCOL_CONFIG => {
+                CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
                         Error::config_name_value_message(
-                            Self::SECURITY_PROTOCOL_CONFIG,
+                            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
                         )
                     })?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
+                SaslConfigs::SASL_MECHANISM => {
                     config.sasl_config.mechanism = value.clone();
                 },
-                Self::SASL_JAAS_CONFIG => {
+                SaslConfigs::SASL_JAAS_CONFIG => {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
@@ -1836,10 +1831,13 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidMetadataRecoveryStrategy")]
     fn test_invalid_metadata_recovery_strategy() {
         let mut props = base_props();
-        props.insert(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(), "abc".to_string());
+        props.insert(
+            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
         let err = ConsumerConfig::new(&props).unwrap_err();
         assert!(
-            err.message().contains(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG),
+            err.message().contains(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG),
             "error message should mention the failing config key, got: {}",
             err.message()
         );

@@ -53,7 +53,6 @@
 
 #![expect(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
-use crate::consumer::CloseOptions;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -75,6 +74,7 @@ use crate::consumer::SubscriptionPattern;
 use crate::consumer::internals::ConsumerInterceptors;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::ConsumerRebalanceListenerInvoker;
+use crate::consumer::internals::ConsumerUtils;
 use crate::consumer::internals::Deserializers;
 use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchCollector;
@@ -360,99 +360,126 @@ impl ConsumerHandle {
     // ── Async reentrant-safe consumer ops ───────────────────────────────
 
     /// [`Consumer::assign`](crate::consumer::Consumer::assign).
-    pub async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
-        self.async_state()?.assign(partitions).await
+    pub fn assign(&self, partitions: Vec<TopicPartition>) -> impl Future<Output = Result<(), Error>> + Send {
+        async move { self.async_state()?.assign(partitions).await }
     }
 
     /// `AsyncKafkaConsumer::seek`.
-    pub async fn seek_with_offset(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
-        self.async_state()?.seek(partition, offset, None).await
+    pub fn seek_with_offset(
+        &self,
+        partition: TopicPartition,
+        offset: i64,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move { self.async_state()?.seek(partition, offset, None).await }
     }
 
     /// [`Consumer::seek_with_offset_and_metadata`](crate::consumer::Consumer::seek_with_offset_and_metadata).
-    pub async fn seek_with_offset_and_metadata(
+    pub fn seek_with_offset_and_metadata(
         &self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), Error> {
-        let offset = offset_and_metadata.offset();
-        let epoch = offset_and_metadata.leader_epoch();
-        self.async_state()?.seek(partition, offset, epoch).await
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let offset = offset_and_metadata.offset();
+            let epoch = offset_and_metadata.leader_epoch();
+            self.async_state()?.seek(partition, offset, epoch).await
+        }
     }
 
     /// [`Consumer::seek_to_beginning`](crate::consumer::Consumer::seek_to_beginning).
-    pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
-            .await
+    pub fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            self.async_state()?
+                .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
+                .await
+        }
     }
 
     /// [`Consumer::seek_to_end`](crate::consumer::Consumer::seek_to_end).
-    pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
-            .await
+    pub fn seek_to_end(&self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            self.async_state()?
+                .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
+                .await
+        }
     }
 
     /// [`Consumer::pause`](crate::consumer::Consumer::pause).
-    pub async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.async_state()?.pause(partitions).await
+    pub fn pause(&self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send {
+        async move { self.async_state()?.pause(partitions).await }
     }
 
     /// [`Consumer::resume`](crate::consumer::Consumer::resume).
-    pub async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.async_state()?.resume(partitions).await
+    pub fn resume(&self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send {
+        async move { self.async_state()?.resume(partitions).await }
     }
 
     /// [`Consumer::position`](crate::consumer::Consumer::position).
-    pub async fn position(&self, partition: &TopicPartition) -> Result<i64, Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        state.position(partition, timeout).await
+    pub fn position(&self, partition: &TopicPartition) -> impl Future<Output = Result<i64, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            state.position(partition, timeout).await
+        }
     }
 
     /// [`Consumer::position_with_timeout`](crate::consumer::Consumer::position_with_timeout).
-    pub async fn position_with_timeout(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
-        self.async_state()?.position(partition, timeout).await
+    pub fn position_with_timeout(
+        &self,
+        partition: &TopicPartition,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<i64, Error>> + Send {
+        async move { self.async_state()?.position(partition, timeout).await }
     }
 
     /// [`Consumer::committed`](crate::consumer::Consumer::committed).
-    pub async fn committed(
+    pub fn committed(
         &self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        state.committed(partitions, timeout).await
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            state.committed(partitions, timeout).await
+        }
     }
 
     /// [`Consumer::beginning_offsets`](crate::consumer::Consumer::beginning_offsets).
-    pub async fn beginning_offsets(
+    pub fn beginning_offsets(
         &self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
-        state.beginning_or_end_offsets(partitions, -2, timeout).await
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
+            state.beginning_or_end_offsets(partitions, -2, timeout).await
+        }
     }
 
     /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets).
-    pub async fn end_offsets(&self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
-        state.beginning_or_end_offsets(partitions, -1, timeout).await
+    pub fn end_offsets(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
+            state.beginning_or_end_offsets(partitions, -1, timeout).await
+        }
     }
 
     /// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
-    pub async fn offsets_for_times(
+    pub fn offsets_for_times(
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        state.offsets_for_times(timestamps_to_search, timeout).await
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            state.offsets_for_times(timestamps_to_search, timeout).await
+        }
     }
 
     /// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync). Commits the offsets the bg
@@ -461,33 +488,38 @@ impl ConsumerHandle {
     ///
     /// On a `MockConsumer` handle, commits the mock's consumed positions
     /// into its committed offsets (Java's `MockConsumer.commitSync()`).
-    pub async fn commit_sync(&self) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => {
-                let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-                state.commit_sync(None, timeout).await
-            },
-            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
-                crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None).await
-            },
+    pub fn commit_sync(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => {
+                    let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+                    state.commit_sync(None, timeout).await
+                },
+                ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None)
+                        .await
+                },
+            }
         }
     }
 
     /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
     /// On a `MockConsumer` handle, commits into the mock's committed offsets
     /// (Java's `MockConsumer.commitSync(Map)`).
-    pub async fn commit_sync_with_offsets(
+    pub fn commit_sync_with_offsets(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => {
-                let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-                state.commit_sync(Some(offsets), timeout).await
-            },
-            ConsumerHandleInner::Mock { closed, committed, .. } => {
-                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
-            },
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => {
+                    let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+                    state.commit_sync(Some(offsets), timeout).await
+                },
+                ConsumerHandleInner::Mock { closed, committed, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
+                },
+            }
         }
     }
 
@@ -497,12 +529,15 @@ impl ConsumerHandle {
     ///
     /// On a `MockConsumer` handle, commits the mock's consumed positions
     /// into its committed offsets (Java's `MockConsumer.commitAsync()`).
-    pub async fn commit_async(&self) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => state.commit_async(None, None).await,
-            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
-                crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None).await
-            },
+    pub fn commit_async(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_async(None, None).await,
+                ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None)
+                        .await
+                },
+            }
         }
     }
 
@@ -514,33 +549,40 @@ impl ConsumerHandle {
     /// On a `MockConsumer` handle, commits the mock's consumed positions
     /// and invokes `callback` inline before returning (Java's
     /// `MockConsumer.commitAsync(OffsetCommitCallback)`).
-    pub async fn commit_async_with_callback(
+    pub fn commit_async_with_callback(
         &self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => state.commit_async(None, Some(callback)).await,
-            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
-                crate::consumer::mock_consumer::mock_commit_all_consumed(
-                    closed,
-                    committed,
-                    subscriptions,
-                    Some(callback),
-                )
-                .await
-            },
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_async(None, Some(callback)).await,
+                ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_all_consumed(
+                        closed,
+                        committed,
+                        subscriptions,
+                        Some(callback),
+                    )
+                    .await
+                },
+            }
         }
     }
 
     /// `AsyncKafkaConsumer::commit_async_offsets`: commits `offsets` without
     /// waiting for the result or a callback.
     /// On a `MockConsumer` handle, commits into the mock's committed offsets.
-    pub async fn commit_async_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), None).await,
-            ConsumerHandleInner::Mock { closed, committed, .. } => {
-                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
-            },
+    pub fn commit_async_offsets(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), None).await,
+                ConsumerHandleInner::Mock { closed, committed, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
+                },
+            }
         }
     }
 
@@ -551,16 +593,18 @@ impl ConsumerHandle {
     /// On a `MockConsumer` handle, commits into the mock's committed offsets
     /// and invokes `callback` inline before returning (Java's
     /// `MockConsumer.commitAsync(Map, OffsetCommitCallback)`).
-    pub async fn commit_async_with_offsets_callback(
+    pub fn commit_async_with_offsets_callback(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), Error> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), Some(callback)).await,
-            ConsumerHandleInner::Mock { closed, committed, .. } => {
-                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, Some(callback)).await
-            },
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), Some(callback)).await,
+                ConsumerHandleInner::Mock { closed, committed, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, Some(callback)).await
+                },
+            }
         }
     }
 
@@ -6433,7 +6477,7 @@ where
     /// Java: `void close()`. Closes the consumer with default timeout.
     pub async fn close(&mut self) -> Result<(), Error> {
         self.close_internal(
-            Duration::from_millis(CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS),
+            Duration::from_millis(ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64),
             crate::consumer::GroupMembershipOperation::Default,
             false,
         )
@@ -6444,7 +6488,7 @@ where
     pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
             .timeout()
-            .unwrap_or_else(|| Duration::from_millis(CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS));
+            .unwrap_or_else(|| Duration::from_millis(ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64));
         self.close_internal(timeout, options.group_membership_operation(), false).await
     }
 

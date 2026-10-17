@@ -77,6 +77,8 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(NoDeprecatedTranslation::new(ctx)),
         Box::new(PublicAudience::new(ctx)),
         Box::new(DynCompatible),
+        Box::new(DynForwarding),
+        Box::new(SendFuture),
         Box::new(ErrorPredicate),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
@@ -2109,10 +2111,53 @@ struct PublicItem {
     owner: Option<String>,
     /// Whether the item is a function: a method or a free function.
     is_fn: bool,
+    /// Whether the item is an `async fn`. A method of an `#[async_trait]`
+    /// trait is not: the attribute boxes its future as `Send`.
+    is_async: bool,
+    /// The value of a `const` initialized by a string literal.
+    str_value: Option<String>,
     /// The types a caller passes or receives through the item, each with its
     /// role: a function's parameters and return type, the type a `type` alias
     /// names.
     types: Vec<(String, syn::Type)>,
+}
+
+/// What [`public_items`] records about an item beyond its name and attributes.
+#[derive(Default)]
+struct Shape {
+    is_fn: bool,
+    is_async: bool,
+    str_value: Option<String>,
+    types: Vec<(String, syn::Type)>,
+}
+
+impl Shape {
+    /// A function with signature `sig`; `boxed` for a method of an
+    /// `#[async_trait]` trait, whose `async` is not native.
+    fn of_fn(sig: &syn::Signature, boxed: bool) -> Self {
+        Shape {
+            is_fn: true,
+            is_async: sig.asyncness.is_some() && !boxed,
+            str_value: None,
+            types: sig_types(sig),
+        }
+    }
+
+    /// A `const` initialized by `expr`.
+    fn of_const(expr: Option<&syn::Expr>) -> Self {
+        let str_value = match expr {
+            Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) => Some(s.value()),
+            _ => None,
+        };
+        Shape { str_value, ..Shape::default() }
+    }
+}
+
+/// Whether `attrs` carry `#[async_trait]`, under any path.
+fn is_async_trait(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"))
 }
 
 /// The parameter types and the return type of `sig`, each with its role.
@@ -2155,12 +2200,8 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
         let reachable = krate.is_reachable(path);
         let is_public_type = |name: &str| types.contains(&(path.clone(), name.to_string()));
         for item in &module.items {
-            let mut push = |name: &syn::Ident,
-                            attrs: &[syn::Attribute],
-                            owner: Option<&syn::Ident>,
-                            is_fn: bool,
-                            types: Vec<(String, syn::Type)>| {
-                if is_fn && is_cfg_test(attrs) {
+            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute], owner: Option<&syn::Ident>, shape: Shape| {
+                if shape.is_fn && is_cfg_test(attrs) {
                     return;
                 }
                 out.push((
@@ -2170,26 +2211,34 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                         attrs: attrs.to_vec(),
                         module: path.clone(),
                         owner: owner.map(ToString::to_string),
-                        is_fn,
-                        types,
+                        is_fn: shape.is_fn,
+                        is_async: shape.is_async,
+                        str_value: shape.str_value,
+                        types: shape.types,
                     },
                 ))
             };
             match item {
                 syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => {
-                    push(&s.ident, &s.attrs, None, false, Vec::new())
+                    push(&s.ident, &s.attrs, None, Shape::default())
                 },
                 syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => {
-                    push(&e.ident, &e.attrs, None, false, Vec::new())
+                    push(&e.ident, &e.attrs, None, Shape::default())
                 },
                 syn::Item::Trait(t) if is_public_type(&t.ident.to_string()) => {
-                    push(&t.ident, &t.attrs, None, false, Vec::new());
+                    push(&t.ident, &t.attrs, None, Shape::default());
+                    let boxed = is_async_trait(&t.attrs);
                     for it in &t.items {
                         match it {
                             syn::TraitItem::Fn(f) => {
-                                push(&f.sig.ident, &f.attrs, Some(&t.ident), true, sig_types(&f.sig))
+                                push(&f.sig.ident, &f.attrs, Some(&t.ident), Shape::of_fn(&f.sig, boxed))
                             },
-                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs, Some(&t.ident), false, Vec::new()),
+                            syn::TraitItem::Const(c) => push(
+                                &c.ident,
+                                &c.attrs,
+                                Some(&t.ident),
+                                Shape::of_const(c.default.as_ref().map(|(_, e)| e)),
+                            ),
                             _ => {},
                         }
                     }
@@ -2198,13 +2247,17 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     &t.ident,
                     &t.attrs,
                     None,
-                    false,
-                    vec![("the aliased type".to_string(), (*t.ty).clone())],
+                    Shape {
+                        types: vec![("the aliased type".to_string(), (*t.ty).clone())],
+                        ..Shape::default()
+                    },
                 ),
                 syn::Item::Fn(f) if reachable && is_pub(&f.vis) => {
-                    push(&f.sig.ident, &f.attrs, None, true, sig_types(&f.sig))
+                    push(&f.sig.ident, &f.attrs, None, Shape::of_fn(&f.sig, false))
                 },
-                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs, None, false, Vec::new()),
+                syn::Item::Const(c) if reachable && is_pub(&c.vis) => {
+                    push(&c.ident, &c.attrs, None, Shape::of_const(Some(&c.expr)))
+                },
                 syn::Item::Impl(i) if i.trait_.is_none() => {
                     let syn::Type::Path(ty) = &*i.self_ty else { continue };
                     let Some(ty) = ty.path.segments.last() else { continue };
@@ -2214,10 +2267,10 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     for it in &i.items {
                         match it {
                             syn::ImplItem::Fn(f) if is_pub(&f.vis) => {
-                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), true, sig_types(&f.sig))
+                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), Shape::of_fn(&f.sig, false))
                             },
                             syn::ImplItem::Const(c) if is_pub(&c.vis) => {
-                                push(&c.ident, &c.attrs, Some(&ty.ident), false, Vec::new())
+                                push(&c.ident, &c.attrs, Some(&ty.ident), Shape::of_const(Some(&c.expr)))
                             },
                             _ => {},
                         }
@@ -2235,6 +2288,8 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                                 module: path.clone(),
                                 owner: None,
                                 is_fn: false,
+                                is_async: false,
+                                str_value: None,
                                 types: Vec::new(),
                             },
                         ));
@@ -2379,6 +2434,17 @@ const CBINDGEN_TOML: &str = "cbindgen.toml";
 /// `long` again), and a setter skips the `ConfigDef` validators that
 /// `new(&props)` runs; so the string map stays the only typed input, and the
 /// typed getters the client reads are `pub(crate)`.
+///
+/// **Constants:** a public associated const of a type translating a Java class
+/// translates the field of the same name, which Java must declare `public` on
+/// that class or a supertype (Java inherits static fields:
+/// `ConsumerConfig.CONFIG_PROVIDERS_CONFIG` is `AbstractConfig`'s). A const
+/// naming no Java field is a Rust addition and is tagged [`RUST_ONLY`]; one
+/// re-declaring another class's field (`ProducerConfig::SASL_JAAS_CONFIG` for
+/// `SaslConfigs.SASL_JAAS_CONFIG`) is removed, since CLAUDE.md §2 exports a
+/// constant only from the struct defining it. And no public const holds an
+/// `internal.*` key: Java defines those with `defineInternal` and removes them
+/// in minor releases (`internal.leave.group.on.close`, 4.2).
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].
@@ -2900,6 +2966,139 @@ impl PublicAudience {
     }
 }
 
+impl PublicAudience {
+    /// The constant half (see the type's docs). A public associated const
+    /// without a member marker translates the field of the same name on its
+    /// type's Java class, which must be `public` there; one naming no field of
+    /// that class must be tagged [`RUST_ONLY`]. And no public const holds an
+    /// [`INTERNAL_KEY_PREFIX`] key, whatever Java's visibility. A tag that lets
+    /// a const through is recorded in `used`. Returns how many consts were
+    /// inspected.
+    fn check_constants(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+                continue;
+            }
+            let name = item
+                .owner
+                .as_ref()
+                .map_or_else(|| item.name.clone(), |o| format!("{o}::{}", item.name));
+            let mut tagged = |tag| {
+                let hit = has_tag(&item.attrs, tag);
+                if hit {
+                    used.insert(TagSite::new(file, item.owner.as_deref(), &item.name, tag));
+                }
+                hit
+            };
+            if let Some(key) = item.str_value.as_deref().filter(|v| v.starts_with(INTERNAL_KEY_PREFIX)) {
+                checked += 1;
+                if !tagged(PUBLIC_IN_RUST) {
+                    findings.push(format!(
+                        "{}: `{name}` is public but holds `{key}`, an internal configuration key Java may remove in a \
+                         minor release; make it `pub(crate)`",
+                        file.display()
+                    ));
+                }
+                continue;
+            }
+            // An associated const: a method is skipped above, and only an
+            // associated item has an owner.
+            let Some(owner) = &item.owner else { continue };
+            if java_markers(&item.attrs).iter().any(|m| JavaIndex::marker_member(m).is_some()) {
+                // `check_members` resolves a marked member.
+                continue;
+            }
+            let Some(class) = krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .and_then(|attrs| java_markers(&attrs).iter().find_map(|marker| self.index.resolve(marker)))
+            else {
+                continue;
+            };
+            checked += 1;
+            match self.field(class, &item.name) {
+                Some((_, java::Visibility::Public)) => {},
+                Some((declaring, visibility)) => {
+                    if !tagged(PUBLIC_IN_RUST) {
+                        findings.push(format!(
+                            "{}: `{name}` is public but translates `{}#{}`, which is {} in Java; make it `pub(crate)`",
+                            file.display(),
+                            declaring.marker(),
+                            item.name,
+                            visibility.keyword()
+                        ));
+                    }
+                },
+                None => {
+                    if !tagged(RUST_ONLY) {
+                        findings.push(format!(
+                            "{}: `{name}` is public but `{}` declares no field `{}`; give it the name of the public \
+                             Java field it translates, make it `pub(crate)`, or tag it #[doc(alias = \"{RUST_ONLY}\")] \
+                             under a comment giving the reason it is public",
+                            file.display(),
+                            class.marker(),
+                            item.name
+                        ));
+                    }
+                },
+            }
+        }
+        checked
+    }
+}
+
+impl PublicAudience {
+    /// The field `name` as Java code reaches it through `class`: declared
+    /// there or, since Java inherits static fields, on a supertype
+    /// (`ConsumerConfig.CONFIG_PROVIDERS_CONFIG` is `AbstractConfig`'s). With
+    /// the class declaring it and its visibility there.
+    fn field<'a>(&'a self, class: &'a java::JavaClass, name: &str) -> Option<(&'a java::JavaClass, java::Visibility)> {
+        self.field_from(class, name, &mut BTreeSet::new())
+    }
+
+    fn field_from<'a>(
+        &'a self,
+        class: &'a java::JavaClass,
+        name: &str,
+        seen: &mut BTreeSet<String>,
+    ) -> Option<(&'a java::JavaClass, java::Visibility)> {
+        if !seen.insert(class.marker()) {
+            return None;
+        }
+        if let Some(&visibility) = class.field_visibility.get(name) {
+            return Some((class, visibility));
+        }
+        class
+            .supertypes
+            .iter()
+            .filter_map(|s| self.supertype(class, s))
+            .find_map(|supertype| self.field_from(supertype, name, seen))
+    }
+
+    /// The class supertype `written` of `class` names: in `class`'s package,
+    /// fully qualified below `org.apache.kafka`, or else the only class of that
+    /// simple name (an imported one, `AbstractConfig`).
+    fn supertype(&self, class: &java::JavaClass, written: &str) -> Option<&java::JavaClass> {
+        let classes = || self.index.classes.iter().filter(|c| !c.is_test);
+        let exact = classes().find(|c| {
+            let nested = c.path.join(".");
+            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
+        });
+        exact.or_else(|| {
+            let simple = written.rsplit('.').next().unwrap_or(written);
+            let mut named = classes().filter(|c| c.name() == simple);
+            match (named.next(), named.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        })
+    }
+}
+
+/// The prefix of the configuration keys Java defines with `defineInternal`
+/// and removes in minor releases (`internal.leave.group.on.close`, 4.2).
+const INTERNAL_KEY_PREFIX: &str = "internal.";
+
 /// Java's base class of every client configuration,
 /// `org.apache.kafka.common.config.AbstractConfig`, as a `supertypes` entry
 /// names it.
@@ -2948,7 +3147,8 @@ impl Rule for PublicAudience {
         let mut used = BTreeSet::new();
         let checked = self.check_rust(krate, findings, &mut used)
             + self.check_c(krate, findings, &mut used)
-            + self.check_configs(krate, findings);
+            + self.check_configs(krate, findings)
+            + self.check_constants(krate, findings, &mut used);
         // `check-java-name` lets a `rust-only` public method through.
         used.extend(
             unmarked_public_methods(krate)
@@ -2986,6 +3186,10 @@ impl Rule for PublicAudience {
    A Rust-only method of a configuration (a subclass of `AbstractConfig`) may
    only set a class-valued key through a trait object: a typed getter or setter
    of a plain key is `pub(crate)`, and users configure through the string map.
+   A public constant translates a `public` field of its class's Java class (or
+   one it inherits): a constant Java keeps non-public is `pub(crate)`, one that
+   re-declares another class's field is removed (CLAUDE.md §2), and a Rust-only
+   one is tagged; a constant holding an `internal.*` key is never public.
    A public signature naming a crate-private type is caught by rustc's
    `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }
@@ -3026,10 +3230,7 @@ impl DynCompatible {
     /// The reasons `t` is not dyn-compatible; empty when it is.
     fn violations(t: &syn::ItemTrait) -> Vec<String> {
         let mut reasons = Vec::new();
-        let is_async_trait = t
-            .attrs
-            .iter()
-            .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"));
+        let is_async_trait = is_async_trait(&t.attrs);
 
         if requires_sized(&t.generics) {
             reasons.push("trait-level `where Self: Sized`".to_string());
@@ -3158,6 +3359,318 @@ impl Rule for DynCompatible {
    `#[async_trait]` for async methods off the hot path), or — for a
    performance-oriented trait — add a public dyn-compatible `Dyn<Name>` trait
    blanket-implemented for it, as `DynProducer` is for `Producer`."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-dyn-forwarding
+// ---------------------------------------------------------------------------
+
+/// Checks that a `Dyn<Name>` companion and its trait forward to each other
+/// method for method (CLAUDE.md §3, forward compatibility).
+///
+/// [`DynCompatible`] lets a performance-oriented trait `Name` (`Producer`) off
+/// with a dyn-compatible `Dyn<Name>` (`DynProducer`). The pair is three blocks
+/// kept in step by hand: the `Dyn<Name>` trait, the blanket
+/// `impl<P: Name> Dyn<Name> for P` and `impl Name for dyn Dyn<Name>`. A method
+/// Java adds to the interface compiles when added to `Name` alone if it has a
+/// default body, and a `dyn Dyn<Name>` then answers with that default instead
+/// of the boxed producer's override; a forward to the wrong method, or with
+/// its arguments swapped, compiles whenever the types agree. So for every
+/// public trait `Name` with a public trait `Dyn<Name>`:
+///
+///  - the two traits declare the same methods;
+///  - a blanket `impl Dyn<Name> for P` (`P` a type parameter) defines each of
+///    them as a call to `Name::<method>(self, <its parameters in order>)`;
+///  - an `impl Name for dyn Dyn<Name>` defines each of them, defaulted ones
+///    included, as a call to `Dyn<Name>::<method>(self, <parameters>)`.
+///
+/// The call may sit anywhere in the body (`Box::pin(…)`, `….await`).
+struct DynForwarding;
+
+/// One side of a `Name` / `Dyn<Name>` pair: what implementing it must forward to.
+struct Forward<'a> {
+    /// How a finding names the impl: `impl DynProducer for P`.
+    label: String,
+    /// The trait the bodies call: `Producer` for the blanket impl.
+    to: &'a str,
+}
+
+impl DynForwarding {
+    /// The method names of `t`, in declaration order.
+    fn methods(t: &syn::ItemTrait) -> Vec<String> {
+        t.items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The name of the trait `imp` implements, if it implements one.
+    fn implemented(imp: &syn::ItemImpl) -> Option<String> {
+        imp.trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .map(|s| s.ident.to_string())
+    }
+
+    /// Whether `imp` is for a bare type parameter of its own: `impl<P: X> Y for P`.
+    fn is_blanket(imp: &syn::ItemImpl) -> bool {
+        let syn::Type::Path(tp) = &*imp.self_ty else {
+            return false;
+        };
+        tp.qself.is_none()
+            && tp
+                .path
+                .get_ident()
+                .is_some_and(|ident| imp.generics.type_params().any(|p| p.ident == *ident))
+    }
+
+    /// Whether `imp` is for `dyn <dyn_name> + …`.
+    fn is_for_dyn(imp: &syn::ItemImpl, dyn_name: &str) -> bool {
+        let syn::Type::TraitObject(object) = &*imp.self_ty else {
+            return false;
+        };
+        object.bounds.iter().any(|bound| {
+            matches!(bound, syn::TypeParamBound::Trait(tb)
+                if tb.path.segments.last().is_some_and(|s| s.ident == dyn_name))
+        })
+    }
+
+    /// The parameter names of `sig` after the receiver; `None` for a
+    /// parameter that is not a plain name.
+    fn params(sig: &syn::Signature) -> Vec<Option<String>> {
+        sig.inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Receiver(_) => None,
+                syn::FnArg::Typed(pt) => Some(match &*pt.pat {
+                    syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                    _ => None,
+                }),
+            })
+            .collect()
+    }
+
+    /// Whether `f`'s body calls `<to>::<f's name>(self, <f's parameters>)`.
+    fn forwards(f: &syn::ImplItemFn, to: &str) -> bool {
+        struct Finder<'a> {
+            to: &'a str,
+            method: &'a syn::Ident,
+            args: Vec<String>,
+            found: bool,
+        }
+        impl syn::visit::Visit<'_> for Finder<'_> {
+            fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+                if let syn::Expr::Path(func) = &*call.func {
+                    let segments: Vec<_> = func.path.segments.iter().collect();
+                    let names_method = segments.len() >= 2
+                        && segments[segments.len() - 1].ident == *self.method
+                        && segments[segments.len() - 2].ident == self.to;
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            syn::Expr::Path(p) => p.path.get_ident().map_or_else(String::new, ToString::to_string),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    if names_method && args == self.args {
+                        self.found = true;
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let Some(params) = Self::params(&f.sig).into_iter().collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let mut finder = Finder {
+            to,
+            method: &f.sig.ident,
+            args: std::iter::once("self".to_string()).chain(params).collect(),
+            found: false,
+        };
+        syn::visit::Visit::visit_block(&mut finder, &f.block);
+        finder.found
+    }
+
+    /// Checks that `imp` defines each of `methods` as a forward to `side.to`.
+    fn check_impl(file: &Path, imp: &syn::ItemImpl, methods: &[String], side: &Forward, findings: &mut Vec<String>) {
+        for method in methods {
+            let defined = imp.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(f) if f.sig.ident == method => Some(f),
+                _ => None,
+            });
+            match defined {
+                None => findings.push(format!(
+                    "{}: `{}` does not define `{method}`; define it as a forward to `{}::{method}`",
+                    file.display(),
+                    side.label,
+                    side.to
+                )),
+                Some(f) if !Self::forwards(f, side.to) => {
+                    let params: Vec<String> = Self::params(&f.sig)
+                        .into_iter()
+                        .map(|p| p.unwrap_or_else(|| "_".to_string()))
+                        .collect();
+                    findings.push(format!(
+                        "{}: `{}`'s `{method}` does not call `{}::{method}({})`",
+                        file.display(),
+                        side.label,
+                        side.to,
+                        std::iter::once("self".to_string()).chain(params).collect::<Vec<_>>().join(", ")
+                    ));
+                },
+                Some(_) => {},
+            }
+        }
+    }
+}
+
+impl Rule for DynForwarding {
+    fn name(&self) -> &'static str {
+        "check-dyn-forwarding"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let traits: BTreeMap<String, (&ModPath, &syn::ItemTrait)> = krate
+            .public_types()
+            .iter()
+            .filter_map(|(path, name)| match krate.type_item(path, name) {
+                syn::Item::Trait(t) => Some((t.ident.to_string(), (krate.modules.get_key_value(path)?.0, t))),
+                _ => None,
+            })
+            .collect();
+        let impls: Vec<(&Path, &syn::ItemImpl)> = krate
+            .modules
+            .values()
+            .flat_map(|m| {
+                m.items.iter().filter_map(move |item| match item {
+                    syn::Item::Impl(imp) => Some((m.file.as_path(), imp)),
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let mut checked = 0;
+        for (name, (_, base)) in &traits {
+            let dyn_name = format!("Dyn{name}");
+            let Some((dyn_path, dyn_trait)) = traits.get(&dyn_name) else {
+                continue;
+            };
+            checked += 1;
+            let dyn_file = &krate.modules[*dyn_path].file;
+            let (base_methods, dyn_methods) = (Self::methods(base), Self::methods(dyn_trait));
+            for method in base_methods.iter().filter(|m| !dyn_methods.contains(m)) {
+                findings.push(format!(
+                    "{}: `{dyn_name}` lacks `{method}` of `{name}`; declare it and forward it both ways",
+                    dyn_file.display()
+                ));
+            }
+            for method in dyn_methods.iter().filter(|m| !base_methods.contains(m)) {
+                findings.push(format!(
+                    "{}: `{dyn_name}` declares `{method}`, which `{name}` lacks; remove it",
+                    dyn_file.display()
+                ));
+            }
+            let shared: Vec<String> = base_methods.iter().filter(|m| dyn_methods.contains(m)).cloned().collect();
+
+            let blanket = impls
+                .iter()
+                .find(|(_, imp)| Self::implemented(imp).as_deref() == Some(&dyn_name) && Self::is_blanket(imp));
+            let side = Forward { label: format!("impl {dyn_name} for P"), to: name };
+            match blanket {
+                Some((file, imp)) => Self::check_impl(file, imp, &shared, &side, findings),
+                None => findings.push(format!(
+                    "{}: no blanket `impl<P: {name}> {dyn_name} for P`; every `{name}` must be a `{dyn_name}`",
+                    dyn_file.display()
+                )),
+            }
+            let on_dyn = impls.iter().find(|(_, imp)| {
+                Self::implemented(imp).as_deref() == Some(name.as_str()) && Self::is_for_dyn(imp, &dyn_name)
+            });
+            let side = Forward { label: format!("impl {name} for dyn {dyn_name}"), to: &dyn_name };
+            match on_dyn {
+                Some((file, imp)) => Self::check_impl(file, imp, &shared, &side, findings),
+                None => findings.push(format!(
+                    "{}: no `impl {name} for dyn {dyn_name}`; a `dyn {dyn_name}` must be a `{name}`",
+                    dyn_file.display()
+                )),
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Keep a `Dyn<Name>` companion in step with `Name` (CLAUDE.md §3): the two
+   traits declare the same methods; the blanket `impl<P: Name> Dyn<Name> for P`
+   defines each as `Name::<method>(self, <parameters>)` (boxed as needed), and
+   `impl Name for dyn Dyn<Name>` defines each, defaulted ones included, as
+   `Dyn<Name>::<method>(self, <parameters>)`, so a boxed implementation's
+   overrides are the ones a trait object runs."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-send-future
+// ---------------------------------------------------------------------------
+
+/// Checks that no public method is a native `async fn` (CLAUDE.md §3, forward
+/// compatibility).
+///
+/// The future of an `async fn` is `Send` exactly when everything its body
+/// holds across an `.await` is, and the compiler infers that from the body.
+/// A caller spawning it on a multi-threaded runtime depends on the inference;
+/// a later change that keeps a non-`Send` value (an `Rc`, a `MutexGuard`)
+/// across an `.await` removes the `Send` and breaks that caller, with nothing
+/// in the signature having changed. Declaring
+/// `fn name(…) -> impl Future<Output = T> + Send` with an `async move` body
+/// makes `Send` part of the contract, so such a change fails to compile in
+/// this crate instead, as the `Producer` trait already does.
+///
+/// An `#[async_trait]` method is exempt: the macro boxes its future as
+/// `Pin<Box<dyn Future + Send>>`, `Send` included in the signature.
+///
+/// Scope: the public fns of [`public_items`], outside the C FFI module.
+struct SendFuture;
+
+impl Rule for SendFuture {
+    fn name(&self) -> &'static str {
+        "check-send-future"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+                continue;
+            }
+            checked += 1;
+            if item.is_async {
+                let name = item
+                    .owner
+                    .as_ref()
+                    .map_or_else(|| item.name.clone(), |o| format!("{o}::{}", item.name));
+                findings.push(format!(
+                    "{}: `{name}` is a public `async fn`, whose future is `Send` only while its body keeps it so; \
+                     declare `fn {}(…) -> impl Future<Output = …> + Send` with an `async move` body",
+                    file.display(),
+                    item.name
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   A public `async fn` leaves `Send` to inference from its body. Write
+   `fn name(&self, …) -> impl Future<Output = T> + Send + '_` (edition 2024
+   captures the parameters' lifetimes) whose body is `async move { … }`, so a
+   change that drops `Send` fails here rather than in a caller's `tokio::spawn`.
+   `#[async_trait]` methods already box a `Send` future and are exempt."
     }
 }
 
@@ -3466,7 +3979,25 @@ mod tests {
                 // A class-valued key set through a trait object (CLAUDE.md §2).
                 #[doc(alias = "rust-only")]
                 pub fn set_partitioner(self, partitioner: Box<dyn Partitioner>) -> Self { self }
+                // Constants: a public Java field, one inherited from
+                // `AbstractConfig` and a tagged Rust-only key pass.
+                pub const GROUP_ID_CONFIG: &str = "group.id";
+                pub const CONFIG_PROVIDERS_CONFIG: &str = "config.providers";
+                // selects a built-in partitioner in place of a class-valued key
+                #[doc(alias = "rust-only")]
+                pub const PARTITIONER_TYPE_CONFIG: &str = "partitioner.type";
+                // A package-private Java field, a name Java lacks and an
+                // internal key: findings.
+                pub const DEFAULT_ISOLATION_LEVEL: &str = "read_uncommitted";
+                pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
+                pub const LEAVE_GROUP_ON_CLOSE_CONFIG: &str = "internal.leave.group.on.close";
+                pub(crate) const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &str =
+                    "internal.throw.on.fetch.stable.offset.unsupported";
             }
+            // An internal key outside any class: a finding, tag or not.
+            // a key of no Java class
+            #[doc(alias = "rust-only")]
+            pub const INTERNAL_KEY: &str = "internal.auto.downgrade.txn.commit";
             #[doc(alias = "rust-only")]
             pub trait Partitioner {}
             pub struct Unmarked;
@@ -3545,6 +4076,21 @@ mod tests {
     fn config_class() -> java::JavaClass {
         let mut class = class("clients.consumer", &["ConsumerConfig"]);
         class.supertypes = vec!["AbstractConfig".to_string()];
+        class.field_visibility = [
+            ("GROUP_ID_CONFIG", java::Visibility::Public),
+            ("DEFAULT_ISOLATION_LEVEL", java::Visibility::Package),
+            ("LEAVE_GROUP_ON_CLOSE_CONFIG", java::Visibility::Public),
+        ]
+        .into_iter()
+        .map(|(name, visibility)| (name.to_string(), visibility))
+        .collect();
+        class
+    }
+
+    /// `AbstractConfig`, declaring the field `ConsumerConfig` inherits.
+    fn abstract_config_class() -> java::JavaClass {
+        let mut class = class("common.config", &["AbstractConfig"]);
+        class.field_visibility = [("CONFIG_PROVIDERS_CONFIG".to_string(), java::Visibility::Public)].into();
         class
     }
 
@@ -3566,6 +4112,7 @@ mod tests {
                     class("clients.consumer", &["KafkaConsumer"]),
                     class("clients.consumer", &["MockConsumer"]),
                     config_class(),
+                    abstract_config_class(),
                     class("clients.consumer.internals", &["Fetcher"]),
                     class("common.network", &["Selector"]),
                     class("common", &["Cluster"]),
@@ -3737,8 +4284,54 @@ mod tests {
         // A class-valued key set through a trait object is CLAUDE.md §2's shape,
         // and `impl Into<String>` is not a trait object.
         assert!(with(&findings, "set_partitioner").is_empty(), "{findings:#?}");
-        // The only findings on the class are those two: its tags are not needless.
-        assert_eq!(with(&findings, "ConsumerConfig").len(), 2, "{findings:#?}");
+        // The only method findings on the class are those two: its tags are
+        // not needless. Its constants are `test_constants_translate_public_java_fields`'.
+        let methods = with(&findings, "ConsumerConfig");
+        assert_eq!(
+            methods.iter().filter(|f| !f.contains("is public but")).count(),
+            2,
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn test_constants_translate_public_java_fields() {
+        let findings = run("constants");
+        let file = fixture_dir("constants").join("lib.rs").display().to_string();
+        // Class findings name the item by its path (`crate::…`).
+        let mut constants: Vec<_> = with(&findings, "is public but")
+            .into_iter()
+            .filter(|f| !f.contains("`crate::"))
+            .collect();
+        constants.sort();
+        assert_eq!(
+            constants,
+            [
+                format!(
+                    "{file}: `ConsumerConfig::DEFAULT_ISOLATION_LEVEL` is public but translates \
+                     `org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_ISOLATION_LEVEL`, which is \
+                     package-private in Java; make it `pub(crate)`"
+                ),
+                // Java's visibility does not matter for an internal key.
+                format!(
+                    "{file}: `ConsumerConfig::LEAVE_GROUP_ON_CLOSE_CONFIG` is public but holds \
+                     `internal.leave.group.on.close`, an internal configuration key Java may remove in a minor \
+                     release; make it `pub(crate)`"
+                ),
+                format!(
+                    "{file}: `ConsumerConfig::SASL_JAAS_CONFIG` is public but \
+                     `org.apache.kafka.clients.consumer.ConsumerConfig` declares no field `SASL_JAAS_CONFIG`; give \
+                     it the name of the public Java field it translates, make it `pub(crate)`, or tag it \
+                     #[doc(alias = \"rust-only\")] under a comment giving the reason it is public"
+                ),
+                format!(
+                    "{file}: `INTERNAL_KEY` is public but holds `internal.auto.downgrade.txn.commit`, an internal \
+                     configuration key Java may remove in a minor release; make it `pub(crate)`"
+                ),
+            ]
+        );
+        // The `rust-only` tag on `PARTITIONER_TYPE_CONFIG` lets it through.
+        assert!(with(&findings, "PARTITIONER_TYPE_CONFIG").is_empty(), "{findings:#?}");
     }
 
     #[test]
@@ -4012,6 +4605,176 @@ mod dyn_compatible_tests {
         let findings = run("hidden");
         assert_eq!(finding(&findings, "Hidden"), None);
         assert_eq!(finding(&findings, "Unreachable"), None);
+    }
+}
+
+#[cfg(test)]
+mod dyn_forwarding_tests {
+    use super::*;
+
+    /// `Good` / `DynGood` forward correctly; `Bad` / `DynBad` break every rule
+    /// once; `Lone` / `DynLone` have no impls at all.
+    const FIXTURE_LIB: &str = r#"
+        use std::future::Future;
+        use std::pin::Pin;
+        type BoxFuture<'a> = Pin<Box<dyn Future<Output = i32> + Send + 'a>>;
+
+        pub trait Good {
+            fn run(&self) -> impl Future<Output = i32> + Send;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32 { 0 }
+        }
+        pub trait DynGood {
+            fn run<'a>(&'a self) -> BoxFuture<'a>;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32;
+        }
+        impl<P: Good + Sync> DynGood for P {
+            fn run<'a>(&'a self) -> BoxFuture<'a> { Box::pin(Good::run(self)) }
+            fn add(&self, x: i32, y: i32) -> i32 { Good::add(self, x, y) }
+            fn get(&self) -> i32 { Good::get(self) }
+        }
+        impl Good for dyn DynGood + '_ {
+            async fn run(&self) -> i32 { DynGood::run(self).await }
+            fn add(&self, x: i32, y: i32) -> i32 { DynGood::add(self, x, y) }
+            fn get(&self) -> i32 { DynGood::get(self) }
+        }
+
+        pub trait Bad {
+            fn run(&self) -> i32;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32 { 0 }
+            fn only_here(&self);
+        }
+        pub trait DynBad {
+            fn run(&self) -> i32;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32;
+            fn only_dyn(&self);
+        }
+        impl<P: Bad> DynBad for P {
+            fn run(&self) -> i32 { Bad::get(self) }
+            fn add(&self, x: i32, y: i32) -> i32 { Bad::add(self, y, x) }
+            fn get(&self) -> i32 { Bad::get(self) }
+            fn only_dyn(&self) {}
+        }
+        impl Bad for dyn DynBad + '_ {
+            fn run(&self) -> i32 { DynBad::run(self) }
+            fn add(&self, x: i32, y: i32) -> i32 { DynBad::add(self, x, y) }
+            fn only_here(&self) {}
+        }
+
+        pub trait Lone {
+            fn run(&self);
+        }
+        pub trait DynLone {
+            fn run(&self);
+        }
+    "#;
+
+    fn run(name: &str) -> (Vec<String>, String) {
+        let dir = std::env::temp_dir().join(format!("xtask-dyn-forwarding-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = DynForwarding.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // The three pairs.
+        assert_eq!(checked, 3);
+        (findings, dir.join("lib.rs").display().to_string())
+    }
+
+    #[test]
+    fn test_correct_forwarding_passes() {
+        let (findings, _) = run("good");
+        assert!(findings.iter().all(|f| !f.contains("Good")), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_each_broken_link_is_a_finding() {
+        let (mut findings, file) = run("bad");
+        findings.sort();
+        let mut want = vec![
+            format!("{file}: `DynBad` lacks `only_here` of `Bad`; declare it and forward it both ways"),
+            format!("{file}: `DynBad` declares `only_dyn`, which `Bad` lacks; remove it"),
+            // A forward to the wrong method, or with its arguments swapped,
+            // compiles whenever the types agree.
+            format!("{file}: `impl DynBad for P`'s `run` does not call `Bad::run(self)`"),
+            format!("{file}: `impl DynBad for P`'s `add` does not call `Bad::add(self, x, y)`"),
+            // A defaulted method left out runs the default on a trait object,
+            // not the boxed implementation's override.
+            format!("{file}: `impl Bad for dyn DynBad` does not define `get`; define it as a forward to `DynBad::get`"),
+            format!("{file}: no blanket `impl<P: Lone> DynLone for P`; every `Lone` must be a `DynLone`"),
+            format!("{file}: no `impl Lone for dyn DynLone`; a `dyn DynLone` must be a `Lone`"),
+        ];
+        want.sort();
+        assert_eq!(findings, want);
+    }
+}
+
+#[cfg(test)]
+mod send_future_tests {
+    use super::*;
+
+    const FIXTURE_LIB: &str = r#"
+        use std::future::Future;
+
+        pub struct Handle;
+        impl Handle {
+            // A native `async fn`: a finding.
+            pub async fn commit(&self) -> i32 { 0 }
+            // `Send` in the signature passes.
+            pub fn flush(&self) -> impl Future<Output = i32> + Send { async move { 0 } }
+            // Not public.
+            pub(crate) async fn helper(&self) {}
+            async fn private(&self) {}
+        }
+        pub trait Native {
+            async fn run(&self);
+        }
+        #[async_trait::async_trait]
+        pub trait Boxed {
+            async fn run(&self);
+        }
+        pub async fn free() {}
+        pub(crate) struct Hidden;
+        impl Hidden {
+            pub async fn run(&self) {}
+        }
+        pub mod ffi {
+            pub async fn bridged() {}
+        }
+    "#;
+
+    #[test]
+    fn test_native_async_fns_are_findings() {
+        let dir = std::env::temp_dir().join(format!("xtask-send-future-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = SendFuture.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // `commit`, `flush`, both `run`s of the public traits and `free`.
+        assert_eq!(checked, 5);
+        let file = dir.join("lib.rs").display().to_string();
+        let finding = |name: &str, method: &str| {
+            format!(
+                "{file}: `{name}` is a public `async fn`, whose future is `Send` only while its body keeps it so; \
+                 declare `fn {method}(…) -> impl Future<Output = …> + Send` with an `async move` body"
+            )
+        };
+        findings.sort();
+        let mut want = vec![
+            finding("Handle::commit", "commit"),
+            finding("Native::run", "run"),
+            finding("free", "free"),
+        ];
+        want.sort();
+        // The `#[async_trait]` method boxes a `Send` future; `Hidden` is not
+        // public; the FFI module is the C half's.
+        assert_eq!(findings, want);
     }
 }
 

@@ -18,11 +18,11 @@
 
 #![expect(non_camel_case_types)]
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 
 use crate::common::resource::ResourceType;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`ResourceType`] singleton.
 #[repr(C)]
@@ -201,6 +201,16 @@ pub extern "C" fn kafka_common_resource_ResourceType_from_code(
     singleton(ResourceType::from_code(code))
 }
 
+/// `ResourceType.values()`: an owned list of the borrowed singletons in
+/// declaration order, freed with `kafka_List_destroy` (the elements are
+/// never freed).
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_resource_ResourceType_values() -> *mut kafka_List_t {
+    let elements = ResourceType::values().iter().map(|&t| singleton(t) as *mut c_void).collect();
+    box_list(elements, None)
+}
+
 /// `fromString(String)`: the singleton named by `str` (Java's constant name),
 /// `UNKNOWN` for any other string.
 ///
@@ -254,7 +264,7 @@ mod tests {
     use super::*;
     use std::ffi::CStr;
 
-    use crate::ffi::util::kafka_string_destroy;
+    use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
 
     #[test]
     fn singletons_round_trip_and_match_their_enumerator() {
@@ -269,6 +279,23 @@ mod tests {
         }
         assert_eq!(kafka_common_resource_ResourceType_unknown(), singleton(ResourceType::Unknown));
         assert_eq!(kafka_common_resource_ResourceType_user(), singleton(ResourceType::User));
+    }
+
+    #[test]
+    fn values_lists_the_singletons_in_declaration_order() {
+        // SAFETY: Test code: the owned list from `values` is destroyed once, after its elements,
+        // borrowed singletons, are read.
+        unsafe {
+            let values = kafka_common_resource_ResourceType_values();
+            assert_eq!(kafka_List_size(values), 8);
+            for (index, &value) in ResourceType::values().iter().enumerate() {
+                assert_eq!(
+                    kafka_List_get(values, index as i32) as *const kafka_common_resource_ResourceType_t,
+                    singleton(value)
+                );
+            }
+            kafka_List_destroy(values);
+        }
     }
 
     #[test]
