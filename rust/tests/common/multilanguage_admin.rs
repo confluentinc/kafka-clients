@@ -44,8 +44,8 @@ use confluent_kafka::admin::{
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
     DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
     ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FinalizedVersionRange, GroupListing,
-    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
-    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
     NewPartitions, NewTopic, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
@@ -74,7 +74,8 @@ use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
     AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
-    FencedProducer, FilterResultView, FilterResultsView, Listings, OffsetSpecArg, Outcomes, ReplicaLogDirInfoView,
+    FencedProducer, FilterResultView, FilterResultsView, GroupOffsets, Listings, OffsetSpecArg, Outcomes,
+    ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
