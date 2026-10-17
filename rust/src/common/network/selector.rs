@@ -47,7 +47,7 @@ use super::{is_authentication_error, is_invalid_receive_error};
 
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::net::TcpSocket;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::Notify;
 
 use crate::common::utils::internals::LogContext;
@@ -55,10 +55,43 @@ use crate::common::utils::{SystemTime, Time};
 use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use std::collections::{HashMap, LinkedList};
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Wake, Waker};
+
+/// A connection whose TCP handshake is still in progress.
+///
+/// Java's `Selector.connect` calls `socketChannel.connect()` on a non-blocking channel and
+/// registers `OP_CONNECT`; `poll()` later calls `finishConnect()`. tokio has no readiness-only
+/// connect, so the connect future is kept here and driven by `poll()` instead. It is never awaited
+/// to completion inside `connect()`: a broker that silently drops the SYN would park the whole
+/// client for the kernel's connect timeout (75 s on macOS), and the connection setup timeout
+/// (`NetworkClient.handleTimedOutConnections`) could never fire.
+struct PendingConnect {
+    /// Owns the socket, so dropping it cancels the connect and closes the socket.
+    connect: Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>,
+    /// The hostname of the remote peer (used for TLS SNI and hostname verification).
+    peer_host: String,
+}
+
+/// The waker handed to pending connects: a finished handshake pokes the selector's `Notify`, so a
+/// blocked `poll()` returns and registers the new channel, as `OP_CONNECT` readiness does in NIO.
+struct ConnectWaker {
+    notify: Arc<Notify>,
+}
+
+impl Wake for ConnectWaker {
+    fn wake(self: Arc<Self>) {
+        self.notify.notify_one();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notify.notify_one();
+    }
+}
 
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
 ///
@@ -213,6 +246,8 @@ pub struct Selector {
     channels_with_buffered_read: FxHashSet<Arc<str>>,
     /// Channels that connected immediately (before poll).
     immediately_connected_keys: FxHashSet<Arc<str>>,
+    /// Connections whose TCP handshake is still in progress, driven by `poll()`.
+    pending_connects: FxHashMap<Arc<str>, PendingConnect>,
     /// Channels that are being closed gracefully (pending receives).
     closing_channels: FxHashMap<Arc<str>, KafkaChannel>,
     /// Sends completed during the last poll.
@@ -330,6 +365,7 @@ impl Selector {
             explicitly_muted_channels: FxHashSet::default(),
             channels_with_buffered_read: FxHashSet::default(),
             immediately_connected_keys: FxHashSet::default(),
+            pending_connects: FxHashMap::default(),
             closing_channels: FxHashMap::default(),
             completed_sends: Vec::new(),
             completed_receives: LinkedList::new(),
@@ -454,8 +490,66 @@ impl Selector {
         if self.channels.contains_key(id) {
             return Err(format!("There is already a connection for id {id}"));
         }
+        if self.pending_connects.contains_key(id) {
+            return Err(format!("There is already a connection for id {id} that is still connecting"));
+        }
         if self.closing_channels.contains_key(id) {
             return Err(format!("There is already a connection for id {id} that is still being closed"));
+        }
+        Ok(())
+    }
+
+    /// Drives every in-progress TCP handshake once. A finished one becomes a channel that `poll()`
+    /// then processes as immediately connected (Java: `finishConnect()` on an `OP_CONNECT` key); a
+    /// failed one is reported through [`Selectable::disconnected`] with
+    /// [`ChannelState::NOT_CONNECTED`], the state a Java channel whose `finishConnect()` threw is
+    /// left in.
+    ///
+    /// Must run after `clear()` (which empties `disconnected`). The connects are polled with a
+    /// [`ConnectWaker`], so a handshake that finishes while `poll()` is blocked wakes it.
+    fn poll_pending_connects(&mut self) {
+        if self.pending_connects.is_empty() {
+            return;
+        }
+        let waker = Waker::from(Arc::new(ConnectWaker { notify: Arc::clone(&self.notify) }));
+        let mut cx = Context::from_waker(&waker);
+        let mut finished = Vec::new();
+        for (id, pending) in self.pending_connects.iter_mut() {
+            if let Poll::Ready(result) = pending.connect.as_mut().poll(&mut cx) {
+                finished.push((Arc::clone(id), result));
+            }
+        }
+        for (id, result) in finished {
+            let Some(pending) = self.pending_connects.remove(&id) else {
+                continue;
+            };
+            let registered = result.and_then(|stream| self.register_connected(&id, stream, &pending.peer_host));
+            if let Err(e) = registered {
+                kafka_debug!(self.log_context, "Connection {} failed to connect: {}", id, e);
+                self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+            }
+        }
+    }
+
+    /// Wraps a connected stream in a channel (plaintext or TLS transport, per the channel builder)
+    /// and registers it, to be processed by the next `poll()` pass as immediately connected.
+    fn register_connected(&mut self, id: &Arc<str>, stream: TcpStream, peer_host: &str) -> io::Result<()> {
+        let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
+        let channel =
+            self.channel_builder
+                .build_channel(id, stream, peer_host, self.max_receive_size, metadata_registry)?;
+
+        // The id is interned once as a single `Arc<str>` shared between the channels map and the
+        // tracking sets (CLAUDE.md §13).
+        self.immediately_connected_keys.insert(Arc::clone(id));
+        // Phase 30 (dirty site #4): register per-channel wakers/arming so the next WAIT can arm
+        // this channel's interest directly instead of sweeping. Also marks it dirty.
+        self.register_arming(id);
+        self.channels.insert(Arc::clone(id), channel);
+
+        let now_nanos = self.time.nanoseconds();
+        if let Some(ref mut mgr) = self.idle_expiry_manager {
+            mgr.update(id, now_nanos);
         }
         Ok(())
     }
@@ -1157,45 +1251,14 @@ impl Selectable for Selector {
         }
         socket.set_nodelay(true)?;
 
-        // Connect (non-blocking)
-        let stream = match socket.connect(address).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                return Err(e);
-            },
-        };
-
-        let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
-
-        // Build channel — the channel builder wraps the stream in the
-        // appropriate transport layer (plaintext or SSL/TLS).
-        let channel =
-            match self
-                .channel_builder
-                .build_channel(id, stream, peer_host, self.max_receive_size, metadata_registry)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return Err(e);
-                },
-            };
-
-        // The connection completed immediately (Tokio connect is async but resolves when done)
-        // Intern the connection id once as a single `Arc<str>` shared between the
-        // channels map and the tracking sets (CLAUDE.md §13).
-        let key: Arc<str> = Arc::from(id);
-        self.immediately_connected_keys.insert(Arc::clone(&key));
-        // Phase 30 (dirty site #4): register per-channel wakers/arming so the
-        // next WAIT can arm this channel's interest directly instead of
-        // sweeping. Also marks it dirty.
-        self.register_arming(&key);
-        self.channels.insert(key, channel);
-
-        let now_nanos = self.time.nanoseconds();
-        if let Some(ref mut mgr) = self.idle_expiry_manager {
-            mgr.update(id, now_nanos);
-        }
-
+        // Begin connecting without waiting for the handshake: `poll()` drives it (see
+        // `PendingConnect`). The socket is created and configured above, so errors there are still
+        // returned here, as Java's `connect` throws for them; everything the network reports
+        // later (refused, unreachable, timed out) arrives through `disconnected()`.
+        self.pending_connects.insert(
+            Arc::from(id),
+            PendingConnect { connect: Box::pin(socket.connect(address)), peer_host: peer_host.to_string() },
+        );
         Ok(())
     }
 
@@ -1212,6 +1275,7 @@ impl Selectable for Selector {
     }
 
     async fn close(&mut self) {
+        self.pending_connects.clear();
         let ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
         for id in ids {
             self.close_channel(&id).await;
@@ -1220,6 +1284,11 @@ impl Selectable for Selector {
     }
 
     async fn close_channel(&mut self, id: &str) {
+        // A connection still in its handshake: dropping it cancels the connect and closes the
+        // socket. No `disconnected` entry, as for any explicit close (`DISCARD_NO_NOTIFY`).
+        if self.pending_connects.remove(id).is_some() {
+            return;
+        }
         if self.channels.contains_key(id) {
             if let Some(channel) = self.channels.get_mut(id) {
                 channel.set_state(ChannelState::LOCAL_CLOSE.clone());
@@ -1289,6 +1358,7 @@ impl Selectable for Selector {
 
         let made_read_progress_last_call = self.made_read_progress_last_poll;
         self.clear().await;
+        self.poll_pending_connects();
 
         let data_in_buffers = !self.channels_with_buffered_read.is_empty();
 
@@ -1364,6 +1434,9 @@ impl Selectable for Selector {
             // the consumer's application task stopped busy-looping and began
             // poking the background task every `retry.backoff.ms`.)
             self.drain_fired_queue(&mut ready_ids);
+
+            // Register the connections whose handshake finished since the last pass.
+            self.poll_pending_connects();
 
             // Process channels with buffered data (reads only)
             if data_in_buffers {
@@ -2406,34 +2479,156 @@ mod tests {
         let server = EchoServer::new().await.unwrap();
         let mut selector = create_selector().await;
 
-        let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
+        // Java forces `doConnect` to block so the connection is "immediately connected" when
+        // `connect` returns. `connect` only begins the handshake here, so drive it to completion
+        // with `poll_pending_connects`, which is what registers the channel for the next pass.
+        for close_after_first_poll in [true, false] {
+            let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
+            selector
+                .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+                .await
+                .unwrap();
+            for _ in 0..100 {
+                selector.poll_pending_connects();
+                if !selector.immediately_connected_keys.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            // After connect, immediately_connected_keys should be non-empty
+            assert!(
+                !selector.immediately_connected_keys.is_empty(),
+                "Immediately connected keys should not be empty after connect"
+            );
+
+            if close_after_first_poll {
+                selector.poll(0).await.unwrap();
+
+                // After poll, immediately_connected_keys should be cleared
+                assert!(
+                    selector.immediately_connected_keys.is_empty(),
+                    "Immediately connected keys should be empty after poll"
+                );
+            }
+
+            selector.close_channel("0").await;
+
+            // Verify selector is clean
+            selector.poll(0).await.unwrap();
+            selector.poll(0).await.unwrap();
+            assert!(selector.channels.is_empty());
+            assert!(selector.closing_channels.is_empty());
+            assert!(selector.pending_connects.is_empty());
+            assert!(selector.immediately_connected_keys.is_empty());
+        }
+    }
+
+    /// A private address that normally silently drops connection attempts. On a network that
+    /// rejects it at once, the connect simply fails fast and these tests prove less.
+    const UNREACHABLE: &str = "10.255.255.1:9092";
+
+    /// `Selector.connect` only *begins* the connection (Java registers `OP_CONNECT` and
+    /// returns). Awaiting the TCP handshake here parked the whole client for the kernel's connect
+    /// timeout (75 s on macOS) when a broker silently dropped the SYN.
+    #[tokio::test]
+    async fn test_connect_does_not_wait_for_an_unreachable_address() {
+        let mut selector = create_selector().await;
+        let addr: SocketAddr = UNREACHABLE.parse().unwrap();
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE),
+        )
+        .await;
+
+        assert!(result.is_ok(), "connect() waited {:?} for the TCP handshake", started.elapsed());
+        selector.close_channel("0").await;
+    }
+
+    /// A connection stuck in the handshake must not stop the selector from serving others.
+    #[tokio::test]
+    async fn test_other_connections_are_served_while_one_is_connecting() {
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        let unreachable: SocketAddr = UNREACHABLE.parse().unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            selector.connect("stuck", unreachable, "localhost", BUFFER_SIZE, BUFFER_SIZE),
+        )
+        .await
+        .expect("connect() waited for the TCP handshake")
+        .ok();
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            blocking_connect(&mut selector, "good", server.port()),
+        )
+        .await
+        .expect("the healthy connection was not served");
+        assert_eq!("ping", blocking_request(&mut selector, "good", "ping").await);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        selector.close().await;
+    }
+
+    /// Closing a connection that is still connecting cancels it, without a `disconnected`
+    /// notification (Java's `close(id)` uses `CloseMode.DISCARD_NO_NOTIFY`), and frees the id.
+    #[tokio::test]
+    async fn test_close_channel_cancels_a_connect_in_progress() {
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        let unreachable: SocketAddr = UNREACHABLE.parse().unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            selector.connect("0", unreachable, "localhost", BUFFER_SIZE, BUFFER_SIZE),
+        )
+        .await
+        .expect("connect() waited for the TCP handshake")
+        .ok();
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+        assert!(
+            !selector.disconnected().contains_key("0"),
+            "an explicit close is not a disconnect"
+        );
+
+        // The id is free again.
+        blocking_connect(&mut selector, "0", server.port()).await;
+        selector.close().await;
+    }
+
+    /// A refused connection is reported by `poll()` through `disconnected()`, as in Java
+    /// (`finishConnect` failing), not by `connect()` returning an error.
+    #[tokio::test]
+    async fn test_refused_connect_is_reported_as_disconnected() {
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let mut selector = create_selector().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
         selector
             .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
             .await
-            .unwrap();
+            .expect("a refused connection is reported by poll()");
 
-        // After connect, immediately_connected_keys should be non-empty
-        assert!(
-            !selector.immediately_connected_keys.is_empty(),
-            "Immediately connected keys should not be empty after connect"
+        for _ in 0..50 {
+            selector.poll(100).await.unwrap();
+            if selector.disconnected().contains_key("0") {
+                break;
+            }
+        }
+        assert_eq!(
+            ChannelState::NOT_CONNECTED,
+            *selector.disconnected().get("0").expect("the refused connection is reported")
         );
-
-        selector.poll(0).await.unwrap();
-
-        // After poll, immediately_connected_keys should be cleared
-        assert!(
-            selector.immediately_connected_keys.is_empty(),
-            "Immediately connected keys should be empty after poll"
-        );
-
-        selector.close_channel("0").await;
-
-        // Verify selector is clean
-        selector.poll(0).await.unwrap();
-        selector.poll(0).await.unwrap();
-        assert!(selector.channels.is_empty());
-        assert!(selector.closing_channels.is_empty());
-        assert!(selector.immediately_connected_keys.is_empty());
+        assert!(!selector.is_channel_ready("0"));
+        assert!(selector.connected().is_empty());
     }
 
     /// Translated from `SelectorTest.testCantSendWithInProgress`.
