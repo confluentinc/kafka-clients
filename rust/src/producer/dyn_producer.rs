@@ -23,6 +23,10 @@
 //! `DynProducer` restores the Java capability (CLAUDE.md §3, "traits must be
 //! dyn-compatible") by boxing each future, and only callers that go through
 //! `dyn` pay for it.
+//!
+//! A method added to [`Producer`] goes in three places here: the trait, the
+//! blanket impl and the impl on `dyn DynProducer`. `cargo xtask lint-custom`
+//! (`check-dyn-forwarding`) fails until all three forward it.
 
 use std::collections::HashMap;
 use std::pin::Pin;

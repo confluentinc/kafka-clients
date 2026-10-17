@@ -274,45 +274,51 @@ impl<K, V> MockConsumer<K, V> {
     /// `consumer-threading.md` §31 / Phase 2); Java's listener methods
     /// are sync.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#rebalance")]
-    pub async fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> Result<(), Error> {
-        let old_assignment_set = self.subs().assigned_partitions();
-        let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
+    pub fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        K: Send,
+        V: Send,
+    {
+        async move {
+            let old_assignment_set = self.subs().assigned_partitions();
+            let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
 
-        let added: Vec<TopicPartition> = new_assignment
-            .iter()
-            .filter(|tp| !old_assignment_set.contains(tp))
-            .cloned()
-            .collect();
-        let removed: Vec<TopicPartition> = old_assignment_set
-            .iter()
-            .filter(|tp| !new_assignment_set.contains(tp))
-            .cloned()
-            .collect();
+            let added: Vec<TopicPartition> = new_assignment
+                .iter()
+                .filter(|tp| !old_assignment_set.contains(tp))
+                .cloned()
+                .collect();
+            let removed: Vec<TopicPartition> = old_assignment_set
+                .iter()
+                .filter(|tp| !new_assignment_set.contains(tp))
+                .cloned()
+                .collect();
 
-        // Clear buffered records (Java: `records.clear()` at line 137).
-        self.records.clear();
+            // Clear buffered records (Java: `records.clear()` at line 137).
+            self.records.clear();
 
-        // Invoke onPartitionsRevoked first (Java line 140-142). Per
-        // consumer-threading.md §16, clone the Arc out before awaiting.
-        let listener = self.subs().rebalance_listener();
-        if !removed.is_empty()
-            && let Some(listener) = listener
-        {
-            listener.on_partitions_revoked(&removed).await?;
+            // Invoke onPartitionsRevoked first (Java line 140-142). Per
+            // consumer-threading.md §16, clone the Arc out before awaiting.
+            let listener = self.subs().rebalance_listener();
+            if !removed.is_empty()
+                && let Some(listener) = listener
+            {
+                listener.on_partitions_revoked(&removed).await?;
+            }
+
+            // Replace assignment (Java line 143:
+            // `subscriptions.assignFromSubscribed(newAssignment)`).
+            self.subs().assign_from_subscribed(new_assignment)?;
+
+            // Invoke onPartitionsAssigned (Java line 144). Java passes only the
+            // *added* partitions, not the full new assignment.
+            let listener = self.subs().rebalance_listener();
+            if let Some(listener) = listener {
+                listener.on_partitions_assigned(&added).await?;
+            }
+
+            Ok(())
         }
-
-        // Replace assignment (Java line 143:
-        // `subscriptions.assignFromSubscribed(newAssignment)`).
-        self.subs().assign_from_subscribed(new_assignment)?;
-
-        // Invoke onPartitionsAssigned (Java line 144). Java passes only the
-        // *added* partitions, not the full new assignment.
-        let listener = self.subs().rebalance_listener();
-        if let Some(listener) = listener {
-            listener.on_partitions_assigned(&added).await?;
-        }
-
-        Ok(())
     }
 
     /// Simulates a partition loss event. Calls
@@ -340,37 +346,47 @@ impl<K, V> MockConsumer<K, V> {
     /// [`ConsumerRebalanceListener::on_partitions_lost`]: crate::consumer::ConsumerRebalanceListener::on_partitions_lost
     /// [`ConsumerRebalanceListener::on_partitions_revoked`]: crate::consumer::ConsumerRebalanceListener::on_partitions_revoked
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#losePartitions")]
-    pub async fn lose_partitions(&mut self, partitions_lost: &[TopicPartition]) -> Result<(), Error> {
-        let current_assignment = self.subs().assigned_partitions();
-        let mut lost: Vec<TopicPartition> = Vec::with_capacity(partitions_lost.len());
-        for tp in partitions_lost {
-            if !lost.contains(tp) {
-                lost.push(tp.clone());
+    pub fn lose_partitions(
+        &mut self,
+        partitions_lost: &[TopicPartition],
+    ) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        K: Send,
+        V: Send,
+    {
+        async move {
+            let current_assignment = self.subs().assigned_partitions();
+            let mut lost: Vec<TopicPartition> = Vec::with_capacity(partitions_lost.len());
+            for tp in partitions_lost {
+                if !lost.contains(tp) {
+                    lost.push(tp.clone());
+                }
             }
+            let not_assigned: Vec<String> = lost
+                .iter()
+                .filter(|tp| !current_assignment.contains(*tp))
+                .map(ToString::to_string)
+                .collect();
+            if !not_assigned.is_empty() {
+                // Java formats the `List` with `toString()`: `[test-1, test-2]`.
+                return Err(Error::local_illegal_state(format!(
+                    "Cannot lose partitions that are not currently assigned: [{}]",
+                    not_assigned.join(", ")
+                )));
+            }
+            for tp in &lost {
+                self.records.remove(tp);
+            }
+            // Clone the listener `Arc` out, dropping the guard, before awaiting
+            // (consumer-threading.md §16).
+            let listener = self.subs().rebalance_listener();
+            if let Some(listener) = listener {
+                listener.on_partitions_lost(&lost).await?;
+            }
+            let remaining: Vec<TopicPartition> =
+                current_assignment.into_iter().filter(|tp| !lost.contains(tp)).collect();
+            self.subs().assign_from_subscribed(&remaining)
         }
-        let not_assigned: Vec<String> = lost
-            .iter()
-            .filter(|tp| !current_assignment.contains(*tp))
-            .map(ToString::to_string)
-            .collect();
-        if !not_assigned.is_empty() {
-            // Java formats the `List` with `toString()`: `[test-1, test-2]`.
-            return Err(Error::local_illegal_state(format!(
-                "Cannot lose partitions that are not currently assigned: [{}]",
-                not_assigned.join(", ")
-            )));
-        }
-        for tp in &lost {
-            self.records.remove(tp);
-        }
-        // Clone the listener `Arc` out, dropping the guard, before awaiting
-        // (consumer-threading.md §16).
-        let listener = self.subs().rebalance_listener();
-        if let Some(listener) = listener {
-            listener.on_partitions_lost(&lost).await?;
-        }
-        let remaining: Vec<TopicPartition> = current_assignment.into_iter().filter(|tp| !lost.contains(tp)).collect();
-        self.subs().assign_from_subscribed(&remaining)
     }
 
     /// Schedule a task to run on the next
@@ -1155,7 +1171,7 @@ where
         // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
         self.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(
-            CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS,
+            crate::consumer::internals::ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64,
         )))
         .await
     }

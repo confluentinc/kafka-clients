@@ -174,3 +174,8 @@ allow_attributes = "deny"
 # so a justification cannot outlive the block it was written for.
 undocumented_unsafe_blocks = "deny"
 unnecessary_safety_comment = "deny"
+# A public method returns `impl Future<Output = T> + Send` with an `async move`
+# body instead of being an `async fn`, so that `Send` is part of its signature
+# rather than inferred from its body (`cargo xtask lint-custom`,
+# `check-send-future`). That is the shape this lint rewrites to `async fn`.
+manual_async_fn = "allow"
