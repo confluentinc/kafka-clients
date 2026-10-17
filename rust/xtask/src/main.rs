@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod api_compat;
 mod config_types;
 mod error_hierarchy;
 mod error_predicates;
@@ -55,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         Some("test-multilanguage") => test_multilanguage()?,
         Some("producer-perf-test") => producer_perf_test()?,
         Some("package-check") => package_check()?,
+        Some("api-compat") => api_compat::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos") => chaos()?,
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
@@ -2116,6 +2118,11 @@ fn print_help() {
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
   package-check   Package the crate as the crates.io publish does (without ffi-macros),
                   fail above 3 MiB, and build a fresh project depending on it
+  api-compat      Compare the public surface with a release tag: the Rust API with
+                  cargo-semver-checks, the C ABI with libabigail's abidiff; a breaking
+                  change fails unless the Cargo.toml version allows it over the tag's
+                    --baseline TAG (default $API_COMPAT_BASELINE, else the highest
+                    vX.Y.Z tag not above the current version)
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2163,6 +2170,7 @@ Usage:
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
   cargo xtask package-check
+  cargo xtask api-compat [--baseline TAG]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
