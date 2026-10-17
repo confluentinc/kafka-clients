@@ -64,13 +64,13 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import UNSET
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._wait import wait_sliced
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.null_pointer_error import NullPointerError
@@ -88,7 +88,6 @@ from ._base import (
     group_metadata_handle,
     offsets_to_spec,
     raise_if_error,
-    result_sliced,
     to_metrics_map,
     to_partition_info,
     wait_futures,
@@ -133,6 +132,10 @@ def _free_partitions_payload(payload: tuple[Any, ...]) -> None:
     free_error(payload[-1])
 
 
+# A record's handover not yet resolved (see _Completion.outcome).
+_HANDOVER_PENDING: Any = object()
+
+
 class _Completion:
     """The completions of one send: called as the record's delivery callback,
     Java's ``ProducerBatch.completeFutureAndFireCallbacks`` for one record, and
@@ -143,32 +146,46 @@ class _Completion:
     at a time, with the GIL held; :meth:`resolve` runs there for a record that
     waited in the core, and on the sending thread, inside
     ``Producer_send_cb``, for one the producer takes or refuses at once. It
-    completes ``handed_over``, the internal future ``send()`` waits for, or
-    fails it with the error to rethrow. The delivery callback runs the user's
-    callback before it completes the record's future (the ``_KafkaFutureImpl``
-    under the ``KafkaFuture`` send() returns), as Java fires the callbacks
-    before ``produceFuture.done()``; then the future is untracked (see
-    _ProducerState._track). The future's dependants (``then_apply``,
-    ``when_complete``) and a waiting ``get()`` are released there, on the
-    completion thread. It is one object rather than closures over its values,
-    so a record in flight keeps fewer objects alive for the garbage collector
-    to scan.
+    records the handover in :attr:`outcome`, which ``send()`` reads once the
+    call returns and waits for (:meth:`wait_handover`) only for a record that
+    was queued: ``None`` for a record handed over, else the error to rethrow.
+    The delivery callback runs the user's callback before it completes the
+    record's future (the ``_KafkaFutureImpl`` under the ``KafkaFuture`` send()
+    returns), as Java fires the callbacks before ``produceFuture.done()``; then
+    the future is untracked (see _ProducerState._track). The future's
+    dependants (``then_apply``, ``when_complete``) and a waiting ``get()`` are
+    released there, on the completion thread. It is one object rather than
+    closures over its values, and the handover is a slot of it rather than a
+    ``concurrent.futures.Future`` (whose creation, completion and reads cost
+    about 1.4 us and 11 garbage-collector-tracked objects per record), so a
+    record in flight keeps fewer objects alive for the garbage collector to
+    scan.
     """
 
     __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack",
-                 "handed_over", "_fired", "completed")
+                 "outcome", "_waiter", "_fired", "completed")
 
     def __init__(self, producer: object, callback: Callback | None,
                  future: _KafkaFutureImpl[RecordMetadata], topic: str, partition: int | None,
-                 untrack: Callable[[_KafkaFutureImpl[RecordMetadata]], None],
-                 handed_over: Future[None]) -> None:
+                 untrack: Callable[[_KafkaFutureImpl[RecordMetadata]], None]) -> None:
         self._producer = producer
         self._callback = callback
         self._future = future
         self._topic = topic
         self._partition = partition
         self._untrack = untrack
-        self.handed_over = handed_over
+        # The handover: _HANDOVER_PENDING until resolve() ran, then None for a
+        # record handed over, or the error the Rust send() returned. Read by
+        # send() on the sending thread without a lock: for a record taken or
+        # refused at once resolve() ran on that very thread, inside
+        # Producer_send_cb; for a queued record it runs on the pump, and
+        # resolve() stores the outcome before it reads _waiter while
+        # wait_handover() stores _waiter before it re-reads the outcome, so
+        # whichever runs first, one of the two sees the other's store (each
+        # store and read is one bytecode, which the GIL orders).
+        self.outcome: Any = _HANDOVER_PENDING
+        # The event wait_handover() waits on, created only for a queued record.
+        self._waiter: threading.Event | None = None
         # Whether the record completed: the pump runs the delivery callback at
         # most once per record, so a plain flag suffices.
         self._fired = False
@@ -197,10 +214,23 @@ class _Completion:
         Producer_send_cb, for a record the producer takes or refuses at
         once, and on the pump for one that waited in the core for its topic's
         metadata or for buffer space."""
-        if error:
-            self.handed_over.set_exception(cast("Exception", from_ffi_error(error)))
-        else:
-            self.handed_over.set_result(None)
+        self.outcome = from_ffi_error(error) if error else None
+        waiter = self._waiter
+        if waiter is not None:
+            waiter.set()
+
+    def wait_handover(self) -> Any:
+        """The handover's outcome, for a record that was queued: waited for in
+        ``WAIT_SLICE_S`` slices, a Ctrl+C letting the wait end and then raised
+        (:func:`wait_sliced`)."""
+        outcome = self.outcome
+        if outcome is _HANDOVER_PENDING:
+            waiter = threading.Event()
+            self._waiter = waiter
+            if self.outcome is _HANDOVER_PENDING:
+                wait_sliced(waiter)
+            outcome = self.outcome
+        return outcome
 
     def _complete(self, metadata: RecordMetadata,
                   exception: Exception | None) -> Exception | None:
@@ -486,9 +516,7 @@ class Producer(Generic[K, V], _ProducerState):
         # KafkaFuture returned (RecordFuture: cancel() answers False, as Java's
         # FutureRecordMetadata).
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
-        handed_over: Future[None] = Future()
-        cb = _Completion(self, callback, future, topic, partition, self._discard_future,
-                         handed_over)
+        cb = _Completion(self, callback, future, topic, partition, self._discard_future)
         # send() returns once the record is handed over and raises the error
         # the Rust send() returned: Java's doSend rethrows those
         # (KafkaProducer.java:1143-1155), where an ApiException reaches the
@@ -517,15 +545,20 @@ class Producer(Generic[K, V], _ProducerState):
             # at once, on the completion thread otherwise.
             raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
         try:
-            # A Ctrl+C is raised once the record is handed over.
-            result_sliced(handed_over)
+            outcome = cb.outcome
+            if outcome is _HANDOVER_PENDING:
+                # Queued: wait for the handover; a Ctrl+C is raised once the
+                # record is handed over.
+                outcome = cb.wait_handover()
+            if outcome is not None:
+                raise outcome
             return RecordFuture._of_impl(future)
         finally:
             # Tracked only once handed over without an error: flush() and
             # commit_transaction() must not wait for a rethrown record, whose
             # Callback may never run (the core's own flush covers it if it
             # reached the accumulator).
-            if handed_over.exception() is None:
+            if cb.outcome is None:
                 self._track_sent(cb, future)
 
     def _track_sent(self, cb: _Completion, future: _KafkaFutureImpl[RecordMetadata]) -> None:

@@ -170,15 +170,8 @@ def _settle(future: _KafkaFutureImpl[RecordMetadata], metadata: RecordMetadata,
     complete_record(future, metadata, exception)
 
 
-def _hand_over(handed_over: asyncio.Future[None], error: BaseException | None) -> None:
-    """Resolve the future ``send()`` awaits (on its loop), or fail it with the
-    exception to rethrow."""
-    if handed_over.done():
-        return
-    if error is not None:
-        handed_over.set_exception(error)
-    else:
-        handed_over.set_result(None)
+# A record's handover not yet resolved (see _AsyncCompletion.outcome).
+_HANDOVER_PENDING: Any = object()
 
 
 async def _await_all(loop: asyncio.AbstractEventLoop,
@@ -230,25 +223,35 @@ class _AsyncCompletion:
     which hands the completion to the producer's event loop (see
     AsyncProducer._deliver), once, and :meth:`resolve` at its handover, called
     by the pump too, or on the loop's thread inside ``Producer_send_cb``
-    for a record the producer takes or refuses at once, which completes
-    ``handed_over``, the internal future ``send()`` awaits, or fails it with
-    the error to rethrow. One object rather than
-    closures over its values, so a record in flight keeps fewer objects alive
-    for the garbage collector to scan."""
+    for a record the producer takes or refuses at once, which records the
+    handover in :attr:`outcome`: ``send()`` reads it once the call returns and
+    awaits it (:meth:`waiter`) only for a record that was queued; ``None`` for
+    a record handed over, else the error to rethrow. One object rather than
+    closures over its values, and the handover a slot of it rather than an
+    ``asyncio.Future`` per record, so a record in flight keeps fewer objects
+    alive for the garbage collector to scan."""
 
     __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_loop",
-                 "handed_over", "_fired")
+                 "outcome", "_waiter", "_fired")
 
     def __init__(self, producer: AsyncProducer[Any, Any], callback: _AsyncCallback | None,
                  future: _KafkaFutureImpl[RecordMetadata], topic: str, partition: int | None,
-                 loop: asyncio.AbstractEventLoop, handed_over: asyncio.Future[None]) -> None:
+                 loop: asyncio.AbstractEventLoop) -> None:
         self._producer = producer
         self._callback = callback
         self._future = future
         self._topic = topic
         self._partition = partition
         self._loop = loop
-        self.handed_over = handed_over
+        # The handover: _HANDOVER_PENDING until resolve() ran, then None for a
+        # record handed over, or the error the Rust send() returned. Written
+        # and read on the loop's thread only (resolve() hops there from any
+        # other thread), so send() needs no lock: it reads the slot once the C
+        # call returns and, for a record still pending, creates _waiter and
+        # suspends on it; the resolve then sets both, on the loop.
+        self.outcome: Any = _HANDOVER_PENDING
+        # The future send() awaits, created only for a queued record.
+        self._waiter: asyncio.Future[None] | None = None
         # Whether the record completed, on the loop's thread or, once the loop
         # closed, on the helper pump's or close()'s.
         self._fired = False
@@ -290,12 +293,28 @@ class _AsyncCompletion:
         outcome: BaseException | None = (
             cast("Exception", from_ffi_error(error)) if error else None)
         if _running_loop() is loop:
-            _hand_over(self.handed_over, outcome)
+            self._resolve_on_loop(outcome)
             return
         try:
-            call_soon_on(loop, _hand_over, self.handed_over, outcome)
+            call_soon_on(loop, self._resolve_on_loop, outcome)
         except RuntimeError:  # the loop closed since the check
             pass
+
+    def _resolve_on_loop(self, outcome: BaseException | None) -> None:
+        """Record the handover, on the loop, and wake the send() awaiting it,
+        if it suspended (a queued record)."""
+        if self.outcome is not _HANDOVER_PENDING:
+            return
+        self.outcome = outcome
+        waiter = self._waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
+    def waiter(self) -> asyncio.Future[None]:
+        """The future ``send()`` awaits for a queued record's handover, created
+        here, on the loop, right before ``send()`` suspends on it."""
+        waiter = self._waiter = self._loop.create_future()
+        return waiter
 
 
 class AsyncProducer(Generic[K, V], _ProducerState):
@@ -706,22 +725,27 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # loop, under the AsyncKafkaFuture returned (AsyncRecordFuture: cancel()
         # answers False, as Java's FutureRecordMetadata).
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
-        handed_over: asyncio.Future[None] = loop.create_future()
-        cb = _AsyncCompletion(self, callback, future, topic, partition, loop, handed_over)
+        cb = _AsyncCompletion(self, callback, future, topic, partition, loop)
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._send_use as c_producer:
             # The record is tried on the loop's thread first and queued to the
             # submission task only when the producer would have to wait for
             # it: cb.resolve runs inside the call for a record taken or refused
-            # at once (handed_over is then done before it is awaited), from the
+            # at once (cb.outcome is then set before it is read), from the
             # pump otherwise.
             raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
+        outcome = cb.outcome
         # Taken or refused at once: one more send without a suspension. Queued:
         # the await below suspends, so the loop gets its turn anyway.
-        self._fast_path_sends = self._fast_path_sends + 1 if handed_over.done() else 0
+        self._fast_path_sends = 0 if outcome is _HANDOVER_PENDING else self._fast_path_sends + 1
         try:
-            await await_to_end(handed_over)
+            if outcome is _HANDOVER_PENDING:
+                # Queued: wait for the handover, on the loop.
+                await await_to_end(cb.waiter())
+                outcome = cb.outcome
+            if outcome is not None:
+                raise outcome
             return AsyncRecordFuture._of_impl(future, loop)
         finally:
             # Tracked only once handed over without an error (see
@@ -731,7 +755,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             # closed with its loop (a task the garbage collector finds on a
             # closed loop): the record is still sent, and its completion,
             # dropped for the closed loop, untracks it.
-            if not handed_over.done() or handed_over.exception() is None:
+            outcome = cb.outcome
+            if outcome is None or outcome is _HANDOVER_PENDING:
                 self._track(future)
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:
