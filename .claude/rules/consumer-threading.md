@@ -87,8 +87,9 @@ which **remains async-only**. It is *un-deferred in the .NET binding only*: the
     surface is synchronous; .NET users expect a blocking `Poll`. The async
     surface stays too (both are siblings over one native consumer).
   - **How it is implemented — the distinction that matters:** the .NET sync
-    facade calls the **sync C ABI directly** (`Consumer_poll` /
-    `Consumer_subscribe` / … return a `KafkaError*`), and the core's `block_on`
+    facade calls the blocking C ABI forms (`kafka_consumer_Consumer_poll` /
+    `_subscribe_*` / …, each with a trailing `kafka_common_Error_t **out_err`),
+    and the core's `block_on`
     runs **inside the Rust core's own multi-thread tokio runtime** — the caller's
     thread parks, deadlock-free. This is **distinct from, and not, the forbidden
     *managed* sync-over-async façade** (a binding-side `block_on` / `Task.Run` /
