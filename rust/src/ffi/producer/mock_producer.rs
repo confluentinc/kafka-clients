@@ -26,7 +26,7 @@
 //! same pointers.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use crate::common::{Cluster, TopicPartition};
@@ -54,8 +54,7 @@ use crate::ffi::producer::partitioner::{
 use crate::ffi::producer::producer_record::{box_producer_record, kafka_producer_ProducerRecord_destroy};
 use crate::ffi::producer::{ProducerHandle, kafka_producer_Producer_t};
 use crate::ffi::util::{
-    GenericValue, box_list, box_map, box_string_keyed_map, c_str_to_string, kafka_List_t, kafka_Map_destroy,
-    kafka_Map_t,
+    GenericValue, box_list, box_map, box_string_keyed_map, kafka_List_t, kafka_Map_destroy, kafka_Map_t,
 };
 use crate::producer::{MockProducer, MockProducerOptions, MockProducerOptionsBuilder};
 
@@ -403,33 +402,6 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_hist
         .map(|groups| group_offsets_map(groups) as *mut c_void)
         .collect();
     box_list(elements, Some(destroy_map))
-}
-
-/// `MockProducer.committedOffset(String group, TopicPartition)`: owned,
-/// `NULL` when none (Java's `null`).
-///
-/// # Safety
-///
-/// `self_` and `topic_partition` must be live handles and `group` a
-/// NUL-terminated string.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
-    self_: *const kafka_producer_MockProducer_t,
-    group: *const c_char,
-    topic_partition: *const kafka_common_TopicPartition_t,
-) -> *mut kafka_consumer_OffsetAndMetadata_t {
-    // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let group = unsafe { c_str_to_string(group) };
-    // SAFETY: Per this function's `# Safety`, `topic_partition` is a live handle, as
-    // `topic_partition_ref` requires; the reference is used only within this call.
-    let topic_partition = unsafe { topic_partition_ref(topic_partition) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
-    // reference is used only within this call.
-    unsafe { mock(self_) }
-        .committed_offset(&group, topic_partition)
-        .map_or(std::ptr::null_mut(), box_offset_and_metadata)
 }
 
 /// `MockProducer.uncommittedOffsets()`: an owned `kafka_Map_t` of `char *`
@@ -1069,7 +1041,9 @@ mod tests {
         kafka_producer_Producer_init_transactions, kafka_producer_Producer_send, kafka_producer_Producer_send_cb,
         kafka_producer_Producer_send_with_callback,
     };
-    use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
+    use crate::ffi::util::{
+        c_str_to_string, kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy,
+    };
 
     struct Seen {
         completions: AtomicI32,

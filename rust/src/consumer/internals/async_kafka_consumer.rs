@@ -3665,11 +3665,15 @@ where
     /// Java: `String clientId()`. Returned as a borrowed `&str` per
     /// CLAUDE.md §14 (most general borrowed form for getters).
     ///
+    /// Java's method is package-private and only its tests call it, so it is
+    /// test-only here and not on the `Consumer` trait.
+    ///
     /// **Returns the configured value silently when the consumer is
     /// closed** (Java throws `IllegalStateException`). The `client_id`
     /// is immutable for the lifetime of the consumer, so returning it
     /// post-close is harmless.
-    pub fn client_id(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn client_id(&self) -> &str {
         &self.client_id
     }
 
@@ -6852,10 +6856,6 @@ where
 
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         AsyncKafkaConsumer::group_metadata(self)
-    }
-
-    fn client_id(&self) -> &str {
-        AsyncKafkaConsumer::client_id(self)
     }
 
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {

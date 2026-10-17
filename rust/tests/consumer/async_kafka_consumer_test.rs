@@ -67,7 +67,7 @@ fn make_smoke_config() -> ConsumerConfig {
 
 /// Smoke: the production ctor succeeds against a refuses-connection
 /// broker (metadata.bootstrap is non-connecting), trait dispatch works
-/// for `client_id()`, and `close().await` cleanly tears down the bg
+/// for a sync accessor, and `close().await` cleanly tears down the bg
 /// task. Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
@@ -78,13 +78,9 @@ async fn new_consumer_builds_and_closes_against_refused_broker() {
     )
     .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
-    // Trait dispatch through `Box<dyn Consumer<K, V>>`. `client_id` is
-    // the Phase-11-translated sync accessor.
-    assert_eq!(
-        consumer.client_id(),
-        "smoke-test-consumer",
-        "client_id() should round-trip the config value",
-    );
+    // Trait dispatch through `Box<dyn Consumer<K, V>>`: a fresh consumer has
+    // no assignment.
+    assert!(consumer.assignment().is_empty(), "a new consumer has no assignment");
 
     // Bg-task graceful shutdown: signal close + drop the join handle.
     // Should NOT hang even though we never reached a broker.

@@ -2861,13 +2861,12 @@ def test_create_delegation_token_rejects_a_non_user_renewer():
 
 
 def test_describe_features_reports_seeded_levels():
-    with MockAdminClient(1) as admin:
-        # Every number distinct, so transposing any two of the three level
-        # columns is visible.
-        admin.set_feature_levels({
-            "metadata.version": (17, 14, 21),
-            "transaction.version": (2, 1, 3),
-        })
+    # Every number distinct, so transposing any two of the three level
+    # columns is visible.
+    with MockAdminClient(1, feature_levels={
+        "metadata.version": (17, 14, 21),
+        "transaction.version": (2, 1, 3),
+    }) as admin:
         metadata = admin.describe_features()
         assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(17, 17)
         assert metadata.supported_features["metadata.version"] == SupportedVersionRange(14, 21)
@@ -2881,8 +2880,7 @@ def test_describe_features_reports_seeded_levels():
 
 
 def test_update_features_applies_and_validates():
-    with MockAdminClient(1) as admin:
-        admin.set_feature_levels({"metadata.version": (17, 14, 21)})
+    with MockAdminClient(1, feature_levels={"metadata.version": (17, 14, 21)}) as admin:
         updates = {"metadata.version": FeatureUpdate(19, UpgradeType.UPGRADE)}
 
         # validate_only leaves the level alone.
@@ -2934,7 +2932,7 @@ async def test_async_b5b_rpcs():
         assert await admin.renew_delegation_token(token.hmac, renew_time_period_ms=7) == 7
         assert await admin.expire_delegation_token(token.hmac, expiry_time_period_ms=-1) == -1
 
-        admin.set_feature_levels({"metadata.version": (17, 14, 21)})
+    async with AsyncMockAdminClient(1, feature_levels={"metadata.version": (17, 14, 21)}) as admin:
         metadata = await admin.describe_features()
         assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(17, 17)
         assert await admin.update_features(
@@ -3155,23 +3153,9 @@ def test_unregister_controller_follows_the_mock_raft_controller_setting():
         assert exc.value.code == UNSUPPORTED_VERSION
         assert str(exc.value) == ""
 
-        admin.set_using_raft_controller(True)
+    with MockAdminClient(1, using_raft_controller=True) as admin:
         assert admin.unregister_controller(1) is None
         assert admin.unregister_controller(1, timeout=5.0) is None
-
-        admin.set_using_raft_controller(False)
-        with pytest.raises(KafkaError):
-            admin.unregister_controller(1)
-
-
-def test_set_using_raft_controller_rejects_a_real_client():
-    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
-    try:
-        with pytest.raises(KafkaError) as exc:
-            _MockAdminClientMixin.set_using_raft_controller(admin, True)
-        assert str(exc.value) == "this operation is only supported on a MockAdminClient"
-    finally:
-        admin.close(timeout=1.0)
 
 
 @pytest.mark.asyncio
@@ -3181,7 +3165,7 @@ async def test_async_unregister_controller():
             await admin.unregister_controller(1)
         assert exc.value.code == UNSUPPORTED_VERSION
 
-        admin.set_using_raft_controller(True)
+    async with AsyncMockAdminClient(1, using_raft_controller=True) as admin:
         assert await admin.unregister_controller(1) is None
 
 

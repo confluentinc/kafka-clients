@@ -10947,10 +10947,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string(), "/data1".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11003,10 +11002,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11030,10 +11028,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,

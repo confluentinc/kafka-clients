@@ -213,17 +213,12 @@ pub struct MultilanguageConsumer {
     consumer_id: u64,
     client: ConsumerServiceClient<Channel>,
     backend: &'static str,
-    client_id: String,
 }
 
 impl MultilanguageConsumer {
     /// Connect to `channel` and create a server-side consumer from `config`
     /// (empty config selects a MockConsumer server-side).
     pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
-        let client_id = config
-            .get("client.id")
-            .cloned()
-            .unwrap_or_else(|| format!("multilanguage-{backend}"));
         let mut client = ConsumerServiceClient::new(channel);
         let response = client
             .create_consumer(proto::CreateConsumerRequest { config })
@@ -233,7 +228,7 @@ impl MultilanguageConsumer {
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
-        Ok(Self { consumer_id: response.consumer_id, client, backend, client_id })
+        Ok(Self { consumer_id: response.consumer_id, client, backend })
     }
 
     /// The server-local consumer id. Needed by
@@ -478,10 +473,6 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             panic!("{backend} backend failed group_metadata: {}", kafka_error_from_proto(err));
         }
         MultilanguageGroupMetadata::register(response, self.client.clone(), backend)
-    }
-
-    fn client_id(&self) -> &str {
-        &self.client_id
     }
 
     fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {

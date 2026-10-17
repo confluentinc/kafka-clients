@@ -2302,37 +2302,6 @@ static PyObject* py_MockProducer_sent_offsets(PyObject* self, PyObject* args) {
     return PyBool_FromLong(sent ? 1 : 0);
 }
 
-// MockProducer_committed_offset(handle, group_id, topic, partition)
-//   -> (offset, leader_epoch | None, metadata) or None
-static PyObject* py_MockProducer_committed_offset(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long ptr;
-    const char* group;
-    const char* topic;
-    int partition;
-    if (!PyArg_ParseTuple(args, "Kssi", &ptr, &group, &topic, &partition)) return NULL;
-    Producer* p = producer_from_handle(ptr);
-    kafka_common_TopicPartition_t* tp = NULL;
-    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, partition, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    kafka_consumer_OffsetAndMetadata_t* oam = NULL;  // owned or NULL
-    kafka_common_Error_t* err = (oam = kafka_producer_MockProducer_committed_offset_err(p->mp, group, tp, &ffi_err), ffi_take(&ffi_err));
-    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(err)) return NULL;
-    if (oam == NULL) Py_RETURN_NONE;
-    int32_t epoch = -1;  // -1 = Optional.empty()
-    const char* metadata = NULL;
-    int64_t offset = 0;
-    PyObject* out = NULL;
-    if (!ffi_raise((epoch = kafka_consumer_OffsetAndMetadata_leader_epoch_err(oam, &ffi_err), ffi_take(&ffi_err)))
-        && !ffi_raise((metadata = kafka_consumer_OffsetAndMetadata_metadata_err(oam, &ffi_err), ffi_take(&ffi_err)))
-        && !ffi_raise((offset = kafka_consumer_OffsetAndMetadata_offset_err(oam, &ffi_err), ffi_take(&ffi_err)))) {
-        PyObject* py_epoch = epoch >= 0 ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
-        out = py_epoch ? Py_BuildValue("(LNs)", (long long)offset, py_epoch, metadata ? metadata : "") : NULL;
-    }
-    ffi_unraisable((kafka_consumer_OffsetAndMetadata_destroy_err(oam, &ffi_err), ffi_take(&ffi_err)));
-    return out;
-}
-
 // KafkaError accessor/destroy functions
 static PyObject* py_KafkaError_code(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
@@ -4232,16 +4201,6 @@ static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     return ret;
 }
 
-static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h;
-    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    const char* s = NULL;  // borrowed
-    if (ffi_raise((s = kafka_consumer_Consumer_client_id_err(consumer_self(h), &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (s == NULL) Py_RETURN_NONE;
-    return PyUnicode_FromString(s);
-}
-
 // Consumer_current_lag(handle, topic, partition) -> (int | None, err | None),
 // None for an empty lag (-1)
 static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
@@ -5802,18 +5761,32 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)a);
 }
 
-// Admin_MockAdminClient_new(num_brokers: int) -> handle
+static int mock_builder_set_feature_levels(kafka_admin_MockAdminClient_Builder_t* builder, PyObject* spec,
+                                           kafka_common_Error_t** err_out);
+
+// Admin_MockAdminClient_new(num_brokers: int, using_raft_controller: bool,
+//                           feature_levels: [(feature, level, min, max)] | None) -> handle
 static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     int num_brokers;
-    if (!PyArg_ParseTuple(args, "i", &num_brokers)) return NULL;
-    // MockAdminClient.create().numBrokers(num_brokers).build(); the builder is
-    // freed whether or not a step failed.
+    int using_raft_controller;
+    PyObject* feature_levels;
+    if (!PyArg_ParseTuple(args, "ipO", &num_brokers, &using_raft_controller, &feature_levels)) return NULL;
+    // MockAdminClient.create().numBrokers(num_brokers)
+    //     .usingRaftController(using_raft_controller).featureLevels(...)...build();
+    // the builder is freed whether or not a step failed.
     kafka_admin_MockAdminClient_Builder_t* builder = NULL;
     kafka_admin_MockAdminClient_t* mock = NULL;
     kafka_common_Error_t* err = (builder = kafka_admin_MockAdminClient_create_err(&ffi_err), ffi_take(&ffi_err));
     if (err == NULL) {
         err = (kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, (int32_t)num_brokers, &ffi_err), ffi_take(&ffi_err));
+    }
+    if (err == NULL) {
+        err = (kafka_admin_MockAdminClient_Builder_set_using_raft_controller_err(builder, (int8_t)(using_raft_controller != 0), &ffi_err), ffi_take(&ffi_err));
+    }
+    if (err == NULL && feature_levels != Py_None && mock_builder_set_feature_levels(builder, feature_levels, &err) < 0) {
+        ffi_unraisable((kafka_admin_MockAdminClient_Builder_destroy_err(builder, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
     }
     if (err == NULL) {
         err = (mock = kafka_admin_MockAdminClient_Builder_build(builder, &ffi_err), ffi_take(&ffi_err));
@@ -10345,18 +10318,6 @@ static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObjec
     return owned_error_int((kafka_admin_MockAdminClient_timeout_next_request_err(a->mock, (int32_t)n, &ffi_err), ffi_take(&ffi_err)));
 }
 
-// MockAdminClient_set_using_raft_controller(h, using_raft_controller) -> error.
-// Java's `MockAdminClient.Builder.usingRaftController(boolean)`, a setter on
-// the constructed mock here.
-static PyObject* py_MockAdminClient_set_using_raft_controller(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int using_raft_controller;
-    if (!PyArg_ParseTuple(args, "Kp", &h, &using_raft_controller)) return NULL;
-    AdminHandle* a = admin_from_handle(h);
-    if (a->mock == NULL) return mock_only_error();
-    return owned_error_int((kafka_admin_MockAdminClient_set_using_raft_controller_err(a->mock, (int8_t)(using_raft_controller != 0), &ffi_err), ffi_take(&ffi_err)));
-}
-
 typedef void (*mock_offsets_fn)(const kafka_admin_MockAdminClient_t*, const kafka_Map_t*, kafka_common_Error_t**);
 
 static PyObject* mock_update_offsets(PyObject* args, mock_offsets_fn fn) {
@@ -10387,19 +10348,19 @@ static PyObject* py_MockAdminClient_update_consumer_group_offsets(PyObject* self
     return mock_update_offsets(args, kafka_admin_MockAdminClient_update_consumer_group_offsets_err);
 }
 
-// MockAdminClient_set_feature_levels(h, [(feature, level, min, max)]) -> error.
-// Three borrowed char* -> int16_t* maps, replacing what was seeded before.
-static PyObject* py_MockAdminClient_set_feature_levels(PyObject* self, PyObject* args) {
+// Java's `MockAdminClient.Builder` `featureLevels`, `minSupportedFeatureLevels`
+// and `maxSupportedFeatureLevels` from [(feature, level, min, max)]: three
+// borrowed char* -> int16_t* maps the builder copies. -1 with a Python
+// exception set for a malformed spec; otherwise 0, with an FFI failure in
+// *err_out.
+static int mock_builder_set_feature_levels(kafka_admin_MockAdminClient_Builder_t* builder, PyObject* spec,
+                                           kafka_common_Error_t** err_out) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec;
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;
-    AdminHandle* a = admin_from_handle(h);
-    if (a->mock == NULL) return mock_only_error();
     PyObject* fast = fast_rows(spec, "feature levels must be a sequence");
-    if (fast == NULL) return NULL;
+    if (fast == NULL) return -1;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
     int16_t* vals = n > 0 ? PyMem_Calloc((size_t)n * 3, sizeof(int16_t)) : NULL;
-    if (n > 0 && vals == NULL) { Py_DECREF(fast); PyErr_NoMemory(); return NULL; }
+    if (n > 0 && vals == NULL) { Py_DECREF(fast); PyErr_NoMemory(); return -1; }
     kafka_Map_t* levels = NULL;
     kafka_Map_t* mins = NULL;
     kafka_Map_t* maxs = NULL;
@@ -10412,20 +10373,24 @@ static PyObject* py_MockAdminClient_set_feature_levels(PyObject* self, PyObject*
             if (levels) ffi_unraisable((kafka_Map_destroy_err(levels, &ffi_err), ffi_take(&ffi_err)));
             if (mins) ffi_unraisable((kafka_Map_destroy_err(mins, &ffi_err), ffi_take(&ffi_err)));
             if (maxs) ffi_unraisable((kafka_Map_destroy_err(maxs, &ffi_err), ffi_take(&ffi_err)));
-            PyMem_Free(vals); Py_DECREF(fast); return NULL;
+            PyMem_Free(vals); Py_DECREF(fast); return -1;
         }
         vals[3 * i] = (int16_t)level; vals[3 * i + 1] = (int16_t)lo; vals[3 * i + 2] = (int16_t)hi;
         FFI_STEP(err, (kafka_Map_put_err(levels, (void*)feature, &vals[3 * i], &ffi_err), ffi_take(&ffi_err)));
         FFI_STEP(err, (kafka_Map_put_err(mins, (void*)feature, &vals[3 * i + 1], &ffi_err), ffi_take(&ffi_err)));
         FFI_STEP(err, (kafka_Map_put_err(maxs, (void*)feature, &vals[3 * i + 2], &ffi_err), ffi_take(&ffi_err)));
     }
-    FFI_STEP(err, (kafka_admin_MockAdminClient_set_feature_levels_err(a->mock, levels, mins, maxs, &ffi_err), ffi_take(&ffi_err)));  // copied
+    // copied
+    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_feature_levels_err(builder, levels, &ffi_err), ffi_take(&ffi_err)));
+    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels_err(builder, mins, &ffi_err), ffi_take(&ffi_err)));
+    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels_err(builder, maxs, &ffi_err), ffi_take(&ffi_err)));
     if (levels) ffi_unraisable((kafka_Map_destroy_err(levels, &ffi_err), ffi_take(&ffi_err)));
     if (mins) ffi_unraisable((kafka_Map_destroy_err(mins, &ffi_err), ffi_take(&ffi_err)));
     if (maxs) ffi_unraisable((kafka_Map_destroy_err(maxs, &ffi_err), ffi_take(&ffi_err)));
     PyMem_Free(vals);
     Py_DECREF(fast);
-    return owned_error_int(err);
+    *err_out = err;
+    return 0;
 }
 
 static PyMethodDef ProducerNativeMethods[] = {
@@ -10489,8 +10454,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Test hook: install (code, message) / clear (None) the mock's commitTransaction error"},
     {"MockProducer_sent_offsets", py_MockProducer_sent_offsets, METH_VARARGS,
      "Test hook: whether offsets were staged in the current transaction"},
-    {"MockProducer_committed_offset", py_MockProducer_committed_offset, METH_VARARGS,
-     "Test hook: (offset, leader_epoch | None, metadata) for (group_id, topic, partition) or None"},
     {"KafkaError_code", py_KafkaError_code, METH_VARARGS,
      "Get error code from KafkaError pointer"},
     {"KafkaError_message", py_KafkaError_message, METH_VARARGS,
@@ -10530,7 +10493,6 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "(list[(topic, partition)] | None, err | None)"},
     {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS, "Metrics snapshot as list[dict] with name/group/description/tags/value"},
     {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
-    {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "Client id string"},
     {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "(lag int | None, err | None)"},
     {"Consumer_poll", py_Consumer_poll, METH_VARARGS, "poll(h, timeout_ms) -> (ConsumerRecords | None, err | None)"},
     {"Consumer_poll_cb", py_Consumer_poll_cb, METH_VARARGS, "poll twin; cb(ConsumerRecords | None, err | None)"},
@@ -10692,11 +10654,9 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, ...) -> (job, error)"},
     {"Admin_force_terminate_transaction", py_Admin_force_terminate_transaction, METH_VARARGS, "Admin_force_terminate_transaction(handle, ...) -> (job, error)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
-    {"MockAdminClient_set_using_raft_controller", py_MockAdminClient_set_using_raft_controller, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_consumer_group_offsets", py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
-    {"MockAdminClient_set_feature_levels", py_MockAdminClient_set_feature_levels, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {NULL, NULL, 0, NULL}
 };
 

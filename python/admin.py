@@ -2318,8 +2318,12 @@ class _AdminBase:
         self._h = None
         self.closed = False
 
-    def _init_mock(self, num_brokers=1):
-        self._h = _lib.Admin_MockAdminClient_new(num_brokers)
+    def _init_mock(self, num_brokers=1, using_raft_controller=False, feature_levels=None):
+        spec = None
+        if feature_levels is not None:
+            spec = [(str(f), int(level), int(low), int(high))
+                    for f, (level, low, high) in feature_levels.items()]
+        self._h = _lib.Admin_MockAdminClient_new(num_brokers, bool(using_raft_controller), spec)
 
     def _init_kafka(self, config):
         self._h = _lib.Admin_AdminClient_new(config)
@@ -2927,18 +2931,6 @@ class _MockAdminClientMixin:
         if e:
             raise KafkaError._from_c(e)
 
-    def set_using_raft_controller(self, using_raft_controller):
-        """Set whether the mock runs a KRaft (Raft) controller quorum, which
-        decides whether ``unregister_controller`` succeeds (``True``) or raises
-        an ``UNSUPPORTED_VERSION`` error (``False``, the default).
-
-        Mirrors ``MockAdminClient.Builder.usingRaftController``, which Java
-        takes at construction time.
-        """
-        e = _lib.MockAdminClient_set_using_raft_controller(self._h, bool(using_raft_controller))
-        if e:
-            raise KafkaError._from_c(e)
-
     def update_beginning_offsets(self, offsets):
         """Seed the offsets ``list_offsets`` reports for
         ``OffsetSpec.earliest()``, from ``{(topic, partition): offset}``
@@ -2946,22 +2938,6 @@ class _MockAdminClientMixin:
         than replaces, what was seeded before."""
         spec = [(str(t), int(p), int(o)) for (t, p), o in offsets.items()]
         e = _lib.MockAdminClient_update_beginning_offsets(self._h, spec)
-        if e:
-            raise KafkaError._from_c(e)
-
-    def set_feature_levels(self, feature_levels):
-        """Seed the feature levels ``describe_features`` reports and
-        ``update_features`` validates against, from
-        ``{feature: (level, min_supported, max_supported)}``.
-
-        Mirrors the three ``MockAdminClient.Builder`` setters ``featureLevels``,
-        ``minSupportedFeatureLevels`` and ``maxSupportedFeatureLevels``, which
-        Java takes at construction time. Unlike the offset setters this
-        **replaces** what was seeded before.
-        """
-        spec = [(str(f), int(level), int(low), int(high))
-                for f, (level, low, high) in feature_levels.items()]
-        e = _lib.MockAdminClient_set_feature_levels(self._h, spec)
         if e:
             raise KafkaError._from_c(e)
 
@@ -3012,8 +2988,8 @@ class Admin(_AdminBase):
         super().__init__()
         self._waiter = SyncWaiter(self._execute_callbacks, "confluent-kafka-admin-pump")
 
-    def _init_mock(self, num_brokers=1):
-        super()._init_mock(num_brokers)
+    def _init_mock(self, num_brokers=1, using_raft_controller=False, feature_levels=None):
+        super()._init_mock(num_brokers, using_raft_controller, feature_levels)
         _lib.Admin__set_callbacks_notify(self._h, self._waiter.notify)
         self._waiter.start()
 
@@ -3595,8 +3571,8 @@ class AsyncAdmin(_AdminBase):
         self._off_loop_pump = OffLoopPump(self._execute_callbacks,
                                           "confluent-kafka-admin-pump")
 
-    def _init_mock(self, num_brokers=1):
-        super()._init_mock(num_brokers)
+    def _init_mock(self, num_brokers=1, using_raft_controller=False, feature_levels=None):
+        super()._init_mock(num_brokers, using_raft_controller, feature_levels)
         _lib.Admin__set_callbacks_notify(self._h, self._on_callbacks_notify)
 
     def _init_kafka(self, config):
@@ -3960,11 +3936,20 @@ class AdminClient(Admin):
 
 class MockAdminClient(_MockAdminClientMixin, Admin):
     """A synchronous, broker-less admin client for tests (Java
-    ``MockAdminClient``)."""
+    ``MockAdminClient``).
 
-    def __init__(self, num_brokers=1):
+    ``using_raft_controller`` (Java ``MockAdminClient.Builder.usingRaftController``)
+    decides whether ``unregister_controller`` succeeds (``True``) or raises an
+    ``UNSUPPORTED_VERSION`` error (``False``, the default). ``feature_levels``,
+    ``{feature: (level, min_supported, max_supported)}``, seeds what
+    ``describe_features`` reports and ``update_features`` validates against
+    (Java's ``featureLevels``, ``minSupportedFeatureLevels`` and
+    ``maxSupportedFeatureLevels``). As in Java both are fixed at construction.
+    """
+
+    def __init__(self, num_brokers=1, *, using_raft_controller=False, feature_levels=None):
         super().__init__()
-        self._init_mock(num_brokers)
+        self._init_mock(num_brokers, using_raft_controller, feature_levels)
 
 
 class AsyncAdminClient(AsyncAdmin):
@@ -3978,8 +3963,9 @@ class AsyncAdminClient(AsyncAdmin):
 
 
 class AsyncMockAdminClient(_MockAdminClientMixin, AsyncAdmin):
-    """An asyncio-native, broker-less admin client for tests."""
+    """An asyncio-native, broker-less admin client for tests; the keyword
+    arguments are :class:`MockAdminClient`'s."""
 
-    def __init__(self, num_brokers=1):
+    def __init__(self, num_brokers=1, *, using_raft_controller=False, feature_levels=None):
         super().__init__()
-        self._init_mock(num_brokers)
+        self._init_mock(num_brokers, using_raft_controller, feature_levels)

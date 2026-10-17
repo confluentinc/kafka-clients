@@ -488,7 +488,6 @@ static void test_mock_consumer_concurrency_guard(void) {
     TEST_ASSERT_EQUAL_INT64(250, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
 
     /* Always allowed. */
-    TEST_ASSERT_NOT_NULL(kafka_consumer_Consumer_client_id(f.consumer));
     kafka_consumer_ConsumerHandle_t *handle = kafka_consumer_Consumer_handle(f.consumer);
     TEST_ASSERT_NOT_NULL(handle);
     kafka_consumer_ConsumerHandle_destroy(handle);
@@ -1322,19 +1321,6 @@ static void test_mock_consumer_destroy_runs_pending_completion_once(void) {
 }
 
 // ---------------------------------------------------------------------------
-// client_id is a borrowed string that lives with the handle
-// ---------------------------------------------------------------------------
-
-static void test_mock_consumer_client_id(void) {
-    fixture_t f;
-    fixture_init(&f);
-    const char *id = kafka_consumer_Consumer_client_id(f.consumer);
-    TEST_ASSERT_NOT_NULL(id);
-    TEST_ASSERT_TRUE(strlen(id) > 0);
-    fixture_destroy(&f);
-}
-
-// ---------------------------------------------------------------------------
 // current_lag is -1 when unknown; metrics is a map
 // ---------------------------------------------------------------------------
 
@@ -1455,7 +1441,6 @@ int main(void) {
     RUN_TEST(test_mock_consumer_subscribe_cb);
     RUN_TEST(test_mock_consumer_callbacks_notify_once_per_transition);
     RUN_TEST(test_mock_consumer_destroy_runs_pending_completion_once);
-    RUN_TEST(test_mock_consumer_client_id);
     RUN_TEST(test_mock_consumer_current_lag_and_metrics);
     RUN_TEST(test_mock_consumer_close);
     RUN_TEST(test_mock_consumer_close_with_options);

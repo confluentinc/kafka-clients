@@ -68,12 +68,11 @@ static kafka_consumer_Consumer_t *create_consumer(void) {
 
 static void test_kafka_consumer_new_succeeds(void) {
     kafka_consumer_Consumer_t *consumer = create_consumer();
-    TEST_ASSERT_NOT_NULL(kafka_consumer_Consumer_client_id(consumer));
     kafka_consumer_Consumer_destroy(consumer);
 }
 
 // The map is the config's only input, as in Java: a missing `bootstrap.servers`
-// is the `ConfigException`, and a `client.id` in the map reaches the consumer.
+// is the `ConfigException`, and a `group.id` in the map reaches the consumer.
 static void test_kafka_consumer_new_from_map(void) {
     kafka_Map_t *props = kafka_Map_new();
     kafka_common_Error_t *err = NULL;
@@ -87,7 +86,6 @@ static void test_kafka_consumer_new_from_map(void) {
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
     kafka_Map_put(props, (void *)"group.id", (void *)"map-group");
     kafka_Map_put(props, (void *)"group.protocol", (void *)"consumer");
-    kafka_Map_put(props, (void *)"client.id", (void *)"map-client");
     config = kafka_consumer_ConsumerConfig_new(props, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(config);
@@ -96,7 +94,10 @@ static void test_kafka_consumer_new_from_map(void) {
     kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
     TEST_ASSERT_NULL(err);
     kafka_consumer_ConsumerConfig_destroy(config);
-    TEST_ASSERT_EQUAL_STRING("map-client", kafka_consumer_Consumer_client_id(consumer));
+    kafka_consumer_ConsumerGroupMetadata_t *metadata = kafka_consumer_Consumer_group_metadata(consumer, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("map-group", kafka_consumer_ConsumerGroupMetadata_group_id(metadata));
+    kafka_consumer_ConsumerGroupMetadata_destroy(metadata);
     kafka_consumer_Consumer_destroy(consumer);
 }
 

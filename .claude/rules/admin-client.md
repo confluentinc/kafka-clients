@@ -343,14 +343,22 @@ current surface.
     the conventions as a whole; `_legacy_compat.py` is deleted with that port.
   - The one exception is additive: a method for an Admin RPC that Java newly
     adds and that the multilanguage test suite exercises through the Python
-    gRPC arms, plus the mock helper that seeds that RPC's mock answer, may be
+    gRPC arms, plus the mock option that seeds that RPC's mock answer, may be
     added to `admin.py` in its current style, without changing any existing
     method. The current instance is the Apache Kafka 4.4 bump (Milestone 17):
     `AdminClient.unregister_controller` (sync and asyncio, KAFKA-20395), which
     `rust/tests/integration/admin_controllers_test.rs` drives through the Python
-    gRPC arms, and `MockAdminClient.set_using_raft_controller` (Java's
+    gRPC arms, and the `using_raft_controller` keyword of the `MockAdminClient`
+    and `AsyncMockAdminClient` constructors (Java's
     `MockAdminClient.Builder.usingRaftController`, which 4.4's
     `unregisterController` reads), which `python/test/unit/test_admin.py` covers.
+  - A Java `MockAdminClient.Builder` option is a keyword of the mock
+    constructors, never a setter on the built mock: Java fixes it at
+    construction (`usingRaftController` is a `final` field), and the Rust
+    `MockAdminClient` has no such setter for the C binding to wrap. The
+    `feature_levels` keyword (Java's `featureLevels`,
+    `minSupportedFeatureLevels` and `maxSupportedFeatureLevels`) is the other
+    instance; both replaced earlier setters of the same names.
   - Nothing in the `confluent_kafka` public surface may import
     `_legacy_compat.py`.
 

@@ -30,8 +30,11 @@ blocks in Java:
 
 Java methods that do not block remain synchronous:
 
-  - `assignment()`, `subscription()`, `paused()`, `metrics()`, `client_id()`,
+  - `assignment()`, `subscription()`, `paused()`, `metrics()`,
     `group_metadata()`, `wakeup()`
+
+`clientId()` is package-private on Java's `KafkaConsumer` and absent from the
+`Consumer` interface, so it is not on the Rust trait and has no C binding.
 
 Two notes on the names above, so neither is "corrected" back later:
 
@@ -120,7 +123,6 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
         // its constructors; it becomes an interface in Kafka 5.0).
         fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-        fn client_id(&self) -> &str;
     }
 
     impl KafkaConsumer {
