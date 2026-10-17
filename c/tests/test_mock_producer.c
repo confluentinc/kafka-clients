@@ -1364,12 +1364,21 @@ static kafka_consumer_OffsetAndMetadata_t *offset_and_metadata(int64_t offset, i
     return oam;
 }
 
-/* `MockProducer.committedOffset(group, tp)`: the owned entry, or NULL. */
-static kafka_consumer_OffsetAndMetadata_t *committed_offset(kafka_producer_MockProducer_t *mock,
-                                                            const char *group, const char *topic,
-                                                            int32_t partition) {
+/* The offset the newest commit in `consumerGroupOffsetsHistory()` staged for
+ * `group` / `tp`, borrowed from `history`, or NULL, as a Java caller indexes
+ * the returned maps. */
+static const kafka_consumer_OffsetAndMetadata_t *committed_offset(const kafka_List_t *history,
+                                                                  const char *group, const char *topic,
+                                                                  int32_t partition) {
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new(topic, partition);
-    kafka_consumer_OffsetAndMetadata_t *oam = kafka_producer_MockProducer_committed_offset(mock, group, tp);
+    const kafka_consumer_OffsetAndMetadata_t *oam = NULL;
+    for (int32_t i = kafka_List_size(history) - 1; i >= 0 && oam == NULL; i--) {
+        const kafka_Map_t *groups = (const kafka_Map_t *)kafka_List_get(history, i);
+        const kafka_Map_t *offsets = (const kafka_Map_t *)kafka_Map_get(groups, (void *)group);
+        if (offsets != NULL) {
+            oam = (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_get(offsets, tp);
+        }
+    }
     kafka_common_TopicPartition_destroy(tp);
     return oam;
 }
@@ -1380,13 +1389,14 @@ static kafka_consumer_OffsetAndMetadata_t *committed_offset(kafka_producer_MockP
 static void assert_committed(kafka_producer_MockProducer_t *mock, const char *group,
                              const char *topic, int32_t partition, int64_t offset,
                              int32_t leader_epoch, const char *metadata) {
-    kafka_consumer_OffsetAndMetadata_t *oam = committed_offset(mock, group, topic, partition);
+    kafka_List_t *history = kafka_producer_MockProducer_consumer_group_offsets_history(mock);
+    const kafka_consumer_OffsetAndMetadata_t *oam = committed_offset(history, group, topic, partition);
     TEST_ASSERT_NOT_NULL(oam);
     TEST_ASSERT_EQUAL_INT64(offset, kafka_consumer_OffsetAndMetadata_offset(oam));
     /* `leaderEpoch()` is an `Optional<Integer>`: -1 stands for empty. */
     TEST_ASSERT_EQUAL_INT32(leader_epoch < 0 ? -1 : leader_epoch, kafka_consumer_OffsetAndMetadata_leader_epoch(oam));
     TEST_ASSERT_EQUAL_STRING(metadata, kafka_consumer_OffsetAndMetadata_metadata(oam));
-    kafka_consumer_OffsetAndMetadata_destroy(oam);
+    kafka_List_destroy(history);
 }
 
 void test_transaction_commit_publishes_records(void) {
@@ -1527,7 +1537,9 @@ void test_transaction_send_offsets(void) {
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(uncommitted)); /* one group */
     kafka_Map_destroy(uncommitted);
     const char *group_id = kafka_consumer_ConsumerGroupMetadata_group_id(g.group_metadata);
-    TEST_ASSERT_NULL(committed_offset(f.mock, group_id, "input-topic", 0));
+    kafka_List_t *history = kafka_producer_MockProducer_consumer_group_offsets_history(f.mock);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(history));
+    kafka_List_destroy(history);
 
     /* Inside an open transaction an empty map is a no-op that succeeds. This
      * is the one state where the two backends agree — see
@@ -1539,16 +1551,16 @@ void test_transaction_send_offsets(void) {
     ASSERT_OK(kafka_producer_Producer_commit_transaction(f.producer, &err));
     TEST_ASSERT_EQUAL_INT32(1, history_count(f.mock));
 
+    /* The commit is in the group-offsets history: one map per commit. */
+    history = kafka_producer_MockProducer_consumer_group_offsets_history(f.mock);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(history));
+
     assert_committed(f.mock, group_id, "input-topic", 0, 42, 5, "committed-by-txn");
     assert_committed(f.mock, group_id, "input-topic", 1, 7, -1, "");
 
     /* A partition or group that was never staged is not reported. */
-    TEST_ASSERT_NULL(committed_offset(f.mock, group_id, "input-topic", 2));
-    TEST_ASSERT_NULL(committed_offset(f.mock, "other-group", "input-topic", 0));
-
-    /* The commit is in the group-offsets history: one map per commit. */
-    kafka_List_t *history = kafka_producer_MockProducer_consumer_group_offsets_history(f.mock);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(history));
+    TEST_ASSERT_NULL(committed_offset(history, group_id, "input-topic", 2));
+    TEST_ASSERT_NULL(committed_offset(history, "other-group", "input-topic", 0));
     kafka_List_destroy(history);
 
     group_destroy(&g);

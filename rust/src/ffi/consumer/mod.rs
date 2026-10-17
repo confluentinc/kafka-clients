@@ -85,7 +85,7 @@ pub(crate) mod subscription_pattern;
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,7 +129,7 @@ use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::block_on;
 use crate::ffi::util::{
     GenericValue, box_string_keyed_map, c_str_to_string, kafka_List_destroy, kafka_List_t, kafka_Map_t, list_strings,
-    owned_c_string, sorted_string_list,
+    sorted_string_list,
 };
 
 /// Opaque handle to a `Consumer<K, V>` (see the module docs).
@@ -263,7 +263,6 @@ pub(crate) struct Client {
     /// The consumer's reentrancy handle, also what `wakeup` goes through
     /// so it never touches the consumer an operation may be borrowing.
     handle: ConsumerHandle,
-    client_id: CString,
     /// Whether the `void *`s are `kafka_Bytes_t`s the records own (a `NULL`
     /// deserializer on that side).
     owns: Owns,
@@ -418,7 +417,6 @@ impl ConsumerClassHandle {
             make()?
         };
         let handle = kind.as_dyn().handle();
-        let client_id = owned_c_string(kind.as_dyn().client_id());
         let client = Arc::new(Client {
             consumer: UnsafeCell::new(kind),
             busy: AtomicBool::new(false),
@@ -430,7 +428,6 @@ impl ConsumerClassHandle {
             runtime: runtime.handle().clone(),
             tasks: Mutex::new(Vec::new()),
             handle,
-            client_id,
             owns,
         });
         Ok(Box::new(Self { client, runtime }))
@@ -3911,20 +3908,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
     // to, as `deliver_value` requires.
     unsafe { deliver_value(paused, out_err, |p| sorted_topic_partition_list(p.iter())) }
-}
-
-/// `clientId()`: borrowed from the handle for its lifetime.
-///
-/// # Safety
-///
-/// `self_` must be a live handle.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_consumer_Consumer_t) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
-    // as `client_ref` requires. The pointer returned is into the `CString` the client owns, which
-    // lives at least as long as the handle holds the client, as the docs above state.
-    unsafe { client_ref(self_) }.client_id.as_ptr()
 }
 
 /// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` for

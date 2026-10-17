@@ -47,11 +47,6 @@ use crate::consumer::{
 use crate::consumer::{ConsumerNoOffsetForPartitionError, ConsumerOffsetOutOfRangeError};
 use crate::metadata::LeaderAndEpoch;
 
-/// Fixed `client.id` returned by [`MockConsumer::client_id`]. Java's
-/// `MockConsumer` has no equivalent accessor; the `Consumer` trait requires
-/// one, so we pick a stable constant.
-const MOCK_CLIENT_ID: &str = "mock-consumer";
-
 /// One scheduled poll task — see [`MockConsumer::schedule_poll_task`].
 ///
 /// The deviation from Java's parameterless `Runnable` is documented on the
@@ -598,10 +593,6 @@ where
             "1",
             None,
         ))
-    }
-
-    fn client_id(&self) -> &str {
-        MOCK_CLIENT_ID
     }
 
     /// Translates Java's

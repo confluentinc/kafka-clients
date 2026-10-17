@@ -185,11 +185,6 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
-    /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
-    // Java's KafkaConsumer.clientId() is package-private; consumer-threading.md §1 lists it
-    #[doc(alias = "rust-only")]
-    fn client_id(&self) -> &str;
-
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
     ///
     /// Returns `Option<i64>` — the natural Rust analog.

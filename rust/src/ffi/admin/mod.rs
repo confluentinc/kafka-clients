@@ -930,9 +930,8 @@ mod tests {
     };
     use crate::ffi::admin::mock_admin_client::{
         kafka_admin_MockAdminClient__as_Admin, kafka_admin_MockAdminClient_Builder_build,
-        kafka_admin_MockAdminClient_Builder_destroy, kafka_admin_MockAdminClient_create,
-        kafka_admin_MockAdminClient_destroy, kafka_admin_MockAdminClient_set_using_raft_controller,
-        kafka_admin_MockAdminClient_t,
+        kafka_admin_MockAdminClient_Builder_destroy, kafka_admin_MockAdminClient_Builder_set_using_raft_controller,
+        kafka_admin_MockAdminClient_create, kafka_admin_MockAdminClient_destroy, kafka_admin_MockAdminClient_t,
     };
     use crate::ffi::admin::options::unregister_controller_options::{
         kafka_admin_UnregisterControllerOptions_destroy, kafka_admin_UnregisterControllerOptions_new,
@@ -965,10 +964,24 @@ mod tests {
     ///
     /// `err` must point at null.
     unsafe fn built_mock(err: &mut *mut kafka_common_Error_t) -> *mut kafka_admin_MockAdminClient_t {
+        // SAFETY: Per this function's `# Safety`, `err` points at null.
+        unsafe { built_mock_with_raft_controller(false, err) }
+    }
+
+    /// [`built_mock`] with `Builder.usingRaftController(using_raft_controller)`.
+    ///
+    /// # Safety
+    ///
+    /// `err` must point at null.
+    unsafe fn built_mock_with_raft_controller(
+        using_raft_controller: bool,
+        err: &mut *mut kafka_common_Error_t,
+    ) -> *mut kafka_admin_MockAdminClient_t {
         let builder = kafka_admin_MockAdminClient_create();
         // SAFETY: Test code: `builder` is the live handle `create` just returned and `err` points at
         // null, per this function's `# Safety`; the builder is freed once, after its last use.
         unsafe {
+            kafka_admin_MockAdminClient_Builder_set_using_raft_controller(builder, i8::from(using_raft_controller));
             let mock = kafka_admin_MockAdminClient_Builder_build(builder, err);
             kafka_admin_MockAdminClient_Builder_destroy(builder);
             mock
@@ -1008,12 +1021,12 @@ mod tests {
 
     /// `MockAdminClient.unregisterController` (KAFKA-20395) through C: without a
     /// Raft controller quorum the future fails with Java's
-    /// `UnsupportedVersionException("")`; `set_using_raft_controller` makes it
-    /// succeed, through the options form too.
+    /// `UnsupportedVersionException("")`; `Builder.usingRaftController(true)`
+    /// makes it succeed, through the options form too.
     #[test]
     fn unregister_controller_follows_the_mock_raft_controller_setting() {
         // SAFETY: Test code: `err` is a valid slot pointing at null before each call that takes
-        // it; the mock is live until it is destroyed last, and `admin` is its view; every result,
+        // it; each mock is live until it is destroyed, and `admin` is its view; every result,
         // future, options and error handle is owned and destroyed once, after its last use.
         unsafe {
             let mut err = std::ptr::null_mut();
@@ -1030,8 +1043,11 @@ mod tests {
             err = std::ptr::null_mut();
             kafka_common_KafkaFuture_destroy(all);
             kafka_admin_UnregisterControllerResult_destroy(result);
+            kafka_admin_MockAdminClient_destroy(mock);
 
-            kafka_admin_MockAdminClient_set_using_raft_controller(mock, 1);
+            let mock = built_mock_with_raft_controller(true, &mut err);
+            assert!(err.is_null());
+            let admin = kafka_admin_MockAdminClient__as_Admin(mock);
             let options = kafka_admin_UnregisterControllerOptions_new();
             assert_eq!(kafka_admin_UnregisterControllerOptions_timeout_ms(options), -1);
             kafka_admin_UnregisterControllerOptions_set_timeout_ms(options, 1000);
@@ -1045,15 +1061,6 @@ mod tests {
             kafka_admin_UnregisterControllerResult_destroy(result);
             kafka_admin_UnregisterControllerOptions_destroy(std::ptr::null_mut());
             kafka_admin_UnregisterControllerResult_destroy(std::ptr::null_mut());
-
-            kafka_admin_MockAdminClient_set_using_raft_controller(mock, 0);
-            let result = kafka_admin_Admin_unregister_controller(admin, 0);
-            let all = kafka_admin_UnregisterControllerResult_all(result);
-            assert!(kafka_common_KafkaFuture_get(all, &mut err).is_null());
-            assert_eq!(kafka_common_Error_is_unsupported_version_error(err), 1);
-            kafka_common_Error_destroy(err);
-            kafka_common_KafkaFuture_destroy(all);
-            kafka_admin_UnregisterControllerResult_destroy(result);
             kafka_admin_MockAdminClient_destroy(mock);
         }
     }
