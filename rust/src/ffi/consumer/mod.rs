@@ -4063,7 +4063,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *cons
 /// # Safety
 ///
 /// `self_` must be a live handle; `opaque` stays valid while the hook is
-/// installed.
+/// installed and until a call of it in flight returns: a later call of this
+/// function does not wait for one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
@@ -4073,8 +4074,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // as `client_ref` requires. `notify` and `opaque` are stored as a pair, and `opaque` stays
-    // valid while the hook is installed, which `CallbackQueue::notify_if` relies on when it fires
-    // the hook.
+    // valid while the hook is installed and until a call in flight returns, which
+    // `CallbackQueue::notify_if` relies on when it fires the hook after releasing the
+    // registration's lock.
     unsafe { client_ref(self_) }.delivery.queue.set_notify(Some(notify), opaque);
 }
 
