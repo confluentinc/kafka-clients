@@ -33,7 +33,7 @@ VENV = . venv/bin/activate
 	transactional-producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint doc-check package-check install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check package-check check-api-compat install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -314,6 +314,9 @@ doc-check:
 
 package-check:
 	$(MAKE) -C rust package-check
+
+check-api-compat:
+	$(MAKE) -C rust check-api-compat
 
 # Static checks of the Python binding (see python/Makefile's `check-static`).
 # Needs no build artifacts, so it is cheap to run.

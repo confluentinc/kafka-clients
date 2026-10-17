@@ -26,7 +26,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration-grpc-python test-integration-grpc-c \
 	test-integration-grpc-python-native test-integration-grpc-c-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check install-rust-analyzer clean
+	format-check check-generated lint doc-check package-check check-api-compat install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -234,6 +234,14 @@ doc-check:
 # is above 3 MiB, and build a fresh project that depends on it.
 package-check:
 	cargo xtask package-check
+
+# Compare the Rust API (cargo-semver-checks) and the C ABI (libabigail's
+# abidiff) with a release tag, by default the highest one not above the
+# Cargo.toml version; a breaking change fails unless that version allows it.
+# API_COMPAT_BASELINE=<tag> picks another tag. Needs both tools installed and
+# the tags fetched; not part of `make verify`.
+check-api-compat:
+	cargo xtask api-compat
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the
