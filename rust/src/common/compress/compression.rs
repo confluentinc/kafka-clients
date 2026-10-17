@@ -14,7 +14,7 @@
 
 //! Translates `org.apache.kafka.common.compress.Compression`.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 
 use super::{CompressingWriter, DecompressingReader, XerialSnappyReader, XerialSnappyWriter};
 use super::{GzipCompression, Lz4Compression, ZstdCompression};
@@ -193,6 +193,32 @@ impl Compression {
         }
     }
 
+    /// The size of the buffer a decompression stream is read through: Java's
+    /// `decompressionOutputSize()`, the intermediate buffer its
+    /// `ChunkedBytesStream` copies the codec's output into, 16 KiB for gzip and
+    /// zstd and 2 KiB for snappy and lz4 (`GzipCompression.java:80-83`,
+    /// `ZstdCompression.java:106-109`, `SnappyCompression.java:67-72`,
+    /// `Lz4Compression.java:67-72`). The consumer reads
+    /// [`Self::wrap_for_input`]'s stream through a `ChunkedBytesStream` with a
+    /// buffer of this size, as Java's `wrapForInput` does.
+    ///
+    /// # Errors
+    ///
+    /// No compression has no such buffer: Java's interface default throws
+    /// `UnsupportedOperationException` (`Compression.java:61-63`), which
+    /// `NoCompression` does not override.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#decompressionOutputSize")]
+    pub fn decompression_output_size(&self) -> Result<usize, Error> {
+        match self {
+            Self::None => Err(Error::unsupported_version(format!(
+                "Size of decompression buffer is not defined for this compression type={}",
+                self.compression_type().name()
+            ))),
+            Self::Gzip(_) | Self::Zstd(_) => Ok(16 * 1024),
+            Self::Snappy | Self::Lz4(_) => Ok(2 * 1024),
+        }
+    }
+
     /// Wrap a writer with a compressing output stream.
     ///
     /// The returned writer compresses data written to it. Call `finish()` on the
@@ -243,6 +269,14 @@ impl Compression {
 
     /// Wrap a reader with a decompressing input stream.
     ///
+    /// The reader is a [`BufRead`]: like Java's `ByteBuffer`, it holds bytes
+    /// already in memory, so gzip and zstd decompress them in place. A
+    /// [`std::io::Read`] would make each first copy them through an input
+    /// buffer of its own, 32 KiB for gzip and 128 KiB for zstd. Java's gzip
+    /// copies them through 8 KiB (`GzipCompression.java:63-70`), and its zstd
+    /// through a buffer taken from the fetch's pool
+    /// (`ZstdCompression.java:78-97`).
+    ///
     /// # Arguments
     ///
     /// * `reader` - The underlying reader containing compressed data.
@@ -251,11 +285,11 @@ impl Compression {
     ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
     ///   is implemented; the parameter is accepted for forward compatibility.
     #[doc(alias = "org.apache.kafka.common.compress.Compression#wrapForInput")]
-    pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
+    pub fn wrap_for_input<R: BufRead>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
             Self::Gzip(_) => {
-                let decoder = flate2::read::GzDecoder::new(reader);
+                let decoder = flate2::bufread::GzDecoder::new(reader);
                 Ok(DecompressingReader::Gzip(decoder))
             },
             Self::Snappy => {
@@ -267,7 +301,7 @@ impl Compression {
                 Ok(DecompressingReader::Lz4(decoder))
             },
             Self::Zstd(_) => {
-                let decoder = zstd::Decoder::new(reader)?;
+                let decoder = zstd::Decoder::with_buffer(reader)?;
                 Ok(DecompressingReader::Zstd(decoder))
             },
         }
