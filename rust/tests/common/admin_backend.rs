@@ -35,7 +35,7 @@ use confluent_kafka::admin::{
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    FenceProducersOptions, FinalizedVersionRange, GroupListing, ListConfigResourcesOptions,
     ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
     ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
     LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
@@ -58,6 +58,11 @@ use crate::common::test_context::TestContext;
 use crate::common::test_utils::{
     DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_error_with_timeout, wait_until_true_with_timeout,
 };
+
+/// One group's offsets, as `ListConsumerGroupOffsetsResult` yields them: Java's
+/// `Map<TopicPartition, OffsetAndMetadata>`, with `None` for Java's `null`. The
+/// crate keeps its own alias for this crate-private, so the tests name it here.
+pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
 /// Timeout that stands for Java's no-argument `Admin.close()`, which delegates
 /// to `close(Duration.ofMillis(Long.MAX_VALUE))`. Same convention the C FFI
