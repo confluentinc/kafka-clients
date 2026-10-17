@@ -152,7 +152,7 @@ pub async fn switch_topic_id(topic_ids: &TopicIds, topic: &str, id: Uuid) {
             .expect("topic_ids poisoned")
             .get(topic)
             .copied()
-            .unwrap_or_else(Uuid::zero);
+            .unwrap_or(Uuid::ZERO_UUID);
         streams
             .iter()
             .filter(|entry| Arc::ptr_eq(&entry.topic_ids, topic_ids))
@@ -640,8 +640,8 @@ mod tests {
     /// and unconsumed it is scored as loss, not excused.
     #[tokio::test]
     async fn an_unswitched_topic_follows_the_live_map() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let ids = ids_with("t", old_id);
         let verifier = Arc::new(ConservationVerifier::new());
         let w = workload(Role::Producer, ids.clone(), verifier.clone(), unused_channel());
@@ -664,9 +664,9 @@ mod tests {
     #[tokio::test]
     async fn a_switch_takes_effect_at_its_marker_in_the_stream() {
         let (id0, id1, id2) = (
-            Uuid::with_bytes([1u8; 16]),
-            Uuid::with_bytes([2u8; 16]),
-            Uuid::with_bytes([3u8; 16]),
+            Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8])),
+            Uuid::new(u64::from_be_bytes([2u8; 8]), u64::from_be_bytes([2u8; 8])),
+            Uuid::new(u64::from_be_bytes([3u8; 8]), u64::from_be_bytes([3u8; 8])),
         );
         let ids = ids_with("t", id0);
         let verifier = Arc::new(RecordingVerifier::default());
@@ -703,13 +703,18 @@ mod tests {
     /// mark or freeze this workload.
     #[tokio::test]
     async fn a_switch_marks_only_workloads_sharing_its_map() {
-        let id = Uuid::with_bytes([4u8; 16]);
+        let id = Uuid::new(u64::from_be_bytes([4u8; 8]), u64::from_be_bytes([4u8; 8]));
         let verifier = Arc::new(RecordingVerifier::default());
         let w = workload(Role::Producer, ids_with("t", id), verifier.clone(), unused_channel());
         let (_registration, mut requests) = w.register();
 
         let other = ids_with("t", id);
-        switch_topic_id(&other, "t", Uuid::with_bytes([5u8; 16])).await;
+        switch_topic_id(
+            &other,
+            "t",
+            Uuid::new(u64::from_be_bytes([5u8; 8]), u64::from_be_bytes([5u8; 8])),
+        )
+        .await;
 
         assert!(requests.try_recv().is_err(), "no marker for a workload on another map");
         w.record(delivered(0));
@@ -753,7 +758,7 @@ mod tests {
         let verifier = Arc::new(ConservationVerifier::new());
         let w = workload(
             Role::Consumer,
-            ids_with("t", Uuid::with_bytes([1u8; 16])),
+            ids_with("t", Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]))),
             verifier.clone(),
             unused_channel(),
         );
@@ -784,7 +789,7 @@ mod tests {
     /// under its own operation.
     #[tokio::test]
     async fn consumer_events_feed_the_listener_and_commit_checks() {
-        let id = Uuid::with_bytes([1u8; 16]);
+        let id = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
         let verifier = Arc::new(ConservationVerifier::new());
         let w = workload(Role::Consumer, ids_with("t", id), verifier.clone(), unused_channel());
         let tp = |p| proto::TopicPartitionRef { topic: "t".into(), partition: p };
@@ -871,7 +876,12 @@ mod tests {
     #[tokio::test]
     async fn a_close_error_is_recorded_not_fatal() {
         let verifier = Arc::new(RecordingVerifier::default());
-        let w = workload(Role::Consumer, ids_with("t", Uuid::zero()), verifier.clone(), unused_channel());
+        let w = workload(
+            Role::Consumer,
+            ids_with("t", Uuid::ZERO_UUID),
+            verifier.clone(),
+            unused_channel(),
+        );
 
         w.record(Event::ConsumerError(proto::ConsumerError {
             op: proto::ConsumerOp::Close as i32,
@@ -1017,7 +1027,10 @@ mod tests {
     /// old id; an ack observed after the switch gets the new one.
     #[tokio::test]
     async fn run_stamps_by_stream_position_not_by_arrival() {
-        let (old_id, new_id) = (Uuid::with_bytes([7u8; 16]), Uuid::with_bytes([8u8; 16]));
+        let (old_id, new_id) = (
+            Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8])),
+            Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8])),
+        );
         let ids = ids_with("t", old_id);
         let state = Arc::new(Mutex::new(FakeState::default()));
         state.lock().unwrap().push(Event::Sent(proto::Sent { index: 0 }));
@@ -1063,7 +1076,7 @@ mod tests {
         let state = Arc::new(Mutex::new(FakeState::default()));
         let channel = serve(FakeServer { state: state.clone(), defer_headers: true }).await;
         let verifier = Arc::new(RecordingVerifier::default());
-        let w = Box::new(workload(Role::Consumer, ids_with("t", Uuid::zero()), verifier, channel));
+        let w = Box::new(workload(Role::Consumer, ids_with("t", Uuid::ZERO_UUID), verifier, channel));
         let stop = Arc::new(AtomicBool::new(false));
 
         let harness = async {

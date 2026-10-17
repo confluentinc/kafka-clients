@@ -42,7 +42,8 @@ try:  # pragma: no cover - import guard
 except ImportError:  # pragma: no cover - the native extension is optional here
     _lib = None
 
-__all__ = ["class_for_ffi_id", "error_classes", "from_ffi_error", "to_ffi_id"]
+__all__ = ["class_for_ffi_id", "error_classes", "from_borrowed_ffi_error", "from_ffi_error",
+           "to_ffi_id"]
 
 #: The FFI id the core reports for a bare ``KafkaException``.
 UNKNOWN_SERVER_ERROR = -1
@@ -158,11 +159,18 @@ _CORE_KWARGS: dict[str, Callable[[str | None, dict[str, Any]], dict[str, Any]]] 
     },
     "DuplicateResourceError": lambda m, p: {"resource": p.get("resource"), "message": m},
     "ResourceNotFoundError": lambda m, p: {"resource": p.get("resource"), "message": m},
-    "CorrelationIdMismatchError": lambda m, p: {
-        "message": m,
-        "request_correlation_id": p["request_correlation_id"],
-        "response_correlation_id": p["response_correlation_id"],
-    },
+}
+
+# Constructor arguments the core cannot report, filled with a stand-in so the
+# error is still built through its Java constructor and its getters work.
+#
+# *(deviation)* ``CorrelationIdMismatchError``: Java's class sits in
+# ``common.requests``, "not a supported API", so the Rust payload is
+# crate-private and CLAUDE.md §4 gives it no C accessor. The two correlation ids
+# are therefore unknown on this side and read as -1, a value Java's counter
+# (which starts at 0) never assigns. Goes when the C FFI exposes them.
+_CORE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "CorrelationIdMismatchError": {"request_correlation_id": -1, "response_correlation_id": -1},
 }
 
 
@@ -179,14 +187,18 @@ def construct(cls: type[BaseException], message: str | None,
         if builder is not None and payload:
             error = make(**builder(message, payload))
         else:
-            error = make(message=message)
+            error = make(message=message, **_CORE_DEFAULTS.get(cls.__name__, {}))
     except (TypeError, RuntimeError):
         error = new(cls, message)
     return error
 
 
-def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseException:
-    """The Python error for a C ``kafka_common_Error_t`` handle (consumed).
+def from_ffi_error(handle: int, *, cause: BaseException | None = None,
+                   owned: bool = True) -> BaseException:
+    """The Python error for a C ``kafka_common_Error_t`` handle, freed here when
+    ``owned`` (an operation's result) and left alone when borrowed (a delivery
+    callback's error, or a source: ``kafka_common_Error_source`` returns a
+    borrowed handle, which its owner frees).
 
     The class is the one of the error's FFI id (unknown -> ``KafkaError``),
     built with the payload the FFI accessors expose. The cause chain
@@ -206,25 +218,46 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         if error_source is not None:
             source_handle: int = error_source(handle)
             if source_handle:
-                source_cause = from_ffi_error(source_handle)
+                source_cause = from_ffi_error(source_handle, owned=False)
     payload: dict[str, Any] | None = None
     error_payload = getattr(_lib, "KafkaError_payload", None)
     if error_payload is not None:
         payload = error_payload(handle)
-    cls = class_for_ffi_id(ffi_id)
     is_api_error = getattr(_lib, "KafkaError_is_api_error", None)
-    if ffi_id == UNKNOWN_SERVER_ERROR and is_api_error is not None and not is_api_error(handle):
+    api_error = is_api_error is None or bool(is_api_error(handle))
+    if owned:
+        _lib.KafkaError_destroy(handle)
+    return _build(ffi_id, message, payload, api_error,
+                  cause if cause is not None else source_cause)
+
+
+def from_borrowed_ffi_error(raw: tuple[Any, ...]) -> BaseException:
+    """The Python error for a *borrowed* core error, one an admin result holds per
+    key: the C extension reads it before the result handle is freed into
+    ``(ffi_id, message, is_retriable, is_fatal, payload, is_api_error, cause)``,
+    ``cause`` being the same tuple for its source or ``None``
+    (``borrowed_error_to_py``; ``is_retriable`` / ``is_fatal`` are unused, kept so the
+    tuple shape stays stable). Built as :func:`from_ffi_error` builds an owned one: the
+    class of the FFI id with its payload, the cause chain as ``__cause__``."""
+    ffi_id, message, _is_retriable, _is_fatal, payload, is_api_error, raw_cause = raw
+    cause = None if raw_cause is None else from_borrowed_ffi_error(raw_cause)
+    return _build(ffi_id, message, payload, bool(is_api_error), cause)
+
+
+def _build(ffi_id: int, message: str | None, payload: dict[str, Any] | None,
+           is_api_error: bool, cause: BaseException | None) -> BaseException:
+    """The error of ``ffi_id`` built from what the core reported, ``cause`` as its
+    ``__cause__``."""
+    cls = class_for_ffi_id(ffi_id)
+    if ffi_id == UNKNOWN_SERVER_ERROR and not is_api_error:
         # A bare KafkaException shares UnknownServerException's id; only the
         # latter is an ApiException.
         from .common.kafka_error import KafkaError
 
         cls = KafkaError
-    _lib.KafkaError_destroy(handle)
     error = construct(cls, message, payload)
     # Set after construction, so the constructor arguments do not carry it;
     # ``__reduce__`` (``_throwable.reduce``) keeps it for ``copy`` / ``pickle``.
     if cause is not None:
         error.__cause__ = cause
-    elif source_cause is not None:
-        error.__cause__ = source_cause
     return error

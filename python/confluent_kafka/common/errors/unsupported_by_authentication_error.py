@@ -38,7 +38,7 @@ class UnsupportedByAuthenticationError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 64  # kafka_common_ErrorCode_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED
+    _ffi_id: ClassVar[int] = 64  # kafka_common_Error_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED
 
     def __init__(
         self,

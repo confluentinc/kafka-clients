@@ -34,7 +34,7 @@ class UnreleasedInstanceIdError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 111  # kafka_common_ErrorCode_UNRELEASED_INSTANCE_ID
+    _ffi_id: ClassVar[int] = 111  # kafka_common_Error_UNRELEASED_INSTANCE_ID
 
     def __init__(
         self,

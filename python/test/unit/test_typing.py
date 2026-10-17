@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if sys.version_info >= (3, 11):
@@ -259,6 +260,18 @@ def _consumer_family_types(c: object = None) -> None:
                 "dict[TopicPartition, OffsetAndTimestamp | None]")
     assert_type(kc.metrics(), "dict[MetricName, Metric]")
     assert_type(kc.group_metadata(), ConsumerGroupMetadata)
+    # The Duration overloads: an optional timeout, seconds or a timedelta.
+    assert_type(kc.commit(timeout=1.0), None)
+    assert_type(kc.commit(offsets={}, timeout=timedelta(seconds=1)), None)
+    assert_type(kc.position(partition=tp, timeout=1.0), int)
+    assert_type(kc.committed(partitions=[tp], timeout=1.0),
+                "dict[TopicPartition, OffsetAndMetadata | None]")
+    assert_type(kc.partitions_for(topic="t", timeout=1.0), "list[PartitionInfo]")
+    assert_type(kc.list_topics(timeout=1.0), "dict[str, list[PartitionInfo]]")
+    assert_type(kc.offsets_for_times(timestamps_to_search={tp: 0}, timeout=1.0),
+                "dict[TopicPartition, OffsetAndTimestamp | None]")
+    assert_type(kc.beginning_offsets(partitions=[tp], timeout=1.0), "dict[TopicPartition, int]")
+    assert_type(kc.end_offsets(partitions=[tp], timeout=None), "dict[TopicPartition, int]")
     # The overload stubs accept each Java form.
     kc.subscribe(topics=["t"])
     kc.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
@@ -269,6 +282,16 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit_nowait(callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=None)
+
+    async def async_callback(offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                             exception: Exception | None) -> None:
+        pass
+
+    # Only an async consumer awaits an `async def` commit callback; the sync
+    # client rejects one (strict mode's warn_unused_ignores checks the ignores).
+    kc.commit_nowait(callback=async_callback)  # type: ignore[arg-type]
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                     callback=async_callback)  # type: ignore[arg-type]
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
@@ -294,7 +317,14 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await ac.position(partition=tp), int)
         assert_type(ac.assignment(), "set[TopicPartition]")
         assert_type(ac.current_lag(topic_partition=tp), "int | None")
-        ac.commit_nowait(callback=callback)
+        # commit_nowait is async def on the async peers: awaited, it yields None.
+        assert_type(await ac.commit_nowait(), None)
+        assert_type(await ac.commit_nowait(callback=callback), None)
+        assert_type(await ac.commit_nowait(callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=None), None)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)
         await ac.close(option=CloseOptions.timeout(1.0))
@@ -302,6 +332,10 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
         am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")
         await am.rebalance(new_assignment=[tp])
+        assert_type(await am.commit_nowait(callback=async_callback), None)
+        assert_type(await am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await abase.commit_nowait(callback=async_callback), None)
         await am.lose_partitions(partitions_lost=[tp])
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
 
@@ -309,17 +343,17 @@ def _consumer_family_types(c: object = None) -> None:
 
 
 def _producer_family_types(p: object = None) -> None:
-    """The producer clients' constructor binding stubs, ``send`` and the async
+    """The producer clients' constructor binding stubs, ``send`` (a
+    ``KafkaFuture`` / ``AsyncKafkaFuture`` of the metadata) and the async
     double await.
 
     Type-check-only (guarded early return; never runs the FFI)."""
     if p is None:
         return
-    import asyncio
-    from concurrent.futures import Future
+    import concurrent.futures
     from typing import Any
 
-    from confluent_kafka.common import MetricName, PartitionInfo
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, MetricName, PartitionInfo
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.producer import (
         AsyncKafkaProducer, AsyncMockProducer, Callback, KafkaProducer, MockProducer,
@@ -370,26 +404,51 @@ def _producer_family_types(p: object = None) -> None:
                        value_serializer=string_serializer())
     callback: Callback = lambda metadata, exception: None  # noqa: E731
     # A record's omitted key binds Never, which fits any producer (covariance).
-    assert_type(kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback),
-                "Future[RecordMetadata]")
+    sent = kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
+    assert_type(sent, KafkaFuture[RecordMetadata])
+    assert_type(sent.get(), RecordMetadata)
+    assert_type(sent.get(timeout=1.0), RecordMetadata)
+    assert_type(sent.cancel(may_interrupt_if_running=True), bool)
+    assert_type(sent.then_apply(function=lambda md: md.offset()), KafkaFuture[int])
+    assert_type(sent.when_complete(action=lambda md, e: None), KafkaFuture[RecordMetadata])
+    assert_type(sent.to_completion_stage(), concurrent.futures.Future[RecordMetadata])
     assert_type(kp.partitions_for(topic="t"), "list[PartitionInfo]")
     assert_type(kp.metrics(), "dict[MetricName, Metric]")
     base: Producer[str, str] = kp
     assert_type(base.send(record=ProducerRecord(topic="t", key="k", value="v")),
-                "Future[RecordMetadata]")
+                KafkaFuture[RecordMetadata])
     mp = MockProducer(auto_complete=True, partitioner=None, key_serializer=string_serializer(),
                       value_serializer=string_serializer())
     assert_type(mp.history(), "list[ProducerRecord[str, str]]")
+    assert_type(mp.send(record=ProducerRecord(topic="t", value="v")),
+                KafkaFuture[RecordMetadata])
 
     async def _async() -> None:
         ap = AsyncKafkaProducer(configs=configs, value_serializer=string_serializer())
         future = await ap.send(record=ProducerRecord(topic="t", value="v"))
-        assert_type(future, "asyncio.Future[RecordMetadata]")
-        assert_type(await future, RecordMetadata)
-        assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))),
+        assert_type(future, AsyncKafkaFuture[RecordMetadata])
+        assert_type(await future.get(), RecordMetadata)
+        assert_type(await future.get(timeout=1.0), RecordMetadata)
+        assert_type(future.then_apply(function=lambda md: md.partition()), AsyncKafkaFuture[int])
+        assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))).get(),
                     RecordMetadata)
 
-    del _async, Future, asyncio
+        async def async_callback(metadata: RecordMetadata,
+                                 exception: Exception | None) -> None:
+            del metadata, exception
+        # Only the asyncio producers await an `async def` send callback; the
+        # sync producers take the plain Callback alias.
+        assert_type(await ap.send(record=ProducerRecord(topic="t", value="v"),
+                                  callback=async_callback),
+                    AsyncKafkaFuture[RecordMetadata])
+        await ap.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
+        amp = AsyncMockProducer(auto_complete=True, partitioner=None)
+        assert_type(await amp.send(record=ProducerRecord(topic="t", value=b"v"),
+                                   callback=async_callback), AsyncKafkaFuture[RecordMetadata])
+        kp.send(record=ProducerRecord(topic="t", value="v"),
+                callback=async_callback)  # type: ignore[arg-type]
+
+    del _async
 
 
 def test_typing_module_imports() -> None:
@@ -404,3 +463,508 @@ def test_typing_module_imports() -> None:
     _error_reexport_is_typed()
     _consumer_family_types()
     _producer_family_types()
+
+
+def _admin_reference_set_types(c: object = None) -> None:
+    """The admin reference set: the Options setters return the subclass
+    (``typing.Self`` / re-declared), the keyword constructors, and the result
+    classes' futures per client kind, bound from the futures a public constructor
+    is given (no code writes the kind marker).
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin.create_topics_options import CreateTopicsOptions
+    from confluent_kafka.admin.delete_records_options import DeleteRecordsOptions
+    from confluent_kafka.admin.describe_features_options import DescribeFeaturesOptions
+    from confluent_kafka.admin.list_offsets_result import ListOffsetsResult
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
+
+    # AbstractOptions.timeout_ms returns Self; a re-declaration its own class.
+    assert_type(DeleteRecordsOptions().timeout_ms(timeout_ms=1), DeleteRecordsOptions)
+    assert_type(DeleteRecordsOptions().timeout_ms(), "int | None")
+    assert_type(CreateTopicsOptions(timeout_ms=1, validate_only=True)
+                .timeout_ms(timeout_ms=None).validate_only(validate_only=False),
+                CreateTopicsOptions)
+    assert_type(DescribeFeaturesOptions(node_id=1).node_id(), "int | None")
+    assert_type(DescribeFeaturesOptions().node_id(node_id=2), DescribeFeaturesOptions)
+
+    Info = ListOffsetsResult.ListOffsetsResultInfo
+    tp = TopicPartition(topic="t", partition=0)
+    sync_future = KafkaFuture.completed_future(
+        value=Info(offset=1, timestamp=2, leader_epoch=None))
+    sync_result = ListOffsetsResult(futures={tp: sync_future})
+    assert_type(sync_result.partition_result(partition=tp),
+                "KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]")
+    assert_type(sync_result.all(),
+                "KafkaFuture[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+
+    async def _async() -> None:
+        async_future = AsyncKafkaFuture.completed_future(
+            value=Info(offset=1, timestamp=2, leader_epoch=None))
+        async_result = ListOffsetsResult(futures={tp: async_future})
+        assert_type(async_result.all(),
+                    "AsyncKafkaFuture[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+        assert_type((await async_result.partition_result(partition=tp).get()).offset(), int)
+
+    del _async, Info
+
+
+def test_admin_reference_set_typing_imports() -> None:
+    """Runtime smoke check of the admin reference set's typing function."""
+    _admin_reference_set_types()
+
+
+def _admin_client_types(c: object = None) -> None:
+    """The admin clients: ``Admin.create`` returns ``Admin``, ``AsyncAdmin.create``
+    its async peer, and a result's futures follow the client that returned it, the
+    kind bound without any written type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import Admin, AsyncAdmin, NewTopic, TopicListing
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    assert_type(admin, Admin)
+    created = admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                       replication_factor=1)])
+    assert_type(created.all(), KafkaFuture[None])
+    assert_type(created.values(), dict[str, KafkaFuture[None]])
+    assert_type(admin.list_topics().names(), KafkaFuture[set[str]])
+    with admin as same:
+        assert_type(same, Admin)
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        assert_type(async_admin, AsyncAdmin)
+        async_created = async_admin.create_topics(new_topics=[])
+        assert_type(async_created.all(), AsyncKafkaFuture[None])
+        listings = await async_admin.list_topics().listings().get()
+        assert_type(listings, list[TopicListing])
+        async with async_admin as same_async:
+            assert_type(same_async, AsyncAdmin)
+
+    del _async
+
+
+def test_admin_client_typing_imports() -> None:
+    """Runtime smoke check of the admin clients' typing function."""
+    _admin_client_types()
+
+
+# Typing assertions of the admin RPCs.
+def _admin_topic_rpc_types(c: object = None) -> None:
+    """The topic, cluster, config, log-dir, partition, record, election, reassignment
+    and offset RPCs: each result's futures follow the client that returned it, the
+    kind bound without any written type argument, and every stub of a form-checked
+    method types.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import (
+        Admin,
+        AlterConfigOp,
+        AsyncAdmin,
+        Config,
+        ConfigEntry,
+        DeletedRecords,
+        DescribeReplicaLogDirsResult,
+        ListConfigResourcesOptions,
+        ListOffsetsResult,
+        LogDirDescription,
+        NewPartitionReassignment,
+        NewPartitions,
+        OffsetSpec,
+        PartitionReassignment,
+        RecordsToDelete,
+        TopicDescription,
+    )
+    from confluent_kafka.common import (
+        AclOperation,
+        AsyncKafkaFuture,
+        ElectionType,
+        KafkaFuture,
+        Node,
+        TopicCollection,
+        TopicPartition,
+        TopicPartitionReplica,
+        Uuid,
+    )
+    from confluent_kafka.common.config import ConfigResource
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    resource = ConfigResource(type=ConfigResource.Type.TOPIC, name="t")
+    replica = TopicPartitionReplica(topic="t", partition=0, broker_id=1)
+    op = AlterConfigOp(config_entry=ConfigEntry(name="k", value="v"),
+                       operation_type=AlterConfigOp.OpType.SET)
+
+    deleted = admin.delete_topics(topics=["t"])
+    assert_type(deleted.all(), "KafkaFuture[None]")
+    by_ids = admin.delete_topics(topics=TopicCollection.of_topic_ids(topics=[]))
+    assert_type(by_ids.topic_id_values(), "dict[Uuid, KafkaFuture[None]] | None")
+    assert_type(admin.describe_topics(topic_names=["t"]).topic_name_values(),
+                "dict[str, KafkaFuture[TopicDescription]] | None")
+    assert_type(admin.describe_topics(
+        topics=TopicCollection.of_topic_names(topics=[])).all_topic_names(),
+        "KafkaFuture[dict[str, TopicDescription]] | None")
+    cluster = admin.describe_cluster()
+    assert_type(cluster.nodes(), "KafkaFuture[list[Node]]")
+    assert_type(cluster.authorized_operations(),
+                "KafkaFuture[set[AclOperation] | None]")
+    assert_type(admin.describe_configs(resources=[resource]).all(),
+                "KafkaFuture[dict[ConfigResource, Config]]")
+    assert_type(admin.incremental_alter_configs(configs={resource: [op]}).values(),
+                "dict[ConfigResource, KafkaFuture[None]]")
+    assert_type(admin.alter_replica_log_dirs(replica_assignment={replica: "/d"}).all(),
+                "KafkaFuture[None]")
+    assert_type(admin.describe_log_dirs(brokers=[1]).all_descriptions(),
+                "KafkaFuture[dict[int, dict[str, LogDirDescription]]]")
+    assert_type(admin.describe_replica_log_dirs(replicas=[replica]).values(),
+                "dict[TopicPartitionReplica, "
+                "KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
+    assert_type(admin.create_partitions(
+        new_partitions={"t": NewPartitions.increase_to(total_count=2)}).values(),
+        "dict[str, KafkaFuture[None]]")
+    assert_type(admin.delete_records(
+        records_to_delete={tp: RecordsToDelete.before_offset(offset=1)}).low_watermarks(),
+        "dict[TopicPartition, KafkaFuture[DeletedRecords]]")
+    assert_type(admin.elect_leaders(election_type=ElectionType.PREFERRED,
+                                    partitions=None).partitions(),
+                "KafkaFuture[dict[TopicPartition, BaseException | None]]")
+    assert_type(admin.alter_partition_reassignments(
+        reassignments={tp: NewPartitionReassignment(target_replicas=[1]), tp: None}).all(),
+        "KafkaFuture[None]")
+    assert_type(admin.list_partition_reassignments().reassignments(),
+                "KafkaFuture[dict[TopicPartition, PartitionReassignment]]")
+    assert_type(admin.list_offsets(topic_partition_offsets={tp: OffsetSpec.latest()}).all(),
+                "KafkaFuture[dict[TopicPartition, "
+                "ListOffsetsResult.ListOffsetsResultInfo]]")
+    assert_type(admin.list_config_resources().all(),
+                "KafkaFuture[list[ConfigResource]]")
+    assert_type(admin.list_config_resources(
+        config_resource_types=[ConfigResource.Type.TOPIC],
+        options=ListConfigResourcesOptions()).all(),
+        "KafkaFuture[list[ConfigResource]]")
+    assert_type(admin.unregister_controller(controller_id=1).all(), KafkaFuture[None])
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        async_deleted = async_admin.delete_topics(topics=["t"])
+        assert_type(async_deleted.all(), AsyncKafkaFuture[None])
+        async_described = async_admin.describe_topics(
+            topics=TopicCollection.of_topic_ids(topics=[Uuid.random_uuid()]))
+        assert_type(async_described.all_topic_ids(),
+                    "AsyncKafkaFuture[dict[Uuid, TopicDescription]] | None")
+        nodes = await async_admin.describe_cluster().nodes().get()
+        assert_type(nodes, list[Node])
+        assert_type(async_admin.describe_configs(resources=[]).all(),
+                    AsyncKafkaFuture[dict[ConfigResource, Config]])
+        assert_type(async_admin.incremental_alter_configs(configs={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.alter_replica_log_dirs(replica_assignment={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.describe_log_dirs(brokers=[]).all_descriptions(),
+                    AsyncKafkaFuture[dict[int, dict[str, LogDirDescription]]])
+        assert_type(async_admin.describe_replica_log_dirs(replicas=[]).all(),
+                    AsyncKafkaFuture[dict[TopicPartitionReplica,
+                                          DescribeReplicaLogDirsResult.ReplicaLogDirInfo]])
+        assert_type(async_admin.create_partitions(new_partitions={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.delete_records(records_to_delete={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.elect_leaders(election_type=ElectionType.UNCLEAN,
+                                              partitions=[tp]).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.alter_partition_reassignments(reassignments={}).all(),
+                    AsyncKafkaFuture[None])
+        listed = await async_admin.list_partition_reassignments(
+            partitions=[tp]).reassignments().get()
+        assert_type(listed, dict[TopicPartition, PartitionReassignment])
+        assert_type(async_admin.list_offsets(topic_partition_offsets={}).all(),
+                    AsyncKafkaFuture[dict[TopicPartition,
+                                          ListOffsetsResult.ListOffsetsResultInfo]])
+        resources = await async_admin.list_config_resources().all().get()
+        assert_type(resources, list[ConfigResource])
+        assert_type(async_admin.unregister_controller(controller_id=1).all(),
+                    AsyncKafkaFuture[None])
+
+    del _async
+
+
+def test_admin_topic_rpc_typing_imports() -> None:
+    """Runtime smoke check of the topic, cluster, config and offset RPCs' typing function."""
+    _admin_topic_rpc_types()
+
+
+def _admin_mock_types(c: object = None) -> None:
+    """The mock admin clients: ``MockAdminClient`` hands out ``KafkaFuture`` and
+    ``AsyncMockAdminClient`` ``AsyncKafkaFuture``, the kind bound without any
+    written type argument, and ``get()`` takes a ``Duration``.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import AsyncMockAdminClient, MockAdminClient, NewTopic
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, Node
+
+    node = Node(id=0, host="h", port=1)
+    mock = MockAdminClient(brokers=[node], controller=node)
+    assert_type(mock, MockAdminClient)
+    created = mock.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                      replication_factor=1)])
+    assert_type(created.all(), KafkaFuture[None])
+    assert_type(created.all().get(timeout=1.0), None)
+    assert_type(mock.list_topics().names(), KafkaFuture[set[str]])
+    assert_type(mock.unregister_controller(controller_id=0).all(), KafkaFuture[None])
+
+    async def _async() -> None:
+        async_mock = AsyncMockAdminClient(brokers=[node], controller=node)
+        assert_type(async_mock, AsyncMockAdminClient)
+        assert_type(async_mock.create_topics(new_topics=[]).all(), AsyncKafkaFuture[None])
+        names = await async_mock.list_topics().names().get(timeout=1.0)
+        assert_type(names, set[str])
+        assert_type(async_mock.unregister_controller(controller_id=0).all(),
+                    AsyncKafkaFuture[None])
+
+    del _async
+
+
+def test_admin_mock_typing_imports() -> None:
+    """Runtime smoke check of the mock admin clients' typing function."""
+    _admin_mock_types()
+
+
+def _admin_group_rpc_types(c: object = None) -> None:
+    """The consumer-group RPCs: each result's futures follow the client that
+    returned it (``KafkaFuture`` from ``Admin``, ``AsyncKafkaFuture`` from
+    ``AsyncAdmin``, whose RPCs return their result at once as well), and
+    ``list_consumer_group_offsets`` takes either of its Java forms, with no written
+    type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import (
+        Admin,
+        AsyncAdmin,
+        ClassicGroupDescription,
+        ConsumerGroupDescription,
+        GroupListing,
+        ListConsumerGroupOffsetsSpec,
+        MemberToRemove,
+        RemoveMembersFromConsumerGroupOptions,
+    )
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.consumer import OffsetAndMetadata
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    assert_type(admin.describe_consumer_groups(group_ids=["g"]).described_groups(),
+                dict[str, KafkaFuture[ConsumerGroupDescription]])
+    assert_type(admin.list_consumer_group_offsets(group_id="g").all(),
+                KafkaFuture[dict[str, dict[TopicPartition, OffsetAndMetadata | None]]])
+    by_spec = admin.list_consumer_group_offsets(
+        group_specs={"g": ListConsumerGroupOffsetsSpec(topic_partitions=[tp])})
+    assert_type(by_spec.partitions_to_offset_and_metadata(group_id="g"),
+                KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]])
+    assert_type(admin.delete_consumer_groups(group_ids=["g"]).deleted_groups(),
+                dict[str, KafkaFuture[None]])
+    assert_type(admin.delete_consumer_group_offsets(group_id="g", partitions={tp})
+                .partition_result(partition=tp), KafkaFuture[None])
+    assert_type(admin.list_groups().valid(), KafkaFuture[list[GroupListing]])
+    options = RemoveMembersFromConsumerGroupOptions(
+        members=[MemberToRemove(group_instance_id="i")])
+    assert_type(admin.remove_members_from_consumer_group(group_id="g", options=options).all(),
+                KafkaFuture[None])
+    assert_type(admin.alter_consumer_group_offsets(
+        group_id="g", offsets={tp: OffsetAndMetadata(offset=1)}).all(), KafkaFuture[None])
+    assert_type(admin.describe_classic_groups(group_ids=["g"]).all(),
+                KafkaFuture[dict[str, ClassicGroupDescription]])
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        described = async_admin.describe_consumer_groups(group_ids=["g"])
+        assert_type(described.all(), AsyncKafkaFuture[dict[str, ConsumerGroupDescription]])
+        offsets = await async_admin.list_consumer_group_offsets(
+            group_id="g").partitions_to_offset_and_metadata().get()
+        assert_type(offsets, dict[TopicPartition, OffsetAndMetadata | None])
+        assert_type(await async_admin.list_groups().errors().get(), list[BaseException])
+        removed = async_admin.remove_members_from_consumer_group(group_id="g", options=options)
+        assert_type(removed.member_result(member=MemberToRemove(group_instance_id="i")),
+                    AsyncKafkaFuture[None])
+        altered = async_admin.alter_consumer_group_offsets(group_id="g", offsets={})
+        assert_type(altered.partition_result(partition=tp), AsyncKafkaFuture[None])
+        deleted = async_admin.delete_consumer_group_offsets(group_id="g", partitions=[])
+        assert_type(deleted.all(), AsyncKafkaFuture[None])
+        assert_type(await async_admin.delete_consumer_groups(group_ids=[]).all().get(), None)
+        classic = async_admin.describe_classic_groups(group_ids=["g"])
+        assert_type(classic.described_groups(),
+                    dict[str, AsyncKafkaFuture[ClassicGroupDescription]])
+
+    del _async
+
+
+def test_admin_group_rpc_typing_imports() -> None:
+    """Runtime smoke check of the consumer-group RPCs' typing function."""
+    _admin_group_rpc_types()
+
+
+def _admin_security_rpc_types(c: object = None) -> None:
+    """The ACL, delegation-token, quota, SCRAM, feature, producer and transaction
+    RPCs: each result's futures follow the client that returned it, and
+    ``describe_user_scram_credentials`` takes each of its Java forms, with no written
+    type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import (
+        AbortTransactionSpec,
+        Admin,
+        AsyncAdmin,
+        DescribeProducersResult,
+        DescribeUserScramCredentialsOptions,
+        FeatureMetadata,
+        FeatureUpdate,
+        ScramMechanism,
+        TransactionDescription,
+        TransactionListing,
+        UserScramCredentialDeletion,
+        UserScramCredentialsDescription,
+    )
+    from confluent_kafka.common import (
+        AclBinding,
+        AclBindingFilter,
+        AsyncKafkaFuture,
+        ClientQuotaAlteration,
+        ClientQuotaEntity,
+        ClientQuotaFilter,
+        DelegationToken,
+        KafkaFuture,
+    )
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    assert_type(admin.describe_acls(filter=AclBindingFilter.ANY).values(),
+                "KafkaFuture[list[AclBinding]]")
+    created = admin.create_acls(acls=[])
+    assert_type(created.all(), "KafkaFuture[None]")
+    assert_type(admin.delete_acls(filters=[AclBindingFilter.ANY]).all(),
+                "KafkaFuture[list[AclBinding]]")
+    assert_type(admin.create_delegation_token().delegation_token(),
+                "KafkaFuture[DelegationToken]")
+    assert_type(admin.renew_delegation_token(hmac=b"h").expiry_timestamp(),
+                "KafkaFuture[int]")
+    assert_type(admin.expire_delegation_token(hmac=b"h").expiry_timestamp(),
+                "KafkaFuture[int]")
+    assert_type(admin.describe_delegation_token().delegation_tokens(),
+                "KafkaFuture[list[DelegationToken]]")
+    assert_type(admin.describe_client_quotas(filter=ClientQuotaFilter.all()).entities(),
+                "KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]")
+    altered = admin.alter_client_quotas(entries=[ClientQuotaAlteration(
+        entity=ClientQuotaEntity(entries={"user": "u"}), ops=[])])
+    assert_type(altered.all(), "KafkaFuture[None]")
+    assert_type(admin.describe_user_scram_credentials().all(),
+                "KafkaFuture[dict[str, UserScramCredentialsDescription]]")
+    assert_type(admin.describe_user_scram_credentials(users=["u"]).users(),
+                "KafkaFuture[list[str]]")
+    assert_type(admin.describe_user_scram_credentials(
+        users=None, options=DescribeUserScramCredentialsOptions()).description(user_name="u"),
+        "KafkaFuture[UserScramCredentialsDescription]")
+    assert_type(admin.alter_user_scram_credentials(alterations=[UserScramCredentialDeletion(
+        user="u", mechanism=ScramMechanism.SCRAM_SHA_256)]).all(),
+        "KafkaFuture[None]")
+    assert_type(admin.describe_features().feature_metadata(),
+                "KafkaFuture[FeatureMetadata]")
+    assert_type(admin.update_features(feature_updates={"f": FeatureUpdate(
+        max_version_level=1, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)}).all(),
+        "KafkaFuture[None]")
+    assert_type(admin.describe_producers(partitions=[tp]).partition_result(partition=tp),
+                "KafkaFuture[DescribeProducersResult.PartitionProducerState]")
+    assert_type(admin.describe_transactions(transactional_ids=["x"]).description(
+        transactional_id="x"), "KafkaFuture[TransactionDescription]")
+    assert_type(admin.abort_transaction(spec=AbortTransactionSpec(
+        topic_partition=tp, producer_id=1, producer_epoch=0, coordinator_epoch=0)).all(),
+        "KafkaFuture[None]")
+    assert_type(admin.list_transactions().all(),
+                "KafkaFuture[list[TransactionListing]]")
+    assert_type(admin.fence_producers(transactional_ids=["x"]).producer_id(
+        transactional_id="x"), "KafkaFuture[int]")
+    assert_type(admin.force_terminate_transaction(transactional_id="x").result(),
+                "KafkaFuture[None]")
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        acls = async_admin.describe_acls(filter=AclBindingFilter.ANY)
+        assert_type(acls.values(), "AsyncKafkaFuture[list[AclBinding]]")
+        scram = async_admin.describe_user_scram_credentials(users=["u"])
+        assert_type(await scram.users().get(), list[str])
+        features = async_admin.describe_features()
+        assert_type(await features.feature_metadata().get(), FeatureMetadata)
+        listed = async_admin.list_transactions()
+        assert_type(listed.all(), "AsyncKafkaFuture[list[TransactionListing]]")
+        terminated = async_admin.force_terminate_transaction(transactional_id="x")
+        assert_type(terminated.result(), "AsyncKafkaFuture[None]")
+
+    del _async
+
+
+def test_admin_security_rpc_typing_imports() -> None:
+    """Runtime smoke check of the security RPCs' typing function."""
+    _admin_security_rpc_types()
+
+
+# ---------------------------------------------------------------------------
+# KafkaFuture / AsyncKafkaFuture (CLAUDE.md, Futures)
+# ---------------------------------------------------------------------------
+
+
+def _kafka_future_types() -> None:
+    import concurrent.futures
+
+    from confluent_kafka.common import KafkaFuture
+
+    f = KafkaFuture.completed_future(value=1)
+    assert_type(f, KafkaFuture[int])
+    assert_type(f.get(), int)
+    assert_type(f.get(timeout=1.0), int)
+    assert_type(f.get(timeout=timedelta(seconds=1)), int)
+    assert_type(f.get_now(value_if_absent=0), int)
+    assert_type(f.then_apply(function=str), KafkaFuture[str])
+    assert_type(f.when_complete(action=lambda value, error: None), KafkaFuture[int])
+    assert_type(KafkaFuture.all_of(futures=(f, f.then_apply(function=str))), KafkaFuture[None])
+    assert_type(f.to_completion_stage(), concurrent.futures.Future[int])
+    assert_type(f.cancel(may_interrupt_if_running=False), bool)
+    assert_type(f.is_done(), bool)
+
+
+async def _async_kafka_future_types() -> None:
+    import asyncio
+
+    from confluent_kafka.common import AsyncKafkaFuture
+
+    a = AsyncKafkaFuture.completed_future(value="x")
+    assert_type(a, AsyncKafkaFuture[str])
+    assert_type(await a.get(), str)
+    assert_type(await a.get(timeout=0.5), str)
+    assert_type(a.get_now(value_if_absent="y"), str)
+    assert_type(a.then_apply(function=len), AsyncKafkaFuture[int])
+    assert_type(AsyncKafkaFuture.all_of(futures=(a,)), AsyncKafkaFuture[None])
+    assert_type(a.to_completion_stage(), asyncio.Future[str])
+
+
+def test_kafka_future_typing() -> None:
+    import asyncio
+
+    _kafka_future_types()
+    asyncio.run(_async_kafka_future_types())

@@ -18,8 +18,10 @@
 // Used by:
 //   - the Rust MultilanguageAdmin client (under tests/common)
 //   - the Python gRPC servers (python/grpc_server.py, sync, driving
-//     admin.py AdminClient/MockAdminClient; grpc_server_async.py, asyncio,
-//     driving AsyncAdminClient/AsyncMockAdminClient)
+//     confluent_kafka.admin's KafkaAdminClient/MockAdminClient;
+//     grpc_server_async.py, asyncio, driving AsyncKafkaAdminClient/
+//     AsyncMockAdminClient), both through the admin facade in
+//     python/grpc_translate.py
 //   - the C++ gRPC server (c/grpc_server/server.cc), which drives the
 //     bare *sync* C entry points (kafka_admin_AdminClient_*)
 //
@@ -29,6 +31,11 @@
 // consumer_service.proto. Redeclaring any of them here would be a duplicate
 // symbol in the shared `confluent.kafka.test` package.
 //
+// The comments below that name `admin.py` and its helpers (`_acl_binding_rows`,
+// `NewTopic._to_spec`, …) describe the legacy Python admin binding this
+// contract was first written against. That binding is removed; the Python arm
+// now runs on `confluent_kafka.admin`.
+//
 // Naming convention: where an admin message would collide with one already in
 // the package (`ListTopicsResponse` and `TopicListing` are taken by the
 // consumer service), the admin message carries an `Admin` prefix.
@@ -36,8 +43,8 @@
 // Like the producer and consumer services, blocking calls are awaited
 // server-side: the unary RPC response IS the resolved result. Java's Admin
 // methods return `*Result` objects holding one `KafkaFuture` per key, but no
-// binding hands those futures across the language boundary — Python's
-// `_run_sync` returns an already-resolved dict and the C `_async` entry points
+// binding hands those futures across the language boundary — the Python
+// facade returns already-resolved data and the C `_async` entry points
 // fire their callback with a fully-built result struct. So there are no futures
 // and no streaming on the wire; per-key granularity is preserved by the
 // per-key result envelope below, not by per-key futures.
@@ -218,18 +225,18 @@ service AdminService {
   //     `describeDelegationToken` (`KafkaFuture<Vec<DelegationToken>>`) and
   //     `describeFeatures` (`KafkaFuture<FeatureMetadata>`).
   //
-  //   - **Bespoke RAW per-user rows** for `describeUserScramCredentials` — the
-  //     one admin RPC whose Java `*Result` exposes multiple views with distinct
-  //     semantics. Its result holds one future over the raw response data and
-  //     exposes three views — `all()` (RESOURCE_NOT_FOUND users included as empty
-  //     successes), `users()` (RNF excluded) and `description(user)` (faults on
-  //     RNF). A single flattened per-user `oneof` cannot carry all three, so
-  //     [DescribeUserScramCredentialsEntry] carries the raw wire rows
-  //     (`user` + `error_code` + `credential_infos`) and the CLIENT rebuilds the
-  //     three views (`src/admin/describe_user_scram_credentials_result.rs` via
-  //     `multilanguage_admin.rs`), exactly as the C ABI and admin.py now expose
-  //     the full three-view result object. NOT the `listGroups`
-  //     `valid()`/`errors()` split.
+  //   - **Ordinary per-key `oneof`** for `describeUserScramCredentials`, keyed
+  //     by [ResultKey.name]. Its Java result holds one future over the raw
+  //     response data and exposes three views (`all()` / `users()` /
+  //     `description(user)`); the per-user shape that subsumes all three is what
+  //     every backend composes the same way: `all()` first, then `users()` +
+  //     `description(user)` when `all()` fails (`rust/tests/common/
+  //     admin_backend.rs`, `c/grpc_server/server.cc`, and the Python
+  //     facade's `g_describe_user_scram_credentials` in
+  //     `python/grpc_translate.py`, which returns
+  //     `{user: UserScramCredentialsDescription | KafkaError}`). It is
+  //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
+  //     a user to hang on, so [Listings] does not apply.
   //
   //   - **The third value-carries-its-own-error RPC** (envelope exception 3) is
   //     `deleteAcls`: `HashMap<AclBindingFilter, KafkaFuture<FilterResults>>`
@@ -1103,10 +1110,6 @@ message LogDirDescription {
   optional int64 total_bytes = 2;
   optional int64 usable_bytes = 3;
   repeated ReplicaInfoEntry replica_infos = 4;
-  // Java's `isCordoned()` (KIP-1066): whether an operator has marked this
-  // directory so the broker stops placing new partitions on it. A plain bool,
-  // not an optional volume size, so it always crosses.
-  optional bool is_cordoned = 5;
 }
 
 // Java's per-broker value, `Map<String, LogDirDescription>` keyed by log dir
@@ -2244,32 +2247,17 @@ message DescribeUserScramCredentialsRequest {
   optional int32 timeout_ms = 3;
 }
 
-// One RAW per-user result of `describeUserScramCredentials`, i.e. one row of the
-// Java response data (`DescribeUserScramCredentialsResponseData.results`). Unlike
-// every other admin RPC's per-key entry, this is NOT a keyed `oneof` outcome:
-// Java's `DescribeUserScramCredentialsResult` exposes three views over one
-// response (`all()` / `users()` / `description(user)`) with different
-// RESOURCE_NOT_FOUND semantics, and the CLIENT rebuilds all three from these raw
-// rows (`multilanguage_admin.rs` / `src/admin/describe_user_scram_credentials_result.rs`).
-// So the row carries the wire error code AND the credentials together — a
-// RESOURCE_NOT_FOUND user has `error_code = RESOURCE_NOT_FOUND` and empty
-// `credential_infos`, both of which the three views need.
 message DescribeUserScramCredentialsEntry {
-  reserved 1, 2, 3;  // were: ResultKey key; oneof { KafkaError error; UserScramCredentialsDescription value }
-  string user = 4;
-  // Wire `Errors` code for this user; 0 (NONE) is success. RESOURCE_NOT_FOUND
-  // (91) and any hard error (e.g. DUPLICATE_RESOURCE) are carried through so the
-  // client can reconstruct all()/users()/description() faithfully.
-  int32 error_code = 5;
-  // The broker's per-user error message, if any (Java's nullable `errorMessage`).
-  optional string error_message = 6;
-  repeated ScramCredentialInfo credential_infos = 7;
+  // Always the `name` variant: the user name.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    UserScramCredentialsDescription value = 3;
+  }
 }
 
 message DescribeUserScramCredentialsResponse {
   repeated DescribeUserScramCredentialsEntry entries = 1;
-  // A whole-response (data-future) failure — auth/timeout — NOT a per-user error.
-  // Mirrors Java's top-level `whenComplete` throwable that faults every view.
   optional KafkaError error = 2;
 }
 

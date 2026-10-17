@@ -253,10 +253,7 @@ pub struct ConfigEntry {
     is_sensitive: bool,
     is_read_only: bool,
     synonyms: Vec<ConfigSynonym>,
-    /// `None` is Java's null `type`, which `KafkaAdminClient.createTopics`
-    /// passes for every entry of a `CreateTopicsResponse` (the response carries
-    /// no type).
-    config_type: Option<ConfigType>,
+    config_type: ConfigType,
     documentation: Option<String>,
 }
 
@@ -280,6 +277,8 @@ pub struct ConfigEntry {
 /// built from it renders it.
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq)]
+// the options of ConfigEntry's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
     pub(crate) name: String,
@@ -298,9 +297,9 @@ pub struct ConfigEntryOptions {
     /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
     /// as in `:44` (`Collections.emptyList()`).
     pub(crate) synonyms: Vec<ConfigSynonym>,
-    /// The config data type, or `None` for Java's null. Java's `type`; starts
-    /// as `Some(`[`ConfigType::Unknown`]`)`, as in `:44`.
-    pub(crate) config_type: Option<ConfigType>,
+    /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
+    /// as in `:44`.
+    pub(crate) config_type: ConfigType,
     /// The config documentation. Java's `documentation`; starts as `None`, as in
     /// `:44`.
     pub(crate) documentation: Option<String>,
@@ -352,6 +351,8 @@ impl std::fmt::Debug for ConfigEntryOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+// builds ConfigEntryOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConfigEntryOptionsBuilder {
     name: Option<String>,
     value: Option<Option<String>>,
@@ -359,7 +360,7 @@ pub struct ConfigEntryOptionsBuilder {
     is_sensitive: bool,
     is_read_only: bool,
     synonyms: Vec<ConfigSynonym>,
-    config_type: Option<ConfigType>,
+    config_type: ConfigType,
     documentation: Option<String>,
 }
 
@@ -380,7 +381,7 @@ impl ConfigEntryOptionsBuilder {
             is_sensitive: false,
             is_read_only: false,
             synonyms: Vec::new(),
-            config_type: Some(ConfigType::Unknown),
+            config_type: ConfigType::Unknown,
             documentation: None,
         }
     }
@@ -417,8 +418,8 @@ impl ConfigEntryOptionsBuilder {
         self.synonyms = synonyms;
         self
     }
-    /// Sets `ConfigEntryOptions::config_type`; `None` is Java's null `type`.
-    pub fn set_config_type(mut self, config_type: Option<ConfigType>) -> Self {
+    /// Sets `ConfigEntryOptions::config_type`.
+    pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
         self.config_type = config_type;
         self
     }
@@ -564,9 +565,9 @@ impl ConfigEntry {
         &self.synonyms
     }
 
-    /// Return the config data type, or `None` where Java's `type()` is null —
-    /// the entries `createTopics` returns, whose response carries no type.
-    pub fn config_type(&self) -> Option<ConfigType> {
+    /// Return the config data type.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#type")]
+    pub fn r#type(&self) -> ConfigType {
         self.config_type
     }
 
@@ -604,7 +605,7 @@ impl std::fmt::Display for ConfigEntry {
         write!(
             f,
             "], type={}, documentation={})",
-            self.config_type.map_or("null", |t| t.name()),
+            self.config_type,
             self.documentation.as_deref().unwrap_or("null")
         )
     }
@@ -636,27 +637,8 @@ mod tests {
         assert!(!entry.is_sensitive());
         assert!(!entry.is_read_only());
         assert!(entry.synonyms().is_empty());
-        assert_eq!(entry.config_type(), Some(ConfigType::Unknown));
+        assert_eq!(entry.r#type(), ConfigType::Unknown);
         assert_eq!(entry.documentation(), None);
-    }
-
-    /// Java's widest constructor stores whatever `type` it is given, null
-    /// included (`KafkaAdminClient.createTopics` passes null), and `type()`
-    /// returns it unchanged; only the `(name, value)` constructor defaults it to
-    /// `UNKNOWN`.
-    #[test]
-    fn config_type_can_be_null() {
-        let entry = ConfigEntry::with_options(
-            ConfigEntryOptionsBuilder::new()
-                .set_name("k".to_string())
-                .set_value(Some("v".to_string()))
-                .set_config_type(None)
-                .build()
-                .unwrap(),
-        );
-        assert_eq!(entry.config_type(), None);
-        assert!(entry.to_string().contains("type=null"), "{entry}");
-        assert_ne!(entry, ConfigEntry::new("k".to_string(), Some("v".to_string())));
     }
 
     #[test]
@@ -666,7 +648,7 @@ mod tests {
                 .set_name("k".to_string())
                 .set_value(None)
                 .set_source(ConfigSource::DefaultConfig)
-                .set_config_type(Some(ConfigType::String))
+                .set_config_type(ConfigType::String)
                 .build()
                 .unwrap(),
         );
@@ -681,7 +663,7 @@ mod tests {
                 .set_name("password".to_string())
                 .set_value(Some("secret".to_string()))
                 .set_is_sensitive(true)
-                .set_config_type(Some(ConfigType::Password))
+                .set_config_type(ConfigType::Password)
                 .build()
                 .unwrap(),
         );
@@ -776,7 +758,7 @@ mod tests {
                         ConfigSource::DefaultConfig,
                     ),
                 ])
-                .set_config_type(Some(ConfigType::Long))
+                .set_config_type(ConfigType::Long)
                 .set_documentation(Some("The retention time.".to_string()))
                 .build()
                 .unwrap(),
@@ -824,7 +806,7 @@ mod tests {
             .set_value(Some(SECRET.to_string()))
             .set_source(ConfigSource::DynamicBrokerConfig)
             .set_is_sensitive(true)
-            .set_config_type(Some(ConfigType::Password))
+            .set_config_type(ConfigType::Password)
             .build()
             .unwrap()
     }
@@ -862,7 +844,7 @@ mod tests {
             rendered,
             "ConfigEntryOptions { name: \"ssl.keystore.password\", value: \"Redacted\", \
              source: DynamicBrokerConfig, is_sensitive: true, is_read_only: false, synonyms: [], \
-             config_type: Some(Password), documentation: None }"
+             config_type: Password, documentation: None }"
         );
         let pretty = format!("{options:#?}");
         assert!(pretty.contains("value: \"Redacted\""), "{pretty}");

@@ -65,7 +65,7 @@ impl OffsetCommitMetricsManager {
             "The average time taken for a commit request",
         );
         commit_sensor
-            .add_metric_name(commit_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(commit_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding commit-latency-avg");
 
         let commit_latency_max = metrics.metric_name(
@@ -74,7 +74,7 @@ impl OffsetCommitMetricsManager {
             "The max time taken for a commit request",
         );
         commit_sensor
-            .add_metric_name(commit_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(commit_latency_max.clone(), Box::new(Max::new()))
             .expect("adding commit-latency-max");
 
         let commit_rate =
@@ -105,7 +105,7 @@ impl OffsetCommitMetricsManager {
 
     /// Java: `recordRequestLatency(long responseLatencyMs)`.
     pub(crate) fn record_request_latency(&self, response_latency_ms: i64) {
-        self.commit_sensor.record_value(response_latency_ms as f64);
+        self.commit_sensor.record_with_value(response_latency_ms as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

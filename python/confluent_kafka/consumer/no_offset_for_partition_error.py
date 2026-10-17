@@ -44,7 +44,7 @@ class NoOffsetForPartitionError(InvalidOffsetError):
 
     __module__ = "confluent_kafka.consumer"
 
-    _ffi_id: ClassVar[int] = -21  # kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION
+    _ffi_id: ClassVar[int] = -21  # kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION
 
     @java_forms(
         Form("partition"),

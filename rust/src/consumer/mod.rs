@@ -17,7 +17,6 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
-mod async_kafka_consumer;
 pub mod close_options;
 mod consumer_commit_failed_error;
 mod consumer_config;
@@ -30,6 +29,7 @@ mod consumer_rebalance_listener;
 mod consumer_record;
 mod consumer_records;
 mod consumer_retriable_commit_failed_error;
+mod dyn_consumer;
 mod group_protocol;
 mod interceptor;
 mod kafka_consumer;
@@ -41,8 +41,6 @@ mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
-pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -50,8 +48,10 @@ pub(crate) use consumer_group_metadata::ConsumerGroupMetadataImpl;
 pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordOptionsBuilder};
 pub use consumer_records::ConsumerRecords;
+pub use dyn_consumer::DynConsumer;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
+pub use internals::ConsumerHandle;
 pub use kafka_consumer::KafkaConsumer;
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
@@ -63,13 +63,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-
 use crate::common::metrics::KafkaMetric;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 
-/// The single dispatch trait that `MockConsumer` (Phase 3) and
-/// `AsyncKafkaConsumer` (Phase 11) both implement. Translates Java's
+/// The consumer interface, implemented by [`KafkaConsumer`] and
+/// [`MockConsumer`]. Translates Java's
 /// `org.apache.kafka.clients.consumer.Consumer<K, V>` interface.
 ///
 /// # Parameter conventions
@@ -93,24 +91,33 @@ use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 ///
 /// # Bounds: `Send + 'static`, NOT `Send + Sync`
 ///
-/// The trait is `Send + 'static` so it can be stored as
-/// `Box<dyn Consumer<K, V>>` and moved between tokio tasks (required for
-/// multi-thread runtime support). `Sync` is intentionally NOT required
-/// because the API is `&mut self` — only one task can call methods at a
-/// time, no shared `&Consumer` reference exists.
+/// The trait is `Send + 'static` so a consumer, and its [`DynConsumer`]
+/// view `Box<dyn DynConsumer<K, V>>`, can be moved between tokio tasks
+/// (required for multi-thread runtime support). `Sync` is intentionally NOT
+/// required because the API is `&mut self` — only one task can call methods
+/// at a time, no shared `&Consumer` reference exists.
 ///
-/// Users who need cross-task sharing wrap in `Arc<Mutex<dyn Consumer>>`,
+/// Users who need cross-task sharing wrap in `Arc<Mutex<dyn DynConsumer>>`,
 /// which works without `Sync` on the trait itself. Dropping `Sync` lets
 /// users plug in `K`/`V` types that are `Send` but not `Sync` (e.g.
 /// types containing `Cell`) without artificial restrictions.
 ///
 /// # Async surface
 ///
-/// Per `consumer-threading.md` §1: methods that block in Java become
-/// `async fn`; non-blocking accessors stay `fn`. Per CLAUDE.md §13, the
-/// per-call `Box<Future>` cost of `#[async_trait]` is amortized over many
-/// records (typical `poll()` granularity is ≤ ~100 calls/sec) and is
-/// acceptable on this top-level dispatch trait.
+/// Per `consumer-threading.md` §1: methods that block in Java are
+/// asynchronous; non-blocking accessors stay `fn`. Every asynchronous method
+/// returns `impl Future + Send` rather than being declared `async fn`, so
+/// that generic code can move the returned futures across tasks and box them
+/// as `dyn Future + Send`. That guarantee is what lets [`DynConsumer`] be
+/// blanket-implemented for every `Consumer`. Implementations may still be
+/// written with `async fn`.
+///
+/// Returning `impl Future` keeps statically dispatched calls (on a concrete
+/// [`KafkaConsumer`] or [`MockConsumer`], or through a generic
+/// `C: Consumer<K, V>`) free of a boxed future, but makes the trait itself
+/// not dyn-compatible. Hold [`DynConsumer`] to keep different consumer
+/// implementations behind one type, as Java code holds the `Consumer`
+/// interface (CLAUDE.md §3).
 ///
 /// # Methods NOT translated
 ///
@@ -128,7 +135,6 @@ use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 ///   server-side regex semantics.
 /// - `poll(long timeoutMs)`, `close(Duration timeout)` (both
 ///   `@Deprecated` in Java): not translated per CLAUDE.md §3.
-#[async_trait]
 #[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
 pub trait Consumer<K, V>: Send + 'static
 where
@@ -180,6 +186,8 @@ where
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
+    // Java's KafkaConsumer.clientId() is package-private; consumer-threading.md §1 lists it
+    #[doc(alias = "rust-only")]
     fn client_id(&self) -> &str;
 
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
@@ -242,16 +250,16 @@ where
     /// Takes `Vec<String>` because the impl moves the elements into
     /// `SubscriptionState`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
-    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
+    fn subscribe_with_topics(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void subscribe(Collection<String> topics, ConsumerRebalanceListener)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
-    async fn subscribe_with_topics_listener(
+    fn subscribe_with_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void subscribe(SubscriptionPattern pattern)`.
     ///
@@ -259,16 +267,19 @@ where
     /// the group coordinator, which evaluates it. Java's javadoc notes that no
     /// validation of the pattern is performed by the client.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
-    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
+    fn subscribe_with_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
-    async fn subscribe_with_pattern_listener(
+    fn subscribe_with_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void assign(Collection<TopicPartition>)`.
     ///
@@ -277,7 +288,7 @@ where
     /// which blocks (`AsyncKafkaConsumer.java:1819`). The Rust translation
     /// `.await`s the event handle.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assign")]
-    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error>;
+    fn assign(&mut self, partitions: Vec<TopicPartition>) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Unsubscribe from topics currently subscribed with
     /// [`Self::subscribe_with_topics`] or [`Self::subscribe_with_pattern`].
@@ -298,7 +309,7 @@ where
     /// Returns a Kafka error for any other unrecoverable errors (e.g. rebalance
     /// callback errors).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#unsubscribe")]
-    async fn unsubscribe(&mut self) -> Result<(), Error>;
+    fn unsubscribe(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     // ── Poll ──
 
@@ -307,7 +318,7 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
-    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
+    fn poll(&mut self, timeout: Duration) -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
 
     // ── Commit ──
 
@@ -316,47 +327,50 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
-    async fn commit_sync(&mut self) -> Result<(), Error>;
+    fn commit_sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void commitSync(Duration timeout)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
-    async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+    fn commit_sync_with_timeout(&mut self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
-    async fn commit_sync_with_offsets(
+    fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets,
     ///                  Duration timeout)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
-    async fn commit_sync_with_offsets_timeout(
+    fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void commitAsync()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitAsync")]
-    async fn commit_async(&mut self) -> Result<(), Error>;
+    fn commit_async(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void commitAsync(OffsetCommitCallback)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitAsync")]
-    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
+    fn commit_async_with_callback(
+        &mut self,
+        callback: Arc<dyn OffsetCommitCallback>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>,
     ///                   OffsetCommitCallback)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitAsync")]
-    async fn commit_async_with_offsets_callback(
+    fn commit_async_with_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     // ── Seek (async — Java: addAndGet on SeekUnvalidatedEvent / ResetOffsetEvent) ──
 
@@ -367,34 +381,42 @@ where
     /// calls `applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1068`).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seek")]
-    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+    fn seek_with_offset(
+        &mut self,
+        partition: TopicPartition,
+        offset: i64,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's
     /// `void seek(TopicPartition partition, OffsetAndMetadata)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seek")]
-    async fn seek_with_offset_and_metadata(
+    fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void seekToBeginning(Collection<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seekToBeginning")]
-    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
+    fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void seekToEnd(Collection<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seekToEnd")]
-    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
+    fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
 
     // ── Position / committed (async — may fetch from broker) ──
 
     /// Translates Java's `long position(TopicPartition)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#position")]
-    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
+    fn position(&mut self, partition: &TopicPartition) -> impl Future<Output = Result<i64, Error>> + Send;
 
     /// Translates Java's `long position(TopicPartition, Duration)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#position")]
-    async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
+    fn position_with_timeout(
+        &mut self,
+        partition: &TopicPartition,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<i64, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
@@ -402,20 +424,20 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
-    async fn committed(
+    fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>,
     ///                                                    Duration)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
-    async fn committed_with_timeout(
+    fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
 
     // ── Metadata (async — may fetch from broker) ──
 
@@ -432,7 +454,7 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
-    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
+    fn partitions_for(&mut self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
 
     /// Translates Java's
     /// `List<PartitionInfo> partitionsFor(String topic, Duration)`.
@@ -441,11 +463,11 @@ where
     /// is not found; see [`Self::partitions_for`] for the auto-topic-creation
     /// caveat on an empty result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
-    async fn partitions_for_with_timeout(
+    fn partitions_for_with_timeout(
         &mut self,
         topic: &str,
         timeout: Duration,
-    ) -> Result<Vec<PartitionInfo>, Error>;
+    ) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics()`.
@@ -453,15 +475,15 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#listTopics")]
-    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
+    fn list_topics(&mut self) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics(Duration)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#listTopics")]
-    async fn list_topics_with_timeout(
+    fn list_topics_with_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
+    ) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
@@ -480,10 +502,10 @@ where
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
-    async fn offsets_for_times(
+    fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
@@ -493,42 +515,47 @@ where
     /// contract note (unresolved partitions are omitted, not
     /// present-with-null, unlike Java).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
-    async fn offsets_for_times_with_timeout(
+    fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#beginningOffsets")]
-    async fn beginning_offsets(&mut self, partitions: &[TopicPartition])
-    -> Result<HashMap<TopicPartition, i64>, Error>;
+    fn beginning_offsets(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>,
     ///                                              Duration)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#beginningOffsets")]
-    async fn beginning_offsets_with_timeout(
+    fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#endOffsets")]
-    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
+    fn end_offsets(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>,
     ///                                        Duration)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#endOffsets")]
-    async fn end_offsets_with_timeout(
+    fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, Error>;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send;
 
     // ── Pause / resume (async — Java: addAndGet on PausePartitions / ResumePartitions) ──
 
@@ -565,7 +592,7 @@ where
     /// Returns an illegal-state error if any of the provided partitions are not
     /// currently assigned to this consumer.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#pause")]
-    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
+    fn pause(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void resume(Collection<TopicPartition>)`.
     ///
@@ -573,7 +600,7 @@ where
     /// `applicationEventHandler.addAndGet(new ResumePartitionsEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1292`).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#resume")]
-    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
+    fn resume(&mut self, partitions: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send;
 
     // ── Lifecycle ──
 
@@ -583,7 +610,7 @@ where
     /// the KIP-848 protocol it returns an unsupported-version error.
     /// Match Java behavior.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#enforceRebalance")]
-    async fn enforce_rebalance(&mut self) -> Result<(), Error>;
+    fn enforce_rebalance(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void enforceRebalance(String reason)`
     /// (`Consumer.java:272`).
@@ -592,20 +619,20 @@ where
     /// under CLAUDE.md §2 the no-arg form keeps the plain name and this one
     /// carries the `reason` parameter-name suffix.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#enforceRebalance")]
-    async fn enforce_rebalance_with_reason(&mut self, reason: &str) -> Result<(), Error>;
+    fn enforce_rebalance_with_reason(&mut self, reason: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void close()`. Closes the consumer with default
     /// timeout.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close()")]
-    async fn close(&mut self) -> Result<(), Error>;
+    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void close(CloseOptions option)`.
     ///
     /// Java's `@Deprecated void close(Duration timeout)` is not translated
-    /// (CLAUDE.md §3); pass `CloseOptions::new_timeout(timeout)` here instead,
+    /// (CLAUDE.md §3); pass `CloseOptions::new_with_timeout(timeout)` here instead,
     /// which is what the Java overload's body does.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close(CloseOptions)")]
-    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+    fn close_with_options(&mut self, options: CloseOptions) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Translates Java's `void wakeup()`. Sync — callable from any task,
     /// including signal handlers.
@@ -624,10 +651,12 @@ where
     /// `ConsumerRebalanceListener` can call back into the consumer
     /// (`assign`/`seek`/`pause`/`position`/...) from inside a callback by
     /// capturing the `consumer` variable. Rust borrows the consumer as
-    /// `&mut self` for the duration of a blocking call and
-    /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
+    /// `&mut self` for the duration of a blocking call and a consumer is not
+    /// `Clone`, so neither is expressible with a
     /// bare reference; capture a [`ConsumerHandle`] instead. See
     /// [`ConsumerHandle`].
+    // listener reentrancy handle (consumer-threading.md §31, §41)
+    #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;
 }
 

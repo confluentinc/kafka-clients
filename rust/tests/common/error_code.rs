@@ -14,7 +14,7 @@
 
 //! Error-code constants -- GENERATED, DO NOT EDIT.
 //!
-//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! Generated from `kafka_common_Error_e` in `src/ffi/common.rs` by
 //! `cargo xtask generate-error-codes`, and checked for staleness by
 //! `cargo xtask check-generated`.
 //!
@@ -199,6 +199,7 @@ pub const QUOTA_VIOLATION: i32 = -26;
 pub const RECORD_DESERIALIZATION: i32 = -27;
 pub const PRODUCER_BUFFER_EXHAUSTED: i32 = -28;
 pub const BOOTSTRAP_RESOLUTION: i32 = -29;
+pub const LOCAL_CALLBACK: i32 = -30;
 
 /// Rebuild the error class that owns the protocol error `code`, carrying
 /// `message` -- the table of `Errors::error_with_message` (Java's
@@ -252,7 +253,9 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         FENCED_STATE_EPOCH => Some(Error::FencedStateEpoch(FencedStateEpochError::new(message))),
         FETCH_SESSION_ID_NOT_FOUND => Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message))),
         FETCH_SESSION_TOPIC_ID_ERROR => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-        GROUP_AUTHORIZATION_FAILED => Some(Error::GroupAuthorization(GroupAuthorizationError::new(None, message))),
+        GROUP_AUTHORIZATION_FAILED => {
+            Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
+        },
         GROUP_DELETION_FAILED => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
         GROUP_ID_NOT_FOUND => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
         GROUP_MAX_SIZE_REACHED => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),

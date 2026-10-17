@@ -24,6 +24,8 @@ use crate::consumer::OffsetAndMetadata;
 /// A map of topic partitions to their committed offset and metadata. A `None`
 /// value indicates the group has no committed offset for that partition
 /// (Java's `null` value in the map).
+// the per-group map type of ListConsumerGroupOffsetsResult, a Java `Map<TopicPartition, OffsetAndMetadata>`
+#[doc(alias = "rust-only")]
 pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
 /// The result of `Admin::list_consumer_group_offsets_with_group_specs`.
@@ -57,7 +59,7 @@ impl ListConsumerGroupOffsetsResult {
     ///
     /// Returns an error (Java's `IllegalStateException`) if offsets from
     /// multiple groups were requested — use
-    /// [`partitions_to_offset_and_metadata_for_group`](Self::partitions_to_offset_and_metadata_for_group)
+    /// [`partitions_to_offset_and_metadata_with_group_id`](Self::partitions_to_offset_and_metadata_with_group_id)
     /// instead.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata")]
     pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, Error> {
@@ -80,7 +82,8 @@ impl ListConsumerGroupOffsetsResult {
     ///
     /// Returns an error (Java's `IllegalArgumentException`) if offsets for the
     /// given group were not requested.
-    pub fn partitions_to_offset_and_metadata_for_group(
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata")]
+    pub fn partitions_to_offset_and_metadata_with_group_id(
         &self,
         group_id: &str,
     ) -> Result<KafkaFuture<GroupOffsets>, Error> {
@@ -136,10 +139,10 @@ mod tests {
         let h1: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
         h1.complete(offsets(5));
         let result = ListConsumerGroupOffsetsResult::new(HashMap::from([("g1".to_string(), h1.future())]));
-        let future = result.partitions_to_offset_and_metadata_for_group("g1").unwrap();
+        let future = result.partitions_to_offset_and_metadata_with_group_id("g1").unwrap();
         assert_eq!(future.get().await.unwrap(), offsets(5));
         assert!(matches!(
-            result.partitions_to_offset_and_metadata_for_group("absent"),
+            result.partitions_to_offset_and_metadata_with_group_id("absent"),
             Err(Error::LocalIllegalArgument(_))
         ));
     }

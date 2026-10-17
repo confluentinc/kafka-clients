@@ -31,18 +31,16 @@ WORKDIR /workspace
 
 # Recreate the project layout that setup.py expects: setup.py lives at
 # python/ and computes project_root = ../rust/, looking for the
-# Rust header at rust/target/include/confluent_kafka.h and the shared lib
-# under rust/target/release/.
+# Rust header at rust/target/include/ and the shared lib under
+# rust/target/release/. The extension includes confluent_kafka_bindings.h, the
+# header of `_err` twins for language bindings, not the C users' header.
 COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
-COPY rust/target/include/confluent_kafka.h /workspace/rust/target/include/confluent_kafka.h
+COPY rust/target/include/confluent_kafka_bindings.h /workspace/rust/target/include/confluent_kafka_bindings.h
 COPY python/_confluentkafka.c /workspace/python/_confluentkafka.c
 COPY python/setup.py /workspace/python/setup.py
 COPY python/pyproject.toml /workspace/python/pyproject.toml
-# The new confluent_kafka package (the servers speak it); the paused admin
-# binding stays a top-level module (it imports the package's private
-# _legacy_compat shim).
+# The confluent_kafka package (the servers speak it, admin client included).
 COPY python/confluent_kafka /workspace/python/confluent_kafka
-COPY python/admin.py /workspace/python/admin.py
 
 # Single source of truth for the wire schema: the proto crate.
 COPY rust/multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
@@ -86,10 +84,9 @@ WORKDIR /app
 # loader resolves it via the rpath setup.py embedded.
 COPY --from=builder /workspace/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 COPY --from=builder /workspace/python/_confluentkafka*.so /app/
-# The confluent_kafka package + the paused admin module. The _confluentkafka
+# The confluent_kafka package. The _confluentkafka
 # extension sits at /app next to them (top-level import).
 COPY --from=builder /workspace/python/confluent_kafka /app/confluent_kafka
-COPY --from=builder /workspace/python/admin.py /app/admin.py
 COPY --from=builder /workspace/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
 COPY --from=builder /workspace/python/consumer_service_pb2.py /app/consumer_service_pb2.py

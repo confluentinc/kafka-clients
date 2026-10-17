@@ -94,6 +94,37 @@ where
     }
 }
 
+/// Waits until `condition` returns `true`, panicking once `max_wait_ms` has
+/// elapsed with `Condition not met within timeout <max_wait_ms>. <details>`.
+///
+/// Mirrors `org.apache.kafka.test.TestUtils.waitForCondition(testCondition,
+/// maxWaitMs, conditionDetailsSupplier)`: it polls every
+/// `DEFAULT_POLL_INTERVAL_MS` ([`DEFAULT_PAUSE_MS`]) through
+/// `retryOnExceptionWithTimeout` ([`retry_on_error_with_timeout`]), and asks
+/// `details` for the message at each check, before the condition, as Java asks
+/// its supplier, so the message describes the state at the last check. Java's
+/// `condition` is a synchronous `TestCondition`; here it is an async closure so
+/// callers can `await` inside it.
+pub async fn wait_for_condition_with_timeout<F, Fut, D>(mut condition: F, max_wait_ms: u64, details: D)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+    D: Fn() -> String,
+{
+    retry_on_error_with_timeout(Duration::from_millis(max_wait_ms), || {
+        let condition_details = details();
+        let met = condition();
+        async move {
+            if met.await {
+                Ok(())
+            } else {
+                Err(format!("Condition not met within timeout {max_wait_ms}. {condition_details}"))
+            }
+        }
+    })
+    .await;
+}
+
 /// Retries `body` until it succeeds, or panics with the last failure once
 /// `timeout` has elapsed.
 ///
@@ -251,7 +282,7 @@ pub async fn create_topic_with_configs(
         Some(replication_factor),
     );
     if !configs.is_empty() {
-        new_topic = new_topic.set_configs(configs.into_iter().map(|(k, v)| (k, Some(v))).collect());
+        new_topic = new_topic.set_configs(configs);
     }
     admin
         .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())

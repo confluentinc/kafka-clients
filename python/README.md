@@ -22,6 +22,7 @@ from confluent_kafka.producer import (
     KafkaProducer, MockProducer, AsyncKafkaProducer, AsyncMockProducer,
     ProducerRecord, RecordMetadata, Callback,
 )
+from confluent_kafka.admin import Admin, AsyncAdmin, NewTopic
 from confluent_kafka.consumer import (
     KafkaConsumer, MockConsumer, AsyncKafkaConsumer, AsyncMockConsumer,
     ConsumerRebalanceListener, OffsetAndMetadata, CloseOptions,
@@ -31,6 +32,7 @@ from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
     MetricName, Metric, KafkaMetric, TimestampType, Headers,
     KafkaError,  # Java's org.apache.kafka.common.KafkaException
+    KafkaFuture, AsyncKafkaFuture,  # every future the package hands out
 )
 from confluent_kafka.common.errors import RetriableError  # typed hierarchy
 from confluent_kafka.common.serialization import (
@@ -41,7 +43,7 @@ from confluent_kafka.common.serialization import (
 # package root:
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
-    TimeoutError, NoSuchElementError, NullPointerError, Duration,
+    TimeoutError, NoSuchElementError, NullPointerError, ExecutionError, Duration,
 )
 ```
 
@@ -54,28 +56,70 @@ Each async client lives in the same module as its sync peer, `Async`-prefixed
 (`AsyncKafkaProducer`, `AsyncKafkaConsumer`). A method is `async def` on the
 async class iff Java waits in it (on the background thread, the network, or a
 rebalance listener it runs); the others (`assignment()`, `subscription()`,
-`metrics()`, `group_metadata()`, `commit_nowait()`, `wakeup()`) stay plain
-`def` on both.
+`metrics()`, `group_metadata()`, `wakeup()`) stay plain `def` on both.
+`commit_nowait()` is `async def` on the async consumers, as every method whose
+entry point has a `_cb` twin: `_nowait` means the call does not wait for the
+broker's answer, so `await consumer.commit_nowait(callback=cb)` returns once the
+commit is sent (raising the call's own failure) and `cb` gets the result later.
+
+## Futures
+
+One future type for every future the package hands out: `KafkaFuture[T]` on a
+sync client, `AsyncKafkaFuture[T]` on an async one (both in
+`confluent_kafka.common`), with Java's `KafkaFuture` methods (`get`, `get_now`,
+`then_apply`, `when_complete`, `all_of`, `cancel`, `is_done`, …).
+
+```python
+md = producer.send(record=r).get()                 # sync
+md = await (await producer.send(record=r)).get()   # async: send() and get() are awaited
+```
+
+`get()` on a failed future raises `confluent_kafka.ExecutionError`, as Java's
+`ExecutionException`, and the real error is its `__cause__`:
+
+```python
+try:
+    producer.send(record=r).get()
+except ExecutionError as e:
+    if isinstance(e.__cause__, RetriableError): ...
+```
+
+A `get(timeout=…)` that runs out raises `TimeoutError`. A future's
+`then_apply` functions and `when_complete` actions run where the completion
+runs: on the producer's completion thread or the sync admin client's pump
+thread, on the event loop for an async client.
 
 ## Producer
 
-- `send(record=…, callback=cb)` returns a future for the record's
-  `RecordMetadata`; like Java's, it cannot be cancelled. `cb(metadata,
+- `send(record=…, callback=cb)` returns a `KafkaFuture` for the record's
+  `RecordMetadata` (`.get()` waits for it); like Java's, it cannot be cancelled,
+  and a send failure reaches `get()` as `ExecutionError`. A serializer is called
+  with a `None` key or value as given and decides what null maps to. `cb(metadata,
   exception)` is Java's `Callback`: it runs on the producer's background
   completion thread (`KafkaProducer`) or on the event loop
   (`AsyncKafkaProducer`), one at a time in completion order, before the future
-  completes; a raising callback is logged. `metadata` is never `None`: on
+  completes; a raising callback fails nothing, and the client's core logs its
+  exception once, with Java's message. `metadata` is never `None`: on
   failure every field but the topic and partition is -1.
 - `close()` waits for the records sent before it; `close(timeout=…)` waits at
   most `timeout`, then fails what is left. Neither cancels a future.
 - A `send()` that returned belongs to the `flush()` or transaction call after it
   (`commit_transaction()` includes it, `abort_transaction()` discards it).
 - `MockProducer` is Java's `MockProducer`: sends complete, and callbacks run, on
-  the calling thread.
+  the calling thread, and a raising callback's exception propagates out of the
+  call that completed the record.
 
 ## Consumer
 
-- `poll(timeout=…)` runs the deserializers on the caller's thread. A failing one
+- The calls that wait take Java's `Duration` overloads as an optional keyword:
+  `commit(timeout=…)`, `position(…, timeout=…)`, `committed(…, timeout=…)`,
+  `partitions_for(…, timeout=…)`, `list_topics(timeout=…)`,
+  `offsets_for_times(…, timeout=…)`, `beginning_offsets(…, timeout=…)` and
+  `end_offsets(…, timeout=…)`; omitted or `None` calls the overload without it
+  (`default.api.timeout.ms` applies). A negative timeout raises
+  `IllegalArgumentError`.
+- `poll(timeout=…)` runs the deserializers on the caller's thread. A null key or
+  value is not deserialized: the record's field is `None`. A failing one
   raises `RecordDeserializationError` (after the records before it, if any, were
   returned) and leaves the position at the record:
   `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
@@ -97,8 +141,8 @@ rebalance listener it runs); the others (`assignment()`, `subscription()`,
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
   raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
   thread, it makes the waiting call raise `WakeupError`.
-- `close(option=CloseOptions.timeout(…))` bounds the close;
-  `close(timeout=…)` is Java's deprecated `close(Duration)` and warns.
+- `close()` closes with Java's default timeout; `close(option=CloseOptions.timeout(…))`
+  bounds it. Java's deprecated `close(Duration)` is not generated.
 - A deserializer defaults to the `key.deserializer` / `value.deserializer`
   config key, else to `bytes_deserializer()`; the consumer closes both when it
   closes.
@@ -108,6 +152,52 @@ rebalance listener it runs); the others (`assignment()`, `subscription()`,
   writes them: `c: MockConsumer[str, str] =
   MockConsumer(offset_reset_strategy="earliest")`.
 
+## Admin
+
+`Admin.create(configs={...})` returns a `KafkaAdminClient` (`AsyncAdmin.create` an
+`AsyncKafkaAdminClient`); the client is a context manager, and leaving the block
+closes it. The package is `confluent_kafka.admin`: the client, one `…Options` per
+call, one `…Result` per call, and the value types (`NewTopic`, `TopicDescription`, …).
+
+```python
+from confluent_kafka import ExecutionError
+from confluent_kafka.admin import Admin, NewTopic
+from confluent_kafka.common.errors import TopicExistsError
+
+with Admin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
+    result = admin.create_topics(
+        new_topics=[NewTopic(name="demo", num_partitions=3, replication_factor=1)])
+    try:
+        result.all().get()                  # one future per topic: result.values()
+    except ExecutionError as e:
+        if not isinstance(e.__cause__, TopicExistsError):
+            raise
+```
+
+- Every call returns its `…Result` at once, as Java's does; the Result holds one
+  `KafkaFuture` per key (or one for the whole call) and `.get()` waits. A failed key
+  raises `ExecutionError`, whose `__cause__` is the error as its class.
+- The sync client has one daemon pump thread that completes its futures, as Java's
+  admin thread does: `then_apply` functions and `when_complete` actions run there,
+  so a blocking action blocks the client's other completions.
+- On the async peer the calls are plain `def` too, and the Result holds
+  `AsyncKafkaFuture`s, whose `get()` is awaited; their actions run on the event loop:
+
+  ```python
+  from confluent_kafka.admin import AsyncAdmin, NewTopic
+
+  async with AsyncAdmin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
+      result = admin.create_topics(new_topics=[NewTopic(name="demo", num_partitions=3, replication_factor=1)])
+      await result.all().get()
+  ```
+
+- Errors are classes: `isinstance(e.__cause__, RetriableError)`.
+- `MockAdminClient` (and `AsyncMockAdminClient`) is Java's `MockAdminClient`, for tests: no
+  broker, in-memory state, `MockAdminClient.create()...build()` (`MockAdminClient()` has one `Node.no_node()` broker, as Java's, so topic calls need real brokers). Where Java's mock
+  throws "Not implemented yet", it raises `UnsupportedVersionError`.
+- Overloads whose entry point the core lacks (streams and share groups, metadata quorum, …)
+  are not generated; they are listed in the docstring of `confluent_kafka.admin.admin`.
+
 ## Errors
 
 Errors are a typed hierarchy caught by class, not a flat error with a `code()`.
@@ -116,20 +206,19 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `NullPointerError`) live at the package root.
+`NoSuchElementError`, `NullPointerError`, `ExecutionError`) live at the package root.
 
 ## Directory Structure
 
 ```
 confluent_kafka/        # The client package, one module per Java package
-admin.py                # Admin client (sync and asyncio), outside the package
 _confluentkafka.c       # Hand-written CPython extension over the C API
 tinycthread.{c,h}, c11threads_compat.h  # C11 threads shim (macOS)
 setup.py, pyproject.toml
 grpc_server.py, grpc_server_async.py, grpc_translate.py
                         # gRPC servers for the multilanguage tests
 Dockerfile.grpc, Dockerfile.grpc.async  # Their images
-examples/               # Runnable producer and consumer examples
+examples/               # Runnable producer, consumer and admin examples
 test/
 ├── unit/               # pytest unit tests, no broker needed
 ├── integration/        # Broker-backed binding tests (testcontainers; skip without Docker)

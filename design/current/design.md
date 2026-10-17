@@ -8,9 +8,8 @@ it stands. The dated, step-by-step record of how it got here lives in
 **Last verified against the tree:** 2026-09-27
 **Coverage:** Producer (including idempotence and transactions), Consumer
 (KIP-848) and AdminClient are all translated. The C FFI and the Python bindings
-cover all three: the `confluent_kafka` Python package covers the producer and
-the consumer, and the admin client has a separate, older module
-(`python/admin.py`).
+cover all three: the `confluent_kafka` Python package covers the producer, the
+consumer and the admin client (`confluent_kafka.admin`).
 
 > **Paths:** the repository has three top-level directories, `rust/`, `python/`
 > and `c/` (see [structure.md](structure.md#top-level)). Paths in this document
@@ -28,11 +27,11 @@ A Rust Kafka client translated from the Java Kafka client (Apache Kafka 4.3.1).
 It keeps the Java architecture and logical structure and adapts them to Rust
 idioms. All I/O is async and runs on Tokio.
 
-**Crate stats:** 777 source files under `src/`, ~334,000 lines.
-- Per area (files / lines): `common` 466 / 98.6k, `consumer` 82 / 81.5k,
-  `producer` 31 / 53.3k, `admin` 161 / 44.5k, `ffi` 6 / 38.6k, plus 23
+**Crate stats:** 1040 source files under `src/`, ~375,000 lines.
+- Per area (files / lines): `common` 467 / 102.5k, `consumer` 83 / 82.6k,
+  `producer` 31 / 53.7k, `admin` 162 / 45.0k, `ffi` 265 / 73.1k, plus 25
   crate-root files.
-- **4144 lib tests** (`cargo test --lib -- --list`), or 4361 with
+- **4211 lib tests** (`cargo test --lib -- --list`), or 4464 with
   `--features ffi`.
 - 109 `#[tokio::test]`s across 27 feature-gated integration files. The
   multilanguage test macros generate further cases.
@@ -444,17 +443,23 @@ enter it.*
 
 ### Consumer (`src/consumer/`)
 
-`Consumer<K, V>` is a single `#[async_trait]` trait (`src/consumer/mod.rs:133`)
-with 47 methods. The 38 async ones are the ones that block in Java. The nine
-sync ones are `assignment`, `subscription`, `paused`, `group_metadata`,
-`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`.
+`Consumer<K, V>` (`src/consumer/mod.rs`) is a trait with 47 methods. The 38
+async ones are the ones that block in Java; they return `impl Future + Send`,
+as `Producer`'s do, so static dispatch involves no boxed future. The nine sync
+ones are `assignment`, `subscription`, `paused`, `group_metadata`,
+`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`. Returning
+`impl Future` makes the trait not dyn-compatible, so the sealed
+`DynConsumer<K, V>` (`dyn_consumer.rs`) is blanket-implemented for every
+`Consumer` and boxes each future, for code that holds several implementations
+behind one type; `dyn DynConsumer<K, V>` implements `Consumer` in turn.
 
-`KafkaConsumer::new(config, key_deserializer, value_deserializer)`
-(`kafka_consumer.rs`) is the factory, and it returns
-`Box<dyn Consumer<K, V>>`. There is no free `new_consumer` function. The
+`KafkaConsumer<K, V>` (`kafka_consumer.rs`) is the public consumer type, built
+with `KafkaConsumer::new(config, key_deserializer, value_deserializer)`. As in
+Java, it holds a delegate and forwards every `Consumer` method to it. The
 implementations are:
-- `AsyncKafkaConsumer<K, V>`, which is crate-private (`mod.rs:44`) and
-  reachable only through that box.
+- `KafkaConsumer<K, V>`, whose delegate is `AsyncKafkaConsumer<K, V>`; that
+  type is crate-private (`mod.rs`) and reachable only through
+  `KafkaConsumer`.
 - `MockConsumer<K, V>`.
 
 A compile-time guard on this shape lives at
@@ -642,8 +647,9 @@ the background task.
 `KafkaFuture<T>` (`common/kafka_future.rs:64`) is the type that makes this
 work:
 - The public view is `Clone` and can be awaited more than once. Its methods
-  are `get`, `get_with_timeout`, `is_done`, `all_of`, `then_apply`,
-  `then_apply_try`, `join_map` and `join_map_results`.
+  are `get`, `get_with_timeout`, `is_done`, `all_of` and `then_apply`, whose
+  transform returns a `Result` as Java's `BaseFunction` may throw; the
+  crate-internal `join_map` combines keyed futures into a map.
 - The completable handle is the crate-internal `KafkaFutureImpl<T>`
   (`common/internals/kafka_future_impl.rs:150`), with `complete`,
   `complete_with_error`, `when_complete` and `future()`.
@@ -718,8 +724,8 @@ method for method:
   `unsupported_version("Not implemented yet")` on the returned future, not
   with a panic, since a public API must not panic (CLAUDE.md §12.1).
 
-Java ships the mock in its test jar. Here it stays public through
-`xtask/public-audience-allowlist.txt`.
+Java ships the mock in its test jar. Here it stays public through its
+`#[doc(alias = "public-in-rust")]` tag.
 
 The admin client builds its channel builder from `security.protocol` like the
 other two clients (`kafka_admin_client.rs:325`), so SSL and SASL/PLAIN work.
@@ -808,9 +814,9 @@ variant per Java exception. Java's intermediate classes survive as `is_*_error`
 predicates, and `KafkaException` is the `KafkaError` struct that every variant
 embeds.*
 
-- `Error` (`common/error.rs:864`) is the single error type that every fallible
+- `Error` (`common/error.rs:2362`) is the single error type that every fallible
   API returns.
-  - It is a `#[non_exhaustive]` flat enum with **166 variants**, one per Java
+  - It is a `#[non_exhaustive]` flat enum with **167 variants**, one per Java
     exception class. Examples: `TopicAuthorization`,
     `ProducerBufferExhausted`, `ConsumerOffsetOutOfRange`,
     `CorrelationIdMismatch`.
@@ -818,7 +824,7 @@ embeds.*
     `Local` prefix: `LocalIllegalArgument`, `LocalIllegalState`,
     `LocalConcurrentModification`, `LocalTimeout` and others.
   - `KafkaError(KafkaError)` is the variant for a bare `KafkaException`.
-- Each variant's payload lives in its own file: 146 under `common/errors/`,
+- Each variant's payload lives in its own file: 149 under `common/errors/`,
   plus `consumer/consumer_*_error.rs` and
   `producer/producer_buffer_exhausted_error.rs`, as CLAUDE.md §2 requires.
   Module-prefixed names (`Consumer…`, `Producer…`) avoid collisions with
@@ -827,11 +833,11 @@ embeds.*
   `{ error: Errors, custom_message: Option<String>, source: Option<Box<Error>> }`.
   Every payload embeds one.
 - The ambassador-delegated traits forward to that embedded base: `ErrorCode`
-  (`error.rs:319`), `ErrorName` (`:345`), `ErrorMessage` (`:510`) and
-  `ErrorSource` (`:532`).
-- The crate-private `ErrorHierarchy` trait (`error.rs:161`) encodes Java's
+  (`error.rs:1281`), `ErrorName` (`:1307`), `ErrorMessage` (`:1506`) and
+  `ErrorSource` (`:1528`).
+- The crate-private `ErrorHierarchy` trait (`error.rs:166`) encodes Java's
   `extends` chain. Each intermediate Java class is a predicate on `Error`,
-  with public forms from `error.rs:1711`:
+  with public forms from `error.rs:3234`:
   - `is_kafka_error`, `is_api_error`, `is_retriable_error`,
     `is_refresh_retriable_error`, `is_timeout_error`
   - `is_invalid_metadata_error`, `is_invalid_configuration_error`,
@@ -940,7 +946,7 @@ Cargo features: `integration-tests`, `multilanguage-tests`, `ffi`.
 
 ## Test Infrastructure
 
-### Unit Tests (4144 lib tests; 4361 with `ffi`)
+### Unit Tests (4211 lib tests; 4464 with `ffi`)
 
 - Message serialization/deserialization round-trips
 - Protocol encoding (varint, flexible versions, tagged fields)
@@ -996,7 +1002,8 @@ its own.
 Rust, C and Python sides. For Rust only, use `make verify-rust`.
 
 The xtask subcommands are `format`, `format-check`, `check-generated`,
-`generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`,
+`generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`
+(optionally one rule name and `--no-baseline`), `ffi-baseline`,
 `doc-hygiene`, `lint-fix`, `coverage`, `coverage-lcov`, `coverage-all`,
 `test-multilanguage` and `producer-perf-test`.
 
@@ -1009,85 +1016,204 @@ outside the Rust client library proper.
 
 ![Bindings layering](img/bindings-layering.svg)
 
-*Takeaway: every blocking operation crosses the C ABI twice over: once as a
-`block_on` sync entry point and once as an `*_async` entry point completed on a
-dispatcher thread. Both bindings are thin layers over that pair.*
+*Takeaway: the C API mirrors the Rust surface one-to-one under CLAUDE.md §4.
+A Rust `async fn` crosses twice (a blocking entry point and a `_cb` twin whose
+completion is queued on the client's callbacks vector); a sync `fn` crosses
+once. No Rust thread ever runs a user callback. Both bindings are thin layers
+over that surface.*
 
 ### C FFI (`src/ffi/`, feature `ffi`)
 
 The module is gated on the `ffi` feature, which also turns on the `cbindgen`
-build-dependency that emits the C header. Only crate types that are public
-have bindings (CLAUDE.md §4). It has five files. The symbol counts and
-line-number citations in this section are as of 2026-10-05.
+build-dependency that emits `rust/target/include/confluent_kafka.h` (33.9K
+lines). Only crate types that are public have bindings (CLAUDE.md §4). The
+layout mirrors the crate: one file per Java class under `src/ffi/common/`,
+`producer/`, `consumer/` and `admin/` (269 files, 2354 exported symbols),
+plus the package-less helpers:
 
-| File | Exported symbols | `*_async` |
-|------|-----------------:|----------:|
-| `common.rs` (the `kafka_common_Error_t` surface, error predicates, the shared callback machinery) | 58 | 0 |
-| `producer.rs` | 65 | 13 |
-| `consumer.rs` | 180 | 30 |
-| `consumer_handle.rs` | 23 | 1 |
-| `admin.rs` | 490 | 47 |
+| File / directory | Exported symbols | What it holds |
+|------------------|-----------------:|---------------|
+| `common.rs`, `common/` (106 files) | 846 | `kafka_common_Error_t` (factories, accessors, payload views), `TopicPartition`, `Node`, `Uuid`, `Cluster`, ACL / quota / resource / config types, metrics, serialization, enum singletons |
+| `error_predicates.rs` (generated) | 172 | `kafka_common_Error_is_<class>_error`, `kafka_common_Error_e` |
+| `util.rs` | 14 | `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`, `kafka_string_destroy` |
+| `kafka_future.rs` | 12 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
+| `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
+| `producer/` (9 files) | 132 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
+| `consumer/` (16 files) | 306 | `kafka_consumer_Consumer_t` interface, `KafkaConsumer_t` / `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
+| `admin/` (132 files; `options/` 46, `rpc.rs` 96 invokers) | 857 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
 
-Every operation that can block is exposed twice:
-- The sync form drives the async API with `block_on` on a runtime the handle
-  owns. It returns `*mut kafka_common_Error_t` (`common.rs:77`), with null
-  meaning success.
-- The `*_async` form takes a `*_callback_t` plus a `void *user_data` and
-  spawns the future on the same runtime. It delivers the result through a
-  dispatcher thread, using `CompletionJob` (`src/ffi/common.rs:2011`),
-  `spawn_dispatcher` (`:2020`) and `enqueue_or_run_inline` (`:2038`).
+The conventions, each enforced by `cargo xtask lint-custom check-ffi-translation`
+(`xtask/src/lint_custom/ffi_translation.rs`, which derives the expected C
+shape of every public Rust item from its signature and compares it with the
+`#[unsafe(no_mangle)]` exports; `xtask/ffi-baseline.txt` holds the five
+by-design gaps, all closure parameters whose C shape the lint cannot derive):
 
-`kafka_consumer_Consumer_subscribe` / `_subscribe_async`
-(`src/ffi/consumer.rs:3595`, `:3615`) are the canonical pair.
+- **Error slot.** A fallible function returns its value (or `void`) and takes
+  a trailing `kafka_common_Error_t **out_err`: not NULL, `*out_err` NULL on
+  entry (GLib's `GError` rule, unchecked like every precondition). On failure
+  it stores an owned error there and returns its type's failure value (NULL,
+  a NULL `kafka_Bytes_t`, 0 for `int8_t`, -1 for the other integers); the
+  caller tests `*out_err`, never the value, since NULL and -1 can be answers.
+  The value and the error come from one helper, `deliver_value` / `deliver_unit` in
+  `src/ffi/common.rs`, over the `FailValue` trait, so a body's failure value
+  and a panic's cannot diverge. The interface method pointers the caller
+  implements (serializer, deserializer, `Headers` add/remove,
+  `KafkaFuture_BaseFunction_apply`) take the same shape. Errors are
+  classified with the predicates, never by code comparison; payload-carrying
+  errors expose a view type such as `kafka_common_ResourceNotFoundError_t`.
+- **One entry point per Rust method, named like the Rust method**
+  (`subscribe_with_topics`, `describe_topics_with_topic_names_options`,
+  `AdminClient_create`); `*OptionsBuilder` types get `_new` / `set_*` /
+  `build`. A Rust `async fn` additionally gets a `_cb` twin taking
+  `(<fn>_cb_t cb, void *opaque)` whose `cb(value, error, opaque)` is queued on
+  the client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
+  pumping thread; `<Client>__set_callbacks_notify(fn, opaque)` fires once per
+  empty→non-empty transition and may only schedule. There are 80 `_cb` twins
+  and no `_async` functions; Java's `commitAsync` keeps its name.
+- **Fixed-width scalars only**: `int8_t` for `boolean` / `byte`, no `bool`,
+  `usize` or unsigned type in any signature, byte buffers as `kafka_Bytes_t`.
+- **Enums** cross as borrowed per-value singletons (`kafka_common_IsolationLevel_read_committed()`),
+  with a `<Enum>_e` C enum and `<Enum>__enum(p)` for `switch`; data-carrying
+  variants (`kafka_admin_OffsetSpec_for_timestamp`) are owned.
+- **Traits** C implements are interfaces: `<Interface>_new(void *self, <method>_fn_t ...)`
+  with the caller owning `self`; a method that is `async fn` in Rust returns
+  `void`, takes an `int64_t callback_id` and reports through
+  `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, result, error)`:
+  `error` is `NULL` on success, otherwise owned and taken over (`result` is
+  then ignored and stays the caller's); on success `result` is the method's
+  return value, taken over as its `_fn_t` documents, `NULL` for a void method
+  (every method the consumer invokes). Each consumer keeps its own ids, so
+  `consumer` is the one that invoked the method, except for an id from a
+  standalone invoker (`ConsumerRebalanceListener_on_partitions_*`,
+  `OffsetCommitCallback_on_complete*`), which is routed by the id alone.
+  The producer's delivery callback follows the same protocol, although
+  `onCompletion` is not `async` in Rust: `kafka_producer_Callback_on_completion_fn_t`
+  takes a trailing `callback_id` and reports through
+  `kafka_producer_Producer__set_callback_result(producer, callback_id, NULL, error)`,
+  inline or later from any thread. The record's C future completes with the
+  record's own outcome, and `flush`, `commit_transaction`, `abort_transaction`
+  and `close` return, only once the callbacks of the records they cover
+  reported, as Java fires the callbacks before `produceFuture.done()` and
+  joins its I/O thread on close; a blocking form runs the producer's callback
+  queue on the waiting thread meanwhile. A reported error is Java's throwing
+  `onCompletion`: logged, failing nothing. `close`'s timeout bounds only the
+  Rust close, the report wait after it is unbounded like Java's final
+  `ioThread.join()`; `_destroy` resolves any report still missing, so no
+  future or waiter hangs. Inside a delivery callback `flush` fails with Java's
+  error and `close` does not wait (Java's self-join guard). An
+  unknown or repeated id is ignored and its error freed. A binding whose callback
+  raised one of its own language's errors reports
+  `kafka_common_Error_local_callback(message, opaque)`: `LocalCallbackError`
+  (no Java class) sits outside the Kafka hierarchy, so the client wraps it as
+  Java wraps a listener's foreign `Throwable` and it comes back as the cause,
+  where `kafka_common_LocalCallbackError_opaque` returns the pointer as given.
+  Rust never dereferences, frees or retains it; the Python binding passes the
+  exception object, keeps it in a per-operation stash, and swaps it back in
+  (the same instance for a `KafkaError` or `KeyboardInterrupt`, Java's
+  unwrapped `KafkaException`; otherwise as the wrapper's `__cause__`). A Rust class implementing a
+  trait exposes a borrowed `<Class>__as_<Interface>()` view (48 of them: the
+  three mocks, `KafkaProducer`, the built-in serdes and partitioner, the
+  metrics stats).
+- **Generics are `void *`**: K/V, `KafkaFuture<T>` values, list and map
+  elements. With a NULL serializer/deserializer the `void *` is a
+  `kafka_Bytes_t *`, written straight into the batch (CLAUDE.md §14) or
+  borrowed from the fetch buffer.
+- **Collections** are the package-less `kafka_List_t` / `kafka_Map_t` of
+  `void *`: inputs hold borrowed elements; outputs are owned, except the
+  borrowed view lists, and are sorted deterministically.
+- **Panics never cross the boundary.** Every export carries `#[ffi_guard]`
+  (proc-macro crate `rust/ffi-macros`), which wraps the body in
+  `catch_unwind`; `ffi::tests::test_every_exported_function_is_guarded` fails on
+  an unguarded export. A fallible function stores the panic in `*out_err` as a
+  `LOCAL_ILLEGAL_STATE` error whose message begins "Rust panic caught at the FFI
+  boundary in <function>" and returns its failure value, as on any other
+  failure (`fallback` is a compile error there); any other
+  function returns its return type's failure value (NULL, 0 or -1, NaN,
+  `UNKNOWN_SERVER_ERROR`, a NULL `kafka_Bytes_t`), or, where that value is a
+  valid answer in the Java domain, the explicit `fallback` its documentation
+  names (`ffi::tests::test_explicit_fallbacks` pins each one); a `void` function
+  only logs. A `_cb` function delivers a panic exactly once through its
+  completion, whether it happened on the calling thread or on the task running
+  the operation; the three completions without an error parameter
+  (`Admin_close_cb`, `Admin_close_with_timeout_cb`,
+  `Callback_on_completion_cb`) fire with `opaque` alone. A task
+  owning a callback runs its body under `catch_task_panic`, so a panic inside
+  it still completes the callback once, and is spawned through
+  `spawn_callback_task`, which aborts the process if Tokio itself panics while
+  spawning it: unwinding there would let the guard fire a callback the task may
+  already have queued. The full contract opens the C header
+  (`rust/cbindgen.toml` `header`) and the `src/ffi/mod.rs` module docs. A
+  panic is a library bug: the handle it hit should be destroyed, and its
+  `_destroy` still frees it and runs its pending callbacks once each.
+- **Two headers: `confluent_kafka.h` for C, `confluent_kafka_bindings.h` for
+  language bindings.** A failure value that is also a valid answer is
+  acceptable to a C programmer, but a binding must raise whenever Rust
+  panicked, without turning every Java precondition throw into a `Result`. So
+  `#[ffi_guard]` also emits a twin `f_err` for every export `f` that is neither
+  fallible nor a `_cb`, and `rust/build.rs` writes the second header from the
+  same cbindgen IR, declaring each such function only as its twin.
+  `confluent_kafka.h` declares no twin:
 
-Error classification crosses the boundary as predicates. C cannot see enum
-variants, so every `is_*_error` predicate on `Error` has a
-`kafka_common_Error_is_*` counterpart. Errors with extra payload expose an
-opaque accessor type, such as `kafka_common_ResourceNotFoundError_t`.
+  | `f` in `confluent_kafka.h` | in `confluent_kafka_bindings.h` |
+  |---|---|
+  | fallible, `T f(args, kafka_common_Error_t **out_err)` | `f` itself, no twin |
+  | a `_cb` function | `f` itself, no twin: the completion is the channel for every outcome, a caught panic included |
+  | any other `T f(args)`, `void` included | only `T f_err(args, kafka_common_Error_t **out_err)`: on a caught panic it stores the error in `*out_err` and returns `f`'s panic value (NULL for an error factory, whose value is itself an error), otherwise what `f` returns |
 
-The consumer handle keeps its `ConsumerKind` in an `UnsafeCell` behind a
-non-reentrant single-owner guard, an `AtomicU64` owner id. A second thread
-that enters while another holds the guard gets a `ConcurrentModification`
-error rather than being serialized. That is Java's
-`KafkaConsumer.acquire()/release()` contract. `wakeup()` deliberately bypasses
-the guard, because it has to work *while* another thread holds it
-(`src/ffi/consumer.rs:167-168`, `:577`).
+  A twin has `f`'s documentation and preconditions, and `out_err` the contract
+  above; a caught panic is `LOCAL_ILLEGAL_STATE`, its message naming the twin,
+  and `fallback` does not apply. A program includes one header, never both.
+  Function-pointer typedefs are the same in both, since the caller implements
+  them. `ffi::tests::test_bindings_header_declares_the_twin_of_every_export`
+  and `test_fallible_declarations_end_in_out_err` pin both headers against the
+  exports, `c/tests/test_bindings_header.c` compiles against the bindings
+  header alone, and `python/tools/ffi_twins.py` fails the Python extension on
+  any C API name the bindings header does not declare.
+- **Every `unsafe` block states why it is sound.** Clippy's
+  `undocumented_unsafe_blocks` and `unnecessary_safety_comment` are denied
+  (`rust/Cargo.toml`), so each block and `unsafe impl` carries a `// SAFETY:`
+  comment naming the invariant and where it is established, usually a
+  precondition in the export's `# Safety` rustdoc, which is also its C header
+  text. A borrowed handle (`kafka_common_Error_source`, payload and
+  struct-field accessors, view lists) lives as long as its owner and is never
+  passed to its own `_destroy`.
 
-`consumer_handle.rs` exposes the reentrant-safe `ConsumerHandle` operations to
-C: `assign`, `seek`, `pause`, `resume`, `position`, `committed`, the offset
-queries and `commit_*`. So a C rebalance listener can call back into the
-consumer.
+Values delivered by a `kafka_common_KafkaFuture_t` are borrowed from the
+future and live until `kafka_common_KafkaFuture_destroy`; Java's `Future.get()`
+may be called any number of times, and a `void *` cannot be cloned per call
+(`src/ffi/kafka_future.rs` module docs).
 
-A rebalance listener or commit callback can also run on the caller's thread
-rather than the dispatcher thread (`consumer-threading.md` §31):
-- The binding registers a notify with
-  `kafka_consumer_Consumer_set_pending_callback_notify`
-  (`src/ffi/consumer.rs:1895`) and subscribes through the
-  `subscribe_*_caller_thread_listener_async` forms (`:1928`, `:1962`).
-- The core then queues each callback and fires the notify.
-- The waiting call takes the entry with `next_pending_callback` (`:2002`), runs
-  it on its own thread and reports the result with `ack_pending_callback`
-  (`:2063`).
+The consumer handle keeps its `ConsumerKind` behind a non-reentrant
+single-owner guard: a second thread that enters while another holds it gets
+`LocalConcurrentModification` ("KafkaConsumer is not safe for multi-threaded
+access.") rather than being serialized, Java's `acquire()/release()` contract;
+`wakeup()` bypasses the guard. The state reads (`assignment`, `subscription`,
+`paused`, `current_lag`, `group_metadata`) take it too and report a refusal
+through their error result, as Java's `acquireAndEnsureOpen()` throws;
+`metrics()` reads through the handle without it, as Java's `metrics()` takes no
+`acquire()`. `ConsumerHandle_t` is the reentrant-safe path a
+C rebalance listener uses to call back into the consumer while `poll` holds
+the guard (consumer-threading.md §31/§41).
 
-A caller that registers no notify keeps the dispatcher-thread behaviour.
+The producer keeps a submission outbox for `send_cb` /
+`send_with_callback_cb`: `flush`, `close` and every transaction-control
+operation, blocking or `_cb`, drain it first (`producer-transactions.md` §13),
+so a send that has returned is always included in the next commit, abort or
+flush. A timed `close(Duration)` bounds that drain by its timeout and closes
+with the time left, as Java's timeout bounds the whole call; a record the drain
+did not reach then fails as a send after close.
 
-The producer handle also has an async submission outbox for
-`send_async` / `send_batch_async`:
-- `SubmitRequest::{Send, Barrier}` (`producer.rs:771-782`).
-- `drain_submitted_sends_await` (`:3383`) pushes a FIFO barrier.
-- `flush`, `close` and every transaction-control operation drain the outbox
-  first, through `with_txn_control` (`:3447`) and `with_txn_control_async`
-  (`:3868`). So a send that has returned is always included in the next
-  commit, abort or flush (`producer-transactions.md` §13).
+The admin surface is Java-faithful (admin-client.md §1, §5): each RPC is a
+sync call returning a `<Rpc>Result_t` whose `_values()` map holds one
+`kafka_common_KafkaFuture_t` per key, with `_all()` and the typed refinements
+(`CreateTopicsResult_num_partitions(topic)`); only `close` has `_cb` twins.
+`AdminClient_create(config, &out)` returns an owned `kafka_admin_Admin_t`;
+`MockAdminClient_create` returns a `MockAdminClient_Builder_t` (Java's static
+`create()` returning a `Builder`), whose `_build` returns a class handle viewed
+through `__as_Admin`, as do the `MockAdminClient_new` constructors.
 
-The admin handle, `kafka_admin_AdminClient_t` (`src/ffi/admin.rs:278`), wraps
-either a `KafkaAdminClient` or a `MockAdminClient`. It exposes each RPC as a
-sync call plus an `*_async` variant, and copies result structs out through
-accessor functions.
-
-> The module docs at `src/ffi/consumer.rs:37` cite
-> `design/current/consumer-ffi-plan.md`. That plan has moved under
-> `design/history/`, so the path in the code is stale.
+The first client created from C initializes the default `RUST_LOG` logger
+(`src/ffi/common.rs`, `init_default_logger`).
 
 ### Python client (`python/`)
 
@@ -1101,26 +1227,147 @@ It mirrors Java's packages with `clients` dropped (`confluent_kafka.producer`,
 per Java class. Each family has a non-instantiable base, a `Kafka*` client, a
 `Mock*`, and an `Async*` peer of each.
 
-`MockProducer` is plain Python translated from Java's mock. The other clients
-call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+`MockProducer` and `MockConsumer` (and their async peers) are plain Python
+translated from Java's mocks, as CLAUDE.md's "Implementation over the FFI"
+requires (`producer/_mock_core.py`, `consumer/_mock_core.py`); the FFI's `Mock*`
+entry points serve the C binding. The other clients call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
 marshalling layer that links the `confluent_kafka` cdylib
 (`python/setup.py:37-40`). `setup.py` resolves the library under
 `../rust/target/`, and `CONFLUENT_KAFKA_LIB_DIR` overrides that. The error
 classes and the config key-type table (`_config_types.py`) are generated from
 the Java sources by `cargo xtask generate-error-codes`.
 
-A blocking method submits the entry point's `_async` form and waits on the
-calling thread or event loop, never inside a native `block_on`. So Ctrl+C and
-task cancellation stay deliverable: they call `wakeup()`, let the call end and
-re-raise. While it waits, a consumer call drains the caller-thread callback
-queue above and runs the listener or commit callback itself (`_run_sync` /
-`_run_async`, `python/confluent_kafka/consumer/_base.py:686-778`). With a
-listener registered, `commit_nowait()` runs its C call on a per-consumer helper
-thread, because `commit_async` has no `_async` form.
+Each module offers a synchronous and an asyncio family. Both submit every
+blocking-in-Java operation through its `_cb` twin, never a blocking native
+call, and differ only in where the queued callbacks run, that is, who calls
+`<Client>__execute_callbacks`. `<Client>__set_callbacks_notify` only signals or
+schedules; it never runs a callback.
+- **Sync producer.** Each waiting call (`flush`, `partitions_for`, the
+  transaction operations, `close`) waits in Python in 100 ms slices, so
+  `Ctrl-C` is seen. On `KeyboardInterrupt` the operation is let finish, then
+  the interrupt is re-raised and the producer stays usable; a `close()` is
+  forced instead. The completions, meaning the `send()` callbacks and the
+  waiting calls' results, run on one background completion thread per
+  producer. That thread loops on the extension's `Producer_poll`, which waits
+  on the condvar the notify hook signals and then runs
+  `Producer__execute_callbacks`. So `send()` callbacks run one at a time, in
+  completion order, and never on the caller's thread. A callback reports when
+  it returns (its exception, if it raised, logged as Java logs it); an
+  `async def` callback is closed and a `TypeError` logged.
+- **Sync consumer.** A waiting call (`poll`, `commit`, `committed`, `close`,
+  ...) submits the `_cb` form and waits in 100 ms slices on a
+  `threading.Event` the notify hook sets. Between slices it drains
+  `Consumer__execute_callbacks` on its own thread. So the completion, the
+  `ConsumerRebalanceListener` methods and the `OffsetCommitCallback` run on
+  the waiting thread, inside the call that delivers them, and the rebalance
+  does not advance before the listener returns (`consumer-threading.md`
+  §31). On `Ctrl-C` the consumer calls `wakeup()` once, lets the call end,
+  and re-raises `KeyboardInterrupt`.
+- **Async families.** The notify hook schedules a drain on the event loop
+  with `loop.call_soon_threadsafe`, so every completion and every queued
+  interface call runs on the loop thread.
+  - The producer and the admin client are bound to one event loop: the one
+    running when they are constructed, or else the loop of their first async
+    call. A call from another loop raises `RuntimeError` (`"<Class> is bound to
+    a different event loop"`), as asyncio's own primitives do.
+  - The producer pumps on its loop, and once on entry to each async method.
+    Once that loop has closed, the pump runs on one helper thread instead
+    (one at a time), so a completion left for it is dropped promptly, reported
+    at once. A `send()` callback runs on the producer's loop and reports through the extension's
+    `Producer__set_callback_result(h, callback_id, error)` after it returned;
+    an `async def` callback is awaited there first, and later completions for
+    that loop wait behind it, so callbacks stay one at a time in completion
+    order. Inside its own `async def` callback `flush()` raises Java's error,
+    `close()` does not wait, and a transaction-end call is bounded by
+    `max.block.ms`.
+  - An awaiting consumer call drains on its own loop. A coroutine listener
+    method is awaited there and reports through the extension's
+    `Consumer__set_callback_result(h, callback_id, error)`, which passes a
+    `NULL` result to the C function, the listener methods being void.
+- **Futures and the admin client.** Every future the package hands out is a
+  `KafkaFuture` (sync clients) or `AsyncKafkaFuture` (async clients) in
+  `confluent_kafka.common`: over a core `kafka_common_KafkaFuture_t` through
+  the extension's future object (`is_done`, `get_cb`), or over Python state
+  for the mocks and the dependants (`then_apply`, `when_complete`, `all_of`).
+  `get()` only waits, in short slices, and raises `ExecutionError` with the
+  failure as its `__cause__`. An admin RPC returns its `*Result` at once, as
+  Java's; the Result's per-key futures are the core's, completed through
+  `get_cb` when the response arrives. The sync `KafkaAdminClient` has one
+  daemon pump thread that drains `Admin__execute_callbacks` when the client's
+  notify hook fires, so `then_apply` functions and `when_complete` actions run
+  there; `AsyncKafkaAdminClient` drains on its event loop.
+- **One drainer per client.** `<Client>__execute_callbacks` keeps the GIL from
+  the first callback of a drain to the last, rather than releasing it after
+  each callback and taking it again for the next. A second thread entering
+  the drain would then block inside the native call holding the GIL while the
+  first waits for the GIL, so each client has exactly one drainer: the sync
+  producer's completion thread, the sync admin client's pump thread, the
+  consumer's calling thread (a consumer refuses a concurrent call), or the
+  async client's loop. A hop onto the loop from a callback already running on
+  it uses `loop.call_soon`, since `call_soon_threadsafe`'s self-pipe write
+  would release the GIL mid-drain.
 
-`admin.py` is the older admin binding. It is paused and outside the
-conventions, and keeps its flat `KafkaError` and positional value types through
-the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+The extension starts no thread. The Python-side threads are:
+- the sync producer's completion thread;
+- the sync admin client's pump thread;
+- the async producer's and async admin client's helper pump, once their loop
+  has closed.
+
+Blocking C entry points are used only where the call cannot park: the
+re-entrant `ConsumerHandle` inside a listener.
+
+`begin_transaction` does not wait in Java, but its C entry point first drains
+the records already sent, like every transaction-control operation
+(`producer-transactions.md` §13), so it has a `_cb` twin and both Python
+families wait on it like the other control operations.
+
+Deviations recorded in the package's module docstrings:
+- Backpressure is Java's, not master's `Producer_drain` / on-space-available
+  machinery: `send()` returns only once its record is with the producer, as
+  Java's returns once `doSend` appended it. The record is queued on the
+  submission task, which hands records to the producer one at a time, in
+  order; there the metadata wait and the wait for `buffer.memory` space are
+  bounded by `max.block.ms`, as in Java. `send()` waits on two futures: an
+  internal one, which the `send_with_callback_cb` completion resolves at the
+  handover with the record's future or with the error Java's `doSend`
+  rethrows (which `send()` raises), and the record's own future, which
+  `send()` returns and the delivery callback completes. So the submission
+  queue holds at most one record per sending thread or task. The one
+  deviation: `submission_loop` waits for one record at a time, so the k-th
+  caller waiting behind a full buffer can wait up to k × `max.block.ms` before
+  its record fails, where each Java `send()` waits at most `max.block.ms`,
+  whatever the number of sending threads.
+- A call from inside a `send()` callback cannot have its completion run,
+  since that runs on the thread the callback blocks. There, `send()` does not
+  wait for its record to reach the producer. `init_transactions`,
+  `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`,
+  `abort_transaction` and `partitions_for` raise `TimeoutError` after
+  `max.block.ms`; the operation itself may still complete. For
+  `begin_transaction` that can leave the core in a transaction although the
+  call raised: a retry raises Java's `IllegalStateError` (the transaction is
+  already in progress). No binding-side fix: a timed-out wait cannot tell
+  whether the core began, and not waiting would drop `begin_transaction`'s
+  own errors. What a `send()` from a callback would raise goes to its
+  callback and future instead.
+- Inside a consumer callback, a listener re-enters the consumer through the
+  guard-free `ConsumerHandle`, since the outer call holds the single-owner
+  guard. Two calls raise `ConcurrentModificationError` at once, because their
+  completion would be queued behind the running callback, where a nested drain
+  cannot reach it:
+  - an operation the handle lacks (`poll`, `subscribe`, `close`, ...);
+  - a `commit_nowait()` with a callback.
+
+  A coroutine listener on the sync `Consumer` raises `TypeError`.
+- Fetched key, value and header bytes are `memoryview`s over the fetch
+  batch. The extension's C-mock batch path still copies them, because its
+  pinned buffers die with the consumer.
+- A `CorrelationIdMismatchError` raised by the core reads -1 for both
+  correlation ids (`_errors.py` `_CORE_DEFAULTS`): Java's class sits in
+  `common.requests`, so the Rust payload is crate-private and the C API has no
+  accessor for them (CLAUDE.md §4).
+
+The admin binding is `confluent_kafka.admin`, generated from the same
+conventions over the same FFI. `grpc_server.py`,
 `grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
 multilanguage tests, and `soak/` holds the long-running soak client.
 

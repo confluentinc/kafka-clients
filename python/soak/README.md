@@ -478,8 +478,9 @@ Five traps, all encoded in the code rather than left to be rediscovered:
 3. **All config values must be `str`** — an int raises `TypeError` in the C
    extension. `stringify_config()` coerces.
 4. **`consumer.poll(timeout)` takes seconds** (float), not milliseconds.
-5. **`record.value` is a zero-copy `memoryview`** that dies with its batch.
-   `SoakRecord.deserialize()` copies with `bytes(...)` before parsing.
+5. **`record.value` is `bytes`** (`None` for a null value), copied out of the
+   fetch batch by the binding, so it outlives the `ConsumerRecords` batch.
+   `SoakRecord.deserialize()` still accepts any bytes-like object.
 
 ## Payload format (headers are not supported on produce)
 
@@ -507,25 +508,23 @@ client repeatedly and a restart must not discard the soak's history.
 `--recreate-topic` deletes and re-creates it, for a deliberate fresh start
 only.
 
-Topic creation goes through **this repo's Rust-backed** `AdminClient`
-(`python/admin.py`) — the soak now drives the Rust client for admin,
+Topic creation goes through **this repo's Rust-backed** `KafkaAdminClient`
+(`confluent_kafka.admin`) — the soak now drives the Rust client for admin,
 produce and consume alike. The admin client takes the **same Java-style config
 namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
 `sasl.mechanism`, `sasl.jaas.config`, `ssl.*`), so the soak passes its admin
 config through verbatim: no `sasl.jaas.config` → `sasl.username`/`sasl.password`
 translation, and no `confluent-kafka` dependency. The security-protocol support
 on the client makes this work against SASL/SSL clusters (Confluent Cloud). Each
-multi-key RPC returns one **`concurrent.futures.Future` per key**, matching
-Java's `KafkaFuture` and librdkafka's dict-of-futures: `create_topics()` yields
-`{name: Future}` (each future resolves to a `TopicMetadataAndConfig`) and
-`delete_topics()` yields `{name: Future}` (each future resolves to `None`), and
-the whole call still raises a `KafkaError` on a call-level failure. Calling
-`fut.result()` returns that key's success value or **raises** the key's
-`KafkaError` (whose numeric `.code` is the wire error code) — so the soak
-iterates `for _t, fut in ....items(): try: fut.result() except KafkaError: ...`,
-classifying each key independently (see `_classify` in `soak_metrics.py`, which
-tolerates the benign `TOPIC_ALREADY_EXISTS` / `UNKNOWN_TOPIC_OR_PARTITION`
-codes and treats the rest as fatal/transient).
+multi-key RPC returns at once a result holding one `KafkaFuture` per key
+(Java's `KafkaFuture`): `create_topics(...).values()` is `{name: KafkaFuture}`
+and `delete_topics(...).topic_name_values()` likewise. `get()` waits for a key
+and, when it failed, raises `ExecutionError` whose `__cause__` is the typed error
+(its class's FFI id is the wire error code); a call-level failure raises from the
+call itself. So the soak iterates
+`for _t, future in ....items(): try: future.get() except Exception as e: classify(failure_of(e))`.
+The producer's `send()` future is the same class; the soak reads its outcome in a
+`when_complete` action.
 
 ## Threading
 

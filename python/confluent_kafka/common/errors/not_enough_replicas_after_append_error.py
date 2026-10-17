@@ -41,7 +41,7 @@ class NotEnoughReplicasAfterAppendError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 20  # kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS_AFTER_APPEND
+    _ffi_id: ClassVar[int] = 20  # kafka_common_Error_NOT_ENOUGH_REPLICAS_AFTER_APPEND
 
     def __init__(
         self,

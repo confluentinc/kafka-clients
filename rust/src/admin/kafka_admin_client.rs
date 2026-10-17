@@ -99,7 +99,7 @@ use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::{
-    SystemTime, Time, Utils,
+    SystemTime, Time,
     internals::{ExponentialBackoff, LogContext},
 };
 use crate::common::{
@@ -721,7 +721,7 @@ impl KafkaAdminClient {
 
         let nodes_handle: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller_handle: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
-        let cluster_id_handle: KafkaFutureImpl<Option<String>> = KafkaFutureImpl::new();
+        let cluster_id_handle: KafkaFutureImpl<String> = KafkaFutureImpl::new();
         let authorized_ops_handle: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
 
         let public = DescribeClusterResult::new(
@@ -784,9 +784,7 @@ impl KafkaAdminClient {
                     .filter(|c| c.id() != MetadataResponse::NO_CONTROLLER_ID)
                     .cloned();
                 resp_controller.complete(controller);
-                // `MetadataResponseData.ClusterId` is nullable; Java completes
-                // `clusterIdFuture` with `response.clusterId()`, null included.
-                resp_cluster_id.complete(metadata_response.cluster_id().map(str::to_string));
+                resp_cluster_id.complete(metadata_response.cluster_id().unwrap_or_default().to_string());
                 resp_authorized.complete(AdminUtils::valid_acl_operations(
                     metadata_response.cluster_authorized_operations(),
                 ));
@@ -810,7 +808,7 @@ impl KafkaAdminClient {
                 resp_nodes.complete(nodes.values().cloned().collect());
                 // Controller is None if the controller id is NO_CONTROLLER_ID.
                 resp_controller.complete(nodes.get(&controller_id).cloned());
-                resp_cluster_id.complete(Some(describe_response.data().cluster_id.clone()));
+                resp_cluster_id.complete(describe_response.data().cluster_id.clone());
                 resp_authorized.complete(AdminUtils::valid_acl_operations(
                     describe_response.data().cluster_authorized_operations,
                 ));
@@ -1064,7 +1062,7 @@ impl KafkaAdminClient {
                 }
             }
             let mut wire_resource = AlterConfigsResource::new();
-            wire_resource.set_resource_type(resource.resource_type().id());
+            wire_resource.set_resource_type(resource.r#type().id());
             wire_resource.set_resource_name(resource.name().to_string());
             wire_resource.set_configs(alterable_configs);
             wire_resources.push(wire_resource);
@@ -2634,44 +2632,19 @@ fn get_list_partition_reassignments_call(
 /// Returns the broker id pertaining to the given resource, or `None` if the
 /// resource is not associated with a particular broker.
 ///
-/// Mirrors `KafkaAdminClient.nodeFor`, including its
-/// `Integer.valueOf(resource.name())`: a BROKER / BROKER_LOGGER name that is
-/// not a decimal `int` is Java's `NumberFormatException`, returned as an
-/// error with Java's message (see [`parse_java_int`]).
+/// Mirrors `KafkaAdminClient.nodeFor`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
-fn node_for(resource: &ConfigResource) -> Result<Option<i32>, Error> {
-    if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
-        || resource.resource_type() == config_resource::Type::BrokerLogger
+fn node_for(resource: &ConfigResource) -> Option<i32> {
+    if (resource.r#type() == config_resource::Type::Broker && !resource.is_default())
+        || resource.r#type() == config_resource::Type::BrokerLogger
     {
-        parse_java_int(resource.name()).map(Some)
+        // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
+        // would throw. Here a parse failure degrades to "any broker" rather
+        // than panicking on a recoverable path (CLAUDE.md §12).
+        resource.name().parse::<i32>().ok()
     } else {
-        Ok(None)
+        None
     }
-}
-
-/// Java's `Integer.parseInt(s)` / `Integer.valueOf(s)`: an optional `+` / `-`
-/// followed by decimal digits, within `int` range. Anything else is Java's
-/// `NumberFormatException` — an `IllegalArgumentException` subclass, so
-/// [`Error::LocalIllegalArgument`] — with its message, `For input string:
-/// "<s>"`. (Java also accepts non-ASCII Unicode decimal digits; this does not.)
-pub(crate) fn parse_java_int(s: &str) -> Result<i32, Error> {
-    s.parse::<i32>()
-        .map_err(|_| Error::local_illegal_argument(format!("For input string: \"{s}\"")))
-}
-
-/// One already-failed future per resource, for a `describeConfigs` /
-/// `incrementalAlterConfigs` call Java would have aborted with a throw.
-fn failed_config_futures<'a, T: Clone + Send + Sync + 'static>(
-    resources: impl Iterator<Item = &'a ConfigResource>,
-    error: &Error,
-) -> HashMap<ConfigResource, KafkaFuture<T>> {
-    resources
-        .map(|resource| {
-            let handle: KafkaFutureImpl<T> = KafkaFutureImpl::new();
-            handle.complete_with_error(error.clone());
-            (resource.clone(), handle.future())
-        })
-        .collect()
 }
 
 /// Converts a `DescribeConfigsResult` wire result into a [`Config`], mirroring
@@ -2698,7 +2671,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
                 .set_synonyms(synonyms)
-                .set_config_type(Some(ConfigType::for_id(config.config_type)))
+                .set_config_type(ConfigType::for_id(config.config_type))
                 .set_documentation(config.documentation.clone())
                 .build()
                 .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
@@ -2723,7 +2696,7 @@ fn get_describe_configs_call(
             .map(|resource| {
                 let mut r = DescribeConfigsResource::new();
                 r.set_resource_name(resource.name().to_string());
-                r.set_resource_type(resource.resource_type().id());
+                r.set_resource_type(resource.r#type().id());
                 r.set_configuration_keys(None);
                 r
             })
@@ -3183,11 +3156,6 @@ fn get_create_topics_call(
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)
-                                    // `configEntry(CreatableTopicConfigs)`
-                                    // (`KafkaAdminClient.java:1884-1893`) passes
-                                    // `Collections.emptyList()` synonyms and a
-                                    // null type and documentation.
-                                    .set_config_type(None)
                                     .build()
                                     .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
                             )
@@ -4054,18 +4022,11 @@ impl Admin for KafkaAdminClient {
         config_resources: &[ConfigResource],
         options: DescribeConfigsOptions,
     ) -> DescribeConfigsResult {
-        // Java's `nodeFor` throws `NumberFormatException` from `describeConfigs`
-        // itself, before any future exists or any request is sent. This result
-        // type cannot carry a synchronous error, so the closest form is used:
-        // every requested resource fails with that error and nothing is sent.
-        let brokers = match config_resources.iter().map(node_for).collect::<Result<Vec<_>, Error>>() {
-            Ok(brokers) => brokers,
-            Err(error) => return DescribeConfigsResult::new(failed_config_futures(config_resources.iter(), &error)),
-        };
         // Partition the requested config resources based on which broker they
         // must be sent to (null broker == obtainable from any broker).
         let mut node_futures: HashMap<Option<i32>, HashMap<ConfigResource, KafkaFutureImpl<Config>>> = HashMap::new();
-        for (resource, broker) in config_resources.iter().zip(brokers) {
+        for resource in config_resources {
+            let broker = node_for(resource);
             node_futures
                 .entry(broker)
                 .or_default()
@@ -4107,20 +4068,10 @@ impl Admin for KafkaAdminClient {
         // so the controller special-casing never triggers).
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
-        // Java's `nodeFor` throws `NumberFormatException` from
-        // `incrementalAlterConfigs` itself; see `describe_configs_with_options`
-        // for why every resource's future carries it instead. Residual
-        // difference: Java has already sent the requests for the node-specific
-        // resources its `HashMap` iteration reached before the bad one; this
-        // validates first and sends nothing.
-        let nodes = match configs.keys().map(node_for).collect::<Result<Vec<_>, Error>>() {
-            Ok(nodes) => nodes,
-            Err(error) => return AlterConfigsResult::new(failed_config_futures(configs.keys(), &error)),
-        };
-
-        for (resource, mut node) in configs.keys().zip(nodes) {
+        for resource in configs.keys() {
+            let mut node = node_for(resource);
             if self.shared.metadata_manager.using_bootstrap_controllers()
-                && resource.resource_type() != config_resource::Type::BrokerLogger
+                && resource.r#type() != config_resource::Type::BrokerLogger
             {
                 node = None;
             }
@@ -5128,7 +5079,9 @@ impl Admin for KafkaAdminClient {
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
-            if Utils::is_blank(Some(feature)) {
+            // Java's `Utils.isBlank`: `str.trim().isEmpty()`, and Java's `trim()`
+            // strips every char up to U+0020 (Rust's `trim()` is Unicode white space).
+            if feature.trim_matches(|c: char| c <= ' ').is_empty() {
                 return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
@@ -6289,7 +6242,7 @@ mod tests {
         );
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
-        // Java's text, `KafkaAdminClient.java:2572-2573`.
+        // Java's text (`KafkaAdminClient.java:2573-2574`).
         assert_eq!(err.message(), "The AclBindingFilter must not contain UNKNOWN elements.");
     }
 
@@ -7776,7 +7729,7 @@ mod tests {
             &nodes[0],
         );
         let mut records = HashMap::new();
-        records.insert(tp0.clone(), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(tp0.clone(), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
         for _ in 0..40 {
             if result.low_watermarks()[&tp0].is_done() {
@@ -7944,7 +7897,7 @@ mod tests {
         let error = failure.lock().unwrap().take().expect("the call must be failed");
         assert_eq!(
             error.message(),
-            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: null isFenced: false)."
+            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: None isFenced: false)."
         );
         // Java's replacement is a bare `KafkaException`.
         assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
@@ -8796,11 +8749,6 @@ mod tests {
         assert!(entry.is_read_only());
         assert!(!entry.is_sensitive());
         assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
-        // `configEntry(CreatableTopicConfigs)` (`KafkaAdminClient.java:1884-1893`):
-        // no synonyms, and a null type and documentation.
-        assert!(entry.synonyms().is_empty());
-        assert_eq!(entry.config_type(), None);
-        assert_eq!(entry.documentation(), None);
     }
 
     #[tokio::test]
@@ -8849,7 +8797,7 @@ mod tests {
         counts.insert("my_topic".to_string(), NewPartitions::increase_to(3));
         counts.insert(
             "other_topic".to_string(),
-            NewPartitions::increase_to_new_assignments(3, vec![vec![2], vec![3]]),
+            NewPartitions::increase_to_with_new_assignments(3, vec![vec![2], vec![3]]),
         );
         counts
     }
@@ -9082,22 +9030,10 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(
-            TopicPartition::new("my_topic", 0),
-            RecordsToDelete::before_offset_with_offset(3),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 1),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 2),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 3),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9131,7 +9067,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9167,8 +9103,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9861,7 +9797,7 @@ mod tests {
         ));
         let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
         pump(&mut runnable, 5).await;
-        assert_eq!(result.cluster_id().get().await.unwrap().as_deref(), Some(cluster_id));
+        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
         assert_eq!(got, nodes.iter().cloned().collect());
         assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
@@ -9923,31 +9859,11 @@ mod tests {
 
         let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
         pump(&mut runnable, 8).await;
-        assert_eq!(result.cluster_id().get().await.unwrap().as_deref(), Some(cluster_id));
+        assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
         assert_eq!(got, nodes.iter().cloned().collect());
         assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
         assert_eq!(result.authorized_operations().get().await.unwrap(), None);
-    }
-
-    /// The `Metadata` fallback's `ClusterId` is nullable, and Java completes
-    /// `clusterId()` with that null rather than an empty string.
-    #[tokio::test]
-    async fn test_describe_cluster_fail_back_keeps_a_null_cluster_id() {
-        let (admin, mut runnable, _time, nodes) = env();
-        runnable.client_mut().prepare_unsupported_version_response();
-        runnable
-            .client_mut()
-            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
-                &nodes,
-                None,
-                2,
-                Vec::new(),
-            )));
-
-        let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
-        pump(&mut runnable, 8).await;
-        assert_eq!(result.cluster_id().get().await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -10033,62 +9949,6 @@ mod tests {
         assert_eq!(keys, [broker.clone(), broker_logger.clone()].into_iter().collect());
         result.values().get(&broker).unwrap().get().await.unwrap();
         result.values().get(&broker_logger).unwrap().get().await.unwrap();
-    }
-
-    /// Java's `nodeFor` is `Integer.valueOf(resource.name())`, so a non-numeric
-    /// BROKER or BROKER_LOGGER name throws `NumberFormatException` from the
-    /// call itself, before any request. Here every requested resource fails
-    /// with Java's message and no request is sent.
-    #[tokio::test]
-    async fn test_describe_configs_rejects_a_non_numeric_broker_name_like_java() {
-        for resource_type in [config_resource::Type::Broker, config_resource::Type::BrokerLogger] {
-            let (admin, mut runnable, _time, _nodes) = env();
-            let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
-            let bad = ConfigResource::new(resource_type, "x".to_string());
-            let before = runnable.client_mut().request_count();
-            let result =
-                admin.describe_configs_with_options(&[topic.clone(), bad.clone()], DescribeConfigsOptions::new());
-            pump(&mut runnable, 5).await;
-            assert_eq!(runnable.client_mut().request_count(), before, "nothing is sent");
-            for resource in [&topic, &bad] {
-                let err = result.values()[resource].get().await.unwrap_err();
-                assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
-                assert_eq!(err.message(), "For input string: \"x\"");
-            }
-        }
-    }
-
-    /// The same `nodeFor` throw for `incrementalAlterConfigs`.
-    #[tokio::test]
-    async fn test_incremental_alter_configs_rejects_a_non_numeric_broker_name_like_java() {
-        let (admin, mut runnable, _time, _nodes) = env();
-        let bad = ConfigResource::new(config_resource::Type::BrokerLogger, "".to_string());
-        let ops = vec![AlterConfigOp::new(
-            ConfigEntry::new("log4j.logger.kafka".to_string(), Some("DEBUG".to_string())),
-            OpType::Set,
-        )];
-        let before = runnable.client_mut().request_count();
-        let result = admin
-            .incremental_alter_configs_with_options(&HashMap::from([(bad.clone(), ops)]), AlterConfigsOptions::new());
-        pump(&mut runnable, 5).await;
-        assert_eq!(runnable.client_mut().request_count(), before, "nothing is sent");
-        let err = result.values()[&bad].get().await.unwrap_err();
-        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
-        assert_eq!(err.message(), "For input string: \"\"");
-    }
-
-    /// `Integer.parseInt` accepts a sign and decimal digits within `int` range;
-    /// everything else is `NumberFormatException("For input string: \"s\"")`.
-    #[test]
-    fn parse_java_int_matches_integer_parse_int() {
-        assert_eq!(parse_java_int("42").unwrap(), 42);
-        assert_eq!(parse_java_int("+7").unwrap(), 7);
-        assert_eq!(parse_java_int("-3").unwrap(), -3);
-        for bad in ["", "x", " 1", "1 ", "0x10", "2147483648", "+", "-"] {
-            let err = parse_java_int(bad).unwrap_err();
-            assert!(matches!(err, Error::LocalIllegalArgument(_)), "{bad:?}");
-            assert_eq!(err.message(), format!("For input string: \"{bad}\""));
-        }
     }
 
     #[tokio::test]
@@ -11234,7 +11094,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTopicTest#testElectLeaders")]
     async fn test_elect_leaders() {
-        for election_type in ElectionType::values() {
+        for &election_type in ElectionType::values() {
             let (admin, mut runnable, time, _nodes) = env();
             let topic1 = TopicPartition::new("topic", 0);
             let topic2 = TopicPartition::new("topic", 2);
@@ -11733,17 +11593,28 @@ mod tests {
         assert_eq!(err.message(), "Provided feature can not be empty.");
     }
 
-    /// Java checks `Utils.isBlank(feature)`, so a whitespace-only name is
-    /// rejected just like an empty one.
+    /// `testUpdateFeaturesShouldFailRequestForInvalidFeatureName` with a blank name:
+    /// Java's `Utils.isBlank` is `trim().isEmpty()`, and Java's `trim()` strips every
+    /// char up to U+0020, so `" "` and `"\t\n"` are rejected, while a no-break space
+    /// (U+00A0, Unicode white space but above U+0020) is a name.
     #[tokio::test]
-    async fn test_update_features_rejects_a_blank_feature_name() {
+    async fn test_update_features_should_fail_request_for_blank_feature_name() {
         let (admin, _runnable, _time, _nodes) = env();
-        let updates = HashMap::from([(" \t ".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap())]);
-        let err = admin
-            .update_features_with_options(&updates, UpdateFeaturesOptions::new())
-            .unwrap_err();
-        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
-        assert_eq!(err.message(), "Provided feature can not be empty.");
+        for blank in [" ", "\t\n", "\u{0}"] {
+            let mut updates = HashMap::new();
+            updates.insert(blank.to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+            let err = admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .unwrap_err();
+            assert_eq!(err.message(), "Provided feature can not be empty.", "{blank:?}");
+        }
+        let mut updates = HashMap::new();
+        updates.insert("\u{a0}".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+        assert!(
+            admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .is_ok()
+        );
     }
 
     // `testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion`
@@ -13219,7 +13090,7 @@ mod tests {
 
         let description = future.get().await.unwrap();
         assert_eq!(description.group_id(), "g1");
-        assert_eq!(description.group_type(), GroupType::Consumer);
+        assert_eq!(description.r#type(), GroupType::Consumer);
         assert_eq!(description.group_state(), GroupState::Stable);
         assert_eq!(description.partition_assignor(), "uniform");
         // `coordinator()` is the Node the fulfillment request was routed to, and
@@ -13550,7 +13421,7 @@ mod tests {
         let listings = result.valid().get().await.unwrap();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].group_id(), "g1");
-        assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
+        assert_eq!(listings[0].r#type(), Some(GroupType::Consumer));
         assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
     }
 
@@ -13882,7 +13753,7 @@ mod tests {
         assert_eq!(map.len(), 2);
         // Each group's per-partition offsets match the requested spec.
         for group in ["groupA", "groupB"] {
-            let future = result.partitions_to_offset_and_metadata_for_group(group).unwrap();
+            let future = result.partitions_to_offset_and_metadata_with_group_id(group).unwrap();
             assert_eq!(future.get().await.unwrap().len(), 1);
         }
     }
@@ -14442,7 +14313,8 @@ mod tests {
     }
 
     fn members_to_remove(instance_ids: &[&str]) -> RemoveMembersFromConsumerGroupOptions {
-        RemoveMembersFromConsumerGroupOptions::new(instance_ids.iter().map(|id| MemberToRemove::new(*id))).unwrap()
+        RemoveMembersFromConsumerGroupOptions::with_members(instance_ids.iter().map(|id| MemberToRemove::new(*id)))
+            .unwrap()
     }
 
     /// Translated from `testDeleteConsumerGroupsNumRetries`: with `retries=0`, a
@@ -14759,16 +14631,7 @@ mod tests {
         );
         let partial_all = partial_failure_result.all();
         drive_until(&mut runnable, &time, 80, || partial_all.is_done()).await;
-        // Java: `assertInstanceOf(KafkaException.class, exception.getCause())`
-        // then `assertInstanceOf(UnknownMemberIdException.class,
-        // exception.getCause().getCause())` — a bare Kafka error whose cause is
-        // the member's error.
-        let partial_err = partial_all.get().await.unwrap_err();
-        assert!(matches!(partial_err, Error::KafkaError(_)), "{partial_err:?}");
-        assert!(
-            matches!(partial_err.source(), Some(Error::UnknownMemberId(_))),
-            "{partial_err:?}"
-        );
+        assert_eq!(partial_all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
 
         // removeAll with success.
         runnable

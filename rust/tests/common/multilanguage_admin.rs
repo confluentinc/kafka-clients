@@ -22,6 +22,10 @@
 //! response carries already-resolved results.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -47,7 +51,7 @@ use confluent_kafka::admin::{
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UnregisterControllerOptions,
-    UpdateFeaturesOptions, UserScramCredentialAlteration,
+    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -69,9 +73,8 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, DescribeUserScramCredentialsView,
-    FeatureMetadataView, FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes,
-    ReplicaLogDirInfoView, ScramUserRow,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
+    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -399,6 +402,18 @@ impl MultilanguageAdmin {
         Ok(rebuilt)
     }
 
+    /// Rebuilds a [`UserScramCredentialsDescription`].
+    fn scram_description(
+        &self,
+        description: proto::UserScramCredentialsDescription,
+    ) -> Result<UserScramCredentialsDescription, Error> {
+        let mut infos = Vec::with_capacity(description.credential_infos.len());
+        for info in description.credential_infos {
+            infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
+        }
+        Ok(UserScramCredentialsDescription::new(description.name, infos))
+    }
+
     /// Rebuilds a [`FeatureMetadataView`].
     ///
     /// `finalized_features_epoch` stays an `Option`: an absent epoch is Java's
@@ -470,8 +485,8 @@ impl MultilanguageAdmin {
         Ok(ConfigResource::new(config_resource::Type::for_id(id), resource.name))
     }
 
-    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error, the
-    /// two `OptionalLong` volume sizes and the `isCordoned()` flag (KIP-1066).
+    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
+    /// the two `OptionalLong` volume sizes.
     fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, Error> {
         let mut replica_infos = HashMap::with_capacity(description.replica_infos.len());
         for replica in description.replica_infos {
@@ -483,31 +498,21 @@ impl MultilanguageAdmin {
                 ReplicaInfo::new(replica.size, replica.offset_lag, replica.is_future),
             );
         }
-        // Java's `isCordoned()` is a plain bool; an absent proto field (a server
-        // that predates the flag) is false, matching the Java default.
-        let is_cordoned = description.is_cordoned.unwrap_or(false);
-        // The five-argument constructor is the KIP-1066 one; passing
-        // `UNKNOWN_VOLUME_BYTES` (-1) for a volume size records it as absent,
-        // exactly as the two-argument Java constructor does. Java has no
-        // constructor for one volume size present and the other absent, and no
-        // broker sends that, so the mixed case is a protocol error rather than a
-        // guess. Java's `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`, spelled
-        // out because `common::requests` is not public API.
-        const UNKNOWN: i64 = -1;
+        // `LogDirDescription::new` is the two-argument Java constructor, which
+        // records both volume sizes as absent; `with_total_bytes_usable_bytes` is the
+        // four-argument one. Java has no constructor for one present and the
+        // other absent, and no broker sends that, so the mixed case is a
+        // protocol error rather than a guess.
         match (description.total_bytes, description.usable_bytes) {
-            (None, None) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
+            (None, None) => Ok(LogDirDescription::new(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
-                UNKNOWN,
-                UNKNOWN,
-                is_cordoned,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
                 usable,
-                is_cordoned,
             )),
             (total, usable) => Err(self.protocol_error(format!(
                 "LogDirDescription reported totalBytes={} and usableBytes={}; Java has no constructor for one \
@@ -935,15 +940,7 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        // The proto map cannot carry Java's null config value, and no
-        // multilanguage test sends one.
-        configs: topic
-            .configs()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, value)| (name, value.expect("a null config value cannot cross the gRPC harness")))
-            .collect(),
+        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {
@@ -1037,7 +1034,7 @@ fn acl_operations_from_proto(ops: &proto::AclOperationList) -> BTreeSet<AclOpera
 
 fn config_resource_to_proto(resource: &ConfigResource) -> proto::ConfigResource {
     proto::ConfigResource {
-        resource_type: i32::from(resource.resource_type().id()),
+        resource_type: i32::from(resource.r#type().id()),
         name: resource.name().to_string(),
     }
 }
@@ -1185,7 +1182,7 @@ fn client_quota_entity_to_proto(entity: &ClientQuotaEntity) -> proto::ClientQuot
 /// `ofEntityType`, "match any specified name" — so it carries no name either, and
 /// only the kind separates it from `Default`.
 fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> proto::ClientQuotaFilterComponent {
-    let (kind, match_name) = match component.match_spec() {
+    let (kind, match_name) = match component.r#match() {
         ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
         ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
         ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),
@@ -2147,7 +2144,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<DescribeUserScramCredentialsView, Error> {
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
@@ -2156,35 +2153,15 @@ impl AdminBackend for MultilanguageAdmin {
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
             .await?;
-        // A whole-response (data-future) failure faults every view — mirrors
-        // Java's top-level `whenComplete` throwable.
-        if let Some(error) = response.error {
-            return Err(kafka_error_from_proto(error));
-        }
-        // Rebuild the raw per-user rows and hand them to the harness's
-        // `DescribeUserScramCredentialsView`, whose `Rows` arm answers
-        // all()/users()/description() with the production result's rules (the
-        // production result's constructor and response-data type are
-        // crate-private, so it cannot be rebuilt here). A row's wire error code is the FFI code
-        // `kafka_error_from_proto` decodes (the two agree on every broker code);
-        // an absent message decodes as empty rather than the code's default text.
-        let mut rows = Vec::with_capacity(response.entries.len());
-        for entry in response.entries {
-            let mut credential_infos = Vec::with_capacity(entry.credential_infos.len());
-            for info in entry.credential_infos {
-                // Reuse the mechanism-indicator validation the other SCRAM paths use.
-                credential_infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
-            }
-            let error = (entry.error_code != 0).then(|| {
-                kafka_error_from_proto(proto::KafkaError {
-                    code: entry.error_code,
-                    message: entry.error_message.unwrap_or_default(),
-                    ..Default::default()
-                })
-            });
-            rows.push(ScramUserRow { user: entry.user, error, credential_infos });
-        }
-        Ok(DescribeUserScramCredentialsView::Rows(rows))
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "describeUserScramCredentials")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_user_scram_credentials_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_user_scram_credentials_entry::Outcome::Value(v)) => Ok(self.scram_description(v)?),
+                None => return Err(self.protocol_error("DescribeUserScramCredentialsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
     }
 
     async fn alter_user_scram_credentials(

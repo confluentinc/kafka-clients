@@ -36,7 +36,7 @@ class PreferredLeaderNotAvailableError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 80  # kafka_common_ErrorCode_PREFERRED_LEADER_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 80  # kafka_common_Error_PREFERRED_LEADER_NOT_AVAILABLE
 
     def __init__(
         self,

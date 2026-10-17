@@ -34,7 +34,7 @@ class DuplicateVoterError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 126  # kafka_common_ErrorCode_DUPLICATE_VOTER
+    _ffi_id: ClassVar[int] = 126  # kafka_common_Error_DUPLICATE_VOTER
 
     def __init__(
         self,

@@ -116,7 +116,7 @@ def test_padding_grows_source_buffer_beyond_default():
 
 
 def test_deserialize_accepts_memoryview():
-    # `record.value` is a zero-copy memoryview over the fetch batch.
+    # `record.value` is bytes, but any bytes-like payload must parse.
     payload = SoakRecord(5, send_time_ms=1765432100123).serialize()
     parsed = SoakRecord.deserialize(memoryview(payload))
     assert parsed.msgid == 5
@@ -576,7 +576,7 @@ def test_module_imports_without_bindings():
     import soakclient
 
     assert soakclient.__name__ == "soakclient"
-    for module in ("confluent_kafka", "admin", "_confluentkafka"):
+    for module in ("confluent_kafka", "_confluentkafka"):
         assert not hasattr(soakclient, module), \
             f"soakclient must not bind {module} at module scope"
 
@@ -594,7 +594,7 @@ def test_bindings_accessor_reports_a_missing_binding_clearly(monkeypatch):
     # `from pkg.sub import x` finds an already-imported `pkg.sub` in
     # sys.modules without consulting `pkg`, so every module the accessor
     # imports is blocked, not just the package root.
-    for module in ("admin", "confluent_kafka", "confluent_kafka.common",
+    for module in ("confluent_kafka", "confluent_kafka.admin", "confluent_kafka.common",
                    "confluent_kafka.common.serialization",
                    "confluent_kafka.consumer", "confluent_kafka.producer"):
         monkeypatch.setitem(sys.modules, module, None)
@@ -740,6 +740,140 @@ def test_is_wakeup_recognizes_the_package_wakeup_error():
     errors = _errors()
     assert SoakClient._is_wakeup(errors.WakeupError()) is True
     assert SoakClient._is_wakeup(errors.NotCoordinatorError(message="x")) is False
+
+
+# ---------------------------------------------------------------------------
+# Topic creation through confluent_kafka.admin: per-topic futures raise typed
+# errors, which are classified by FFI id (the wire code).
+# ---------------------------------------------------------------------------
+def _execution_error(cause):
+    """What ``KafkaFuture.get()`` raises for a failed future (Java's
+    ``ExecutionException``)."""
+    from confluent_kafka import ExecutionError
+    return ExecutionError(cause=cause)
+
+
+class _FakeTopicFuture:
+    def __init__(self, error=None):
+        self._error = error
+
+    def get(self):
+        if self._error is not None:
+            raise _execution_error(self._error)
+
+
+class _FakeCreateResult:
+    def __init__(self, futures):
+        self._futures = futures
+
+    def values(self):
+        return self._futures
+
+
+class _FakeAdmin:
+    """Stands in for ``confluent_kafka.admin.Admin``."""
+
+    def __init__(self, topic_error=None, call_error=None):
+        self._topic_error = topic_error
+        self._call_error = call_error
+        self.closed = False
+        self.created = []
+
+    def create_topics(self, *, new_topics):
+        if self._call_error is not None:
+            raise self._call_error
+        self.created.extend(t.name for t in new_topics)
+        return _FakeCreateResult(
+            {t.name: _FakeTopicFuture(self._topic_error) for t in new_topics})
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeNewTopic:
+    def __init__(self, *, name, num_partitions, replication_factor):
+        self.name = name
+        self.num_partitions = num_partitions
+        self.replication_factor = replication_factor
+
+
+def _create_topic(monkeypatch, admin):
+    import soakclient
+
+    bindings = SimpleNamespace(
+        Admin=SimpleNamespace(create=lambda configs: admin),
+        NewTopic=_FakeNewTopic)
+    monkeypatch.setattr(soakclient, "_BINDINGS", bindings)
+    stub = _StubClient()
+    SoakClient.create_topic(stub, "t", {"bootstrap.servers": "x"}, 3, 1, False)
+
+
+def test_create_topic_creates_and_closes_the_admin(monkeypatch):
+    admin = _FakeAdmin()
+    _create_topic(monkeypatch, admin)
+    assert admin.created == ["t"]
+    assert admin.closed
+
+
+def test_create_topic_treats_topic_exists_as_good(monkeypatch):
+    errors = _errors()
+    admin = _FakeAdmin(topic_error=errors.TopicExistsError(message="exists"))
+    _create_topic(monkeypatch, admin)
+    assert admin.closed
+
+
+def test_create_topic_auth_failure_is_fatal(monkeypatch):
+    from soakclient import FatalStartupError
+
+    errors = _errors()
+    admin = _FakeAdmin(call_error=errors.SaslAuthenticationError(message="bad creds"))
+    with pytest.raises(FatalStartupError, match="bad creds"):
+        _create_topic(monkeypatch, admin)
+    assert admin.closed
+
+
+def test_create_topic_other_failure_is_transient(monkeypatch):
+    from soakclient import TransientStartupError
+
+    errors = _errors()
+    admin = _FakeAdmin(topic_error=errors.NotCoordinatorError(message="moved"))
+    with pytest.raises(TransientStartupError, match="moved"):
+        _create_topic(monkeypatch, admin)
+
+
+def test_recreate_topic_deletes_then_creates(monkeypatch):
+    """`recreate_topic` (soak_metrics) over the package's admin: a delete of an
+    absent topic is benign, the create goes through, and both sleeps are skipped."""
+    import soak_metrics
+
+    errors = _errors()
+    calls = []
+
+    class _DeleteResult:
+        def topic_name_values(self):
+            return {"t": _FakeTopicFuture(errors.UnknownTopicOrPartitionError(message="gone"))}
+
+    class _Admin(_FakeAdmin):
+        def delete_topics(self, *, topics, options):
+            calls.append(("delete", list(topics), options.timeout_ms))
+            return _DeleteResult()
+
+        def create_topics(self, *, new_topics):
+            calls.append(("create", [(t.name, t.num_partitions) for t in new_topics]))
+            return super().create_topics(new_topics=new_topics)
+
+    admin = _Admin()
+    fake = SimpleNamespace(
+        Admin=SimpleNamespace(create=lambda configs: admin),
+        DeleteTopicsOptions=lambda timeout_ms: SimpleNamespace(timeout_ms=timeout_ms),
+        NewTopic=_FakeNewTopic)
+    monkeypatch.setitem(sys.modules, "confluent_kafka.admin", fake)
+    monkeypatch.setattr(soak_metrics.time, "sleep", lambda seconds: None)
+
+    soak_metrics.recreate_topic({"bootstrap.servers": "x"}, "t", partitions=4)
+
+    assert calls == [("delete", ["t"], 30000), ("create", [("t", 4)])]
+    assert admin.closed
 
 
 # ---------------------------------------------------------------------------
@@ -1087,3 +1221,53 @@ def test_latency_gauges_record_ms_and_export_seconds(tmp_path):
                     "{} p99 collapsed to zero: histogram was fed seconds".format(key)
     finally:
         metrics.close()
+
+
+# ---------------------------------------------------------------------------
+# send() futures: the delivery report is a `when_complete` action, and a failed
+# `get()` is an `ExecutionError` classified through its cause.
+# ---------------------------------------------------------------------------
+def _delivery_client():
+    client = _bare_soak_client()
+    client.outstanding = 1
+    client.dr_cnt = 0
+    client.dr_err_cnt = 0
+    return client
+
+
+def test_delivery_report_of_a_completed_send_future():
+    from confluent_kafka.common import KafkaFuture
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
+
+    impl = _KafkaFutureImpl()
+    metadata = SimpleNamespace(partition=lambda: 0, topic=lambda: "t", offset=lambda: 5)
+    client = _delivery_client()
+    KafkaFuture._of_impl(impl).when_complete(
+        action=lambda value, error: client._on_delivery(value, error, time.time()))
+    impl.complete(metadata)
+    assert (client.dr_cnt, client.dr_err_cnt, client.outstanding) == (1, 0, 0)
+    client.incr_counter.assert_any_call("producer.drok", 1)
+
+
+def test_delivery_report_of_a_failed_send_future_counts_the_error_code():
+    from confluent_kafka.common import KafkaFuture
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
+
+    errors = _errors()
+    impl = _KafkaFutureImpl()
+    client = _delivery_client()
+    KafkaFuture._of_impl(impl).when_complete(
+        action=lambda value, error: client._on_delivery(value, error, time.time()))
+    impl.complete_with_error(errors.NotCoordinatorError(message="x"))
+    assert (client.dr_cnt, client.dr_err_cnt, client.outstanding) == (0, 1, 0)
+    client.incr_counter.assert_any_call("producer.drerr", 1)
+    client.incr_counter.assert_any_call("producer.delivery.failure", 1, tags={"err": "16"})
+
+
+def test_failure_of_unwraps_an_execution_error_only():
+    from soakclient import failure_of
+
+    errors = _errors()
+    cause = errors.NotCoordinatorError(message="x")
+    assert failure_of(_execution_error(cause)) is cause
+    assert failure_of(cause) is cause

@@ -2485,8 +2485,27 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         // so keep the signalling tests out of it.
         let _signals = crate::signals::test_lock();
         // Honours SIGINT, as the harness does: gone well before the grace.
-        let mut polite = Command::new("sh").args(["-c", "sleep 30; :"]).process_group(0).spawn().unwrap();
+        // Perl restores SIGINT's default action first: a shell started with
+        // SIGINT ignored (a CI agent, a background job) cannot undo that, and
+        // would otherwise sit out the grace.
+        let mut polite = Command::new("perl")
+            .args([
+                "-e",
+                "$SIG{INT} = 'DEFAULT'; exec @ARGV or die",
+                "sh",
+                "-c",
+                "echo ready; sleep 30; :",
+            ])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
         let pgid = polite.id();
+        // SIGINT has its default action once the shell says so; one sent
+        // before that would be ignored.
+        let mut ready = String::new();
+        BufReader::new(polite.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
         let started = Instant::now();
         stop_group(&mut polite, pgid, Duration::from_secs(20)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(10));

@@ -37,7 +37,7 @@ class InvalidRegularExpression(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 128  # kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION
+    _ffi_id: ClassVar[int] = 128  # kafka_common_Error_INVALID_REGULAR_EXPRESSION
 
     def __init__(
         self,

@@ -34,5 +34,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_invalid_offset_error,
+        is_offset_out_of_range_error,
     ],
 }

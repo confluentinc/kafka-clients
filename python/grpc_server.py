@@ -15,7 +15,7 @@
 
 """gRPC server exposing the sync clients of the ``confluent_kafka`` package
 (``confluent_kafka.producer``, ``confluent_kafka.consumer``) and
-python/admin.py over the ProducerService / ConsumerService /
+confluent_kafka.admin over the ProducerService / ConsumerService /
 AdminService defined in rust/multilanguage-test-server/proto/.
 
 Used by the Rust integration tests under the multilanguage-tests
@@ -23,7 +23,7 @@ feature: the Rust MultilanguageProducer / MultilanguageConsumer /
 MultilanguageAdmin clients tunnel every call to this server, which
 translates each call into a ``confluent_kafka.producer``
 KafkaProducer/MockProducer, ``confluent_kafka.consumer``
-KafkaConsumer/MockConsumer or admin.py AdminClient/MockAdminClient call,
+KafkaConsumer/MockConsumer or the admin facade AdminClient/MockAdminClient call,
 returning the result over gRPC. See
 design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
 design/history/Milestone-11/PLAN-multilanguage-admin.md.
@@ -32,10 +32,12 @@ The server listens on GRPC_HOST:GRPC_PORT (default 127.0.0.1:50051; the
 Docker image sets GRPC_HOST=0.0.0.0 and the test pool maps 50051 to a
 random host port via testcontainers). GRPC_PORT=0 binds an ephemeral port.
 
-Sync grpc.server + thread pool is used because the sync clients are
-thread-based: their C extension (``_confluentkafka``) completes each
-concurrent.futures.Future on a background completion thread, and
-Future.result() blocks the calling thread until the future fires.
+Sync grpc.server + thread pool is used because the sync clients block the
+calling thread: KafkaProducer completes each KafkaFuture on its
+background completion thread, which runs the C API's queued callbacks
+(``__execute_callbacks``), and KafkaFuture.get() blocks the handler thread until
+the future fires; KafkaConsumer's waiting calls drain their completions and
+callbacks on the handler thread itself.
 """
 
 import datetime as _dt
@@ -59,8 +61,8 @@ from confluent_kafka.consumer import (  # noqa: E402
     MockConsumer,
     OffsetAndMetadata,
 )
+from confluent_kafka import ExecutionError  # noqa: E402
 from confluent_kafka.common import KafkaError  # noqa: E402
-import admin as ka  # noqa: E402  (AdminClient / MockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
@@ -76,6 +78,7 @@ LOG = logging.getLogger("grpc_server")
 # Proto<->Python translation helpers are shared with the async server
 # (grpc_server_async.py) and live in grpc_translate.py.
 from grpc_translate import (  # noqa: E402
+    admin_create_sync,
     CallbackLog,
     GroupMetadataStore,
     LoggingRebalanceListener,
@@ -92,6 +95,7 @@ from grpc_translate import (  # noqa: E402
     _admin_close_timeout,
     _admin_cluster_description_response,
     _admin_config_resource_key,
+    _admin_config_resource_types,
     _admin_config_resources,
     _admin_constructor_error,
     _admin_create_acls_response,
@@ -139,7 +143,6 @@ from grpc_translate import (  # noqa: E402
     _admin_replicas,
     _admin_retry_on_quota,
     _admin_scram_alterations,
-    _admin_selects_mock,
     _admin_timeout,
     _admin_token_owners,
     _admin_topic_id_key,
@@ -148,8 +151,6 @@ from grpc_translate import (  # noqa: E402
     _admin_transaction_states,
     _admin_void_response,
     _group_metadata_to_proto,
-    _admin_remove_members_response,
-    _resolve_admin_futures,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
@@ -238,19 +239,21 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
         # Block this gRPC worker thread until the producer future fires.
-        # KafkaProducer's futures are concurrent.futures.Future instances
-        # completed on the C extension's completion thread, so .result() is
-        # safe here.
+        # KafkaProducer's futures are KafkaFutures completed on the C extension's
+        # completion thread, so .get() is safe here. A failed send raises
+        # ExecutionError (Java's ExecutionException) whose cause is the error.
         try:
-            metadata = future.result(timeout=120)
+            metadata = future.get(timeout=120)
+        except ExecutionError as e:
+            return pb.SendResponse(error=_kafka_error_to_proto(e.__cause__ or e))
         except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
-        except futures.TimeoutError:
+        except TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
                 code=_REQUEST_TIMED_OUT,
                 message="python server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("future.result raised")
+            LOG.exception("future.get raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         return pb.SendResponse(metadata=_record_metadata_to_proto(metadata))
 
@@ -755,13 +758,14 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
 
 class AdminService(apb_grpc.AdminServiceServicer):
-    """Maps AdminService RPCs onto python/admin.py's *synchronous*
-    AdminClient / MockAdminClient (the async twin is driven by
+    """Maps AdminService RPCs onto the admin facade's *synchronous*
+    Admin / MockAdminClient (the async twin is driven by
     grpc_server_async.py).
 
-    Java's Admin methods return per-key futures, but admin.py's `_run_sync`
-    already waits for the FFI completion callback and hands back resolved data,
-    so blocking the gRPC worker thread here is what the binding does anyway."""
+    Java's Admin methods return per-key `KafkaFuture`s; the admin facade
+    (`grpc_translate.SyncAdminFacade`) waits for each with `get()` and hands back
+    resolved data, so blocking the gRPC worker thread here is what the binding
+    does anyway."""
 
     def __init__(self):
         self._admins = {}
@@ -778,10 +782,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             # See CreateAdminRequest in admin_service.proto: this predicate is
             # the normative mock-selection rule for all three servers.
-            if _admin_selects_mock(config):
-                client = ka.MockAdminClient(num_brokers)
-            else:
-                client = ka.AdminClient(config)
+            client = admin_create_sync(config, num_brokers)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateAdmin failed")
             return apb.CreateAdminResponse(admin_id=0, error=_admin_constructor_error(e))
@@ -795,8 +796,8 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # -- Topics & partitions (slice G1) --------------------------------------
     #
     # Every handler follows the same three steps: look the handle up, call the
-    # admin.py method (which blocks this worker thread until the FFI completion
-    # callback fires, exactly as any admin.py caller does), and wrap the
+    # the admin facade method (which blocks this worker thread until the FFI completion
+    # callback fires, exactly as any the admin facade caller does), and wrap the
     # resolved dict in the per-key envelope. A raised KafkaError is a
     # whole-call failure and goes in the response's top-level `error`, leaving
     # `entries` empty — per-key failures never raise, they arrive inside the
@@ -812,16 +813,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.CreateTopicsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.create_topics(
+            outcomes = client.create_topics(
                 _admin_new_topics(request.topics),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
-            # create_topics is per-key-Future (admin.py's Phase A): resolve
-            # every key's Future before handing off to the (unchanged)
-            # already-resolved-dict translator.
-            return _admin_create_topics_response(_resolve_admin_futures(futures))
+            return _admin_create_topics_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_topics raised")
             return apb.CreateTopicsResponse(error=_kafka_error_to_proto(e))
@@ -834,16 +832,15 @@ class AdminService(apb_grpc.AdminServiceServicer):
         names = list(request.topic_ids.values if by_ids else request.names.values)
         try:
             if by_ids:
-                futures = client.delete_topics_by_ids(
+                outcomes = client.delete_topics_by_ids(
                     names, timeout=_admin_timeout(request),
                     retry_on_quota_violation=_admin_retry_on_quota(request))
             else:
-                futures = client.delete_topics(
+                outcomes = client.delete_topics(
                     names, timeout=_admin_timeout(request),
                     retry_on_quota_violation=_admin_retry_on_quota(request))
             key_fn = _admin_topic_id_key if by_ids else _admin_name_key
-            # Per-key-Future (Phase A): resolve before translating.
-            return _admin_void_response(_resolve_admin_futures(futures), key_fn)
+            return _admin_void_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_topics raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -870,15 +867,14 @@ class AdminService(apb_grpc.AdminServiceServicer):
                  if request.HasField("partition_size_limit_per_response") else None)
         try:
             method = client.describe_topics_by_ids if by_ids else client.describe_topics
-            futures = method(
+            outcomes = method(
                 topics,
                 timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations,
                 partition_size_limit=limit,
             )
             key_fn = _admin_topic_id_key if by_ids else _admin_name_key
-            # Per-key-Future (Phase A): resolve before translating.
-            return _admin_describe_topics_response(_resolve_admin_futures(futures), key_fn)
+            return _admin_describe_topics_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_topics raised")
             return apb.DescribeTopicsResponse(error=_kafka_error_to_proto(e))
@@ -888,14 +884,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.create_partitions(
+            outcomes = client.create_partitions(
                 _admin_new_partitions(request.partitions),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
-            # Per-key-Future (Phase A): resolve before translating.
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_name_key)
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_partitions raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -905,10 +900,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DeleteRecordsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.delete_records(
+            outcomes = client.delete_records(
                 _admin_records_to_delete(request.records), timeout=_admin_timeout(request))
-            # Per-key-Future (Phase A): resolve before translating.
-            return _admin_delete_records_response(_resolve_admin_futures(futures))
+            return _admin_delete_records_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_records raised")
             return apb.DeleteRecordsResponse(error=_kafka_error_to_proto(e))
@@ -917,7 +911,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #
     # Same three steps as the G1 handlers. Note the split in what "failure"
     # means: describe_cluster / list_config_resources have one Java future
-    # each, so admin.py *raises* and the failure lands in the top-level error;
+    # each, so the admin facade *raises* and the failure lands in the top-level error;
     # the per-key RPCs never raise for a single key, its KafkaError arrives
     # inside the dict.
 
@@ -941,13 +935,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeConfigsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.describe_configs(
+            outcomes = client.describe_configs(
                 _admin_config_resources(request.resources),
                 timeout=_admin_timeout(request),
                 include_synonyms=request.include_synonyms,
                 include_documentation=request.include_documentation,
             )
-            return _admin_describe_configs_response(_resolve_admin_futures(futures))
+            return _admin_describe_configs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_configs raised")
             return apb.DescribeConfigsResponse(error=_kafka_error_to_proto(e))
@@ -957,12 +951,12 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.incremental_alter_configs(
+            outcomes = client.incremental_alter_configs(
                 _admin_alter_configs(request.configs),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
             )
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_config_resource_key)
+            return _admin_void_response(outcomes, _admin_config_resource_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("incremental_alter_configs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -974,7 +968,8 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             # An empty repeated field is Java's empty Set: every supported type.
             resources = client.list_config_resources(
-                list(request.resource_types), timeout=_admin_timeout(request))
+                _admin_config_resource_types(request.resource_types),
+                timeout=_admin_timeout(request))
             return _admin_list_config_resources_response(resources)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_config_resources raised")
@@ -985,9 +980,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.describe_log_dirs(
+            outcomes = client.describe_log_dirs(
                 list(request.brokers), timeout=_admin_timeout(request))
-            return _admin_describe_log_dirs_response(_resolve_admin_futures(futures))
+            return _admin_describe_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_log_dirs raised")
             return apb.DescribeLogDirsResponse(error=_kafka_error_to_proto(e))
@@ -997,10 +992,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.alter_replica_log_dirs(
+            outcomes = client.alter_replica_log_dirs(
                 _admin_replica_log_dir_assignments(request.assignments),
                 timeout=_admin_timeout(request))
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_replica_key)
+            return _admin_void_response(outcomes, _admin_replica_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_replica_log_dirs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1010,9 +1005,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeReplicaLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.describe_replica_log_dirs(
+            outcomes = client.describe_replica_log_dirs(
                 _admin_replicas(request.replicas), timeout=_admin_timeout(request))
-            return _admin_describe_replica_log_dirs_response(_resolve_admin_futures(futures))
+            return _admin_describe_replica_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_replica_log_dirs raised")
             return apb.DescribeReplicaLogDirsResponse(error=_kafka_error_to_proto(e))
@@ -1021,16 +1016,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #
     # electLeaders and alterPartitionReassignments both answer with the shared
     # VoidKeyedResponse, but their two error levels do not mean the same thing.
-    # alter_partition_reassignments has one Java future per partition (Phase D:
-    # admin.py now returns a dict of Futures, resolved here via
-    # _resolve_admin_futures before the shared translator runs), so a single
-    # partition's failure arrives inside the dict as usual.
-    # elect_leaders has *one* future for the whole map: admin.py raises when it
+    # alter_partition_reassignments has one Java future per partition, so a
+    # single partition's failure arrives inside the dict as usual.
+    # elect_leaders has *one* future for the whole map: the admin facade raises when it
     # fails, which is the top-level error, and the per-partition value inside the
     # resolved dict is Java's Optional<Throwable> -- None meaning that partition's
     # election succeeded. list_partition_reassignments is whole-value (one
-    # future, so a raise), list_offsets is ordinary per-key (Phase D: also a
-    # dict of Futures, resolved the same way).
+    # future, so a raise), list_offsets is ordinary per-key.
 
     def ElectLeaders(self, request, context):
         client = self._get(request.admin_id)
@@ -1038,7 +1030,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
             # `partitions=None` is Java's null Set: elect for every partition.
-            # admin.py requires the argument explicitly for exactly that reason.
+            # the admin facade requires the argument explicitly for exactly that reason.
             outcomes = client.elect_leaders(
                 request.election_type,
                 _admin_optional_partitions(request),
@@ -1056,11 +1048,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         allow_rf_change = (request.allow_replication_factor_change
                            if request.HasField("allow_replication_factor_change") else True)
         try:
-            futures = client.alter_partition_reassignments(
+            outcomes = client.alter_partition_reassignments(
                 _admin_reassignments(request.reassignments),
                 timeout=_admin_timeout(request),
                 allow_replication_factor_change=allow_rf_change)
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_tp_tuple_key)
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_partition_reassignments raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1088,11 +1080,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # ILLEGAL_ARGUMENT *variant*, which is what the C++ server stamps for
             # the same condition. Agreeing on the level is not enough -- `variant`
             # is the field the Rust client matches on.
-            futures = client.list_offsets(
+            outcomes = client.list_offsets(
                 _admin_offset_specs(request.specs),
                 timeout=_admin_timeout(request),
                 isolation_level=request.isolation_level)
-            return _admin_list_offsets_response(_resolve_admin_futures(futures))
+            return _admin_list_offsets_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_offsets raised")
             return apb.ListOffsetsResponse(error=_kafka_error_to_proto(e))
@@ -1102,21 +1094,19 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # Three levels of error, and which one an RPC uses follows its Java future
     # shape rather than a template:
     #
-    #   - list_groups: admin.py returns a *pair* of lists.
+    #   - list_groups: the admin facade returns a *pair* of lists.
     #     A raise is the whole-call error; a per-broker listing failure is inside
     #     the second list, unkeyed.
     #   - describe_consumer_groups / describe_classic_groups /
-    #     list_consumer_group_offsets / alter_consumer_group_offsets /
-    #     delete_consumer_group_offsets / delete_consumer_groups /
-    #     remove_members_from_consumer_group are all per-key-Future now (Phase
-    #     E, mirroring Phase A/D): admin.py returns a dict of Futures
-    #     immediately, one per key, resolving independently, so
-    #     `_resolve_admin_futures` (see create_topics above) is required before
-    #     handing off to the (unchanged) already-resolved-dict translators
-    #     below. With an empty input to alter/delete_consumer_group_offsets or
-    #     `removeAll` mode for remove_members_from_consumer_group there is no
-    #     per-key slot at all, so admin.py returns an empty dict and
-    #     `_resolve_admin_futures` is a no-op on it.
+    #     list_consumer_group_offsets: one future per group, so a per-group
+    #     failure arrives in the dict and only a submission failure raises.
+    #   - alter_consumer_group_offsets / delete_consumer_group_offsets /
+    #     remove_members_from_consumer_group: Java holds ONE future over the whole
+    #     map, so a failure of that future raises here and becomes the top-level
+    #     error with `entries` empty. With an empty input (no partitions, or
+    #     removeAll) that is the *only* observable, and the admin facade returns an empty
+    #     dict. delete_consumer_groups is the one of the four with genuine
+    #     per-key futures.
 
     def ListGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -1124,7 +1114,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.ListGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
             # Empty filter lists leave the filter unset, which is Java's empty
-            # set; admin.py takes None for the same thing, and [] is equivalent.
+            # set; the admin facade takes None for the same thing, and [] is equivalent.
             outcome = client.list_groups(
                 group_states=list(request.group_states),
                 protocol_types=list(request.protocol_types),
@@ -1140,10 +1130,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.describe_consumer_groups(
+            outcomes = client.describe_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
-            return _admin_describe_consumer_groups_response(_resolve_admin_futures(futures))
+            return _admin_describe_consumer_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_consumer_groups raised")
             return apb.DescribeConsumerGroupsResponse(error=_kafka_error_to_proto(e))
@@ -1153,10 +1143,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeClassicGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.describe_classic_groups(
+            outcomes = client.describe_classic_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
-            return _admin_describe_classic_groups_response(_resolve_admin_futures(futures))
+            return _admin_describe_classic_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_classic_groups raised")
             return apb.DescribeClassicGroupsResponse(error=_kafka_error_to_proto(e))
@@ -1167,11 +1157,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.ListConsumerGroupOffsetsResponse(
                 error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.list_consumer_group_offsets(
+            outcomes = client.list_consumer_group_offsets(
                 _admin_group_offset_specs(request.group_specs),
                 timeout=_admin_timeout(request),
                 require_stable=request.require_stable)
-            return _admin_list_consumer_group_offsets_response(_resolve_admin_futures(futures))
+            return _admin_list_consumer_group_offsets_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_consumer_group_offsets raised")
             return apb.ListConsumerGroupOffsetsResponse(error=_kafka_error_to_proto(e))
@@ -1181,10 +1171,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.alter_consumer_group_offsets(
+            outcomes = client.alter_consumer_group_offsets(
                 request.group_id, _admin_group_offset_commits(request.offsets),
                 timeout=_admin_timeout(request))
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_tp_tuple_key)
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_consumer_group_offsets raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1194,11 +1184,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.delete_consumer_group_offsets(
+            outcomes = client.delete_consumer_group_offsets(
                 request.group_id,
-                [(tp.topic, tp.partition) for tp in request.partitions],
+                [_tp(tp) for tp in request.partitions],
                 timeout=_admin_timeout(request))
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_tp_tuple_key)
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_group_offsets raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1208,9 +1198,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.delete_consumer_groups(
+            outcomes = client.delete_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request))
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_name_key)
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_groups raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1223,14 +1213,12 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # `members=None` is Java's no-argument options constructor
             # (removeAll); an empty *list* is the collection constructor, which
             # Java rejects. _admin_members_to_remove keeps the two apart.
-            futures = client.remove_members_from_consumer_group(
+            outcomes = client.remove_members_from_consumer_group(
                 request.group_id, _admin_members_to_remove(request),
                 reason=request.reason if request.HasField("reason") else None,
                 timeout=_admin_timeout(request))
-            # Keyed by group.instance.id (a plain string), except in removeAll
-            # mode where a single whole-operation entry is keyed by None. Resolving
-            # here runs the operation to completion before responding.
-            return _admin_remove_members_response(_resolve_admin_futures(futures))
+            # Keyed by group.instance.id, which is a plain string.
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("remove_members_from_consumer_group raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1240,36 +1228,24 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # Five of the thirteen hold ONE future for the whole call in Java
     # (describe_acls, describe_client_quotas, create_delegation_token,
     # renew/expire_delegation_token, describe_delegation_token,
-    # describe_features), so admin.py *raises* on failure and the error becomes
+    # describe_features), so the admin facade *raises* on failure and the error becomes
     # the response's top-level error — there is no per-key slot for it. The other
-    # eight have genuine per-key futures: create_acls, delete_acls,
-    # alter_client_quotas, alter_user_scram_credentials and update_features
-    # return a dict of Futures immediately (Phase F of the per-key-callback
-    # reversal), resolved here via `_resolve_admin_futures` before the shared
-    # response translators run — the same `_resolve_admin_futures` used by
-    # create_topics and friends above; describe_producers/describe_transactions/
-    # fence_producers/list_transactions (slice G6, below) still return an
-    # already-resolved dict directly. A per-key failure arrives inside the
+    # eight have genuine per-key futures, so a per-key failure arrives inside the
     # returned dict and only a submission failure raises.
     #
     # update_features is the one whose *submission* can fail on a well-formed
     # request: an empty map raises against a real client (Java's
-    # IllegalArgumentException), but with zero features there is no per-key
-    # slot left for that rejection to land in either, so it is silently
-    # dropped rather than surfaced — a documented limitation of the per-key
-    # async entry point (see `update_features`'s docstring in admin.py). Against
-    # a mock (which never validates) an empty map yields an empty result. Both
-    # backends return `{}` for an empty map here; the real-client rejection is
-    # simply unobservable through this async entry point.
+    # IllegalArgumentException) and yields an empty result against a mock. Both
+    # are faithful, and the raise lands in the top-level error.
 
     def CreateAcls(self, request, context):
         client = self._get(request.admin_id)
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.create_acls(_admin_acl_bindings(request.acls),
-                                         timeout=_admin_timeout(request))
-            return _admin_create_acls_response(_resolve_admin_futures(futures))
+            outcomes = client.create_acls(_admin_acl_bindings(request.acls),
+                                          timeout=_admin_timeout(request))
+            return _admin_create_acls_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_acls raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1291,9 +1267,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DeleteAclsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.delete_acls(_admin_acl_filters(request.filters),
-                                         timeout=_admin_timeout(request))
-            return _admin_delete_acls_response(_resolve_admin_futures(futures))
+            outcomes = client.delete_acls(_admin_acl_filters(request.filters),
+                                          timeout=_admin_timeout(request))
+            return _admin_delete_acls_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_acls raised")
             return apb.DeleteAclsResponse(error=_kafka_error_to_proto(e))
@@ -1315,10 +1291,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.alter_client_quotas(_admin_quota_alterations(request.entries),
-                                                 timeout=_admin_timeout(request),
-                                                 validate_only=request.validate_only)
-            return _admin_alter_client_quotas_response(_resolve_admin_futures(futures))
+            outcomes = client.alter_client_quotas(_admin_quota_alterations(request.entries),
+                                                  timeout=_admin_timeout(request),
+                                                  validate_only=request.validate_only)
+            return _admin_alter_client_quotas_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_client_quotas raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1330,12 +1306,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 error=self._unknown_admin(request.admin_id))
         try:
             # An empty `users` is Java's no-argument overload: describe every
-            # user. admin.py takes None for the same thing and [] is equivalent.
-            # Returns a DescribeUserScramCredentialsResult (the three views);
-            # a data-future failure raises here and becomes the top-level error.
-            result = client.describe_user_scram_credentials(
+            # user. the admin facade takes None for the same thing and [] is equivalent.
+            outcomes = client.describe_user_scram_credentials(
                 list(request.users), timeout=_admin_timeout(request))
-            return _admin_describe_user_scram_credentials_response(result)
+            return _admin_describe_user_scram_credentials_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_user_scram_credentials raised")
             return apb.DescribeUserScramCredentialsResponse(error=_kafka_error_to_proto(e))
@@ -1345,9 +1319,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.alter_user_scram_credentials(
+            outcomes = client.alter_user_scram_credentials(
                 _admin_scram_alterations(request.alterations), timeout=_admin_timeout(request))
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_name_key)
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_user_scram_credentials raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1429,10 +1403,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            futures = client.update_features(_admin_feature_updates(request),
-                                             timeout=_admin_timeout(request),
-                                             validate_only=request.validate_only)
-            return _admin_void_response(_resolve_admin_futures(futures), _admin_name_key)
+            outcomes = client.update_features(_admin_feature_updates(request),
+                                              timeout=_admin_timeout(request),
+                                              validate_only=request.validate_only)
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("update_features raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1440,15 +1414,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
 
     # -- Producers & transactions (slice G6) ----------------------------------
     #
-    # describe_producers / describe_transactions / fence_producers now return a
-    # {key: Future} dict (Phase G per-key reversal), resolved here via
-    # `_resolve_admin_futures` before the shared response translators run — the
-    # same helper create_topics and friends use. list_transactions stays JOINED
-    # (Java's ListTransactionsResult has no per-transactional-id future map), so
-    # it already returns a resolved dict and needs no wrap. The other two,
+    # Four of the six are ordinary per-key results (describe_producers,
+    # describe_transactions, fence_producers, list_transactions). The other two,
     # abort_transaction and force_terminate_transaction, answer with the shared
     # StatusResponse because Java's AbortTransactionResult / TerminateTransaction
-    # Result carry no data and no reachable per-key granularity — admin.py
+    # Result carry no data and no reachable per-key granularity — the admin facade
     # resolves both to None, so success is an absent error.
     #
     # list_transactions is keyed by *broker*: byBrokerId() is the only one of
@@ -1464,10 +1434,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # partition's leader); broker 0 is legal, so HasField carries it.
             broker_id = request.broker_id if request.HasField("broker_id") else None
             outcomes = client.describe_producers(
-                [(tp.topic, tp.partition) for tp in request.partitions],
+                [_tp(tp) for tp in request.partitions],
                 broker_id=broker_id,
                 timeout=_admin_timeout(request))
-            return _admin_describe_producers_response(_resolve_admin_futures(outcomes))
+            return _admin_describe_producers_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_producers raised")
             return apb.DescribeProducersResponse(error=_kafka_error_to_proto(e))
@@ -1479,7 +1449,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = client.describe_transactions(
                 list(request.transactional_ids), timeout=_admin_timeout(request))
-            return _admin_describe_transactions_response(_resolve_admin_futures(outcomes))
+            return _admin_describe_transactions_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_transactions raised")
             return apb.DescribeTransactionsResponse(error=_kafka_error_to_proto(e))
@@ -1544,7 +1514,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = client.fence_producers(
                 list(request.transactional_ids), timeout=_admin_timeout(request))
-            return _admin_fence_producers_response(_resolve_admin_futures(outcomes))
+            return _admin_fence_producers_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("fence_producers raised")
             return apb.FenceProducersResponse(error=_kafka_error_to_proto(e))
@@ -1556,13 +1526,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # Close is idempotent — silent success on unknown id, as the
             # producer and consumer services do.
             return pb.StatusResponse()
-        # admin.py's close() takes seconds or a timedelta; absent means Java's
+        # the admin facade's close() takes seconds or a timedelta; absent means Java's
         # no-argument close(). Shared helper so both servers convert the wire's
         # integer milliseconds exactly (see _admin_close_timeout).
         timeout = _admin_close_timeout(request)
         try:
             client.close(timeout)
-        except ka.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("admin close raised")

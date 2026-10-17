@@ -52,18 +52,34 @@ class HeldCompletion:
 
     ``payloads`` holds the results as the C trampoline passes them, ``raised``
     what the client's callback raised back to the trampoline (which prints it
-    and drops it), and ``delivered`` is set once the callback has returned."""
+    and drops it), and ``delivered`` is set once the callback has returned.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    ``index`` is the position of the completion callback among the entry
+    point's arguments: the last by default, ``-2`` for ``Producer_send_cb``,
+    whose delivery callback comes before its ``resolve``.
+
+    With ``submit_later``, a call of the entry point only records its
+    arguments, and :meth:`submit` makes the call: the operation cannot complete,
+    nor its completion reach a callback pump, before then. A test whose loop
+    must have stopped before the completion arrives (see :class:`StoppedLoop`)
+    submits after ``start`` returns: an operation that completes at once would
+    otherwise notify while the loop still runs, and the pump scheduled on the
+    loop would run (and hold) on the test's thread, or never run once the loop
+    stops."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str, index: int = -1,
+                 *, submit_later: bool = False) -> None:
         self.submitted = threading.Event()
         self.release = threading.Event()
         self.delivered = threading.Event()
         self.payloads: list[tuple[Any, ...]] = []
         self.raised: list[BaseException] = []
+        self._later: list[Callable[[], Any]] = []
         real = getattr(_lib, name)
 
         def entry(*args: Any) -> Any:
-            *rest, cb = args
+            arguments = list(args)
+            cb = arguments[index]
 
             def held(*payload: Any) -> None:
                 self.payloads.append(payload)
@@ -76,18 +92,35 @@ class HeldCompletion:
                 finally:
                     self.delivered.set()
 
-            result = real(*rest, held)
-            self.submitted.set()
-            return result
+            arguments[index] = held
+
+            def call() -> Any:
+                result = real(*arguments)
+                self.submitted.set()
+                return result
+
+            if submit_later:
+                self._later.append(call)
+                return None
+            return call()
 
         monkeypatch.setattr(_lib, name, entry)
 
+    def submit(self) -> None:
+        """Make the entry-point calls ``submit_later`` recorded, in order."""
+        later, self._later = self._later, []
+        assert later, "the entry point was not called"
+        for call in later:
+            call()
+
 
 @pytest.fixture
-def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], HeldCompletion]:
-    """``hold_completion(name)`` holds the completions of ``_lib.<name>``, whose
-    last argument is the completion callback (see :class:`HeldCompletion`)."""
-    return lambda name: HeldCompletion(monkeypatch, name)
+def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[..., HeldCompletion]:
+    """``hold_completion(name, index=-1, *, submit_later=False)`` holds the
+    completions of ``_lib.<name>``, whose argument at ``index`` is the
+    completion callback (see :class:`HeldCompletion`)."""
+    return lambda name, index=-1, *, submit_later=False: HeldCompletion(
+        monkeypatch, name, index, submit_later=submit_later)
 
 
 @pytest.fixture

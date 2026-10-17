@@ -105,13 +105,15 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
 from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import KafkaProducer, ProducerRecord, RecordMetadata
+
+from .producer_futures import failure
 
 INIT_TXN_TIMEOUT_MSG = ("InitTransactions timed out - did not complete coordinator discovery or "
                         "receive the InitProducerId response within max.block.ms.")
@@ -190,16 +192,29 @@ def test_serializer_close() -> None:
 def test_should_close_properly_and_throw_if_interrupted() -> None:
     # Java interrupts the thread blocked in close() and expects an
     # InterruptException after the close force-closed the sender
-    # (KafkaProducer.close(Duration, boolean), :1419-1437). The Python analog of
+    # (KafkaProducer.close(Duration, boolean), :1506-1524). The Python analog of
     # the interrupt is Ctrl+C: SIGINT, which only the main thread receives, so
     # close() runs here and a timer sends the signal. Java's MockClient holds
     # the send in flight; here an unreachable broker keeps the record waiting
     # for metadata (max.block.ms 60 s), so close() cannot end on its own sooner.
+    # That send() waits for the metadata as Java's does, so it runs on a thread
+    # of its own; the forced close ends its wait.
     configs = {"bootstrap.servers": "localhost:9999", "batch.size": "1",
                "max.block.ms": 60000}
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                              value_serializer=string_serializer())
-    future = producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+    outcome: list[BaseException | KafkaFuture[RecordMetadata]] = []
+
+    def send() -> None:
+        try:
+            outcome.append(producer.send(
+                record=ProducerRecord(topic="topic", key="key", value="value")))
+        except BaseException as e:  # noqa: BLE001 - checked below
+            outcome.append(e)
+
+    sender = threading.Thread(target=send, daemon=True)
+    sender.start()
+    time.sleep(0.05)  # the record is with the submission task
 
     armed = True
 
@@ -226,9 +241,16 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     # Close did not complete without waiting for the send, and the interrupt
     # surfaced once the close was forced, not after max.block.ms.
     assert 0.1 <= elapsed < 10, elapsed
-    # Closed properly: the pending record failed, and the producer is closed.
-    assert future.done()
-    assert isinstance(future.exception(), KafkaError)
+    # Closed properly: the pending record failed (its send() raising, or its
+    # future failing), and the producer is closed.
+    sender.join(10)
+    assert not sender.is_alive()
+    (result,) = outcome
+    if isinstance(result, BaseException):
+        assert isinstance(result, KafkaError), result
+    else:
+        assert result.is_done()
+        assert isinstance(failure(result), KafkaError)
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"

@@ -40,7 +40,7 @@ class FencedLeaderEpochError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 74  # kafka_common_ErrorCode_FENCED_LEADER_EPOCH
+    _ffi_id: ClassVar[int] = 74  # kafka_common_Error_FENCED_LEADER_EPOCH
 
     def __init__(
         self,

@@ -31,11 +31,12 @@ use confluent_kafka::consumer::{
 };
 
 /// Compile-time check that [`MockConsumer<K, V>`] is object-safe and can be
-/// used as `Box<dyn Consumer<K, V>>` (DoD §11). A regression that introduces
+/// used as `Box<dyn DynConsumer<K, V>>` (DoD §11). A regression that introduces
 /// a `Self: Sized` bound would fail this file at compile time.
 #[test]
 fn mock_consumer_is_consumer_trait_object() {
-    let _: Box<dyn Consumer<String, String>> = Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
+    let _: Box<dyn confluent_kafka::consumer::DynConsumer<String, String>> =
+        Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
 }
 
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
@@ -401,7 +402,7 @@ async fn close_overloads_mark_the_consumer_closed() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed());
     consumer
-        .close_with_options(CloseOptions::new_timeout(std::time::Duration::from_secs(1)))
+        .close_with_options(CloseOptions::new_with_timeout(std::time::Duration::from_secs(1)))
         .await
         .expect("close_with_options");
     assert!(consumer.closed(), "close_with_options(..) closes");

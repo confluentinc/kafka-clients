@@ -38,7 +38,7 @@ class PolicyViolationError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 44  # kafka_common_ErrorCode_POLICY_VIOLATION
+    _ffi_id: ClassVar[int] = 44  # kafka_common_Error_POLICY_VIOLATION
 
     def __init__(
         self,

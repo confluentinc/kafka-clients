@@ -47,7 +47,7 @@ use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
+use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::cluster_config::ClusterConfig;
@@ -97,18 +97,20 @@ fn producer(bootstrap: &str, overrides: &[(&str, &str)]) -> KafkaProducer<Vec<u8
 /// Java `clusterInstance.consumer(overrides)` — byte-array deserializers,
 /// bootstrapping against every broker. The Java arm under test sets
 /// `group.protocol=consumer`.
-fn consumer(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn consumer(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
     ]);
     props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::default()),
+            Box::new(ByteArrayDeserializer::default()),
+        )
+        .expect("build consumer"),
     )
-    .expect("build consumer")
 }
 
 fn record(topic: &str, value: &str) -> ProducerRecord<Vec<u8>, Vec<u8>> {
@@ -128,7 +130,7 @@ async fn send_and_get_offset(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: 
 
 /// Java `TestUtils.waitForCondition(() -> consumer.poll(Duration.ofMillis(100)).count() == 1,
 /// 10 * 1000, "Failed to poll data.")`.
-async fn wait_for_one_polled_record(consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>) {
+async fn wait_for_one_polled_record(consumer: &mut dyn DynConsumer<Vec<u8>, Vec<u8>>) {
     let deadline = Instant::now() + Duration::from_millis(10 * 1000);
     loop {
         let count = consumer.poll(Duration::from_millis(100)).await.expect("poll").count();

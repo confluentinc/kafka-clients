@@ -55,7 +55,7 @@ async def main(broker, topic):
                 break
             record = ProducerRecord(topic=topic, value=line.rstrip())
             # Awaiting send() waits for buffer space, and returns the future of
-            # the delivery; `await (await p.send(...))` would give its metadata.
+            # the delivery; `await (await p.send(...)).get()` would give its metadata.
             await p.send(record=record, callback=functools.partial(delivery_callback, record))
 
         sys.stderr.write('% Waiting for outstanding deliveries\n')

@@ -28,6 +28,8 @@ integration tests.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import gc
 import inspect
 import itertools
 import logging
@@ -40,19 +42,27 @@ import sys
 import threading
 import time
 from types import FrameType
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError
+from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
 from confluent_kafka._args import UNSET
-from confluent_kafka.common import KafkaError, MetricName, PartitionInfo, TopicPartition
+from confluent_kafka.common import (
+    AsyncKafkaFuture,
+    KafkaError,
+    KafkaFuture,
+    MetricName,
+    PartitionInfo,
+    TopicPartition,
+)
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors import UnsupportedVersionError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
-from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer
+from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import (
     AsyncKafkaProducer,
     AsyncMockProducer,
@@ -65,13 +75,24 @@ from confluent_kafka.producer import (
     ProducerRecord,
     RecordMetadata,
 )
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.producer._base import NO_GROUP_METADATA_HANDLE_MESSAGE, raise_if_error
+from confluent_kafka.producer._record_future import AsyncRecordFuture, RecordFuture
+from confluent_kafka.producer._send import failure_metadata, run_callback
+
+from .producer_futures import (
+    assert_send_throws,
+    async_assert_send_throws,
+    async_failure,
+    failure,
+)
 
 TOPIC = "topic"
 RECORD = ProducerRecord(topic=TOPIC, key=b"k", value=b"v")
 # Sends fail on the metadata wait after max.block.ms.
 UNREACHABLE = {"bootstrap.servers": "127.0.0.1:59999", "max.block.ms": 100}
 CLOSED = "Cannot perform operation after producer has been closed"
+BOUND_ELSEWHERE = "{cls} is bound to a different event loop"
 # Java's messages for a transactional method on an idempotent producer (the
 # default: it has a transaction manager, TransactionManager.ensureTransactional)
 # and on a producer with neither idempotence nor transactions
@@ -197,8 +218,8 @@ def test_send_callback_defaults_to_unset() -> None:
     for cls in (Producer, AsyncProducer, MockProducer, AsyncMockProducer):
         assert inspect.signature(cls.send).parameters["callback"].default is UNSET, cls
     p = MockProducer(auto_complete=True, partitioner=None)
-    assert p.send(record=RECORD).result().offset() == 0
-    assert p.send(record=RECORD, callback=None).result().offset() == 1
+    assert p.send(record=RECORD).get().offset() == 0
+    assert p.send(record=RECORD, callback=None).get().offset() == 1
 
 
 def test_parameter_names_and_order_are_javas() -> None:
@@ -319,14 +340,14 @@ def test_mock_constructor_defaults_are_javas() -> None:
     # *(deviation)* bytes_serializer() for the serializers.
     p = MockProducer()
     f = p.send(record=RECORD)
-    assert not f.done()
+    assert not f.is_done()
     assert p.partitions_for(topic=TOPIC) == []
     assert p.complete_next()
-    assert f.result().offset() == 0
+    assert f.get().offset() == 0
     # auto_complete given as False still counts as given: the four-argument form.
     p2 = MockProducer(auto_complete=False, partitioner=None, key_serializer=None,
                       value_serializer=None)
-    assert not p2.send(record=RECORD).done()
+    assert not p2.send(record=RECORD).is_done()
 
 
 def test_kafka_producer_constructor_takes_every_combination() -> None:
@@ -557,27 +578,32 @@ def test_send_failure_metadata_callback_and_future() -> None:
     # Java's AppendCallbacks hands the callback RecordMetadata(tp, -1, -1,
     # NO_TIMESTAMP, -1, -1), never null; the callback runs off the caller's
     # thread and before the future completes; the future cannot be cancelled.
+    # send() waits for the record's handover, and the core's send() fires the
+    # callback of a metadata TimeoutError before it returns (Java's doSend
+    # does, KafkaProducer.java:1137-1149), so the callback may run before
+    # send() returned the future: that future is not done either.
     caller = threading.get_ident()
     seen: list[tuple[int, bool, RecordMetadata, Exception | None]] = []
     done = threading.Event()
     holder: dict[str, Any] = {}
 
     def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append((threading.get_ident(), holder["f"].done(), md, e))
+        future = holder.get("f")
+        seen.append((threading.get_ident(), future is not None and future.is_done(), md, e))
         done.set()
 
     with KafkaProducer(configs=UNREACHABLE) as p:
         holder["f"] = f = p.send(record=ProducerRecord(topic=TOPIC, partition=3, key=None,
                                                        value=b"v"),
                                  callback=callback)
-        assert not f.cancel()
+        assert not f.cancel(may_interrupt_if_running=True)
         assert done.wait(30)
-        with pytest.raises(KafkaTimeoutError) as err:
-            f.result(timeout=30)
+        cause = assert_send_throws(f, KafkaTimeoutError, 30)
+        assert not f.is_cancelled()
     ((thread, future_done, md, e),) = seen
     assert thread != caller
     assert not future_done
-    assert e is err.value
+    assert e is cause
     assert str(e) == "Topic topic not present in metadata after 100 ms."
     assert (md.topic(), md.partition(), md.offset(), md.timestamp(),
             md.serialized_key_size(), md.serialized_value_size()) == (TOPIC, 3, -1, -1, -1, -1)
@@ -604,8 +630,7 @@ def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the
             start = time.monotonic()
             f = await p.send(record=RECORD, callback=callback)
             elapsed = time.monotonic() - start
-            await asyncio.wait([f], timeout=30)
-            return elapsed, f.exception()
+            return elapsed, await async_failure(f, 30)
         finally:
             await p.close(timeout=0)
 
@@ -617,7 +642,7 @@ def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the
             start = time.monotonic()
             f = p.send(record=RECORD, callback=callback)
             elapsed = time.monotonic() - start
-            error = f.exception(timeout=30)
+            error = failure(f, 30)
         finally:
             p.close(timeout=0)
     assert elapsed >= 0.3, elapsed
@@ -629,44 +654,52 @@ def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the
 _NOT_IN_A_TRANSACTION = "Cannot add partition topic-0 to transaction while in state  READY"
 
 
-def _fake_full_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Fakes the native calls of a send whose buffer is full and whose record is
-    not handed over yet; the completion callback send() passed is kept."""
+def _fake_queued_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fakes the queued send of a record not handed over yet: the delivery
+    callback and the handover callback send() passed are kept."""
     captured: dict[str, Any] = {}
 
-    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
-        captured["cb"] = cb
-        return True  # the buffer is full
+    def producer_send_cb(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> int:
+        captured["on_completion"] = on_completion
+        captured["resolve"] = resolve
+        return 0
 
-    def producer_drain(c_producer: int, ready: Any) -> bool:
-        return False  # not handed over yet
-
-    def on_space_available(c_producer: int, ready: Any) -> bool:
-        captured["waiting_for_space"] = True
-        return False  # no space yet
-
-    monkeypatch.setattr(_lib, "Producer_send", producer_send)
-    monkeypatch.setattr(_lib, "Producer_drain", producer_drain)
-    monkeypatch.setattr(_lib, "Producer_on_space_available", on_space_available)
+    monkeypatch.setattr(_lib, "Producer_send_cb", producer_send_cb)
     return captured
 
 
-def _immediate_error(cb: Any) -> None:
-    """The core reports the error its send() returned for the record."""
-    cb(0, _lib.KafkaError_new(IllegalStateError._ffi_id, _NOT_IN_A_TRANSACTION), True)
+def _hand_over(captured: dict[str, Any], rethrown: bool) -> None:
+    """The record reaches the core: with ``rethrown`` its send() returns the
+    error (an OWNED handle, as the extension passes it), else it is accepted
+    and then fails its delivery (a BORROWED handle, freed after the call)."""
+    error = _lib.KafkaError_new(IllegalStateError._ffi_id, _NOT_IN_A_TRANSACTION)
+    if rethrown:
+        captured["resolve"](error)
+        return
+    captured["resolve"](0)
+    try:
+        # Callback id 0: the faked send registered no report with the core.
+        captured["on_completion"](None, error, 0)
+    finally:
+        _lib.KafkaError_destroy(error)
 
 
-@pytest.mark.parametrize("error_before_interrupt", [False, True])
-def test_ctrl_c_while_a_transactional_send_waits_for_space_leaves_nothing_to_flush(
-        monkeypatch: pytest.MonkeyPatch, error_before_interrupt: bool) -> None:
-    # With no transaction started, send() waits for buffer space, then for the
-    # handover, to raise what Java's doSend rethrows. After a Ctrl+C in the
-    # first wait, the immediate error reaches the callback and the future when
-    # it arrives later, and drops the future when it came first (Java gives a
-    # rethrown error to neither); either way flush() has nothing left to wait
-    # for (Copilot review, PR #187).
+@pytest.mark.parametrize("rethrown", [False, True])
+def test_ctrl_c_while_a_transactional_send_waits_for_its_handover_raises_after_it(
+        monkeypatch: pytest.MonkeyPatch, rethrown: bool) -> None:
+    # Updated for the branch C API: send() waits for its record's handover,
+    # the core's producer.send() holding it up to max.block.ms for metadata
+    # and buffer space as Java's does, and a sync wait lets the operation
+    # finish on Ctrl+C, raising KeyboardInterrupt after it. With no
+    # transaction started, the handover carries what Java's doSend rethrows.
+    # A Ctrl+C meanwhile is raised once the record is
+    # handed over: a rethrown error then reaches neither the callback nor the
+    # future (as in Java; the callback runs only if the record completes later,
+    # see test_a_rethrown_send_runs_its_callback_once_if_the_record_completes),
+    # an accepted record's later failure reaches both, and either way flush()
+    # has nothing left to wait for (Copilot review, PR #187).
     p = KafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
-    captured = _fake_full_send(monkeypatch)
+    captured = _fake_queued_send(monkeypatch)
     seen: list[Exception | None] = []
     called = threading.Event()
 
@@ -675,35 +708,40 @@ def test_ctrl_c_while_a_transactional_send_waits_for_space_leaves_nothing_to_flu
         called.set()
 
     armed = True
+    handed_over_at: list[float] = []
 
     def on_sigint(signum: int, frame: FrameType | None) -> None:
         if armed:
             raise KeyboardInterrupt
 
-    def interrupt() -> None:
-        if error_before_interrupt:
-            _immediate_error(captured["cb"])
-        os.kill(os.getpid(), signal.SIGINT)
+    def hand_over() -> None:
+        handed_over_at.append(time.monotonic())
+        _hand_over(captured, rethrown)
 
     previous = signal.signal(signal.SIGINT, on_sigint)
-    timer = threading.Timer(0.2, interrupt)
+    interrupt = threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGINT))
+    handover = threading.Timer(0.5, hand_over)
     try:
-        timer.start()
+        interrupt.start()
+        handover.start()
         with pytest.raises(KeyboardInterrupt):
             p.send(record=RECORD, callback=callback)
+        raised_at = time.monotonic()
     finally:
-        timer.cancel()
-        timer.join()
+        interrupt.cancel()
+        handover.cancel()
+        interrupt.join()
+        handover.join()
         armed = False
         time.sleep(0.05)  # a signal still pending runs the disarmed handler
         signal.signal(signal.SIGINT, previous)
-    assert captured.get("waiting_for_space")
+    # The interrupt was raised once the send's wait ended, not at the signal.
+    assert handed_over_at and raised_at >= handed_over_at[0]
     monkeypatch.undo()
     try:
-        if error_before_interrupt:
+        if rethrown:
             assert not called.wait(0.2)
         else:
-            _immediate_error(captured["cb"])
             assert called.wait(5)
             assert type(seen[0]) is IllegalStateError
             assert str(seen[0]) == _NOT_IN_A_TRANSACTION
@@ -717,32 +755,33 @@ def test_ctrl_c_while_a_transactional_send_waits_for_space_leaves_nothing_to_flu
         p.close(timeout=0)
 
 
-@pytest.mark.parametrize("error_before_cancel", [False, True])
-async def test_cancelling_a_transactional_send_waiting_for_space_leaves_nothing_to_flush(
-        monkeypatch: pytest.MonkeyPatch, error_before_cancel: bool) -> None:
-    # The async peer of the test above: cancelling the task awaiting send().
+@pytest.mark.parametrize("rethrown", [False, True])
+async def test_cancelling_a_transactional_send_waiting_for_its_handover_raises_after_it(
+        monkeypatch: pytest.MonkeyPatch, rethrown: bool) -> None:
+    # The async peer of the test above (updated the same way): cancelling the
+    # task awaiting send() lets the wait end, then raises CancelledError.
     p = AsyncKafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
-    captured = _fake_full_send(monkeypatch)
+    captured = _fake_queued_send(monkeypatch)
     seen: list[Exception | None] = []
 
     def callback(md: RecordMetadata, e: Exception | None) -> None:
         seen.append(e)
 
     task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
-    while not captured.get("waiting_for_space"):
+    while "resolve" not in captured:
         await asyncio.sleep(0.01)
-    if error_before_cancel:
-        _immediate_error(captured["cb"])
     task.cancel()
+    await asyncio.sleep(0.2)
+    assert not task.done()  # the cancellation waits for the handover
+    _hand_over(captured, rethrown)
     with pytest.raises(asyncio.CancelledError):
         await task
     monkeypatch.undo()
     try:
-        if error_before_cancel:
+        if rethrown:
             await asyncio.sleep(0.2)
             assert seen == []
         else:
-            _immediate_error(captured["cb"])
             for _ in range(500):
                 if seen:
                     break
@@ -756,8 +795,145 @@ async def test_cancelling_a_transactional_send_waiting_for_space_leaves_nothing_
         await p.close(timeout=0)
 
 
-def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(
-        caplog: pytest.LogCaptureFixture) -> None:
+# A later completion of a record whose send() raised: Java's doSend appends the
+# record, its appendCallbacks carrying the Callback, before maybeAddPartition
+# throws (KafkaProducer.java:1027-1039), so the record completes with its batch
+# and its Callback runs then, with the batch's outcome: the metadata of a
+# committed record, or the error that aborted it, with the -1 metadata of
+# KafkaProducer.AppendCallbacks.onCompletion (:1589-1592).
+_LATE_OUTCOMES = {
+    "committed": (("topic", 0, 7, 1234, 1, 1), None),
+    "aborted": (None, "Producer is closed forcefully."),
+}
+
+
+def _complete_late(captured: dict[str, Any], outcome: str) -> None:
+    """The core fires the record's delivery callback (a BORROWED error handle,
+    freed after the call; callback id 0, as the faked send registered no report
+    with the core)."""
+    metadata, message = _LATE_OUTCOMES[outcome]
+    error = 0 if message is None else _lib.KafkaError_new(KafkaError._ffi_id, message)
+    try:
+        captured["on_completion"](metadata, error, 0)
+    finally:
+        if error:
+            _lib.KafkaError_destroy(error)
+
+
+def _check_late(seen: list[tuple[int, Exception | None]], outcome: str) -> None:
+    if outcome == "committed":
+        assert seen == [(7, None)]
+    else:
+        assert len(seen) == 1
+        offset, error = seen[0]
+        assert offset == -1
+        assert type(error) is KafkaError
+        assert str(error) == "Producer is closed forcefully."
+
+
+@pytest.mark.parametrize("outcome", sorted(_LATE_OUTCOMES))
+def test_a_rethrown_send_runs_its_callback_once_if_the_record_completes(
+        monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    # send() raises the handover's error and returns no future; flush() does
+    # not wait for the record, whose callback may never run (a record rejected
+    # before the append). When the record does complete, its callback runs,
+    # once, and the internal future is set once (a second set would raise
+    # InvalidStateError from on_completion).
+    p = KafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_queued_send(monkeypatch)
+    seen: list[tuple[int, Exception | None]] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append((md.offset(), e))
+
+    def hand_over() -> None:
+        while "resolve" not in captured:
+            time.sleep(0.01)
+        _hand_over(captured, rethrown=True)
+
+    handover = threading.Thread(target=hand_over, daemon=True)
+    handover.start()
+    try:
+        with pytest.raises(IllegalStateError) as raised:
+            p.send(record=RECORD, callback=callback)
+        assert str(raised.value) == _NOT_IN_A_TRANSACTION
+        handover.join(5)
+        monkeypatch.undo()
+        assert seen == []
+        assert not p._futures  # noqa: SLF001
+        flush = threading.Thread(target=p.flush, daemon=True)
+        flush.start()
+        flush.join(5)
+        assert not flush.is_alive(), "flush() waits for the rethrown send"
+
+        _complete_late(captured, outcome)
+        _check_late(seen, outcome)
+        _complete_late(captured, outcome)  # never twice
+        _check_late(seen, outcome)
+    finally:
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("outcome", sorted(_LATE_OUTCOMES))
+async def test_a_rethrown_async_send_runs_its_callback_once_if_the_record_completes(
+        monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    # The async peer of the test above. The future send() did not return is
+    # cancelled, so a later failure is not logged as never retrieved.
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_queued_send(monkeypatch)
+    seen: list[tuple[int, Exception | None]] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append((md.offset(), e))
+
+    try:
+        task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
+        while "resolve" not in captured:
+            await asyncio.sleep(0.01)
+        _hand_over(captured, rethrown=True)
+        with pytest.raises(IllegalStateError) as raised:
+            await task
+        assert str(raised.value) == _NOT_IN_A_TRANSACTION
+        monkeypatch.undo()
+        assert seen == []
+        assert not p._futures  # noqa: SLF001
+        await asyncio.wait_for(p.flush(), 5)
+
+        for _ in range(2):  # never twice
+            _complete_late(captured, outcome)
+            await asyncio.sleep(0.05)
+            _check_late(seen, outcome)
+        # Drop every reference to send()'s frame (the raised error's traceback
+        # holds it), so an unretrieved error would be logged now.
+        del task, raised
+        captured.clear()
+        gc.collect()
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        await p.close(timeout=0)
+
+
+def _core_callback_errors(capfd: pytest.CaptureFixture[str]) -> list[str]:
+    """The core's log lines for a raising send() callback, from stderr, the
+    record prefix of its default log backend left out."""
+    return [line.split("] ", 1)[1] for line in capfd.readouterr().err.splitlines()
+            if "Error executing user-provided callback" in line]
+
+
+def test_callbacks_run_in_completion_order_and_a_raising_one_is_reported(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]) -> None:
+    # Java logs a throwing onCompletion with its exception and fails nothing
+    # (ProducerBatch.completeFutureAndFireCallbacks, ProducerBatch.java:318-320).
+    # Python reports it to the core, which logs it once with Java's message and
+    # the exception's text; Python logs nothing.
     order: list[int] = []
     all_done = threading.Event()
 
@@ -770,15 +946,381 @@ def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(
                 raise RuntimeError("callback blew up")
         return cb
 
-    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+    capfd.readouterr()
+    with caplog.at_level(logging.DEBUG, logger="confluent_kafka"):
         with KafkaProducer(configs=UNREACHABLE) as p:
             futures = [p.send(record=RECORD, callback=make(i)) for i in range(4)]
             assert all_done.wait(30)
             for f in futures:
-                assert isinstance(f.exception(timeout=30), KafkaTimeoutError)
+                assert_send_throws(f, KafkaTimeoutError, 30)
     assert order == [0, 1, 2, 3]
-    assert [r.getMessage() for r in caplog.records if r.name == "confluent_kafka.producer"] == [
-        "Error executing user-provided callback on message for topic-partition 'topic--1'"]
+    assert _core_callback_errors(capfd) == [f"{CALLBACK_ERROR}: LocalCallbackError: callback blew up"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_a_raising_callback_of_a_record_rejected_before_the_accumulator_is_logged_once(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        capfd: pytest.CaptureFixture[str]) -> None:
+    # A send() from a send() callback does not wait for its handover (see the
+    # producer module docstring), so the error the Rust send() returns for a
+    # record rejected before the accumulator goes to the record's callback and
+    # future. No delivery callback reports such a completion, so the
+    # callback's exception has no core report to go to: Python logs it, once,
+    # with the message the core logs a reported one with. (Outside a callback
+    # send() raises that error instead and the callback never runs: see
+    # test_a_rethrown_send_runs_its_callback_once_if_the_record_completes.)
+    p = KafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    raised = RuntimeError("callback blew up")
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        raise raised
+
+    def outer(md: RecordMetadata, e: Exception | None) -> KafkaFuture[RecordMetadata]:
+        # The send, as from inside a delivery callback of p: run_callback is
+        # what the completion thread runs a callback with.
+        return p.send(record=RECORD, callback=callback)
+
+    capfd.readouterr()
+    try:
+        with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+            f = cast("KafkaFuture[RecordMetadata]",
+                     run_callback(p, outer, failure_metadata(TOPIC, None), None))
+            assert not f.is_done(), "a send from a callback returns before its handover"
+            captured["resolve"](_lib.KafkaError_new(IllegalStateError._ffi_id,
+                                                    _NOT_IN_A_TRANSACTION))
+            error = assert_send_throws(f, IllegalStateError, 5)
+            assert str(error) == _NOT_IN_A_TRANSACTION
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
+    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[1] is raised
+    assert _core_callback_errors(capfd) == []
+
+
+def test_send_returns_only_once_its_record_is_handed_over(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's send() returns once its record is in the accumulator (doSend), so
+    # a full buffer.memory blocks it up to max.block.ms: the producer's
+    # backpressure. send() waits for the handover's internal future, then
+    # returns the record's future; the record's delivery completes that future
+    # later.
+    p = KafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    out: dict[str, Any] = {}
+
+    def send() -> None:
+        out["future"] = p.send(record=RECORD)
+
+    sender = threading.Thread(target=send, daemon=True)
+    try:
+        sender.start()
+        while "resolve" not in captured:
+            time.sleep(0.01)
+        sender.join(0.3)
+        assert sender.is_alive(), "send() returned before its record was handed over"
+        captured["resolve"](0)
+        sender.join(5)
+        assert not sender.is_alive()
+        future = out["future"]
+        assert not future.is_done()
+        assert p._futures == {future._impl}  # noqa: SLF001 (flush() waits for it)
+        captured["on_completion"](("topic", 0, 7, 1234, 1, 1), 0, 0)
+        assert future.get(timeout=5).offset() == 7
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+
+
+async def test_async_send_returns_only_once_its_record_is_handed_over(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The async peer of the test above: the awaited send() resolves with the
+    # record's future once the record is handed over, the loop staying free.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    try:
+        task = asyncio.ensure_future(p.send(record=RECORD))
+        while "resolve" not in captured:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+        assert not task.done(), "send() returned before its record was handed over"
+        captured["resolve"](0)
+        future = await asyncio.wait_for(task, 5)
+        assert isinstance(future, AsyncKafkaFuture)
+        assert not future.is_done()
+        assert p._futures == {future._impl}  # noqa: SLF001 (flush() waits for it)
+        captured["on_completion"](("topic", 0, 7, 1234, 1, 1), 0, 0)
+        assert (await future.get(timeout=5)).offset() == 7
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        await p.close(timeout=0)
+
+
+def test_send_future_dependants_run_where_the_record_completes_after_its_callback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # send() returns a KafkaFuture (CLAUDE.md, Python Binding Conventions,
+    # Futures): its then_apply functions and when_complete actions run where
+    # the record completes (the producer's completion thread; here the thread
+    # the faked completion runs on), after the record's callback, as Java fires
+    # the callbacks before completing the future. Registered on a done future,
+    # they run inside the registering call. cancel() answers False, as Java's
+    # FutureRecordMetadata.
+    p = KafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    order: list[tuple[str, int]] = []
+    out: dict[str, Any] = {}
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        order.append(("callback", threading.get_ident()))
+
+    def offset_of(md: RecordMetadata) -> int:
+        order.append(("then_apply", threading.get_ident()))
+        return md.offset()
+
+    seen: list[tuple[RecordMetadata | None, BaseException | None]] = []
+
+    def action(md: RecordMetadata | None, e: BaseException | None) -> None:
+        order.append(("when_complete", threading.get_ident()))
+        seen.append((md, e))
+
+    sender = threading.Thread(
+        target=lambda: out.__setitem__("f", p.send(record=RECORD, callback=callback)))
+    try:
+        sender.start()
+        while "resolve" not in captured:
+            time.sleep(0.01)
+        captured["resolve"](0)
+        sender.join(5)
+        f = out["f"]
+        assert isinstance(f, KafkaFuture)
+        assert not f.cancel(may_interrupt_if_running=True)
+        offset = f.then_apply(function=offset_of)
+        completed = f.when_complete(action=action)
+        assert order == [] and not offset.is_done()
+        completer = threading.Thread(target=captured["on_completion"], args=(_METADATA, 0, 0))
+        completer.start()
+        completer.join(5)
+        assert [name for name, _ in order] == ["callback", "then_apply", "when_complete"]
+        assert {thread for _, thread in order} == {completer.ident}
+        assert offset.get(timeout=5) == 0
+        assert completed.get(timeout=5).offset() == 0
+        ((md, error),) = seen
+        assert md is not None and md.offset() == 0 and error is None
+        late: list[int] = []
+        f.then_apply(function=lambda md: late.append(threading.get_ident()))
+        assert late == [threading.get_ident()]
+        assert not f.cancel(may_interrupt_if_running=True)
+        assert not f.to_completion_stage().cancel()
+        assert not f.is_cancelled() and not f.is_completed_exceptionally()
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+
+
+async def test_async_send_future_dependants_run_on_the_loop_after_its_callback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The asyncio peer: the record completes on the producer's event loop, so
+    # its future's then_apply functions and when_complete actions run there,
+    # after the callback, even when the completion arrives on another thread.
+    # A failed record skips then_apply's function (Java's thenApply) and fails
+    # the dependants with its error.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    loop_thread = threading.get_ident()
+    order: list[tuple[str, int]] = []
+    errors: list[BaseException | None] = []
+
+    def offset_of(md: RecordMetadata) -> int:
+        order.append(("then_apply", threading.get_ident()))
+        return md.offset()
+
+    def action(md: RecordMetadata | None, e: BaseException | None) -> None:
+        order.append(("when_complete", threading.get_ident()))
+        errors.append(e)
+
+    async def send() -> tuple[AsyncKafkaFuture[RecordMetadata], dict[str, Any]]:
+        captured = _fake_queued_send(monkeypatch)
+        task = asyncio.ensure_future(p.send(
+            record=RECORD, callback=lambda md, e: order.append(("callback", threading.get_ident()))))
+        while "resolve" not in captured:
+            await asyncio.sleep(0.01)
+        captured["resolve"](0)
+        f = await asyncio.wait_for(task, 5)
+        assert isinstance(f, AsyncKafkaFuture)
+        assert not f.cancel(may_interrupt_if_running=True)
+        return f, captured
+
+    try:
+        f, captured = await send()
+        offset = f.then_apply(function=offset_of)
+        completed = f.when_complete(action=action)
+        completer = threading.Thread(target=captured["on_completion"], args=(_METADATA, 0, 0))
+        completer.start()
+        completer.join(5)
+        await _until(lambda: len(order) == 3)
+        assert [name for name, _ in order] == ["callback", "then_apply", "when_complete"]
+        assert {thread for _, thread in order} == {loop_thread}
+        assert await offset.get(timeout=5) == 0
+        assert (await completed.get(timeout=5)).offset() == 0 and errors == [None]
+
+        order.clear()
+        errors.clear()
+        f, captured = await send()
+        offset = f.then_apply(function=offset_of)
+        completed = f.when_complete(action=action)
+        _complete_off_loop(captured)
+        await _until(lambda: len(order) == 2)
+        assert [name for name, _ in order] == ["callback", "when_complete"]
+        assert {thread for _, thread in order} == {loop_thread}
+        cause = await async_assert_send_throws(f, KafkaTimeoutError, 5)
+        assert errors == [cause]
+        assert await async_assert_send_throws(offset, KafkaTimeoutError, 5) is cause
+        assert await async_assert_send_throws(completed, KafkaTimeoutError, 5) is cause
+        assert not f.is_cancelled() and f.is_completed_exceptionally()
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        await p.close(timeout=0)
+
+
+def test_a_producer_call_from_a_record_futures_dependant_is_a_call_from_a_callback() -> None:
+    # Java tests Thread.currentThread() == ioThread, so whatever runs on the
+    # I/O thread counts, not only the record's Callback: a when_complete
+    # action runs on the completion thread after the callback returned, and
+    # a call into the producer there behaves as from the callback. flush()
+    # raises KafkaError at once and send() does not wait for its hand-over
+    # (both would otherwise wait for the thread they block). The action is
+    # registered on a record sent from a callback, whose send() returns before
+    # the record completes.
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": 300})
+    out: dict[str, Any] = {}
+    done = threading.Event()
+
+    def action(md: RecordMetadata | None, e: BaseException | None) -> None:
+        out["action_thread"] = threading.get_ident()
+        try:
+            p.flush()
+        except KafkaError as error:
+            out["flush"] = error
+        start = time.monotonic()
+        out["sent"] = p.send(record=RECORD)
+        out["send_s"] = time.monotonic() - start
+        done.set()
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        out["callback_thread"] = threading.get_ident()
+        p.send(record=RECORD).when_complete(action=action)
+
+    try:
+        p.send(record=RECORD, callback=callback)
+        assert done.wait(30)
+        assert type(out["flush"]) is KafkaError and str(out["flush"]) == FLUSH_IN_CALLBACK
+        assert out["action_thread"] == out["callback_thread"] != threading.get_ident()
+        assert out["send_s"] < 0.25, out["send_s"]  # well under max.block.ms
+        assert_send_throws(out["sent"], KafkaTimeoutError, 30)
+    finally:
+        p.close(timeout=0)
+
+
+def test_a_record_future_failed_with_a_cancelled_error_is_an_ordinary_failure() -> None:
+    # Java's FutureRecordMetadata is never cancelled and boxes every error in
+    # ExecutionException (valueOrError), a CancellationException included,
+    # which MockProducer.errorNext(RuntimeException) can inject: get() raises
+    # ExecutionError from it, waiters already in get() included.
+    p = MockProducer()
+    f = p.send(record=RECORD)
+    stage = f.to_completion_stage()
+    outcome: list[BaseException] = []
+    waiter = threading.Thread(target=lambda: outcome.append(
+        pytest.raises(Exception, f.get, timeout=30).value))
+    waiter.start()
+    time.sleep(0.05)
+    injected = concurrent.futures.CancelledError()
+    assert p.error_next(e=injected)  # type: ignore[arg-type]
+    waiter.join(10)
+    assert not waiter.is_alive()
+    (error,) = outcome
+    assert type(error) is ExecutionError and error.__cause__ is injected
+    assert assert_send_throws(f, concurrent.futures.CancelledError) is injected
+    assert not f.is_cancelled() and f.is_completed_exceptionally() and f.is_done()
+    assert stage.done() and not stage.cancelled() and stage.exception() is injected
+
+
+async def test_an_async_record_future_failed_with_a_cancelled_error_is_an_ordinary_failure(
+        ) -> None:
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD)
+    waiting = asyncio.ensure_future(f.get(timeout=30))
+    await asyncio.sleep(0.05)
+    injected = asyncio.CancelledError()
+    assert p.error_next(e=injected)  # type: ignore[arg-type]
+    done, _ = await asyncio.wait((waiting,), timeout=5)
+    assert done, "a get() waiting when the error arrived never returned"
+    error = waiting.exception()
+    assert type(error) is ExecutionError and error.__cause__ is injected
+    assert await async_assert_send_throws(f, asyncio.CancelledError) is injected
+    assert not f.is_cancelled() and f.is_completed_exceptionally()
+    await p.close()
+
+
+async def test_a_refused_inner_cancel_still_releases_the_waiters() -> None:
+    # The inner future of a record's future refuses cancellation; were its
+    # state ever cancelled, settling it must still release a get() already
+    # waiting, which then answers from the state, for both kinds.
+    impl: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
+    f = RecordFuture._of_impl(impl)
+    outcome: list[BaseException] = []
+    waiter = threading.Thread(target=lambda: outcome.append(
+        pytest.raises(BaseException, f.get, timeout=30).value))
+    waiter.start()
+    await asyncio.sleep(0.05)
+    assert impl.cancel(concurrent.futures.CancelledError())
+    waiter.join(10)
+    assert not waiter.is_alive()
+    assert type(outcome[0]) is concurrent.futures.CancelledError
+    assert f.to_completion_stage().done()
+
+    impl2: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
+    g = AsyncRecordFuture._of_impl(impl2, asyncio.get_running_loop())
+    waiting = asyncio.ensure_future(g.get(timeout=30))
+    await asyncio.sleep(0.05)
+    assert impl2.cancel(asyncio.CancelledError())
+    done, _ = await asyncio.wait((waiting,), timeout=5)
+    assert done and waiting.cancelled()
+    assert g.to_completion_stage().done()
+
+
+def test_mock_send_future_dependants_run_in_the_completing_call() -> None:
+    # On MockProducer the record completes inside the call that completes it
+    # (complete_next here): its future's dependants run there, after the
+    # callback.
+    order: list[str] = []
+    p = MockProducer()
+    f = p.send(record=RECORD, callback=lambda md, e: order.append("callback"))
+    assert isinstance(f, KafkaFuture)
+    offset = f.then_apply(function=lambda md: order.append("then_apply") or md.offset())
+    assert order == [] and not f.cancel(may_interrupt_if_running=True)
+    assert p.complete_next()
+    assert order == ["callback", "then_apply"]
+    assert offset.get_now(value_if_absent=-1) == 0
+
+
+async def test_async_mock_send_returns_an_async_kafka_future() -> None:
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD)
+    assert isinstance(f, AsyncKafkaFuture)
+    assert not f.cancel(may_interrupt_if_running=True)
+    p.error_next(e=KafkaError(message="failed"))
+    assert str(await async_assert_send_throws(f, KafkaError)) == "failed"
+    await p.close()
 
 
 def test_flush_waits_for_the_records_sent_before_it() -> None:
@@ -789,7 +1331,7 @@ def test_flush_waits_for_the_records_sent_before_it() -> None:
         futures = [p.send(record=RECORD, callback=lambda md, e, i=i: seen.append(i))
                    for i in range(3)]
         p.flush()
-        assert all(f.done() for f in futures)
+        assert all(f.is_done() for f in futures)
         assert seen == [0, 1, 2]
 
 
@@ -850,24 +1392,51 @@ def test_close_waits_for_in_flight_sends_and_does_not_cancel_them() -> None:
     futures = [p.send(record=RECORD) for _ in range(3)]
     p.close()
     for f in futures:
-        assert f.done() and not f.cancelled()
-        assert isinstance(f.exception(), KafkaTimeoutError)
+        assert f.is_done() and not f.is_cancelled()
+        assert_send_throws(f, KafkaTimeoutError)
+
+
+SENDERS = 5
+
+
+def _send_outcome(sent: KafkaFuture[RecordMetadata] | BaseException) -> BaseException | None:
+    """The error of a send that a close ended: what its send() raised, or its
+    future's error."""
+    if isinstance(sent, BaseException):
+        return sent
+    assert sent.is_done() and not sent.is_cancelled()
+    return failure(sent)
 
 
 def test_timed_close_is_bounded_and_fails_what_it_could_not_send() -> None:
+    # Updated for the branch C API: it has no test pause; the 60 s max.block.ms
+    # alone keeps the first record waiting for metadata. send() waits for its
+    # record's handover as Java's does, so each record is sent from a thread
+    # of its own: the first waits for metadata, the others behind it.
     p = KafkaProducer(configs={"bootstrap.servers": "127.0.0.1:59999"})  # max.block.ms 60 s
-    _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-    futures = [p.send(record=RECORD) for _ in range(50)]
+    outcomes: list[KafkaFuture[RecordMetadata] | BaseException] = []
+
+    def send() -> None:
+        try:
+            outcomes.append(p.send(record=RECORD))
+        except BaseException as e:  # noqa: BLE001 - checked below
+            outcomes.append(e)
+
+    senders = [threading.Thread(target=send, daemon=True) for _ in range(SENDERS)]
+    for sender in senders:
+        sender.start()
+    time.sleep(0.2)  # the records are with the submission task
     start = time.monotonic()
     p.close(timeout=1.0)
     assert time.monotonic() - start < 20
-    # The record waiting for metadata fails with the close; the ones after it as
-    # sent after close.
-    errors = [f.exception() for f in futures]
-    assert all(f.done() and not f.cancelled() for f in futures)
-    assert isinstance(errors[0], KafkaError)
-    assert all(isinstance(e, (KafkaError, IllegalStateError)) for e in errors)
-    assert str(errors[-1]) == CLOSED
+    for sender in senders:
+        sender.join(10)
+        assert not sender.is_alive(), "close() did not end a waiting send()"
+    # Every record failed with the close: its send() raising, or its future
+    # failing.
+    errors = [_send_outcome(sent) for sent in outcomes]
+    assert len(errors) == SENDERS
+    assert all(isinstance(e, (KafkaError, IllegalStateError)) for e in errors), errors
 
 
 def test_close_is_idempotent_then_every_call_raises() -> None:
@@ -1021,10 +1590,15 @@ async def test_an_async_call_that_passed_its_closed_check_before_close_never_tou
     passed = p._check_not_closed  # noqa: SLF001
 
     def check_then_close() -> None:
-        # The close runs to its end, on its own loop, before the call goes on.
+        # The close runs to its end on another thread before the call goes on.
+        # Updated for the one-loop binding: a close() from another loop is
+        # refused, so the thread is the one the close of an async def callback
+        # frees the handle on (_close_from_callback), the only one besides the
+        # producer's loop.
         passed()
         p._check_not_closed = passed  # type: ignore[method-assign]  # noqa: SLF001
-        closer = threading.Thread(target=lambda: asyncio.run(p.close(timeout=0)))
+        assert p._begin_close()  # noqa: SLF001
+        closer = threading.Thread(target=p._finish_close_from_callback)  # noqa: SLF001
         closer.start()
         closer.join(30)
         assert not closer.is_alive()
@@ -1039,21 +1613,31 @@ async def test_an_async_call_that_passed_its_closed_check_before_close_never_tou
 
 
 def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
-    """Count Producer_shutdown / Producer_destroy per handle; a second destroy
-    of one handle is counted, not run (it would free the struct twice)."""
-    calls: dict[str, list[int]] = {"shutdown": [], "destroy": []}
-    real_shutdown, real_destroy = _lib.Producer_shutdown, _lib.Producer_destroy
+    """Count the close entry points (Producer_close_cb /
+    Producer_close_with_timeout_cb) and Producer_destroy per handle; a second
+    destroy of one handle is counted, not run (it would free the struct twice).
+    Updated for the branch C API, which has no Producer_shutdown: the close
+    entry point is the first step of a teardown."""
+    calls: dict[str, list[int]] = {"close": [], "destroy": []}
+    real_close = _lib.Producer_close_cb
+    real_close_with_timeout = _lib.Producer_close_with_timeout_cb
+    real_destroy = _lib.Producer_destroy
 
-    def shutdown(c_producer: int) -> None:
-        calls["shutdown"].append(c_producer)
-        real_shutdown(c_producer)
+    def close(c_producer: int, cb: Any) -> None:
+        calls["close"].append(c_producer)
+        real_close(c_producer, cb)
+
+    def close_with_timeout(c_producer: int, timeout_ms: int, cb: Any) -> None:
+        calls["close"].append(c_producer)
+        real_close_with_timeout(c_producer, timeout_ms, cb)
 
     def destroy(c_producer: int) -> None:
         calls["destroy"].append(c_producer)
         if calls["destroy"].count(c_producer) == 1:
             real_destroy(c_producer)
 
-    monkeypatch.setattr(_lib, "Producer_shutdown", shutdown)
+    monkeypatch.setattr(_lib, "Producer_close_cb", close)
+    monkeypatch.setattr(_lib, "Producer_close_with_timeout_cb", close_with_timeout)
     monkeypatch.setattr(_lib, "Producer_destroy", destroy)
     return calls
 
@@ -1088,7 +1672,7 @@ def test_concurrent_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(module, "in_callback", slow_in_callback)
     p = KafkaProducer(configs=UNREACHABLE)
     _close_from_two_threads(p)
-    assert calls == {"shutdown": [p._c_producer], "destroy": [p._c_producer]}  # noqa: SLF001
+    assert calls == {"close": [p._c_producer], "destroy": [p._c_producer]}  # noqa: SLF001
 
 
 def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
@@ -1100,11 +1684,11 @@ def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
     sys.setswitchinterval(1e-6)
     try:
         for _ in range(30):
-            calls["shutdown"].clear()
+            calls["close"].clear()
             calls["destroy"].clear()
             p = KafkaProducer(configs=UNREACHABLE)
             _close_from_two_threads(p)
-            assert len(calls["shutdown"]) == 1 and len(calls["destroy"]) == 1
+            assert len(calls["close"]) == 1 and len(calls["destroy"]) == 1
     finally:
         sys.setswitchinterval(previous)
 
@@ -1119,7 +1703,7 @@ def test_concurrent_async_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch)
         return c_producer
 
     c_producer = asyncio.run(main())
-    assert calls == {"shutdown": [c_producer], "destroy": [c_producer]}
+    assert calls == {"close": [c_producer], "destroy": [c_producer]}
 
 
 def test_close_returns_after_every_delivery_callback_has_run() -> None:
@@ -1153,21 +1737,31 @@ async def test_async_close_returns_after_every_delivery_callback_has_run() -> No
     assert len(ran) == 10
 
 
+# What a successful completion's delivery callback receives from the C
+# extension: (topic, partition, offset, timestamp, key size, value size).
+_METADATA = ("t", 0, 0, -1, -1, 1)
+
+
 def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The completion untracks a record's future right after completing it. It
     # can run on the C completion thread before send() tracks the future; then
     # send() finds the future done and does not keep it, so a later flush()
     # does not hold it for ever.
-    def complete_at_once(c_producer: int, native: object, cb: Any) -> bool:
-        cb(0, 0, False)
-        return False
+    # Adapted to the branch C API: the queued send is Producer_send_cb, whose
+    # delivery callback takes (metadata, error, callback_id); 0 is success.
+    # Updated for send() waiting for its handover: the record completes just
+    # before it is handed over.
+    def complete_at_once(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        cb(_METADATA, 0, 0)
+        resolve(0)
+        return 0
 
-    monkeypatch.setattr(_lib, "Producer_send", complete_at_once)
+    monkeypatch.setattr(_lib, "Producer_send_cb", complete_at_once)
     p = KafkaProducer(configs=UNREACHABLE)
     try:
         future = p.send(record=RECORD)
-        assert future.done()
+        assert future.is_done()
         assert not p._futures  # noqa: SLF001
     finally:
         monkeypatch.undo()
@@ -1176,54 +1770,62 @@ def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
 
 def test_the_completion_untracks_its_future_without_a_done_callback(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    # No done callback of the producer's own is added to a record's future
-    # (asyncio would schedule each one as a loop callback): the completion
-    # removes the future from the tracked set itself.
+    # No listener of the producer's own is added to a record's future, and no
+    # inner future is made for it unless a wait happens (CLAUDE.md, Python
+    # Binding Conventions, Futures: the lazy design): the completion removes
+    # the future's Python state from the tracked set itself.
     captured: dict[str, Any] = {}
 
-    def hold(c_producer: int, native: object, cb: Any) -> bool:
+    def hold(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
         captured["cb"] = cb
-        return False
+        resolve(0)  # handed over, its completion held
+        return 0
 
-    monkeypatch.setattr(_lib, "Producer_send", hold)
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
     p = KafkaProducer(configs=UNREACHABLE)
     try:
         future = p.send(record=RECORD)
-        assert future in p._futures  # noqa: SLF001
-        assert future._done_callbacks == []  # noqa: SLF001 - concurrent.futures' own list
-        captured["cb"](0, 0, False)
-        assert future.done()
-        assert future not in p._futures  # noqa: SLF001
+        impl = future._impl  # noqa: SLF001
+        assert impl in p._futures  # noqa: SLF001
+        assert impl._listeners is None and future._inner is None  # noqa: SLF001
+        captured["cb"](_METADATA, 0, 0)
+        assert future.is_done()
+        assert impl not in p._futures  # noqa: SLF001
+        assert future._inner is None  # noqa: SLF001 - nobody waited
     finally:
         monkeypatch.undo()
         p.close(timeout=0)
 
 
-async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_completion(
+async def test_an_async_send_future_cannot_be_cancelled_and_is_untracked_by_its_completion(
         monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's FutureRecordMetadata.cancel() returns false: the future stays
+    # tracked until its completion arrives, which completes it normally.
     captured: dict[str, Any] = {}
 
-    def hold(c_producer: int, native: object, cb: Any) -> bool:
+    def hold(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
         captured["cb"] = cb
-        return False
+        resolve(0)  # handed over, its completion held
+        return 0
 
-    monkeypatch.setattr(_lib, "Producer_send", hold)
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
         future = await p.send(record=RECORD)
-        future.cancel()
-        # Tracked until its completion arrives; a flush() meanwhile sees it as
-        # done and does not wait for it.
-        assert future in p._futures  # noqa: SLF001
-        completer = threading.Thread(target=captured["cb"], args=(0, 0, False))
+        assert not future.cancel(may_interrupt_if_running=True)
+        assert not future.to_completion_stage().cancel()
+        assert not future.is_cancelled() and not future.is_done()
+        assert future._impl in p._futures  # noqa: SLF001
+        completer = threading.Thread(target=captured["cb"], args=(_METADATA, 0, 0))
         completer.start()
         completer.join(5)
         for _ in range(500):
-            if future not in p._futures:  # noqa: SLF001
+            if future._impl not in p._futures:  # noqa: SLF001
                 break
             await asyncio.sleep(0.01)
-        assert future not in p._futures  # noqa: SLF001
-        assert future.cancelled()
+        assert future._impl not in p._futures  # noqa: SLF001
+        assert not future.is_cancelled()
+        assert (await future.get(timeout=5)).offset() == _METADATA[2]
     finally:
         monkeypatch.undo()
         await p.close(timeout=0)
@@ -1239,25 +1841,45 @@ def _completing_send(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[threadi
     """Fake the C send: each record completes successfully, a third of them at
     once inside the call (before send() tracks the future), the rest on another
     thread after a short random delay (out of order), as the C completion
-    thread would. Returns the completer threads, for the caller to join."""
+    thread would. Returns the completer threads, for the caller to join.
+
+    Adapted to this branch's C API: the core never runs a delivery callback
+    inside ``Producer_send_cb`` (it queues it for the callback pump), and the
+    pump on an event loop runs a completion inline when nothing is queued
+    before it there. So on a running loop the "at once" completion runs as
+    that pump would, in a call the loop makes after send() returns.
+    Updated for send() waiting for its handover: every record is handed over
+    (``resolve(0)``), an "at once" completion just before it, which on a
+    running loop is a call the loop makes before the one handing it over."""
     rng = random.Random(seed)
     lock = threading.Lock()
     threads: list[threading.Thread] = []
 
-    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
+    def producer_send(c_producer: int, native: Any, cb: Any, resolve: Any) -> int:
         with lock:
             at_once = rng.random() < 0.33
             delay = rng.random() * 0.003
         if at_once:
-            cb(0, 0, False)
+            try:
+                loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is None:
+                cb(_METADATA, 0, 0)
+                resolve(0)
+            else:
+                loop.call_soon(cb, _METADATA, 0, 0)
+                loop.call_soon(resolve, 0)
         else:
-            t = threading.Thread(target=lambda: (time.sleep(delay), cb(0, 0, False)), daemon=True)
+            resolve(0)
+            t = threading.Thread(target=lambda: (time.sleep(delay), cb(_METADATA, 0, 0)),
+                                 daemon=True)
             with lock:
                 threads.append(t)
             t.start()
-        return False
+        return 0
 
-    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    monkeypatch.setattr(_lib, "Producer_send_cb", producer_send)
     return threads
 
 
@@ -1273,7 +1895,7 @@ def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
     def sender() -> None:
         for _ in range(250):
             f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
-            f.add_done_callback(lambda fut: done_callbacks.append(None))
+            f.when_complete(action=lambda md, e: done_callbacks.append(None))
             with lock:
                 futures.append(f)
 
@@ -1285,11 +1907,11 @@ def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
             t.join(30)
         p.flush()
         # flush() waited for every record sent before it to complete.
-        assert all(f.done() for f in futures) and len(futures) == 1000
+        assert all(f.is_done() for f in futures) and len(futures) == 1000
         assert len(callbacks) == 1000
-        # A future's done callbacks, and its completion's untracking, run on
-        # the completing thread just after concurrent.futures wakes flush()'s
-        # wait: join those threads, then nothing is left tracked.
+        # A future's when_complete actions, and its completion's untracking,
+        # run on the completing thread around waking flush()'s wait: join
+        # those threads, then nothing is left tracked.
         for t in list(completers):
             t.join(5)
         assert len(done_callbacks) == 1000
@@ -1301,20 +1923,24 @@ def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
         p.close(timeout=0)
 
 
-async def test_async_senders_with_cancellations_leave_nothing_tracked(
+async def test_async_senders_with_refused_cancellations_leave_nothing_tracked(
         monkeypatch: pytest.MonkeyPatch) -> None:
     completers = _completing_send(monkeypatch, seed=2)
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     callbacks: list[None] = []
     done_callbacks: list[None] = []
     futures: list[Any] = []
+    cancelled: list[None] = []
 
     async def sender(n: int) -> None:
         for i in range(200):
             f = await p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
-            f.add_done_callback(lambda fut: done_callbacks.append(None))
-            if i % 10 == n:
-                f.cancel()  # its completion still arrives, runs the callback, untracks it
+            f.when_complete(action=lambda md, e: done_callbacks.append(None))
+            # cancel() answers False and cancels nothing (Java's
+            # FutureRecordMetadata): the completion still runs the callback,
+            # completes the future and untracks it.
+            if i % 10 == n and f.cancel(may_interrupt_if_running=False):
+                cancelled.append(None)
             futures.append(f)
 
     try:
@@ -1322,12 +1948,12 @@ async def test_async_senders_with_cancellations_leave_nothing_tracked(
         await p.flush()
         for t in list(completers):
             t.join(5)
-        for _ in range(500):  # the completions of cancelled futures may still be on their way
+        for _ in range(500):  # the completions may still be on their way
             if len(callbacks) == 800 and not p._futures:  # noqa: SLF001
                 break
             await asyncio.sleep(0.01)
-        assert all(f.done() for f in futures) and len(futures) == 800
-        assert sum(f.cancelled() for f in futures) == 80
+        assert all(f.is_done() for f in futures) and len(futures) == 800
+        assert sum(f.is_cancelled() for f in futures) == len(cancelled) == 0
         assert len(callbacks) == 800 and len(done_callbacks) == 800
         assert not p._futures  # noqa: SLF001
     finally:
@@ -1359,7 +1985,7 @@ def test_close_with_records_in_flight_from_several_threads_completes_and_untrack
     for t in threads:
         t.join(30)
     p.close()
-    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(futures) == 12 and all(f.is_done() for f in futures)
     assert len(callbacks) == 12
     assert not p._futures  # noqa: SLF001
 
@@ -1376,7 +2002,7 @@ async def test_async_close_with_records_in_flight_from_several_tasks_completes_a
 
     await asyncio.gather(*(sender() for _ in range(3)))
     await p.close()
-    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(futures) == 12 and all(f.is_done() for f in futures)
     assert len(callbacks) == 12
     assert not p._futures  # noqa: SLF001
 
@@ -1384,51 +2010,185 @@ async def test_async_close_with_records_in_flight_from_several_tasks_completes_a
 def test_close_from_a_callback_with_records_in_flight_completes_the_rest() -> None:
     # The first record's callback closes the producer (from the completion
     # thread, so with a zero timeout); the records still in flight complete
-    # anyway, their callbacks run, and nothing stays tracked.
-    p = KafkaProducer(configs=UNREACHABLE)
+    # anyway, their callbacks run, and nothing stays tracked. send() waits for
+    # its record's handover, so the records are sent from threads of their
+    # own: each send() returns its future (its callback then runs, once) or,
+    # for a record the close refused before the producer took it, raises.
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": 300})
     callbacks: list[Exception | None] = []
     closed = threading.Event()
+    outcomes: list[KafkaFuture[RecordMetadata] | BaseException] = []
 
-    def first(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
         callbacks.append(e)
-        p.close()
+        p.close()  # the first one closes; closing again is harmless
         closed.set()
 
-    futures = [p.send(record=RECORD, callback=first)]
-    futures += [p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
-                for _ in range(5)]
+    def send() -> None:
+        try:
+            outcomes.append(p.send(record=RECORD, callback=callback))
+        except BaseException as e:  # noqa: BLE001 - checked below
+            outcomes.append(e)
+
+    senders = [threading.Thread(target=send, daemon=True) for _ in range(SENDERS + 1)]
+    for sender in senders:
+        sender.start()
     assert closed.wait(30)
+    for sender in senders:
+        sender.join(30)
+        assert not sender.is_alive()
+    futures = [o for o in outcomes if not isinstance(o, BaseException)]
+    raised = [o for o in outcomes if isinstance(o, BaseException)]
+    assert all(isinstance(e, (KafkaError, IllegalStateError)) for e in raised), raised
     deadline = time.monotonic() + 30
-    while (len(callbacks) < 6 or p._futures) and time.monotonic() < deadline:  # noqa: SLF001
+    while (len(callbacks) < len(futures) or p._futures) and time.monotonic() < deadline:  # noqa: SLF001
         time.sleep(0.01)
-    assert len(callbacks) == 6 and all(f.done() for f in futures)
+    assert len(futures) >= 1 and len(callbacks) == len(futures)
+    assert all(f.is_done() for f in futures)
     assert not p._futures  # noqa: SLF001
     assert p._closed  # noqa: SLF001
 
 
-def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
-    started = threading.Event()
+def test_an_async_send_from_another_loop_is_refused_before_its_serializer() -> None:
+    # Updated for the one-loop binding (was: a send() on another loop racing
+    # close() is refused after its serializer, which only the sync producer
+    # can still race): a send() from a loop other than the producer's raises
+    # RuntimeError before its serializer runs, and the producer stays usable.
+    serialized: list[bytes | None] = []
 
-    def slow(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
-        started.set()
-        time.sleep(0.5)
+    def recording(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
+        serialized.append(value)
         return value
 
-    async def main() -> BaseException:
-        p = AsyncKafkaProducer(configs=UNREACHABLE, value_serializer=slow)
+    async def main() -> None:
+        p = AsyncKafkaProducer(configs=UNREACHABLE, value_serializer=recording)
         loop = asyncio.get_running_loop()
-        send = loop.run_in_executor(None, lambda: asyncio.run(p.send(record=RECORD)))
-        await loop.run_in_executor(None, started.wait, 10)
+        with pytest.raises(RuntimeError) as err:
+            await loop.run_in_executor(None, lambda: asyncio.run(p.send(record=RECORD)))
+        assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+        assert serialized == []
+        await p.send(record=RECORD)
+        assert serialized == [RECORD.value()]
         await p.close(timeout=0)
-        try:
-            await send
-        except BaseException as error:  # noqa: BLE001
-            return error
-        raise AssertionError("send() returned")
 
-    error = asyncio.run(main())
-    assert type(error) is KafkaError
-    assert str(error) == "Producer closed while send in progress"
+    asyncio.run(main())
+
+
+def _count_submissions(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count the calls of the real ``Producer_send_cb`` (one element each)."""
+    count: list[int] = []
+    real = _lib.Producer_send_cb
+
+    def send_cb(*args: Any) -> Any:
+        result = real(*args)
+        count.append(1)
+        return result
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", send_cb)
+    return count
+
+
+def _wait_for(condition: Callable[[], bool], timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("cls", [KafkaProducer, AsyncKafkaProducer])
+def test_one_drain_keeps_the_gil_from_the_first_callback_to_the_last(
+        monkeypatch: pytest.MonkeyPatch, cls: type) -> None:
+    # `<Client>__execute_callbacks` runs a drain's callbacks with the GIL held
+    # throughout, instead of releasing it after each callback and taking it
+    # again for the next. A thread made runnable by the first callback can
+    # therefore run only once the drain is over, not between two callbacks.
+    # The long switch interval keeps the interpreter from handing the GIL over
+    # on its own, so only an explicit release would let the thread in; the
+    # garbage collector is off, as a finalizer it ran inside the drain (an
+    # earlier client's teardown) could release the GIL itself.
+    released = threading.Event()
+    other_ran: list[str] = []
+    seen: list[list[str]] = []
+    ran = 0
+
+    def other() -> None:
+        released.wait()
+        other_ran.append("other")
+
+    # Every gap between two callbacks is a chance for a release to let the
+    # thread in. The records wait for metadata one after the other, max.block.ms
+    # each, so five fail well within the second the test waits. send() waits
+    # for its record's handover, so the five are sent at once (from threads, or
+    # tasks), and the callbacks act by the order they run in: the first
+    # releases the thread, the last records whether it ran.
+    records = 5
+
+    def callback(metadata: Any, error: BaseException | None) -> None:
+        nonlocal ran
+        ran += 1
+        if ran == 1:
+            released.set()
+        elif ran == records:
+            seen.append(list(other_ran))
+
+    submitted = _count_submissions(monkeypatch)
+    thread = threading.Thread(target=other)
+    thread.start()
+    interval = sys.getswitchinterval()
+    gc.collect()
+    gc.disable()
+    try:
+        if cls is KafkaProducer:
+            p = KafkaProducer(configs=UNREACHABLE)
+            futures: list[KafkaFuture[RecordMetadata]] = []
+
+            def send() -> None:
+                futures.append(p.send(record=RECORD, callback=callback))
+
+            senders = [threading.Thread(target=send) for _ in range(records)]
+            for sender in senders:
+                sender.start()
+            _wait_for(lambda: len(submitted) == records)
+            # The records fail after max.block.ms; holding the GIL keeps the
+            # completion thread from draining before all are queued.
+            sys.setswitchinterval(30)
+            hold_gil_until = time.monotonic() + 1
+            while time.monotonic() < hold_gil_until:
+                pass
+            for sender in senders:
+                sender.join(30)
+            p.flush()
+            assert len(futures) == records
+            for future in futures:
+                assert_send_throws(future, KafkaTimeoutError)
+            p.close(timeout=0)
+        else:
+            async def main() -> None:
+                p = AsyncKafkaProducer(configs=UNREACHABLE)
+                # The futures are kept: one freed unretrieved inside the drain
+                # would log, and the log's stream write releases the GIL.
+                sends = [asyncio.ensure_future(p.send(record=RECORD, callback=callback))
+                         for _ in range(records)]
+                while len(submitted) < records:
+                    await asyncio.sleep(0.01)
+                # Block the loop until every record failed, so one pump drains
+                # all the completions.
+                sys.setswitchinterval(30)
+                time.sleep(1)
+                futures = await asyncio.gather(*sends)
+                await p.flush()
+                for future in futures:
+                    await async_assert_send_throws(future, KafkaTimeoutError)
+                await p.close(timeout=0)
+
+            asyncio.run(main())
+    finally:
+        sys.setswitchinterval(interval)
+        gc.enable()
+        released.set()
+        thread.join()
+    assert seen == [[]]
+    assert other_ran == ["other"]
 
 
 def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
@@ -1439,7 +2199,11 @@ def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
     # waiting for the pending record's max.block.ms.
     async def main() -> None:
         p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 60000})
-        future = await p.send(record=RECORD)
+        # The send waits for its record's handover, which the metadata wait
+        # holds back: a task of its own, which the forced close ends.
+        sending = asyncio.ensure_future(p.send(record=RECORD))
+        await asyncio.sleep(0.1)
+        assert not sending.done()
         task = asyncio.ensure_future(p.close())
         await asyncio.sleep(0.1)
         assert not task.done()
@@ -1449,8 +2213,12 @@ def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert loop.time() - start < 10
-        assert future.done()
-        assert isinstance(future.exception(), KafkaError)
+        await asyncio.wait({sending}, timeout=10)
+        assert sending.done()
+        error = sending.exception()
+        if error is None:
+            error = await async_failure(sending.result(), 10)
+        assert isinstance(error, KafkaError), error
         with pytest.raises(IllegalStateError) as err:
             await p.send(record=RECORD)
         assert str(err.value) == CLOSED
@@ -1486,7 +2254,7 @@ def test_close_rejects_a_timeout_beyond_a_long_and_stays_open() -> None:
     # Still open: a send and a flush work, and a plain close() closes it.
     f = p.send(record=RECORD)
     p.flush()
-    assert isinstance(f.exception(), KafkaTimeoutError)
+    assert_send_throws(f, KafkaTimeoutError)
     p.close()
     with pytest.raises(IllegalStateError) as err:
         p.send(record=RECORD)
@@ -1504,7 +2272,7 @@ async def test_async_close_rejects_a_timeout_beyond_a_long_and_stays_open() -> N
         await p.close(timeout=float("nan"))
     f = await p.send(record=RECORD)
     await p.flush()
-    assert isinstance(f.exception(), KafkaTimeoutError)
+    await async_assert_send_throws(f, KafkaTimeoutError)
     await p.close()
     with pytest.raises(IllegalStateError) as err:
         await p.send(record=RECORD)
@@ -1542,7 +2310,7 @@ async def test_async_closed_first_then_the_argument_checks() -> None:
 def test_context_manager_flushes_then_closes() -> None:
     with KafkaProducer(configs=UNREACHABLE) as p:
         f = p.send(record=RECORD)
-    assert f.done()
+    assert f.is_done()
     with pytest.raises(IllegalStateError):
         p.flush()
 
@@ -1551,31 +2319,78 @@ def test_context_manager_flushes_then_closes() -> None:
 # The drain before flush and the transaction-control operations
 # ===========================================================================
 
-def test_drain_waits_until_the_accumulation_is_handed_over() -> None:
-    p = KafkaProducer(configs=UNREACHABLE)
+# Updated for the branch C API: it has no test pause and no Producer_drain.
+# A send to the unreachable broker holds the core's submission task for
+# max.block.ms (its metadata wait), which is what these tests hold instead.
+HELD_MS = 500
+
+
+def _send_in_the_background(p: KafkaProducer[Any, Any], submitted: list[int]
+                            ) -> tuple[threading.Thread, list[KafkaFuture[RecordMetadata]]]:
+    """Send one record from a thread of its own and return once it is queued
+    on the C API's submission queue (``submitted``, from
+    :func:`_count_submissions`): send() waits for the handover, which the
+    metadata wait holds back, and what follows is to run while the record is
+    still queued."""
+    sent: list[KafkaFuture[RecordMetadata]] = []
+    sender = threading.Thread(target=lambda: sent.append(p.send(record=RECORD)))
+    sender.start()
+    _wait_for(lambda: len(submitted) == 1)
+    return sender, sent
+
+
+def test_drain_waits_until_the_accumulation_is_handed_over(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The queued flush drains the submission queue first, so its completion
+    # waits for the send before it, whose future completes first (the
+    # callbacks run in completion order). The flush's completion reads the
+    # record's own completion, not the future send() returned: the handover,
+    # the record's completion and the flush's can run in one drain, which
+    # holds the GIL, so the sending thread may not have returned yet.
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": HELD_MS})
+    submitted = _count_submissions(monkeypatch)
+    completions: list[Any] = []
+    counting = _lib.Producer_send_cb
+
+    def capturing(*args: Any) -> Any:
+        completions.append(args[2])
+        return counting(*args)
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", capturing)
     try:
-        _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-        p.send(record=RECORD)
+        sender, sent = _send_in_the_background(p, submitted)
         fired = threading.Event()
-        assert _lib.Producer_drain(p._c_producer, fired.set) is False  # noqa: SLF001
+        future_done: list[bool] = []
+
+        def flushed(error: int) -> None:
+            if error:
+                _lib.KafkaError_destroy(error)
+            future_done.append(completions[0].completed)
+            fired.set()
+
+        _lib.Producer_flush_cb(p._c_producer, flushed)  # noqa: SLF001
         assert not fired.wait(0.2)
-        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
         assert fired.wait(30)
-        assert _lib.Producer_drain(p._c_producer, lambda: None) is True  # noqa: SLF001
+        sender.join(30)
+        assert future_done == [True]
+        assert sent[0].is_done()
     finally:
         p.close(timeout=0)
 
 
 @pytest.mark.parametrize("operation", ["commit_transaction", "abort_transaction",
                                        "init_transactions", "flush"])
-def test_control_operations_run_after_the_sends_that_returned(operation: str) -> None:
+def test_control_operations_run_after_the_sends_that_returned(
+        monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
     # producer-transactions.md §13: a send that returned belongs to the
     # control call after it, so the call waits until the record is with the
-    # Rust producer.
-    p = KafkaProducer(configs=UNREACHABLE)
+    # Rust producer. send() itself returns only then, so the record is sent
+    # from a thread and the call made while it is still queued in the C API,
+    # where that wait lives.
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": HELD_MS})
+    submitted = _count_submissions(monkeypatch)
     try:
-        _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-        p.send(record=RECORD)
+        sender, _sent = _send_in_the_background(p, submitted)
         result: dict[str, Any] = {}
 
         def run() -> None:
@@ -1589,9 +2404,9 @@ def test_control_operations_run_after_the_sends_that_returned(operation: str) ->
         t.start()
         t.join(0.3)
         assert t.is_alive(), f"{operation} must wait for the handover"
-        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
         t.join(30)
         assert not t.is_alive()
+        sender.join(30)
         if operation == "flush":
             assert result == {"ok": True}
         else:
@@ -1602,56 +2417,140 @@ def test_control_operations_run_after_the_sends_that_returned(operation: str) ->
 
 
 @pytest.mark.parametrize("transactional", [False, True])
-def test_begin_transaction_does_not_wait_for_earlier_sends(transactional: bool) -> None:
-    # Critic 75 N1: Java's beginTransaction does not wait. No send that
-    # returned can still be on its way (a transactional producer's send with no
-    # transaction started returns once its record is with the Rust producer),
-    # so begin_transaction() does not drain: with the handover held, it returns
-    # at once, while a transactional send is still waiting for its handover.
-    configs = {**UNREACHABLE, "transactional.id": "txn"} if transactional else UNREACHABLE
+def test_begin_transaction_waits_for_earlier_sends(transactional: bool) -> None:
+    # Updated for the branch C API (was: does not wait): its beginTransaction,
+    # like every transaction-control operation, drains the submission queue
+    # first (producer-transactions.md §13), so begin_transaction() returns only
+    # once the send before it is with the Rust producer. The send itself
+    # returns only then too, as Java's does.
+    configs = {**UNREACHABLE, "max.block.ms": HELD_MS}
+    if transactional:
+        configs["transactional.id"] = "txn"
     p = KafkaProducer(configs=configs)
     try:
-        _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
         sent = threading.Event()
 
         def send() -> None:
             p.send(record=RECORD)
             sent.set()
 
+        start = time.monotonic()
         t = threading.Thread(target=send)
         t.start()
-        assert sent.wait(0.3) is not transactional
-        start = time.monotonic()
+        assert not sent.wait(0.3)
         with pytest.raises(IllegalStateError) as err:
             p.begin_transaction()
-        assert time.monotonic() - start < 0.3
+        assert time.monotonic() - start >= (HELD_MS - 50) / 1000.0
         assert str(err.value) == (
             "TransactionalId txn: Invalid transition attempted from state UNINITIALIZED to "
             "state IN_TRANSACTION" if transactional else NOT_TRANSACTIONAL)
-        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
         t.join(30)
         assert sent.is_set()
     finally:
         p.close(timeout=0)
 
 
-def test_begin_transaction_waits_on_its_async_entry_point(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    # The entry point has an _async form, so the sync class waits on it, as
-    # for the other transaction ops (CLAUDE.md, Python Binding Conventions,
-    # Class family), and does not call the plain form.
-    calls: list[str] = []
-    for name in ("Producer_begin_transaction", "Producer_begin_transaction_async"):
-        def recording(*args: Any, _name: str = name, _real: Any = getattr(_lib, name)) -> Any:
-            calls.append(_name)
-            return _real(*args)
+# The sync KafkaProducer never calls a blocking C entry point (branch commit
+# 2942d0921): every blocking-in-Java operation is submitted through its _cb
+# twin and waited for in Python in 100 ms slices, so Ctrl+C is honoured.
+_BLOCKING_ENTRY_POINTS = (
+    "Producer_flush", "Producer_partitions_for",
+    "Producer_init_transactions", "Producer_begin_transaction",
+    "Producer_send_offsets_to_transaction",
+    "Producer_commit_transaction", "Producer_abort_transaction", "Producer_close",
+)
 
-        monkeypatch.setattr(_lib, name, recording)
-    with KafkaProducer(configs=UNREACHABLE) as p:
+
+def test_the_extension_has_no_blocking_send() -> None:
+    # No producer hands out a record future over a C handle, whose C get would
+    # run the producer's queued callbacks on the calling thread: the record's
+    # outcome reaches Python only through its delivery callback
+    # (Producer_send_cb), and the blocking send has no entry point.
+    assert not hasattr(_lib, "Producer_send")
+    assert not hasattr(_lib, "KAFKA_FUTURE_CONV_RECORD_METADATA")
+
+
+def _forbid_blocking_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(name: str) -> Any:
+        def entry(*args: Any) -> Any:
+            raise AssertionError(f"the sync KafkaProducer called the blocking {name}")
+        return entry
+
+    for name in _BLOCKING_ENTRY_POINTS:
+        monkeypatch.setattr(_lib, name, forbidden(name))
+
+
+def test_sync_producer_never_calls_a_blocking_entry_point(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _forbid_blocking_entry_points(monkeypatch)
+    got: list[Exception | None] = []
+    p = KafkaProducer(configs=UNREACHABLE)
+    future = p.send(record=RECORD, callback=lambda md, e: got.append(e))
+    for call in (p.init_transactions, p.begin_transaction, p.commit_transaction,
+                 p.abort_transaction):
         with pytest.raises(IllegalStateError) as err:
-            p.begin_transaction()
+            call()
         assert str(err.value) == NOT_TRANSACTIONAL
-    assert calls == ["Producer_begin_transaction_async"]
+    p.flush()
+    assert_send_throws(future, KafkaTimeoutError, 0)
+    with pytest.raises(KafkaTimeoutError):
+        p.partitions_for(topic=TOPIC)
+    assert p.metrics() is not None
+    p.close()
+    assert len(got) == 1 and isinstance(got[0], KafkaTimeoutError)
+
+
+def test_sync_send_offsets_to_transaction_never_calls_its_blocking_entry_point(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Apart from the test above: it needs a KafkaConsumer's group metadata.
+    group_metadata = _consumer_group_metadata()
+    _forbid_blocking_entry_points(monkeypatch)
+    with KafkaProducer(configs=UNREACHABLE) as p:
+        # Non-empty offsets: Java's empty map is a no-op on an idempotent producer
+        # (see test_send_offsets_to_transaction_checks_group_metadata_first).
+        # They make Java 4.4 await the offsets' topic metadata (awaitTopicMetadata,
+        # KafkaProducer.java:800-805) before ensureTransactional. Both outcomes are
+        # Java-faithful, as in the C twin (test_kafka_producer.c): the unreachable
+        # cluster times the wait out, or the sender's lazy bootstrap lands after the
+        # wait took the metadata version (Metadata.java:309 bumps it), ending the
+        # wait early, and ensureTransactional rejects the call. Either way the
+        # error comes through the completion the call waits on.
+        offsets = {TopicPartition(topic=TOPIC, partition=0): OffsetAndMetadata(offset=1)}
+        with pytest.raises((KafkaTimeoutError, IllegalStateError)) as err:
+            p.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
+        if isinstance(err.value, KafkaTimeoutError):
+            assert str(err.value) == "Failed to update metadata after 100 ms."
+        else:
+            assert str(err.value) == NOT_TRANSACTIONAL
+
+
+def test_sigint_while_waiting_lets_the_operation_finish_then_reraises() -> None:
+    # Ctrl+C during a waiting call (CLAUDE.md, Python Binding Conventions,
+    # Threads and callbacks): the producer cannot abort the operation in
+    # flight, so it waits for its completion (here partitions_for's metadata
+    # wait of max.block.ms, 500 ms), then re-raises KeyboardInterrupt, and the
+    # producer stays usable. pytest runs the test on the main thread, the only
+    # one that runs Python signal handlers.
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": 500})
+    try:
+        timer = threading.Timer(0.15, os.kill, (os.getpid(), signal.SIGINT))
+        start = time.monotonic()
+        timer.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                p.partitions_for(topic=TOPIC)
+            elapsed = time.monotonic() - start
+        finally:
+            timer.cancel()
+            timer.join()
+        assert elapsed >= 0.45, elapsed  # not before the operation ended
+        # Still usable: the next calls reach the core.
+        with pytest.raises(KafkaTimeoutError) as err:
+            p.partitions_for(topic=TOPIC)
+        assert str(err.value) == f"Topic {TOPIC} not present in metadata after 500 ms."
+        assert_send_throws(p.send(record=RECORD), KafkaTimeoutError, 30)
+    finally:
+        p.close(timeout=0)
 
 
 def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
@@ -1769,45 +2668,59 @@ async def test_a_closed_async_producer_reports_the_closed_state(
 
 
 # ===========================================================================
-# Backpressure: send waits for buffer space (why the async send is awaited)
+# Backpressure: send() waits for its record's handover, as Java's does
 # ===========================================================================
 
-# PRODUCER_MAX_ACCUMULATED_RECORDS in _confluentkafka.c.
+# The bound the no-memory children are handed (their prelude reads it).
 BACKPRESSURE_BOUND = 1000
 
+# Updated for the branch C API (was: a send crossing the extension's bound of
+# queued records waits for space until close releases it): the branch queues
+# each record on the core's submission task, whose producer.send() waits
+# max.block.ms for metadata and buffer space as Java's does, and send() returns
+# only once its record is handed over, so each send to an unreachable broker
+# takes max.block.ms, as in Java, and its future fails with the core's error.
+QUEUED_SENDS = 3
+BLOCK_MS = 200
 
-def test_sync_send_blocks_on_full_and_close_unblocks() -> None:
-    p = KafkaProducer(configs=UNREACHABLE)
-    _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-    for _ in range(BACKPRESSURE_BOUND - 1):
-        p.send(record=RECORD)  # below the bound: none block
-    done = threading.Event()
 
-    def crossing_send() -> None:
-        p.send(record=RECORD)  # crosses the bound -> waits for space
-        done.set()
-
-    t = threading.Thread(target=crossing_send)
-    t.start()
+def test_sync_send_waits_for_the_metadata_as_java_does() -> None:
+    p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": BLOCK_MS})
     try:
-        assert not done.wait(timeout=0.4), "send should block while the buffer is full"
-        p.close(timeout=2.0)
-        assert done.wait(timeout=30), "close must release the blocked sender"
+        start = time.monotonic()
+        futures = [p.send(record=RECORD) for _ in range(QUEUED_SENDS)]
+        elapsed = time.monotonic() - start
+        assert elapsed >= QUEUED_SENDS * (BLOCK_MS - 50) / 1000.0, elapsed
+        for f in futures:
+            error = assert_send_throws(f, KafkaTimeoutError, 30)
+            assert str(error) == f"Topic {TOPIC} not present in metadata after {BLOCK_MS} ms."
     finally:
-        t.join(timeout=30)
+        p.close(timeout=30.0)
 
 
-async def test_async_send_suspends_on_full_and_close_unblocks() -> None:
-    p = AsyncKafkaProducer(configs=UNREACHABLE)
-    _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-    for _ in range(BACKPRESSURE_BOUND - 1):
-        await p.send(record=RECORD)
-    task = asyncio.ensure_future(p.send(record=RECORD))
-    await asyncio.sleep(0.3)
-    assert not task.done(), "crossing send should suspend on backpressure"
-    assert await asyncio.sleep(0, result=True)  # the loop stays responsive
-    await asyncio.wait_for(p.close(timeout=2.0), timeout=60)
-    await asyncio.wait_for(task, timeout=5)
+async def test_async_send_waits_for_the_metadata_without_blocking_the_loop() -> None:
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": BLOCK_MS})
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker = asyncio.ensure_future(tick())
+    try:
+        start = time.monotonic()
+        futures = [await p.send(record=RECORD) for _ in range(QUEUED_SENDS)]
+        elapsed = time.monotonic() - start
+        assert elapsed >= QUEUED_SENDS * (BLOCK_MS - 50) / 1000.0, elapsed
+        assert ticks >= 10, "the loop must stay responsive while send() waits"
+        for f in futures:
+            error = await async_assert_send_throws(f, KafkaTimeoutError, 30)
+            assert str(error) == f"Topic {TOPIC} not present in metadata after {BLOCK_MS} ms."
+    finally:
+        ticker.cancel()
+        await asyncio.wait_for(p.close(timeout=30.0), timeout=60)
 
 
 async def test_cancelling_close_waits_for_its_teardown_before_closing_the_serializers() -> None:
@@ -1898,9 +2811,19 @@ FUTURE_TIMEOUT = float(sys.argv[2])
 sys.path[:0] = sys.argv[3:]
 import _testcapi
 import _confluentkafka as _lib
+from confluent_kafka import ExecutionError
 from confluent_kafka.producer import KafkaProducer, ProducerRecord
 from confluent_kafka.producer._send import completion_to_python
 UNREACHABLE = {"bootstrap.servers": "127.0.0.1:59999", "max.block.ms": 100}
+
+
+def failure(future):
+    # The error the record's KafkaFuture.get() raises an ExecutionError from.
+    try:
+        future.get(timeout=FUTURE_TIMEOUT)
+    except ExecutionError as e:
+        return e.__cause__
+    return None
 
 
 def without_memory(call, *args):
@@ -1920,8 +2843,8 @@ def without_memory(call, *args):
     return outcome
 
 
-def on_complete(result, error, immediate):
-    completion_to_python(result, error, "t", None)  # frees the completion handles
+def on_complete(metadata, error):
+    completion_to_python(metadata, error, "t", None)  # reads the borrowed error
 """
 
 # How long the child waits for a future: a send to the unreachable broker
@@ -1947,24 +2870,31 @@ def _run_without_memory(body: str) -> None:
 def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
     # The first record of a fresh producer needs a new batch node. Its
     # allocation was unchecked, so a failure crashed on a NULL dereference.
+    # Updated for the branch C API: the queued send is Producer_send_cb, whose
+    # first allocation is the context it hands the C API.
     _run_without_memory("""
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 p = KafkaProducer(configs=UNREACHABLE)
 record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
-refs = sys.getrefcount(record), sys.getrefcount(on_complete)
-outcome = without_memory(_lib.Producer_send, p._c_producer, record, on_complete)
+resolve = lambda error: None
+refs = sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)
+outcome = without_memory(_lib.Producer_send_cb, p._c_producer, record, on_complete, resolve)
 assert isinstance(outcome, MemoryError), outcome
-# Not queued: both references taken for the queue were given back...
-assert (sys.getrefcount(record), sys.getrefcount(on_complete)) == refs
+# Not queued: every reference taken for the queue was given back...
+assert (sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)) == refs
 # ...and no half-built batch was left behind: the next record still goes
 # through the batch list to the producer, whose metadata wait it fails.
-error = p.send(record=ProducerRecord(topic="t", value=b"v")).exception(timeout=FUTURE_TIMEOUT)
+error = failure(p.send(record=ProducerRecord(topic="t", value=b"v")))
 assert isinstance(error, KafkaTimeoutError), error
 p.close(timeout=0)
 print("ok")
 """)
 
 
+@pytest.mark.skip(reason="Subject not on this branch: the extension has no list of senders "
+                         "waiting for space (no Producer_on_space_available); send() waits for "
+                         "its record's handover instead, the core's producer.send() "
+                         "holding it up to max.block.ms, as Java's does.")
 def test_waiting_for_space_without_memory_does_not_wait() -> None:
     # The list of senders waiting for space grows on demand. A failed realloc
     # was assigned over the list and then written through; now the sender is
@@ -1983,7 +2913,7 @@ assert sys.getrefcount(space_cb) == refs  # not registered
 _lib.Producer_test_set_paused(p._c_producer, False)
 # The queued records are not lost: the close completes every one of them.
 p.close(timeout=0)
-assert all(future.done() for future in futures)
+assert all(future.is_done() for future in futures)
 print("ok")
 """)
 
@@ -1993,17 +2923,21 @@ print("ok")
 # ===========================================================================
 
 async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
+    # send() waits for the record's handover, and the core's send() fires the
+    # callback of a metadata TimeoutError before it returns (Java's doSend
+    # does, KafkaProducer.java:1137-1149), so the callback may run before
+    # send() returned the future: that future is not done either.
     loop_thread = threading.get_ident()
     seen: list[tuple[int, bool, RecordMetadata]] = []
     holder: dict[str, Any] = {}
 
     def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append((threading.get_ident(), holder["f"].done(), md))
+        future = holder.get("f")
+        seen.append((threading.get_ident(), future is not None and future.is_done(), md))
 
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     holder["f"] = f = await p.send(record=RECORD, callback=callback)
-    with pytest.raises(KafkaTimeoutError):
-        await asyncio.wait_for(f, 30)
+    await async_assert_send_throws(f, KafkaTimeoutError, 30)
     ((thread, future_done, md),) = seen
     assert thread == loop_thread and not future_done
     assert (md.topic(), md.partition(), md.offset()) == (TOPIC, -1, -1)
@@ -2014,41 +2948,314 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     assert str(err.value) == CLOSED
 
 
+CALLBACK_ERROR = "Error executing user-provided callback on message for topic-partition 'topic--1'"
+FLUSH_IN_CALLBACK = ("KafkaProducer.flush() invocation inside a callback is not permitted "
+                     "because it may lead to deadlock.")
+
+
+async def _until(condition: Any, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+async def test_async_send_awaits_an_async_def_callback_before_the_future() -> None:
+    # Java fires the callbacks before produceFuture.done()
+    # (ProducerBatch.completeFutureAndFireCallbacks): an `async def` callback
+    # is awaited on the loop, and the record's future completes, with the
+    # record's own outcome, only once it returned and reported.
+    release = asyncio.Event()
+    started = asyncio.Event()
+    seen: list[tuple[bool, Exception | None]] = []
+    holder: dict[str, Any] = {}
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        started.set()
+        await release.wait()
+        seen.append((holder["f"].is_done(), e))
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        holder["f"] = f = await p.send(record=RECORD, callback=callback)
+        await asyncio.wait_for(started.wait(), 30)
+        await asyncio.sleep(0.2)
+        assert not f.is_done()
+        release.set()
+        await async_assert_send_throws(f, KafkaTimeoutError, 30)
+        ((future_done, error),) = seen
+        assert not future_done and isinstance(error, KafkaTimeoutError)
+    finally:
+        await p.close()
+
+
+async def test_async_flush_waits_for_an_async_def_callback() -> None:
+    # flush() returns once the records sent before it completed, their
+    # callbacks run first: an awaited callback included.
+    release = asyncio.Event()
+    started = asyncio.Event()
+    finished: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        started.set()
+        await release.wait()
+        finished.append(True)
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f = await p.send(record=RECORD, callback=callback)
+        flush = asyncio.ensure_future(p.flush())
+        await asyncio.wait_for(started.wait(), 30)
+        await asyncio.sleep(0.3)
+        assert not flush.done() and finished == []
+        release.set()
+        await asyncio.wait_for(flush, 30)
+        assert finished == [True] and f.is_done()
+    finally:
+        await p.close()
+
+
+async def test_async_def_callbacks_run_one_at_a_time_in_completion_order() -> None:
+    # A producer's callbacks run one at a time in completion order (CLAUDE.md,
+    # Python Binding Conventions, Threads and callbacks): a later completion
+    # waits behind an awaited callback.
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def first(md: RecordMetadata, e: Exception | None) -> None:
+        order.append("first started")
+        await release.wait()
+        order.append("first done")
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f1 = await p.send(record=RECORD, callback=first)
+        f2 = await p.send(record=RECORD, callback=lambda md, e: order.append("second"))
+        await _until(lambda: order == ["first started"])
+        await asyncio.sleep(0.3)
+        assert order == ["first started"] and not f2.is_done()
+        release.set()
+        for f in (f1, f2):
+            await async_assert_send_throws(f, KafkaTimeoutError, 30)
+        assert order == ["first started", "first done", "second"]
+    finally:
+        await p.close()
+
+
+@pytest.mark.parametrize(("kind", "text"), [
+    ("plain", "callback blew up"),
+    ("async def", "async callback blew up"),
+    # A bare CancelledError has an empty str(): its type's name is the text,
+    # as Java's toString() is the class name for a null message.
+    ("cancelled", "CancelledError"),
+])
+async def test_a_raising_callback_on_the_async_producer_is_reported_and_fails_nothing(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str], kind: str,
+        text: str) -> None:
+    # A throwing onCompletion is logged (ProducerBatch.completeFutureAndFireCallbacks)
+    # and fails nothing: the future keeps the record's own outcome and the next
+    # callback runs. Python reports the exception to the core, which logs it
+    # once; Python logs nothing.
+    seen: list[str] = []
+
+    def plain(md: RecordMetadata, e: Exception | None) -> None:
+        raise RuntimeError("callback blew up")
+
+    async def async_def(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        if kind == "cancelled":
+            raise asyncio.CancelledError
+        raise RuntimeError("async callback blew up")
+
+    capfd.readouterr()
+    caplog.set_level(logging.DEBUG, logger="confluent_kafka")
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f = await p.send(record=RECORD, callback=plain if kind == "plain" else async_def)
+        g = await p.send(record=RECORD, callback=lambda md, e: seen.append("next"))
+        for future in (f, g):
+            await async_assert_send_throws(future, KafkaTimeoutError, 30)
+        await p.flush()
+        assert seen == ["next"]
+    finally:
+        await p.close()
+    assert _core_callback_errors(capfd) == [f"{CALLBACK_ERROR}: LocalCallbackError: {text}"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+async def test_flush_in_an_async_def_callback_raises_javas_error() -> None:
+    out: dict[str, Any] = {}
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        try:
+            await p.flush()
+        except KafkaError as error:
+            out["flush"] = error
+
+    try:
+        f = await p.send(record=RECORD, callback=callback)
+        await async_assert_send_throws(f, KafkaTimeoutError, 30)
+        assert str(out["flush"]) == FLUSH_IN_CALLBACK
+    finally:
+        await p.close()
+
+
+COROUTINE_CALLBACK = "a coroutine send() callback requires an AsyncProducer"
+
+
+@pytest.mark.parametrize("cls", [KafkaProducer, MockProducer])
+def test_a_coroutine_callback_on_a_sync_producer_raises_a_type_error_at_send(
+        cls: type[Any]) -> None:
+    # Only an asyncio producer awaits an `async def` callback (CLAUDE.md,
+    # Python Binding Conventions, Threads and callbacks): the sync producers
+    # reject a coroutine function with TypeError at send(), before the record
+    # is sent, and stay usable.
+    ran: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        ran.append(True)
+
+    class AsyncCallable:
+        async def __call__(self, md: RecordMetadata, e: Exception | None) -> None:
+            ran.append(True)
+
+    p = (KafkaProducer(configs=UNREACHABLE) if cls is KafkaProducer
+         else MockProducer(auto_complete=True, partitioner=None))
+    try:
+        for given in (callback, AsyncCallable()):
+            with pytest.raises(TypeError) as err:
+                p.send(record=RECORD, callback=given)  # type: ignore[arg-type]
+            assert str(err.value) == COROUTINE_CALLBACK
+        if cls is MockProducer:
+            assert p.history() == []
+        called: list[Exception | None] = []
+        f = p.send(record=RECORD, callback=lambda md, e: called.append(e))
+        failure(f, 30)
+        assert len(called) == 1
+    finally:
+        p.close(timeout=0)
+    assert ran == []
+
+
+def test_a_callback_returning_a_coroutine_on_the_sync_producer_is_closed_and_reported(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]) -> None:
+    # A plain callback that returns an awaitable passes the check at send():
+    # the completion thread closes the coroutine and reports a TypeError, as
+    # for a raising callback, which the core logs.
+    ran: list[bool] = []
+
+    async def coroutine(md: RecordMetadata, e: Exception | None) -> None:
+        ran.append(True)
+
+    def callback(md: RecordMetadata, e: Exception | None) -> Any:
+        return coroutine(md, e)
+
+    capfd.readouterr()
+    with caplog.at_level(logging.DEBUG, logger="confluent_kafka"):
+        with KafkaProducer(configs=UNREACHABLE) as p:
+            f = p.send(record=RECORD, callback=callback)
+            assert_send_throws(f, KafkaTimeoutError, 30)
+    assert _core_callback_errors(capfd) == [
+        f"{CALLBACK_ERROR}: LocalCallbackError: "
+        "a coroutine send() callback requires an AsyncProducer"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert ran == []
+
+
+async def test_async_mock_awaits_an_async_def_callback_and_flush_waits_for_it() -> None:
+    release = asyncio.Event()
+    finished: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        await release.wait()
+        finished.append(True)
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=callback)
+    flush = asyncio.ensure_future(p.flush())
+    await asyncio.sleep(0.2)
+    assert not flush.done() and not f.is_done()
+    release.set()
+    await asyncio.wait_for(flush, 30)
+    assert finished == [True] and (await f.get()).offset() == 0
+    await p.close()
+
+
+def _send_handed_over(p: Any, loop: asyncio.AbstractEventLoop, captured: dict[str, Any],
+                      ran: list[Exception | None]) -> AsyncKafkaFuture[RecordMetadata]:
+    """Send one record on ``loop`` and hand it over (the faked send, see
+    :func:`_fake_queued_send`), its completion left for later: with a real
+    unreachable broker the record completes (its metadata wait failing)
+    before its handover, so before send() returns."""
+    async def send() -> AsyncKafkaFuture[RecordMetadata]:
+        task = asyncio.ensure_future(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+        while "resolve" not in captured:
+            await asyncio.sleep(0.01)
+        captured["resolve"](0)
+        return cast("AsyncKafkaFuture[RecordMetadata]", await task)
+
+    return loop.run_until_complete(send())
+
+
+def _send_on_a_loop_that_closes(p: Any, captured: dict[str, Any],
+                                 ran: list[Exception | None]) -> AsyncKafkaFuture[RecordMetadata]:
+    """:func:`_send_handed_over` on a fresh loop, closed after it: the record's
+    completion then arrives after its loop closed."""
+    loop = asyncio.new_event_loop()
+    try:
+        return _send_handed_over(p, loop, captured, ran)
+    finally:
+        loop.close()
+
+
+def _complete_off_loop(captured: dict[str, Any]) -> None:
+    """The record's completion, a metadata TimeoutError (a BORROWED error
+    handle; callback id 0, as the faked send registered no report with the
+    core), on a thread of its own, as the helper pump of a closed loop."""
+    def complete() -> None:
+        error = _lib.KafkaError_new(KafkaTimeoutError._ffi_id,
+                                    f"Topic {TOPIC} not present in metadata after 1000 ms.")
+        try:
+            captured["on_completion"](None, error, 0)
+        finally:
+            _lib.KafkaError_destroy(error)
+
+    helper = threading.Thread(target=complete)
+    helper.start()
+    helper.join(10)
+
+
 def test_an_async_completion_after_its_loop_closed_is_dropped(
-        caplog: pytest.LogCaptureFixture) -> None:
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     # The callback runs on the event loop (CLAUDE.md, Python Binding
     # Conventions, Threads and callbacks), and a future only its own loop can
     # complete: a record that completes after its loop closed is dropped with a
-    # warning, its callback not run on the completion thread, its future no
-    # longer tracked, so a flush() and close() from a fresh loop return. The
-    # send fails on its metadata wait after max.block.ms, long after the loop
-    # closed.
+    # warning, its callback not run, its future no longer tracked. The send
+    # fails on its metadata wait after max.block.ms, long after the loop
+    # closed, and the helper thread that pumps once the loop has closed drops
+    # it. Updated for the one-loop binding (was: a flush() and close() from a
+    # fresh loop then return): a call from another loop is refused. Updated
+    # for send() waiting for its handover (the core fires the metadata
+    # wait's TimeoutError before it, on the loop): a faked send hands the
+    # record over at once and completes it once the loop closed.
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 1000})
+    captured = _fake_queued_send(monkeypatch)
     ran: list[Exception | None] = []
-    loop = asyncio.new_event_loop()
-    try:
-        future = loop.run_until_complete(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
-    finally:
-        loop.close()
-    assert future in p._futures  # noqa: SLF001
-    deadline = time.monotonic() + 30
-    while future in p._futures and time.monotonic() < deadline:  # noqa: SLF001
-        time.sleep(0.05)
-    assert future not in p._futures  # noqa: SLF001
+    future = _send_on_a_loop_that_closes(p, captured, ran)
+    assert future._impl in p._futures  # noqa: SLF001
+    _complete_off_loop(captured)
+    monkeypatch.undo()
+    assert future._impl not in p._futures  # noqa: SLF001
     assert ran == []
-    assert not future.done()
-    assert [r.getMessage() for r in caplog.records if r.name == "confluent_kafka.producer"] == [
-        f"The completion of a record sent to topic-partition '{TOPIC}--1' was dropped: its "
-        "event loop had closed, so its callback did not run and its future does not complete"]
-
-    async def flush_and_close() -> None:
-        await asyncio.wait_for(p.flush(), 30)
-        await asyncio.wait_for(p.close(), 30)
-
-    asyncio.run(flush_and_close())
-    assert p._closed  # noqa: SLF001
+    assert not future.is_done()
+    assert _dropped(caplog) == [DROPPED]
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(p.flush())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    p._destroy()  # noqa: SLF001
 
 
 DROPPED = (f"The completion of a record sent to topic-partition '{TOPIC}--1' was dropped: its "
@@ -2060,121 +3267,160 @@ def _dropped(caplog: pytest.LogCaptureFixture) -> list[str]:
             if r.name == "confluent_kafka.producer" and r.getMessage().startswith("The completion")]
 
 
-def test_a_flush_that_starts_before_a_closed_loops_completion_returns(
-        caplog: pytest.LogCaptureFixture) -> None:
-    # Loop A closes with a send in flight, and a flush() on loop B starts
-    # before the record completes: the flush's wait list holds a future no
-    # loop can complete any more, so the wait leaves it out, and the
-    # completion is dropped with one warning when it arrives.
+def _hold_pump_schedules(p: Any) -> tuple[threading.Event, Callable[[], None]]:
+    """Hold the producer's pump schedules: the event is set once the notify
+    hook asks for one, and calling the function schedules that one as the hook
+    would have. Holding it keeps the pump off the loop while the loop still
+    runs, which on a fast machine would otherwise run the pump, and then the
+    delivery, before the loop stops."""
+    scheduled = threading.Event()
+    real = p._schedule_pump  # noqa: SLF001
+
+    def schedule() -> None:
+        scheduled.set()
+
+    p._schedule_pump = schedule  # noqa: SLF001
+    return scheduled, real
+
+
+def test_a_call_from_another_loop_is_refused_while_a_closed_loops_completion_is_in_flight(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # Updated for the one-loop binding (was: a flush() on loop B that starts
+    # before loop A's completion arrives leaves that record out of its wait):
+    # loop A closes with a send in flight, and a flush() from loop B is
+    # refused, the record still in flight; the helper thread drops its
+    # completion, with one warning, when it arrives (faked as in the test
+    # above).
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 1000})
+    captured = _fake_queued_send(monkeypatch)
+    ran: list[Exception | None] = []
+    future = _send_on_a_loop_that_closes(p, captured, ran)
+
+    async def flush() -> None:
+        assert future._impl in p._futures  # noqa: SLF001 - the completion has not arrived
+        await p.flush()
+
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(flush())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    _complete_off_loop(captured)
+    monkeypatch.undo()
+    assert future._impl not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.is_done()
+    assert _dropped(caplog) == [DROPPED]
+    p._destroy()  # noqa: SLF001
+
+
+def test_a_completion_for_a_stopped_loop_runs_when_the_loop_runs_again(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Updated for the one-loop binding (was: the completion, pumped on a
+    # helper thread while its loop is stopped, is dropped by a flush() from
+    # another loop once the loop closes): a record that completes while its
+    # loop is open but not running waits, its completion scheduled on the
+    # loop, and runs there, callback first, once the loop runs again. Updated
+    # for send() waiting for its handover: the faked send completes the record
+    # after it, from another thread, as a pump off the loop would.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
     ran: list[Exception | None] = []
     loop = asyncio.new_event_loop()
     try:
-        future = loop.run_until_complete(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+        future = _send_handed_over(p, loop, captured, ran)
+        _complete_off_loop(captured)
+        monkeypatch.undo()
+        assert loop in p._pending  # noqa: SLF001 - waiting for the loop
+        assert ran == [] and not future.is_done()
+
+        loop.run_until_complete(async_assert_send_throws(future, KafkaTimeoutError, 30))
+        assert len(ran) == 1 and isinstance(ran[0], KafkaTimeoutError)
+        loop.run_until_complete(p.close())
     finally:
         loop.close()
 
-    async def flush_then_close() -> None:
-        assert future in p._futures  # noqa: SLF001 - the completion has not arrived
-        await asyncio.wait_for(p.flush(), 10)
-        await asyncio.wait_for(p.close(), 10)
 
-    asyncio.run(flush_then_close())
-    assert future not in p._futures  # noqa: SLF001
-    assert ran == []
-    assert not future.done()
-    assert _dropped(caplog) == [DROPPED]
-
-
-def test_a_completion_left_for_a_closed_loop_is_dropped_by_the_next_flush(
-        caplog: pytest.LogCaptureFixture) -> None:
-    # The record completes while its loop is open but not running, so its
-    # completion waits for that loop, which then closes without running it: a
-    # flush() on another loop drops it, with one warning, and returns.
+def test_a_completion_left_for_a_closed_loop_is_dropped_when_the_producer_is_destroyed(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # Updated for the one-loop binding (was: close() from another loop drops
+    # it): the loop closes without running the pump scheduled on it, so the
+    # completion stays queued, the producer refuses a close() from another
+    # loop, and freeing the producer runs the completion, which is dropped
+    # with one warning. Updated for send() waiting for its handover: the
+    # record is handed over by the faked send (see _send_handed_over), and
+    # Producer_destroy runs its queued completion first, as the core's
+    # destroy runs the callbacks still pending.
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    real_destroy = _lib.Producer_destroy
+
+    def destroy(c_producer: Any) -> None:
+        _complete_off_loop(captured)
+        real_destroy(c_producer)
+
+    monkeypatch.setattr(_lib, "Producer_destroy", destroy)
     ran: list[Exception | None] = []
-    loop = asyncio.new_event_loop()
-    try:
-        future = loop.run_until_complete(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
-        deadline = time.monotonic() + 30
-        while loop not in p._pending and time.monotonic() < deadline:  # noqa: SLF001
-            time.sleep(0.01)
-        assert loop in p._pending  # noqa: SLF001
-    finally:
-        loop.close()
-
-    async def flush_then_close() -> None:
-        await asyncio.wait_for(p.flush(), 10)
-        await asyncio.wait_for(p.close(), 10)
-
-    asyncio.run(flush_then_close())
-    assert loop not in p._pending  # noqa: SLF001
-    assert future not in p._futures  # noqa: SLF001
+    future = _send_on_a_loop_that_closes(p, captured, ran)
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(p.close())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    assert future._impl in p._futures and _dropped(caplog) == []  # noqa: SLF001
+    p._destroy()  # noqa: SLF001
+    assert future._impl not in p._futures  # noqa: SLF001
     assert ran == []
-    assert not future.done()
+    assert not future.is_done()
     assert _dropped(caplog) == [DROPPED]
+
+
+def test_a_send_abandoned_with_its_loop_before_its_handover_stays_tracked(
+        monkeypatch: pytest.MonkeyPatch, stopped_loop: Any) -> None:
+    # A send() task left on a loop that closes before its record is handed
+    # over has its coroutine closed (what the garbage collector does to it):
+    # it ends without an error of its own, the record still sent and tracked
+    # until its completion, dropped for the closed loop, untracks it.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    stopped_loop.start(p.send(record=RECORD))
+    assert "resolve" in captured
+    stopped_loop.abandon()
+    assert len(p._futures) == 1  # noqa: SLF001
+    p._destroy()  # noqa: SLF001
 
 
 def test_a_completion_its_closing_loop_refuses_is_dropped(
-        hold_completion: Any, caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
         capfd: pytest.CaptureFixture[str]) -> None:
     # The loop is open when the completion checks it, then closes before
-    # call_soon_threadsafe, which raises RuntimeError on the C completion
-    # thread: the completion is dropped there, with one warning, instead of the
-    # error reaching the C trampoline (which printed it) and the completion
-    # waiting for a later flush().
+    # call_soon_threadsafe, which raises RuntimeError on the pumping thread:
+    # the completion is dropped there, with one warning, instead of the error
+    # reaching the C trampoline (which printed it) and the completion waiting
+    # for a later flush(). Updated for the one-loop binding (was: then closed
+    # from another loop): the producer is freed instead. Updated for send()
+    # waiting for its handover (was: the delivery callback held on the pump,
+    # which now runs on the loop the send awaits on): the record is handed
+    # over by the faked send and completes on a thread of its own, any error
+    # it raised there printed by the thread's excepthook.
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_send")
+    captured = _fake_queued_send(monkeypatch)
     ran: list[Exception | None] = []
     loop = asyncio.new_event_loop()
     try:
-        future = loop.run_until_complete(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+        future = _send_handed_over(p, loop, captured, ran)
     finally:
         loop.close()
     loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
     capfd.readouterr()
-    held.release.set()
-    assert held.delivered.wait(30)
+    _complete_off_loop(captured)
     del loop.is_closed
-    assert held.raised == []
     assert capfd.readouterr().err == ""
     assert loop not in p._pending  # noqa: SLF001
-    assert future not in p._futures  # noqa: SLF001
+    assert future._impl not in p._futures  # noqa: SLF001
     assert ran == []
-    assert not future.done()
+    assert not future.is_done()
     assert _dropped(caplog) == [DROPPED]
-    asyncio.run(p.close())
-
-
-def test_a_completion_left_for_a_closed_loop_is_dropped_by_close(
-        hold_completion: Any, caplog: pytest.LogCaptureFixture) -> None:
-    # As by the next flush(), with no flush(): close() drops it, with one
-    # warning.
-    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
-    p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_send")
-    ran: list[Exception | None] = []
-    loop = asyncio.new_event_loop()
-    try:
-        future = loop.run_until_complete(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
-        held.release.set()
-        assert held.delivered.wait(30)
-        assert loop in p._pending  # noqa: SLF001
-    finally:
-        loop.close()
-    asyncio.run(asyncio.wait_for(p.close(), 10))
-    assert loop not in p._pending  # noqa: SLF001
-    assert future not in p._futures  # noqa: SLF001
-    assert ran == []
-    assert not future.done()
-    assert _dropped(caplog) == [DROPPED]
+    p._destroy()  # noqa: SLF001
 
 
 def test_an_operation_result_its_closing_loop_refuses_is_freed(
@@ -2182,18 +3428,22 @@ def test_an_operation_result_its_closing_loop_refuses_is_freed(
         capfd: pytest.CaptureFixture[str]) -> None:
     # The same race for the result of an operation (begin_transaction()'s
     # error on a non-transactional producer), whose task waits on a loop that
-    # stopped: the loop is open when the result checks it, then closes before
-    # call_soon_threadsafe. The result is freed on the dispatcher thread
-    # instead of the RuntimeError reaching the C trampoline, which printed it
-    # and left the result's handles allocated.
+    # stopped: the loop is open when the pump and the result check it, then
+    # closes before call_soon_threadsafe. The result is freed on the pumping
+    # thread instead of the RuntimeError reaching the C trampoline, which
+    # printed it and left the result's handles allocated. Updated for the
+    # one-loop binding: submitted once the loop has closed, so the notify hook
+    # that finds it open hands the pump to the helper thread when
+    # call_soon_threadsafe refuses it; the producer is then freed.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_begin_transaction_async")
+    held = hold_completion("Producer_begin_transaction_cb", submit_later=True)
     stopped_loop.start(p.begin_transaction())
-    assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
-    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+    loop.is_closed = lambda: False  # type: ignore[method-assign] # the checks saw it open
     capfd.readouterr()
+    held.submit()
+    assert held.submitted.is_set()
     held.release.set()
     assert held.delivered.wait(30)
     del loop.is_closed
@@ -2202,50 +3452,124 @@ def test_an_operation_result_its_closing_loop_refuses_is_freed(
     assert held.raised == []
     assert capfd.readouterr().err == ""
     assert freed_errors == [error]
-    asyncio.run(p.close())
+    p._destroy()  # noqa: SLF001
 
 
 @pytest.mark.parametrize("call", ["flush", "close"])
-def test_an_operation_result_left_for_a_closed_loop_is_freed_by_the_next_call(
-        call: str, hold_completion: Any, freed_errors: list[int], stopped_loop: Any) -> None:
-    # The result reaches its loop while the loop is stopped, and the loop then
-    # closes, which discards the queued delivery: the next operation of the
-    # producer, from another loop, frees it.
+def test_an_operation_result_left_for_a_closed_loop_is_freed_when_the_producer_is_destroyed(
+        call: str, freed_errors: list[int], stopped_loop: Any) -> None:
+    # Updated for the one-loop binding (was: the next operation, from another
+    # loop, frees it): the result arrives while its loop is stopped, which
+    # then closes without running the pump scheduled on it; the next
+    # operation, from another loop, is refused, and freeing the producer runs
+    # the queued completion, which frees the result.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_begin_transaction_async")
+    scheduled, schedule = _hold_pump_schedules(p)
     stopped_loop.start(p.begin_transaction())
-    held.release.set()
-    assert held.delivered.wait(30)
+    assert scheduled.wait(30)
+    schedule()  # on the stopped loop, whose close discards it
     stopped_loop.loop.close()
-    ((error,),) = held.payloads
-    assert error
     assert freed_errors == []
 
-    async def next_call_then_close() -> None:
-        await asyncio.wait_for(getattr(p, call)(), 10)
-        await asyncio.wait_for(p.close(), 10)
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    assert freed_errors == []
+    p._destroy()  # noqa: SLF001
+    assert len(freed_errors) == 1
 
-    asyncio.run(next_call_then_close())
-    assert freed_errors == [error]
+
+@pytest.mark.parametrize("call", ["flush", "close"])
+def test_an_operation_result_handed_to_a_loop_that_closed_is_freed_when_the_producer_is_destroyed(
+        call: str, freed_errors: list[int], stopped_loop: Any) -> None:
+    # As above, but the pump ran before the loop closed, as it does when the
+    # result arrives during the loop's last iteration: the result was handed
+    # to the stopped loop, whose close discards its delivery, so it waits in
+    # the producer, not in the C API, and the destroy frees it there.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    scheduled, _schedule = _hold_pump_schedules(p)
+    stopped_loop.start(p.begin_transaction())
+    assert scheduled.wait(30)
+    p._pump()  # noqa: SLF001
+    stopped_loop.loop.close()
+    assert freed_errors == []
+
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    assert freed_errors == []
+    p._destroy()  # noqa: SLF001
+    assert len(freed_errors) == 1
+
+
+@pytest.mark.parametrize("call", ["flush", "close"])
+def test_an_operation_result_delivered_to_a_task_left_on_a_closed_loop_is_freed_with_the_task(
+        call: str, freed_errors: list[int], stopped_loop: Any) -> None:
+    # As above, but the loop also ran the delivery before it closed, as it
+    # does when the result arrives early in the loop's last iterations: the
+    # result is in the awaiting task's future, and the task never resumes to
+    # take it. The producer cannot reach it; the task frees it when it goes
+    # away, which closes its coroutine.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    scheduled, _schedule = _hold_pump_schedules(p)
+    stopped_loop.start(p.begin_transaction())
+    assert scheduled.wait(30)
+    p._pump()  # noqa: SLF001
+    # One iteration: the delivery runs, the task's wake-up it schedules does not.
+    stopped_loop.loop.stop()
+    stopped_loop.loop.run_forever()
+    assert not stopped_loop._task.done()  # noqa: SLF001
+    stopped_loop.loop.close()
+    assert freed_errors == []
+
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    p._destroy()  # noqa: SLF001
+    assert freed_errors == []
+    stopped_loop.abandon()
+    assert len(freed_errors) == 1
 
 
 async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
-    # Its entry point has an _async form, so begin_transaction() is a
-    # coroutine (Class family). Critic 75 N1: a record still waiting for its
-    # topic's metadata (up to max.block.ms) does not hold it.
+    # begin_transaction() is a coroutine (Class family).
+    # Updated for the branch C API (was: a record still waiting for its
+    # topic's metadata does not hold it, Critic 75 N1): the branch's
+    # beginTransaction drains the submission queue first, as every
+    # transaction-control operation does (producer-transactions.md §13), so it
+    # waits out the record's max.block.ms; it does so off the loop, which
+    # keeps running meanwhile. Updated for send() waiting for its handover:
+    # the record is sent from a task, which is queued once it first waits.
     async with AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 3000}) as p:
-        f = await p.send(record=RECORD)
+        send = asyncio.ensure_future(p.send(record=RECORD))
+        await asyncio.sleep(0)
+        assert not send.done()
+        ticks = 0
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        ticker = asyncio.ensure_future(tick())
         start = time.monotonic()
         begin = p.begin_transaction()
         assert inspect.iscoroutine(begin)
-        with pytest.raises(IllegalStateError) as err:
-            await begin
-        assert time.monotonic() - start < 1
+        try:
+            with pytest.raises(IllegalStateError) as err:
+                await begin
+        finally:
+            ticker.cancel()
+        elapsed = time.monotonic() - start
+        assert elapsed >= 2.5
+        assert ticks >= 20, (ticks, elapsed)
         assert str(err.value) == NOT_TRANSACTIONAL
         with pytest.raises(IllegalStateError):
             await p.commit_transaction()
-    with pytest.raises(KafkaTimeoutError):
-        await f
+        assert send.done()
+        f = await send
+    await async_assert_send_throws(f, KafkaTimeoutError)
 
 
 # ===========================================================================
@@ -2261,22 +3585,152 @@ def test_mock_callback_runs_on_the_caller_before_the_future_completes() -> None:
     ((thread, md, e),) = seen
     assert thread == caller and e is None
     assert (md.topic(), md.partition(), md.offset()) == (TOPIC, 0, 0)
-    assert f.done() and not f.cancel()
-    assert f.result().offset() == 0 and f.result().timestamp() == -1
+    assert f.is_done() and not f.cancel(may_interrupt_if_running=True)
+    assert f.get().offset() == 0 and f.get().timestamp() == -1
 
 
-def test_mock_raising_callback_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    p = MockProducer()
+def test_mock_raising_callback_propagates_from_the_completing_call() -> None:
+    # Java's MockProducer.Completion.complete calls onCompletion with no
+    # try/catch, before result.done() (MockProducer.java:640-650): the
+    # exception propagates out of the call that completed the record, the
+    # record's future never completes, and the completions behind it stay
+    # queued.
+    raised = RuntimeError("callback blew up")
 
     def boom(md: RecordMetadata, e: Exception | None) -> None:
-        raise RuntimeError("callback blew up")
+        raise raised
 
+    p = MockProducer()
     f = p.send(record=RECORD, callback=boom)
-    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
-        assert p.complete_next()
-    assert f.result().offset() == 0
-    assert [r.getMessage() for r in caplog.records] == [
-        "Error executing user-provided callback on message for topic-partition 'topic-0'"]
+    g = p.send(record=RECORD)
+    with pytest.raises(RuntimeError) as info:
+        p.complete_next()
+    assert info.value is raised
+    assert not f.is_done() and not g.is_done()
+    assert p.complete_next()
+    assert g.get().offset() == 1
+
+    h = p.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        p.error_next(e=KafkaError(message="failed"))
+    assert info.value is raised
+    assert not h.is_done()
+
+    i = p.send(record=RECORD, callback=boom)
+    j = p.send(record=RECORD)
+    with pytest.raises(RuntimeError) as info:
+        p.flush()
+    assert info.value is raised
+    assert not i.is_done() and not j.is_done()
+    p.flush()
+    assert j.get().offset() == 4
+
+    auto = MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                        value_serializer=None)
+    with pytest.raises(RuntimeError) as info:
+        auto.send(record=RECORD, callback=boom)
+    assert info.value is raised
+    assert auto.history() == [RECORD]
+
+    txn = MockProducer()
+    txn.init_transactions()
+    txn.begin_transaction()
+    txn.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        txn.commit_transaction()
+    assert info.value is raised
+    assert not txn.transaction_committed() and txn.transaction_in_flight()
+
+
+def test_mock_callback_returning_a_coroutine_raises_a_type_error() -> None:
+    # The sync mock cannot await what a callback returns: a plain callback
+    # returning a coroutine (a coroutine function itself is refused at send())
+    # has it closed and a TypeError raised from the completing call.
+    ran: list[bool] = []
+
+    async def coroutine(md: RecordMetadata, e: Exception | None) -> None:
+        ran.append(True)
+
+    def callback(md: RecordMetadata, e: Exception | None) -> Any:
+        return coroutine(md, e)
+
+    p = MockProducer()
+    f = p.send(record=RECORD, callback=callback)
+    with pytest.raises(TypeError) as info:
+        p.complete_next()
+    assert str(info.value) == COROUTINE_CALLBACK
+    assert not f.is_done() and ran == []
+
+
+async def test_async_mock_raising_callback_propagates_from_the_completing_call() -> None:
+    raised = RuntimeError("callback blew up")
+
+    def boom(md: RecordMetadata, e: Exception | None) -> None:
+        raise raised
+
+    auto = AsyncMockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                             value_serializer=None)
+    with pytest.raises(RuntimeError) as info:
+        await auto.send(record=RECORD, callback=boom)
+    assert info.value is raised
+    assert auto.history() == [RECORD]
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        p.complete_next()
+    assert info.value is raised
+    assert not f.is_done()
+    await p.flush()  # nothing deferred
+    await p.close()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_async_mock_raising_async_def_callback_is_a_deferred_error(
+        cancelled: bool) -> None:
+    # The completing call has returned when an awaited callback raises: its
+    # exception, CancelledError included, is raised by the next awaited call of
+    # the mock, once, and the record's future never completes.
+    raised: BaseException = (asyncio.CancelledError() if cancelled
+                             else RuntimeError("async callback blew up"))
+
+    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        raise raised
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    with pytest.raises(type(raised)) as info:
+        await p.flush()
+    assert info.value is raised
+    assert not f.is_done()
+    await p.flush()
+
+    g = await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    await _until(lambda: p._mock_callback_errors)  # noqa: SLF001
+    with pytest.raises(type(raised)) as info:
+        await p.send(record=RECORD)
+    assert info.value is raised
+    assert not g.is_done()
+    await p.close()
+
+
+async def test_async_mock_close_raises_a_deferred_callback_error_once_closed() -> None:
+    raised = RuntimeError("async callback blew up")
+
+    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        raise raised
+
+    p = AsyncMockProducer()
+    await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    with pytest.raises(RuntimeError) as info:
+        await p.close()
+    assert info.value is raised
+    assert p.closed()
 
 
 def test_mock_error_next_with_none_completes_successfully() -> None:
@@ -2284,7 +3738,7 @@ def test_mock_error_next_with_none_completes_successfully() -> None:
     p = MockProducer()
     f = p.send(record=RECORD)
     assert p.error_next(e=None)  # type: ignore[arg-type]
-    assert f.result().offset() == 0
+    assert f.get().offset() == 0
 
 
 def test_mock_injected_errors_are_raised_as_the_same_instance() -> None:
@@ -2365,12 +3819,12 @@ def test_mock_partitions_with_the_cluster_and_the_partitioner() -> None:
     p = MockProducer(cluster=cluster, auto_complete=True, partitioner=Chooser(),
                      key_serializer=string_serializer(), value_serializer=string_serializer())
     f = p.send(record=ProducerRecord(topic=TOPIC, key="k", value="v"))
-    assert f.result().partition() == 2
+    assert f.get().partition() == 2
     assert calls == [(TOPIC, "k", b"k", "v", b"v", cluster)]
     # Without a partitioner the first partition; a given partition must exist.
     p2 = MockProducer(cluster=cluster, auto_complete=True, partitioner=None)
-    assert p2.send(record=RECORD).result().partition() == 0
-    assert p2.send(record=ProducerRecord(topic=TOPIC, partition=1, key=None, value=b"v")).result(
+    assert p2.send(record=RECORD).get().partition() == 0
+    assert p2.send(record=ProducerRecord(topic=TOPIC, partition=1, key=None, value=b"v")).get(
     ).partition() == 1
     with pytest.raises(IllegalArgumentError) as err:
         p2.send(record=ProducerRecord(topic=TOPIC, partition=3, key=None, value=b"v"))
@@ -2401,8 +3855,8 @@ async def test_async_mock_family() -> None:
     loop_thread = threading.get_ident()
     seen: list[int] = []
     f = await p.send(record=RECORD, callback=lambda md, e: seen.append(threading.get_ident()))
-    assert f.done() and seen == [loop_thread]
-    md = await (await p.send(record=RECORD))
+    assert f.is_done() and seen == [loop_thread]
+    md = await (await p.send(record=RECORD)).get()
     assert md.offset() == 1
     await p.init_transactions()
     await p.begin_transaction()
@@ -2411,9 +3865,9 @@ async def test_async_mock_family() -> None:
     assert p.commit_count() == 1
     manual = AsyncMockProducer()
     pending = await manual.send(record=RECORD)
-    assert not pending.done()
+    assert not pending.is_done()
     await manual.flush()
-    assert (await pending).offset() == 0
+    assert (await pending.get()).offset() == 0
     async with AsyncMockProducer() as q:
         await q.send(record=RECORD)
     assert q.closed() and q.flushed()
@@ -2460,3 +3914,30 @@ def test_a_bare_kafka_exception_from_the_core_is_the_base_error(
     assert type(errmod.from_ffi_error(1)) is KafkaError
     _Lib.api_error = True
     assert type(errmod.from_ffi_error(1)) is UnknownServerError
+
+
+async def test_a_payload_delivered_just_before_a_cancellation_is_freed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The completion reaches the loop and fills the awaited future, then the task
+    # is cancelled before it resumes (an ``asyncio.wait_for`` timeout in the same
+    # loop iteration): ``cancel()`` cannot cancel the done future, so the awaiting
+    # coroutine frees the payload.
+    from confluent_kafka.producer import async_producer
+
+    freed: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(async_producer, "free_error_payload", freed.append)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        captured: dict[str, Any] = {}
+        task = asyncio.ensure_future(
+            p._await_payload(lambda handle, cb: captured.__setitem__("cb", cb)))
+        await asyncio.sleep(0)  # the task now awaits its future
+        captured["cb"](0)  # the completion: its delivery is scheduled on the loop
+        await asyncio.sleep(0)  # the delivery fills the future; the task is not run yet
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert freed == [(0,)]
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)

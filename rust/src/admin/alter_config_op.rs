@@ -189,7 +189,7 @@ mod tests {
                 .set_name("listener.name.sasl.plain.sasl.jaas.config".to_string())
                 .set_value(Some(SECRET.to_string()))
                 .set_is_sensitive(true)
-                .set_config_type(Some(ConfigType::Password))
+                .set_config_type(ConfigType::Password)
                 .build()
                 .unwrap(),
         );

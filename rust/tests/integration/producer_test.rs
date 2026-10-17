@@ -384,7 +384,7 @@ async fn create_topic_with_admin_config(
 ///
 /// Deviation: Java's fixed group id `"group"` becomes a per-test id, because
 /// clusters are pooled across tests here and Java's are not.
-fn send_test_consumer(ctx: &TestContext) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn send_test_consumer(ctx: &TestContext) -> Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
@@ -392,12 +392,14 @@ fn send_test_consumer(ctx: &TestContext) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> 
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("enable.auto.commit".to_string(), "true".to_string()),
     ]);
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::new()),
-        Box::new(ByteArrayDeserializer::new()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::new()),
+            Box::new(ByteArrayDeserializer::new()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// The fields of a consumed record the suite asserts on (`ConsumerRecord` is
@@ -416,7 +418,7 @@ struct ConsumedRecord {
 /// `pollRecordsUntilTrue` (`:709-718`): 100 ms polls, 15 s budget
 /// (`DEFAULT_MAX_WAIT_MS`), same failure message.
 async fn poll_until_at_least_num_records(
-    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     num_records: usize,
 ) -> Vec<ConsumedRecord> {
     let deadline = Instant::now() + Duration::from_millis(15_000);
@@ -446,7 +448,10 @@ async fn poll_until_at_least_num_records(
 }
 
 /// `TestUtils.consumeRecords` (`TestUtils.scala:1198-1204`).
-async fn consume_records(consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>, num_records: usize) -> Vec<ConsumedRecord> {
+async fn consume_records(
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
+    num_records: usize,
+) -> Vec<ConsumedRecord> {
     let records = poll_until_at_least_num_records(consumer, num_records).await;
     assert_eq!(num_records, records.len(), "Consumed more records than expected");
     records
@@ -953,7 +958,9 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
     // "This consumer close very slowly, which may cause the entire test to time
     // out, and we can't wait for it to auto close" (`ProducerCompressionTest.java:109-111`).
     let _ = consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_secs(1)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(Duration::from_secs(
+            1,
+        )))
         .await;
 }
 
@@ -961,7 +968,7 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
 /// (`ProducerCompressionTest.java:116-154`), with `flagLoop` (`:156-163`)
 /// folded into the record index: record `i` is message `i / 3`, flavour `i % 3`.
 async fn verify_compression_consumer_records(
-    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     messages: &[String],
     now: i64,
     header_arr: &[RecordHeader],
@@ -1373,9 +1380,9 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
         // (`GroupCoordinatorService.java:2324-2330`) with the default
         // `offsets.topic.segment.bytes`.
         let topic_config = BTreeMap::from([
-            ("cleanup.policy".to_string(), Some("compact".to_string())),
-            ("compression.type".to_string(), Some("producer".to_string())),
-            ("segment.bytes".to_string(), Some((100 * 1024 * 1024).to_string())),
+            ("cleanup.policy".to_string(), "compact".to_string()),
+            ("compression.type".to_string(), "producer".to_string()),
+            ("segment.bytes".to_string(), (100 * 1024 * 1024).to_string()),
         ]);
         let new_topic =
             NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))
@@ -3028,9 +3035,9 @@ async fn test_borrowed_send_delivers_the_record_headers() {
     )
     .expect("Failed to create producer");
     let mut headers = RecordHeaders::new();
-    headers.add_key_value("trace", Some(b"abc")).expect("add header");
-    headers.add_key_value("empty", Some(b"")).expect("add header");
-    headers.add_key_value("null", None).expect("add header");
+    headers.add_with_key_value("trace", Some(b"abc")).expect("add header");
+    headers.add_with_key_value("empty", Some(b"")).expect("add header");
+    headers.add_with_key_value("null", None).expect("add header");
     let record = ProducerRecord::with_partition_key_headers(
         topic.clone(),
         Some(0),
@@ -3053,7 +3060,7 @@ async fn test_borrowed_send_delivers_the_record_headers() {
         ("group.id".to_string(), group_id),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&consumer_props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),

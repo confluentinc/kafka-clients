@@ -27,7 +27,7 @@
 //! and its methods take only `&self`; the consumer ops exercised inside the
 //! Java callbacks (`assign` / `position` / `beginning_offsets` / `seek` /
 //! `pause` / `resume`) are `async fn(&mut self)` on `AsyncKafkaConsumer`,
-//! and `Box<dyn Consumer>` is not `Clone`. Phase 41 closes this:
+//! and `Box<dyn DynConsumer>` is not `Clone`. Phase 41 closes this:
 //!   1. The user captures a `Clone + Send + Sync` [`ConsumerHandle`]
 //!      (`consumer.handle()`) into the listener struct — the Rust
 //!      equivalent of Java capturing the `consumer` variable. The handle
@@ -90,10 +90,10 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -103,7 +103,7 @@ use confluent_kafka::producer::ProducerRecord;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config (Java: 3 brokers, KIP-848, no extra serverProperties) ─
 
@@ -143,9 +143,15 @@ fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str) -> ConsumerConf
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
-fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("KafkaConsumer::new should succeed")
+fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            config,
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
+    )
 }
 
 fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
@@ -810,7 +816,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
         let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
-        for rec in records.records_partition(&tp) {
+        for rec in records.records_with_partition(&tp) {
             assert_eq!(
                 rec.offset(),
                 next_offset,

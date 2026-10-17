@@ -41,26 +41,16 @@ impl FenceProducersResult {
         Self { futures }
     }
 
-    /// Returns the underlying per-transactional-id futures.
-    ///
-    /// Crate-internal, for the C FFI's per-key (unjoined) delivery. Java exposes
-    /// only the `producerId(id)` / `epochId(id)` / `fencedProducers()`
-    /// projections publicly, each a `thenApply` view over this same map; the FFI
-    /// needs the whole `ProducerIdAndEpoch` value per key — exactly the field
-    /// those projections are built from — so it reads the map directly rather
-    /// than joining two scalar projections back together.
-    #[cfg_attr(not(feature = "ffi"), expect(dead_code))]
-    pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<ProducerIdAndEpoch>> {
-        &self.futures
-    }
-
     /// Return a map from transactional id to futures which can be used to check
     /// the status of individual fencings.
     ///
     /// Mirrors `FenceProducersResult.fencedProducers`.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#fencedProducers")]
     pub fn fenced_producers(&self) -> HashMap<String, KafkaFuture<()>> {
-        self.futures.iter().map(|(id, f)| (id.clone(), f.then_apply(|_| ()))).collect()
+        self.futures
+            .iter()
+            .map(|(id, f)| (id.clone(), f.then_apply(|_| Ok(()))))
+            .collect()
     }
 
     /// Returns a future that provides the producer id generated while
@@ -108,7 +98,7 @@ impl FenceProducersResult {
     {
         self.futures
             .get(transactional_id)
-            .map(|future| future.then_apply(move |p| followup(&p)))
+            .map(|future| future.then_apply(move |p| Ok(followup(&p))))
             .ok_or_else(|| {
                 Error::local_illegal_argument(format!(
                     "TransactionalId `{transactional_id}` was not included in the request"

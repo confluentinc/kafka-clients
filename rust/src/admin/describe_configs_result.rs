@@ -70,7 +70,7 @@ mod tests {
         let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
         let result = DescribeConfigsResult::new(HashMap::from([(
             resource.clone(),
-            KafkaFuture::completed(Ok(Config::new(Vec::new()))),
+            KafkaFuture::completed_future(Ok(Config::new(Vec::new()))),
         )]));
         let config = result.values()[&resource].get().await.expect("completed future");
         assert_eq!(config.entries().count(), 0);

@@ -200,7 +200,7 @@ impl WorkloadContext {
         }
     }
 
-    /// The current id of `topic`, or `Uuid::zero()` if the harness has not
+    /// The current id of `topic`, or `Uuid::ZERO_UUID` if the harness has not
     /// resolved it.
     pub(crate) fn topic_id_for(&self, topic: &str) -> Uuid {
         topic_id_in(&self.topic_ids, topic)
@@ -222,14 +222,14 @@ fn grpc_uses_containers() -> bool {
     }
 }
 
-/// The current id of `topic` in the harness's live map, or `Uuid::zero()` if
+/// The current id of `topic` in the harness's live map, or `Uuid::ZERO_UUID` if
 /// the harness has not resolved it.
 fn topic_id_in(ids: &TopicIds, topic: &str) -> Uuid {
     ids.lock()
         .expect("topic_ids poisoned")
         .get(topic)
         .copied()
-        .unwrap_or_else(Uuid::zero)
+        .unwrap_or(Uuid::ZERO_UUID)
 }
 
 /// Builds the completion callback for record `index` of `topic`. The callback
@@ -535,7 +535,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Consumer workload — over any ConsumerBackendFactory (yields Box<dyn Consumer>).
+// Consumer workload — over any ConsumerBackendFactory (yields Box<dyn DynConsumer>).
 // ---------------------------------------------------------------------------
 
 struct ConsumerWorkload<F: ConsumerBackendFactory> {
@@ -693,7 +693,11 @@ struct ChaosCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for ChaosCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         if let Some(err) = error {
             eprintln!("chaos {}: async commit failed: {err}", self.consumer);
             self.verifier.record(WorkloadEvent::ConsumerError {
@@ -702,6 +706,7 @@ impl OffsetCommitCallback for ChaosCommitCallback {
                 error: err.to_string(),
             });
         }
+        Ok(())
     }
 }
 
@@ -1069,7 +1074,7 @@ mod tests {
                 consumer: "consumer-rust-1".into(),
                 index: offset as u64,
                 topic: "t".into(),
-                topic_id: Uuid::zero(),
+                topic_id: Uuid::ZERO_UUID,
                 partition: p,
                 offset,
             });
@@ -1141,16 +1146,16 @@ mod tests {
         verifier.record(WorkloadEvent::Delivered {
             index: 7,
             topic: "t".into(),
-            topic_id: Uuid::zero(),
+            topic_id: Uuid::ZERO_UUID,
             partition: 2,
             offset: 9,
         });
         let good = consumer_record(key(7), Some(build_value(7, 16)));
-        record_consumed(&verifier, "consumer-rust-1", &good, Uuid::zero(), 16);
+        record_consumed(&verifier, "consumer-rust-1", &good, Uuid::ZERO_UUID, 16);
         let verdict = verifier.verdict(1);
         assert!(verdict.is_pass(), "{verdict}");
         let bad = consumer_record(key(7), Some(build_value(8, 16)));
-        record_consumed(&verifier, "consumer-rust-1", &bad, Uuid::zero(), 16);
+        record_consumed(&verifier, "consumer-rust-1", &bad, Uuid::ZERO_UUID, 16);
         let verdict = verifier.verdict(1);
         assert_eq!(verdict.corrupted_records, 1, "{verdict}");
         assert_eq!(
@@ -1170,11 +1175,12 @@ mod tests {
     async fn async_commit_callback_records_a_failed_commit() {
         let verifier = Arc::new(ConservationVerifier::new());
         let callback = ChaosCommitCallback { consumer: "consumer-rust-1".into(), verifier: verifier.clone() };
-        callback.on_complete(&HashMap::new(), None).await;
+        callback.on_complete(&HashMap::new(), None).await.unwrap();
         assert_eq!(verifier.verdict(0).commit_errors, 0);
         callback
             .on_complete(&HashMap::new(), Some(&Error::timeout("commit timed out")))
-            .await;
+            .await
+            .unwrap();
         let verdict = verifier.verdict(0);
         assert_eq!(verdict.commit_errors, 1, "{verdict}");
         assert!(verdict.is_pass(), "commit errors are not scored: {verdict}");
@@ -1297,8 +1303,8 @@ mod tests {
     /// have been silently excused.
     #[test]
     fn delivery_callback_stamps_the_generation_current_at_ack_time() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::from([("t".to_string(), old_id)])));
         let verifier = Arc::new(ConservationVerifier::new());
 
@@ -1357,8 +1363,8 @@ mod tests {
     /// real loss went undetected.
     #[test]
     fn records_after_recreate_are_stamped_with_new_generation_and_still_checked() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
             "t".to_string(),
             old_id,
@@ -1408,8 +1414,8 @@ mod tests {
     /// the other.
     #[test]
     fn topic_id_for_is_per_topic_and_zero_when_unresolved() {
-        let a = Uuid::with_bytes([1u8; 16]);
-        let b = Uuid::with_bytes([2u8; 16]);
+        let a = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
+        let b = Uuid::new(u64::from_be_bytes([2u8; 8]), u64::from_be_bytes([2u8; 8]));
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
             ("t0".to_string(), a),
             ("t1".to_string(), b),
@@ -1417,9 +1423,9 @@ mod tests {
         let ctx = ctx_with(ids.clone());
         assert_eq!(ctx.topic_id_for("t0"), a);
         assert_eq!(ctx.topic_id_for("t1"), b);
-        assert_eq!(ctx.topic_id_for("absent"), Uuid::zero());
+        assert_eq!(ctx.topic_id_for("absent"), Uuid::ZERO_UUID);
 
-        let b2 = Uuid::with_bytes([3u8; 16]);
+        let b2 = Uuid::new(u64::from_be_bytes([3u8; 8]), u64::from_be_bytes([3u8; 8]));
         ids.lock().unwrap().insert("t1".to_string(), b2);
         assert_eq!(ctx.topic_id_for("t0"), a, "recreating t1 must not change t0's id");
         assert_eq!(ctx.topic_id_for("t1"), b2);
