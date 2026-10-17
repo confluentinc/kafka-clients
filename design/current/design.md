@@ -578,14 +578,21 @@ only after the listener has returned.*
 ![Consumer receive path](img/consumer-receive-path.svg)
 
 *Takeaway: one buffer owns the fetch payload, and everything downstream
-borrows slices from it. The only per-record deep copy is the one the user's
-`Deserializer` chooses to make.*
+borrows slices from it, or, for a compressed batch, from each record's own
+buffer. The only per-record deep copy is the one the user's `Deserializer`
+chooses to make.*
 
 Receive-path zero-copy holds:
 - `CompletedFetch` owns the fetched bytes once.
 - The buffer is *moved*, never cloned, into a lazy `BatchCursor`
   (`completed_fetch.rs:250`).
-- Compressed batches are decompressed once per batch.
+- Compressed batches are decompressed a record at a time, each record into
+  a buffer of its own, as Java's `DefaultRecord.readFrom(InputStream, ...)`
+  reads it (`RecordStream` in `completed_fetch.rs`); the whole batch is
+  never decompressed at once. That buffer is one allocation per record
+  beyond the deserializer's output, which `consumer-threading.md` §27 does
+  not budget for (the comment on `RecordStream` says why it is taken), and
+  a record handed out zero-copy pins only its own bytes.
 - The topic name is one `Arc<str>` per fetch (`topic_arc`, `:180`), cloned
   per record.
 - `Deserializer<T>` is a sync trait taking `&[u8]`
@@ -1117,7 +1124,7 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Generics are `void *`**: K/V, `KafkaFuture<T>` values, list and map
   elements. With a NULL serializer/deserializer the `void *` is a
   `kafka_Bytes_t *`, written straight into the batch (CLAUDE.md §14) or
-  borrowed from the fetch buffer.
+  borrowed from the fetch buffer, or a compressed record's own buffer.
 - **Collections** are the package-less `kafka_List_t` / `kafka_Map_t` of
   `void *`: inputs hold borrowed elements; outputs are owned, except the
   borrowed view lists, and are sorted deterministically.
