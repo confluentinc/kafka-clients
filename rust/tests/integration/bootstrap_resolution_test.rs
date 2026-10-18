@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use confluent_kafka::admin::{AdminClient, AdminClientConfig};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::cluster_config::ClusterConfig;
@@ -100,7 +100,7 @@ async fn test_consumer_unresolvable_bootstrap_with_positive_timeout() {
             "bootstrap-resolution-test".to_string(),
         ),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),
@@ -200,7 +200,7 @@ async fn test_clients_bootstrap_asynchronously_with_positive_timeout() {
     consumer_props.insert("group.protocol".to_string(), "consumer".to_string());
     consumer_props.insert("group.id".to_string(), ctx.group_id("bootstrap_resolve_async"));
     consumer_props.insert("auto.offset.reset".to_string(), "earliest".to_string());
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&consumer_props).expect("valid config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),

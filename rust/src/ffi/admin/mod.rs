@@ -874,7 +874,8 @@ pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a live handle or view; `opaque` stays valid while the
-/// hook is installed.
+/// hook is installed and until a call of it in flight returns: a later call
+/// of this function does not wait for one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
@@ -884,7 +885,7 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call. `opaque` stays valid while the hook is
-    // installed, as the doc requires.
+    // installed and until a call in flight returns, as the doc requires.
     unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
 }
 

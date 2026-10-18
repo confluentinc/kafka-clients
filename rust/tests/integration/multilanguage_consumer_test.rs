@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{Metric, TopicPartition};
-use confluent_kafka::consumer::Consumer;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::backend_factory::ConsumerBackendFactory;
@@ -105,7 +105,7 @@ async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
 /// Poll until at least `want` records are collected or `deadline` elapses.
 /// Returns the records as (key, value) byte pairs in receive order.
 async fn collect(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     want: usize,
     deadline: Duration,
 ) -> Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> {
@@ -130,7 +130,7 @@ async fn collect(
 /// see them. For the gRPC backends each poll is a `Poll` RPC on the server-side
 /// consumer, and the log is one further RPC behind.
 async fn poll_until_kind(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     log: &ConsumerCallbackLog,
     kind: &str,
     deadline: Duration,

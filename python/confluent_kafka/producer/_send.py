@@ -14,9 +14,13 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension hands each record to the C API's queued send
-(``kafka_producer_Producer_send_with_callback_cb``) with a delivery callback,
-which the producer's callback pump (``kafka_producer_Producer__execute_callbacks``)
+The C extension hands each record to the C API's send
+(``kafka_producer_Producer_send_with_callback_cb``, which tries the producer
+on the calling thread and queues the record on the core's submission task only
+when the producer cannot take it at once), or, for a sync producer's send()
+from any producer's delivery callback, to its
+blocking send, with a delivery callback, which the producer's callback pump
+(``kafka_producer_Producer__execute_callbacks``)
 runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields
 as a tuple (``None`` when there is none), the BORROWED error handle as an int
 (0 for none) and the id the callback reports under. :func:`completion_to_python`
@@ -41,8 +45,8 @@ runs on another event loop, or is an ``async def``.
 from __future__ import annotations
 
 import inspect
-import logging
 import threading
+from types import FunctionType, MethodType
 from typing import TYPE_CHECKING, cast
 
 from confluent_kafka._errors import from_ffi_error
@@ -54,16 +58,17 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = ["MetadataTuple", "call_callback", "completion_to_python", "failure_metadata",
-           "in_callback", "invoke_callback", "log_unreported_callback_error", "run_callback"]
-
-_LOG = logging.getLogger("confluent_kafka.producer")
+           "in_any_callback", "in_callback", "invoke_callback", "mark_completion_thread",
+           "reject_coroutine_callback", "run_callback"]
 
 # A coroutine callback given to the synchronous producer.
 _COROUTINE_CALLBACK_MESSAGE = "a coroutine send() callback requires an AsyncProducer"
+_CO_COROUTINE = inspect.CO_COROUTINE
 
-# The producer whose delivery callback runs on the current thread, if any: Java
-# tests ``Thread.currentThread() == this.ioThread`` in ``flush()`` and
-# ``close()``, and a callback is the only user code on the producer's threads.
+# The producer whose completion thread the current thread is, or whose delivery
+# callback runs on it, if any: Java tests ``Thread.currentThread() ==
+# this.ioThread`` in ``flush()`` and ``close()``, so any user code the
+# completion thread runs (a callback, a record future's dependants) counts.
 _callback_scope = threading.local()
 
 
@@ -108,6 +113,30 @@ def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic
     return metadata, exception
 
 
+def reject_coroutine_callback(callback: Callable[..., object]) -> None:
+    """Raise ``TypeError`` for a coroutine function (an ``async def``, or an
+    object whose ``__call__`` is one) given to a synchronous producer's
+    ``send()``: its completion thread, or the mock's completing call, cannot
+    await it; the asyncio producers do (CLAUDE.md, Python Binding Conventions,
+    Threads and callbacks).
+
+    It runs on every ``send()`` with a callback, so a function or a bound
+    method, the usual callbacks, is answered from its code object's
+    ``CO_COROUTINE`` flag; anything else (a ``functools.partial``, a callable
+    object) goes through ``inspect.iscoroutinefunction``. A plain function
+    that only returns an awaitable, ``inspect.markcoroutinefunction``'s
+    included, passes here and is closed and reported at its completion
+    (:func:`call_callback`)."""
+    function = callback.__func__ if type(callback) is MethodType else callback
+    if type(function) is FunctionType:
+        if function.__code__.co_flags & _CO_COROUTINE:
+            raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
+        return
+    if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(
+            getattr(type(callback), "__call__", None)):
+        raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
+
+
 def run_callback(producer: object, callback: Callable[..., object],
                  metadata: RecordMetadata, exception: Exception | None) -> object:
     """Call the user's callback for one completion and return what it returned
@@ -125,10 +154,11 @@ def call_callback(producer: object, callback: Callable[..., object] | None,
                   metadata: RecordMetadata, exception: Exception | None) -> None:
     """Run the user's ``Callback`` for one completion, synchronously, raising
     what it raised, as Java's ``MockProducer.Completion.complete`` calls
-    ``onCompletion`` with no try/catch. A callback returning an awaitable (an
-    ``async def``) cannot be awaited here: the awaitable is closed and a
-    ``TypeError`` raised, as the synchronous consumer does for a coroutine
-    listener."""
+    ``onCompletion`` with no try/catch. A callback returning an awaitable
+    cannot be awaited here: the awaitable is closed and a ``TypeError`` raised,
+    as the synchronous consumer does for a coroutine listener (a coroutine
+    function itself is refused at ``send()``, by
+    :func:`reject_coroutine_callback`)."""
     if callback is None:
         return
     result = run_callback(producer, callback, metadata, exception)
@@ -144,9 +174,9 @@ def invoke_callback(producer: object, callback: Callable[..., object] | None,
     """:func:`call_callback`, returning the exception the callback raised, if
     any, instead of raising it.
 
-    The caller is the producer's completion thread, which reports it to the
-    core (see the module docstring), and the next callback must still run. It
-    is not logged here: the core logs it once, as Java's
+    The caller is the thread running the producer's callbacks; it reports the
+    exception to the core (see the module docstring), and the next callback
+    must still run. It is not logged here: the core logs it once, as Java's
     ``ProducerBatch.completeFutureAndFireCallbacks`` does.
     """
     try:
@@ -156,19 +186,25 @@ def invoke_callback(producer: object, callback: Callable[..., object] | None,
     return None
 
 
-def log_unreported_callback_error(metadata: RecordMetadata, error: BaseException) -> None:
-    """Log a callback's exception that has no core report to go to, with the
-    message the core logs a reported one with (Java's
-    ``ProducerBatch.completeFutureAndFireCallbacks``): the callback of a
-    completion the core does not deliver: a record sent from a ``send()``
-    callback, which does not wait for its handover, and that the Rust
-    ``send()`` rejected before the accumulator, so Python completes it itself.
-    Every other callback's exception is reported, and only the core logs it."""
-    _LOG.error("Error executing user-provided callback on message for topic-partition '%s'",
-               f"{metadata.topic()}-{metadata.partition()}", exc_info=error)
+def mark_completion_thread(producer: object) -> None:
+    """Mark the current thread, the sync producer's completion thread, as
+    ``producer``'s for its whole life: every piece of user code it runs, a
+    ``send()`` callback or a ``then_apply`` function or ``when_complete``
+    action of a record's future, then sees :func:`in_callback` true, as Java
+    tests the I/O thread itself rather than the callback."""
+    _callback_scope.producer = producer
 
 
 def in_callback(producer: object) -> bool:
-    """Whether the current thread is running a delivery callback of
-    ``producer`` (Java's ``Thread.currentThread() == this.ioThread``)."""
+    """Whether the current thread is ``producer``'s completion thread (see
+    :func:`mark_completion_thread`) or is running a delivery callback of
+    ``producer`` elsewhere (Java's ``Thread.currentThread() ==
+    this.ioThread``)."""
     return getattr(_callback_scope, "producer", None) is producer
+
+
+def in_any_callback() -> bool:
+    """Whether the current thread is a producer's completion thread (see
+    :func:`mark_completion_thread`) or is running a delivery callback of any
+    producer, and so blocks a thread some producer's completions run on."""
+    return getattr(_callback_scope, "producer", None) is not None

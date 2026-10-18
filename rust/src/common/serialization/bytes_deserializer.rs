@@ -15,7 +15,8 @@
 //! Zero-copy byte-buffer deserializer.
 //!
 //! Returns each record's key/value as a refcounted [`bytes::Bytes`] slice of
-//! the owning fetch buffer rather than an owned `Vec<u8>` copy.
+//! the buffer that owns the record's bytes rather than an owned `Vec<u8>`
+//! copy.
 
 use bytes::Bytes;
 
@@ -28,10 +29,11 @@ use crate::common::serialization::Deserializer;
 /// This is the zero-copy counterpart to
 /// [`ByteArrayDeserializer`](crate::common::serialization::ByteArrayDeserializer):
 /// where the latter must copy the borrowed `&[u8]` into an owned `Vec<u8>`,
-/// `BytesDeserializer` slices the owning fetch buffer
+/// `BytesDeserializer` slices the buffer that owns the record's bytes
 /// ([`deserialize_from_shared`](Deserializer::deserialize_from_shared)) so the
-/// returned `Bytes` shares the single buffer that owns the whole fetch payload
-/// (consumer-threading.md §27). No per-record key/value copy occurs on the
+/// returned `Bytes` shares it (consumer-threading.md §27): the fetched records
+/// buffer for an uncompressed batch, the buffer the record was decompressed
+/// into for a compressed one. No per-record key/value copy occurs on the
 /// receive path.
 ///
 /// The plain [`deserialize`](Deserializer::deserialize) entry point (used when
@@ -57,8 +59,9 @@ impl Deserializer<Bytes> for BytesDeserializer {
     }
 
     fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, Error> {
-        // Zero-copy: `data` is a subslice of `source` (the owning fetch /
-        // decompression buffer), so `slice_ref` hands out a refcounted view
+        // Zero-copy: `data` is a subslice of `source` (the fetched records
+        // buffer, or the buffer a compressed record was decompressed into),
+        // so `slice_ref` hands out a refcounted view
         // into the same allocation with no copy. `slice_ref` requires `data`
         // to lie within `source`'s allocation, which the receive path
         // guarantees (the key/value bytes are borrowed from `source`).

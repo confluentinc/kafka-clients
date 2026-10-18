@@ -149,8 +149,9 @@ In practice:
   generated wire modules are `pub(crate)`. Tests that need them live inside the
   crate: the message and protocol tests sit under `rust/src/common/`, and the
   raw-socket integration suites under `rust/src/integration_tests/`.
-- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
-  constructs it and returns it as `Box<dyn Consumer<K, V>>`.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; the public
+  `KafkaConsumer<K, V>` holds it as its delegate and forwards every
+  `Consumer` method to it.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
   callers use `kafka_common_Error_e`.
@@ -275,7 +276,8 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ```
 rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
-├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
+├── kafka_consumer.rs       # KafkaConsumer<K, V>, wrapping the AsyncKafkaConsumer delegate
+├── dyn_consumer.rs         # DynConsumer<K, V>, the dyn-compatible view of Consumer
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))
 │                           # + ConsumerHandle (pub)
 ├── mock_consumer.rs        # MockConsumer<K, V>
@@ -352,7 +354,7 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2354 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
 ├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
 ├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
@@ -363,8 +365,9 @@ rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exporte
 │                       # security/, serialization/, metrics/, ...)
 ├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
 │                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
-├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
-│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+├── consumer/           # 16 files, 298 symbols: Consumer_t, KafkaConsumer_t, MockConsumer_t,
+│                       # ConsumerHandle_t, ConsumerRebalanceListener_t,
+│                       # OffsetCommitCallback_t, ...
 └── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
     ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
     └── ...
@@ -380,14 +383,14 @@ c/
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
-├── confluent_kafka/    # the Python client (producer + consumer), generated
+├── confluent_kafka/    # the Python client (producer, consumer, admin), generated
 │   │                   # from CLAUDE.md's Python Binding Conventions
 │   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
-│   ├── common/                # value types, KafkaError, errors/,
+│   ├── admin/                 # Admin, KafkaAdminClient, MockAdminClient, Async*
+│   │                          # peers, Options, Results, value classes
+│   ├── common/                # value types, KafkaError, KafkaFuture, errors/,
 │   │                          # serialization/, config/, …
-│   └── *_error.py             # Java built-in exceptions at the root
-├── admin.py            # older admin binding, paused (not in the package)
-├── _sync_wait.py       # SyncWaiter: admin.py's pump thread + sliced wait over _cb calls
+│   └── *_error.py             # Java built-in exceptions (ExecutionError…) at the root
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py
@@ -418,9 +421,12 @@ of the exported symbols are accessors, enum singletons and destructors.
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-blocking / `_cb` entry-point shapes. Neither the C binding nor the Python
-extension adds a thread of its own; the Python producer runs its completions on
-one Python completion thread per producer.*
+blocking / `_cb` entry-point shapes. The Python clients submit the `_cb` twins
+only and drain each client's callback queue in Python: a waiting consumer call
+on its own thread, the sync producer on one completion thread, the sync admin
+client on one pump thread, the async clients on their event loop. The
+extension adds no thread of its own, and one future object wraps each core
+`kafka_common_KafkaFuture_t` (the clients' `KafkaFuture` / `AsyncKafkaFuture`).*
 
 ## tests/
 

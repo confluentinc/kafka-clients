@@ -39,7 +39,7 @@
 //! blocking consumer operation invoked on the calling thread, i.e. from a
 //! thread already inside the runtime's `block_on`; a nested `block_on`
 //! there is forbidden by tokio. So every blocking handle operation spawns
-//! its future as a task of the consumer, which `kafka_consumer_Consumer_destroy`
+//! its future as a task of the consumer, which destroying the class handle
 //! joins, and waits for the result on a channel, whichever thread it is
 //! called from; a panic on that task is returned as the operation's error,
 //! as the header's panic contract states. A `_cb` handle operation
@@ -90,8 +90,8 @@ pub struct kafka_consumer_ConsumerHandle_t {
 /// What a handle points at.
 struct HandleInner {
     handle: ConsumerHandle,
-    /// Weak, so a leftover handle never keeps the consumer alive past
-    /// `kafka_consumer_Consumer_destroy`.
+    /// Weak, so a leftover handle never keeps the consumer alive past the
+    /// class handle's destroy.
     client: Weak<Client>,
 }
 

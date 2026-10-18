@@ -77,8 +77,8 @@
 > - **Admin bindings exist.** `src/ffi/admin/` (130 files) exports 844
 >   symbols around `kafka_admin_Admin_t` / `kafka_admin_MockAdminClient_t`,
 >   with one `<Rpc>Options_t` and one per-key-`KafkaFuture_t` `<Rpc>Result_t`
->   per Java class, and `python/admin.py` provides `Admin` / `AdminClient` /
->   `MockAdminClient` and their `Async*` twins. Every "C FFI / Python
+>   per Java class, and `confluent_kafka.admin` provides `Admin` /
+>   `KafkaAdminClient` / `MockAdminClient` and their `Async*` peers. Every "C FFI / Python
 >   bindings deferred" line below is historical.
 > - **The C FFI follows CLAUDE.md §4 one-to-one** (2026-10-08 refactor, see
 >   `design.md` → C FFI): one file per Java class under `src/ffi/`

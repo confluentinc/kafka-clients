@@ -487,6 +487,38 @@ impl ConsumerConfig {
     // then a `long` again) and a public getter would freeze it, so users
     // configure through the string map only, which `new` validates.
 
+    /// The value of the `STRING`-typed configuration `key`, trimmed, or `None`
+    /// when it has no value (Java's `null`, e.g. an unset `group.id`).
+    ///
+    /// `client.id` answers the resolved id: when the property is unset, `new`
+    /// derives it the way Java's `maybeOverrideClientId` does, so this is the
+    /// id the consumer reports to the brokers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] with Java's `Unknown configuration '<key>'`
+    /// when `key` is not a `STRING`-typed `ConsumerConfig` key.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
+    pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
+        let value = match key {
+            Self::GROUP_ID_CONFIG => self.group_id.as_deref(),
+            Self::GROUP_INSTANCE_ID_CONFIG => self.group_instance_id.as_deref(),
+            Self::GROUP_PROTOCOL_CONFIG => Some(self.group_protocol.as_str()),
+            Self::GROUP_REMOTE_ASSIGNOR_CONFIG => self.group_remote_assignor.as_deref(),
+            Self::CLIENT_ID_CONFIG => Some(self.client_id.as_str()),
+            Self::CLIENT_RACK_CONFIG => Some(self.client_rack.as_str()),
+            Self::AUTO_OFFSET_RESET_CONFIG => Some(self.auto_offset_reset.as_str()),
+            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => Some(self.metadata_recovery_strategy.as_str()),
+            Self::ISOLATION_LEVEL_CONFIG => Some(self.isolation_level.as_str()),
+            Self::METRICS_RECORDING_LEVEL_CONFIG => Some(self.metrics_recording_level.as_str()),
+            Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
+            Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
+            Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
+            _ => return Err(Error::config_message(format!("Unknown configuration '{key}'"))),
+        };
+        Ok(value.map(str::trim))
+    }
+
     /// `bootstrap.servers`.
     pub(crate) fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
@@ -1659,6 +1691,23 @@ mod tests {
         sequence_suffix(config.client_id(), "consumer-test-group-");
         let padded = props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, " my-consumer ")]);
         assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `getString` answers a `STRING` key's value, `null` for an unset
+    /// nullable one, the generated `client.id` when the property is unset, and
+    /// `Unknown configuration` for a key that is not a `STRING` key.
+    #[test]
+    fn test_get_string() {
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")])).unwrap();
+        assert_eq!(Some("test-group"), config.get_string(ConsumerConfig::GROUP_ID_CONFIG).unwrap());
+        assert_eq!(None, config.get_string(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG).unwrap());
+        let client_id = config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap().unwrap();
+        assert_eq!(config.client_id(), client_id);
+        sequence_suffix(client_id, "consumer-test-group-");
+        match config.get_string(ConsumerConfig::MAX_POLL_RECORDS_CONFIG) {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'max.poll.records'", e.message()),
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
     }
 
     /// `client.rack` is a `Type.STRING`, so `ConfigDef.parseType` trims it

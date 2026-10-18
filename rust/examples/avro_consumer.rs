@@ -18,7 +18,7 @@
 //!
 //! The registry deserializer is wrapped in an implementation of this client's
 //! [`Deserializer`] trait, [`SchemaRegistryAvroDeserializer`], so the consumer
-//! is typed over the record type itself (`Consumer<String, User>`) and `poll`
+//! is typed over the record type itself (`KafkaConsumer<String, User>`) and `poll`
 //! returns decoded records, like any other deserializer.
 //!
 //! The registry deserializer is `async`, because it fetches the writer schema
@@ -141,12 +141,12 @@ async fn run() -> Result<(), Error> {
         handle.wakeup();
     });
 
-    let result = consume_loop(&mut *consumer).await;
+    let result = consume_loop(&mut consumer).await;
     let close_result = consumer.close().await;
     result.and(close_result)
 }
 
-async fn consume_loop(consumer: &mut dyn Consumer<String, User>) -> Result<(), Error> {
+async fn consume_loop<C: Consumer<String, User>>(consumer: &mut C) -> Result<(), Error> {
     loop {
         // The value deserializer decodes every record inside `poll`.
         let records = match consumer.poll(Duration::from_secs(30)).await {
@@ -205,7 +205,7 @@ fn schema_registry_url() -> String {
 
 fn create_kafka_consumer(
     value_deserializer: SchemaRegistryAvroDeserializer<User>,
-) -> Result<Box<dyn Consumer<String, User>>, Error> {
+) -> Result<KafkaConsumer<String, User>, Error> {
     let props = HashMap::from([
         (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
         (ConsumerConfig::GROUP_ID_CONFIG.to_string(), GROUP_ID.to_string()),

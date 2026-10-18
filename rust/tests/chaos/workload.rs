@@ -521,7 +521,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Consumer workload — over any ConsumerBackendFactory (yields Box<dyn Consumer>).
+// Consumer workload — over any ConsumerBackendFactory (yields Box<dyn DynConsumer>).
 // ---------------------------------------------------------------------------
 
 struct ConsumerWorkload<F: ConsumerBackendFactory> {

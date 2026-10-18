@@ -701,8 +701,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     props.insert("enable.auto.commit".to_string(), "true".to_string());
     let config = ConsumerConfig::new(&props)?;
 
-    let mut consumer: Box<dyn Consumer<usize, usize>> =
-        KafkaConsumer::new::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
+    let mut consumer =
+        KafkaConsumer::<usize, usize>::new(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
     consumer.subscribe_with_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");

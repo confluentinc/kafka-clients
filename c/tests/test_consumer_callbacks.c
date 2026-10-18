@@ -930,8 +930,9 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
 }
 
 /* A KafkaConsumer pointed at an unreachable bootstrap: no broker is needed
- * for the metadata-free calls below. The caller owns the returned handle. */
-static kafka_consumer_Consumer_t *create_real_consumer(void) {
+ * for the metadata-free calls below. The caller owns the returned class
+ * handle. */
+static kafka_consumer_KafkaConsumer_t *create_real_consumer(void) {
     kafka_common_Error_t *err = NULL;
     kafka_Map_t *props = kafka_Map_new();
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
@@ -940,17 +941,18 @@ static kafka_consumer_Consumer_t *create_real_consumer(void) {
     kafka_consumer_ConsumerConfig_t *config = kafka_consumer_ConsumerConfig_new(props, &err);
     assert_ok(err, "ConsumerConfig_new");
     kafka_Map_destroy(props);
-    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
+    kafka_consumer_KafkaConsumer_t *kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
     assert_ok(err, "KafkaConsumer_new");
     kafka_consumer_ConsumerConfig_destroy(config);
-    TEST_ASSERT_NOT_NULL(consumer);
-    return consumer;
+    TEST_ASSERT_NOT_NULL(kc);
+    return kc;
 }
 
 // On a real consumer the handle reads the shared SubscriptionState, and once
 // the consumer is destroyed its operations fail with "consumer destroyed".
 static void test_consumer_handle_shares_state_with_real_consumer(void) {
-    kafka_consumer_Consumer_t *consumer = create_real_consumer();
+    kafka_consumer_KafkaConsumer_t *kc = create_real_consumer();
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer__as_Consumer(kc);
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(consumer);
     TEST_ASSERT_NOT_NULL(h);
 
@@ -968,7 +970,7 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(paused));
     kafka_List_destroy(paused);
 
-    kafka_consumer_Consumer_destroy(consumer);
+    kafka_consumer_KafkaConsumer_destroy(kc);
 
     kafka_common_Error_t *err = NULL;
     kafka_consumer_ConsumerHandle_commit_sync(h, &err);
@@ -1000,7 +1002,8 @@ static void assert_handle_outside_callback(kafka_common_Error_t *err) {
 // test_consumer_handle_async_ops_unsupported_on_mock.)
 static void test_consumer_handle_outside_a_callback_is_concurrent_modification(void) {
     kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer = create_real_consumer();
+    kafka_consumer_KafkaConsumer_t *kc = create_real_consumer();
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer__as_Consumer(kc);
     callback_pump_t pump;
     consumer_callback_pump_install(&pump, consumer);
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(consumer);
@@ -1048,7 +1051,7 @@ static void test_consumer_handle_outside_a_callback_is_concurrent_modification(v
 
     tp_list_destroy(list);
     kafka_consumer_ConsumerHandle_destroy(h);
-    kafka_consumer_Consumer_destroy(consumer);
+    kafka_consumer_KafkaConsumer_destroy(kc);
     callback_pump_destroy(&pump);
 }
 

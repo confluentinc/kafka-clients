@@ -17,8 +17,9 @@
 *(deviation)* Java's interface, with its three ``serialize`` overloads, is one
 callable shape whose headers are always passed (CLAUDE.md, Python Binding
 Conventions, Serialization). A serializer is any callable of that shape; the
-protocol exists for the type checker. A ``None`` value is Java's null, and the
-serializer decides what it maps to.
+protocol exists for the type checker. The producer calls a serializer with the
+record's key or value as given, ``None`` included (Java's null, as Java's
+``KafkaProducer`` does), and the serializer decides what null maps to.
 """
 
 from __future__ import annotations

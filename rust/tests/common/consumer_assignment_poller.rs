@@ -44,12 +44,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::DynConsumer;
 use tokio::task::JoinHandle;
 
 /// Byte-array consumer, Java's `Consumer<byte[], byte[]>`.
-pub type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
+pub type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 
 /// Bound on joining the poller task in [`ConsumerAssignmentPoller::shutdown`].
 /// Java's `ShutdownableThread.awaitShutdown` joins unbounded; a bound keeps a

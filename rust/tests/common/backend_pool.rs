@@ -322,12 +322,12 @@ impl BackendHandle {
         }
     }
 
-    /// Stop the backend: `docker rm -f` for a container, kill for a native
+    /// Stop the backend: `docker rm -f -v` for a container, kill for a native
     /// process. Every teardown path in this module goes through this method.
     fn terminate(&self) {
         match &self.runtime {
             BackendRuntime::Container { id, .. } => {
-                let _ = Command::new("docker").args(["rm", "-f", id]).output();
+                let _ = Command::new("docker").args(["rm", "-f", "-v", id]).output();
             },
             BackendRuntime::Native(process) => process.terminate(),
         }

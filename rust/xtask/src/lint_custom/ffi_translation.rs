@@ -51,9 +51,8 @@
 //!
 //!   - a public struct, or an enum whose variants all carry data (`Error`,
 //!     `TopicCollection`): the opaque handle `<prefix>_t` when some method
-//!     takes `self` or some static returns the type, else no handle (nothing
-//!     constructs a `KafkaConsumer` from C: its constructor returns the
-//!     `Consumer` interface). A struct a public enum's data variant wraps
+//!     takes `self` or some static returns the type, else no handle. A
+//!     struct a public enum's data variant wraps
 //!     (`TopicCollection::TopicIds(TopicIdCollection)`) gets the handle
 //!     only when C can come to hold one — a static of its own builds it or
 //!     a public signature anywhere names it, a type inside a parameter or
@@ -2078,13 +2077,22 @@ fn collect_bound_traits(
 }
 
 /// Whether `sig` returns an owned implementation of trait `name`
-/// (`Box<dyn T>`, `Arc<dyn T>`, possibly inside a `Result`).
+/// (`Box<dyn T>`, `Arc<dyn T>`, possibly inside a `Result`). The name must
+/// end there: `Arc<dyn ConsumerGroupMetadata>` is not an owned `Consumer`.
 fn returns_owned_trait(sig: &syn::Signature, name: &str) -> bool {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         return false;
     };
     let text = ty.to_token_stream().to_string().replace(' ', "");
-    text.contains(&format!("Box<dyn{name}")) || text.contains(&format!("Arc<dyn{name}"))
+    ["Box", "Arc"].iter().any(|wrapper| {
+        let needle = format!("{wrapper}<dyn{name}");
+        text.match_indices(&needle).any(|(at, _)| {
+            !text[at + needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    })
 }
 
 /// Adds the expected C functions of method `m` of the type with `prefix`:
@@ -3512,6 +3520,23 @@ mod tests {
             detail(&findings, "missing kafka_common_Uuid_to_string"),
             "expected `fn(self: *const kafka_common_Uuid_t) -> *mut c_char`"
         );
+    }
+
+    #[test]
+    fn test_returns_owned_trait_matches_the_whole_trait_name() {
+        let returns = |sig: &str, name: &str| returns_owned_trait(&syn::parse_str(sig).unwrap(), name);
+        assert!(returns("fn f() -> Box<dyn Consumer<K, V>>", "Consumer"));
+        assert!(returns("fn f() -> Result<Arc<dyn Consumer>, Error>", "Consumer"));
+        // Another trait whose name starts with `Consumer` is not an owned `Consumer`.
+        assert!(!returns(
+            "fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>",
+            "Consumer"
+        ));
+        assert!(!returns("fn f() -> Box<dyn Consumer_>", "Consumer"));
+        assert!(returns(
+            "fn f() -> (Arc<dyn ConsumerGroupMetadata>, Box<dyn Consumer>)",
+            "Consumer"
+        ));
     }
 
     #[test]

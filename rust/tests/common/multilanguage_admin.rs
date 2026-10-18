@@ -22,6 +22,10 @@
 //! response carries already-resolved results.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
