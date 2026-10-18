@@ -49,7 +49,7 @@ use confluent_kafka::consumer::KafkaConsumer;
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
     }
 }

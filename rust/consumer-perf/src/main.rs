@@ -58,7 +58,7 @@ use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 struct LenDeserializer;
 
 impl Deserializer<usize> for LenDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
         Ok(data.len())
     }
 }

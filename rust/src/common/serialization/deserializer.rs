@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
+
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
 
@@ -25,30 +27,32 @@ use crate::common::header::RecordHeaders;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.serialization.Deserializer<T>`.
 ///
-/// # Sync, not async
+/// # Asynchronous methods
 ///
-/// `deserialize` is intentionally a synchronous `fn` (not `async`) so that the
-/// receive path can call it inline against borrowed slices of the
-/// `CompletedFetch` buffer without allocating a per-record future. See
-/// `consumer-threading.md` §27 — every record allocates at most the
-/// user-deserialized `T`; the trait itself adds zero heap allocation per
-/// call.
+/// Every method returns a `Send` future, so a deserializer can await I/O (a
+/// schema-registry lookup, for instance) without blocking the runtime.
+/// Implementations may write them as `async fn`. The trait is not
+/// dyn-compatible; [`DynDeserializer`], which every `Deserializer` implements,
+/// is its dyn-compatible companion, and the consumer stores its deserializers
+/// as `Box<dyn DynDeserializer<K>>`. A call through `dyn` returns an
+/// [`InlineFuture`], which holds the future without allocating as long as it
+/// is small: a deserializer that awaits a large operation only on a cache miss
+/// should `Box::pin` that operation alone. The receive path then adds no heap
+/// allocation per record beyond the deserialized `T` (`consumer-threading.md`
+/// §27).
 ///
-/// **External lookups inside `deserialize`:** deserializers that depend on
-/// external state (most notably a schema registry) should pre-populate an
-/// in-memory cache before the consumer starts polling. For rare blocking
-/// calls inside `deserialize`, callers on the multi-thread runtime can wrap
-/// with `tokio::task::block_in_place`; this is not free and should not be
-/// the per-record default.
+/// A consumer's `poll()` may be cancelled while a record is being
+/// deserialized, for instance by `tokio::time::timeout`; the record is then
+/// deserialized again by the next `poll()`, so a deserializer should not rely
+/// on being called exactly once per record.
 ///
 /// # Bounds
 ///
-/// `Send + Sync + 'static` is required because deserializer instances are
-/// stored as `Box<dyn Deserializer<T>>` inside `Deserializers<K, V>`, which
-/// is shared across tasks via `Arc<Deserializers<K, V>>` (the consumer's app
-/// side and its background task hold the same `Arc`). `Arc<T>: Send`
-/// requires `T: Send + Sync`; that requirement transits the `Box<dyn>`
-/// boundary to the trait.
+/// `Send + Sync + 'static` is required because the consumer's app side and its
+/// background task share the deserializers across tasks.
+///
+/// [`DynDeserializer`]: crate::common::serialization::DynDeserializer
+/// [`InlineFuture`]: crate::common::serialization::InlineFuture
 #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
 pub trait Deserializer<T>: Send + Sync + 'static {
     /// Deserialize a record value from a byte slice.
@@ -63,16 +67,19 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// The deserialized typed object, or a [`Error`] if deserialization
-    /// fails.
+    /// The deserialized typed object.
     ///
     /// Java returns `T` directly and accepts a null `byte[]` returning a
     /// null `T`. In Rust the receive path never passes a null slice — it
-    /// passes an empty slice or skips the call entirely — so the trait
-    /// surface only models the happy path. Deserialization errors are
-    /// reported via the `Result`.
+    /// skips the call for a null key or value — so the trait surface only
+    /// models the happy path.
+    ///
+    /// # Errors
+    ///
+    /// Whatever error the deserializer reports; the consumer returns it from
+    /// `poll`.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
+    fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8]) -> impl Future<Output = Result<T, Error>> + Send + 'a;
 
     /// Deserialize a record value with access to its headers.
     ///
@@ -84,10 +91,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// The translated Java overloads intersect on `{topic, data}`, which is
     /// exactly `deserialize(String, byte[])` (`:64`) — so that one keeps the
     /// plain name and this one is suffixed with the parameter that distinguishes
-    /// it (CLAUDE.md §2). Java's third overload, `deserialize(String, Headers,
-    /// ByteBuffer)` (`:113`), is conversion sugar over this one and has no Rust
-    /// counterpart: Rust has no `ByteBuffer`, and both forms would translate to
-    /// the same `&[u8]` signature.
+    /// it (CLAUDE.md §2).
     ///
     /// Override this method in custom deserializer implementations that need
     /// to inspect headers during deserialization (for example, schema
@@ -101,53 +105,58 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// two serde traits symmetric and lets the C binding hand the headers over
     /// as a `RecordHeaders_t` handle instead of an interface view.
     ///
+    /// # Errors
+    ///
+    /// As [`deserialize`](Deserializer::deserialize).
+    ///
     /// [`Serializer::serialize_with_headers`]: crate::common::serialization::Serializer::serialize_with_headers
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
-    fn deserialize_with_headers(&self, topic: &str, _headers: &RecordHeaders, data: &[u8]) -> Result<T, Error> {
+    fn deserialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+        let _ = headers;
         self.deserialize(topic, data)
     }
 
-    /// Deserialize from a byte slice that is a subslice of a refcounted source
-    /// buffer, enabling zero-copy `T` for byte-typed deserializers.
+    /// Deserialize a record value from a shared [`Bytes`] buffer, with access
+    /// to its headers.
     ///
-    /// `source` is the [`bytes::Bytes`] that owns the record's bytes (on the
-    /// receive path): the fetched records buffer for an uncompressed batch, the
-    /// buffer the record was decompressed into for a compressed one; `data` is
-    /// the key/value subslice of `source` for this record. The default implementation ignores
-    /// `source` and delegates to [`deserialize`](Deserializer::deserialize) — so
-    /// existing deserializers are unaffected. [`BytesDeserializer`] overrides it
-    /// to return `source.slice_ref(data)`, a zero-copy refcounted slice instead
-    /// of an owned copy (consumer-threading.md §27).
-    ///
-    /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    // zero-copy shared-buffer receive path (consumer-threading.md §27)
-    #[doc(alias = "rust-only")]
-    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, Error> {
-        self.deserialize(topic, data)
-    }
-
-    /// Header-aware variant of
-    /// [`deserialize_from_shared`](Deserializer::deserialize_from_shared).
+    /// Corresponds to Java's
+    /// `default T deserialize(String topic, Headers headers, ByteBuffer data)`
+    /// (`Deserializer.java:115`, KIP-863), the overload Java's `CompletedFetch`
+    /// calls (`CompletedFetch.java:323,329`); the Rust `CompletedFetch` calls
+    /// this method at the same point. `data` is the record's key or value: a
+    /// refcounted slice of the buffer that owns the fetched bytes (the fetched
+    /// records buffer for an uncompressed batch, the buffer a compressed batch
+    /// was decompressed into), so a deserializer may keep it — or a
+    /// [`Bytes::slice`] of it — without copying (`consumer-threading.md` §27).
     ///
     /// The default implementation delegates to
-    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers),
-    /// ignoring `source`. This preserves the header-inspection behavior of any
-    /// deserializer that overrides `deserialize_with_headers` (e.g. schema
-    /// registry) even when called on the shared-buffer receive path — at the
-    /// cost of the copy fallback. Byte-typed deserializers that want zero-copy
-    /// override this method directly (see [`BytesDeserializer`]).
+    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
+    /// `&data[..]`, which, unlike Java's default (`Utils.toNullableArray`),
+    /// copies nothing. [`BytesDeserializer`] overrides it to return `data`
+    /// itself.
+    ///
+    /// Java's `byte[]` and `ByteBuffer` overloads share the parameter name
+    /// `data`, so the Rust type name `bytes` tells this one apart (CLAUDE.md
+    /// §2).
+    ///
+    /// # Errors
+    ///
+    /// As [`deserialize`](Deserializer::deserialize).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    // zero-copy shared-buffer receive path (consumer-threading.md §27)
-    #[doc(alias = "rust-only")]
-    fn deserialize_from_shared_with_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        _source: &bytes::Bytes,
-        data: &[u8],
-    ) -> Result<T, Error> {
-        self.deserialize_with_headers(topic, headers, data)
+    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
+    fn deserialize_with_headers_bytes<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a Bytes,
+    ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+        self.deserialize_with_headers(topic, headers, &data[..])
     }
 
     /// Configure this deserializer. The default implementation is a no-op.
@@ -155,15 +164,66 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Corresponds to Java's
     /// `default void configure(Map<String, ?> configs, boolean isKey)`.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
-    fn configure(&mut self, _configs: &HashMap<String, String>, _is_key: bool) {
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> impl Future<Output = ()> + Send + 'a {
         // intentionally left blank — Java default
+        let _ = (configs, is_key);
+        async {}
     }
 
     /// Close this deserializer. The default implementation is a no-op.
     ///
-    /// Corresponds to Java's `default void close()`.
+    /// Corresponds to Java's `default void close()`. As in Java, the method
+    /// must be idempotent, as it may be called multiple times.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
-    fn close(&mut self) {
+    fn close(&mut self) -> impl Future<Output = ()> + Send {
         // intentionally left blank — Java default
+        async {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::header::Headers;
+
+    /// Reports where the slice it was handed starts, and whether it went
+    /// through `deserialize_with_headers`.
+    struct Address;
+
+    impl Deserializer<(usize, bool)> for Address {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<(usize, bool), Error> {
+            Ok((data.as_ptr() as usize, false))
+        }
+
+        async fn deserialize_with_headers(
+            &self,
+            _topic: &str,
+            headers: &RecordHeaders,
+            data: &[u8],
+        ) -> Result<(usize, bool), Error> {
+            assert!(headers.last_header("k").is_some(), "the headers are forwarded");
+            Ok((data.as_ptr() as usize, true))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_bytes_overload_forwards_the_slice_without_copying() {
+        let source = Bytes::from_static(b"hello world");
+        let data = source.slice(6..);
+        let mut headers = RecordHeaders::new();
+        headers.add_with_key_value("k", Some(b"v")).expect("add");
+        let (address, through_headers) = Deserializer::deserialize_with_headers_bytes(&Address, "t", &headers, &data)
+            .await
+            .expect("deserialize");
+        assert!(through_headers, "the default forwards to deserialize_with_headers");
+        assert_eq!(
+            data.as_ptr() as usize,
+            address,
+            "the default hands over the buffer itself, not a copy"
+        );
     }
 }

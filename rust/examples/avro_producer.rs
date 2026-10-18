@@ -22,13 +22,12 @@
 //! serializes each value inside `send`, like any other serializer.
 //!
 //! The registry serializer is `async`, because it may call the registry to
-//! register or look up the schema, while the [`Serializer`] trait is
-//! synchronous so it can run inline on the send path. The wrapper bridges the
-//! two with `tokio::task::block_in_place`, which needs the multi-thread
-//! runtime `#[tokio::main]` starts. Only the first record waits on the
-//! network: the registry client caches the schema id, so every later call
-//! completes without blocking.
+//! register or look up the schema, and so is the [`Serializer`] trait: the
+//! wrapper awaits the registry serializer directly inside `send`. Only the
+//! first record reaches the registry: the registry client caches the schema
+//! id, so every later call completes without a network round trip.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::process::ExitCode;
@@ -52,8 +51,6 @@ use schema_registry_client::serdes::serde::SerdeType;
 use schema_registry_client::serdes::serde::SerializationContext;
 use schema_registry_client::serdes::serde::SubjectNameStrategyType;
 use serde::Serialize;
-use tokio::runtime::Handle;
-
 use uuid::Uuid;
 
 const TOPIC_NAME: &str = "avro-users";
@@ -95,22 +92,19 @@ struct User {
 struct SchemaRegistryAvroSerializer<T> {
     inner: AvroSerializer<'static, SchemaRegistryClient>,
     serde_type: SerdeType,
-    /// The runtime the registry calls run on, captured at construction.
-    runtime: Handle,
     _record: PhantomData<fn(&T)>,
 }
 
 impl<T> SchemaRegistryAvroSerializer<T> {
-    /// Must be called inside the Tokio runtime the producer runs on.
     fn new(schema: &'static Schema, serde_type: SerdeType, config: SerializerConfig) -> Result<Self, Error> {
         let inner = AvroSerializer::new(&*REGISTRY, Some(schema), None, config)
             .map_err(|e| Error::serialization(format!("cannot create the Avro serializer: {e}")))?;
-        Ok(Self { inner, serde_type, runtime: Handle::current(), _record: PhantomData })
+        Ok(Self { inner, serde_type, _record: PhantomData })
     }
 }
 
-impl<T: Serialize> Serializer<T> for SchemaRegistryAvroSerializer<T> {
-    fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, Error> {
+impl<T: Serialize + Sync> Serializer<T> for SchemaRegistryAvroSerializer<T> {
+    async fn serialize<'a>(&'a self, topic: &'a str, data: Option<&'a T>) -> Result<Option<Cow<'a, [u8]>>, Error> {
         // A null value stays null, as Java's serializers recommend.
         let Some(data) = data else { return Ok(None) };
         // The schema id travels in the payload prefix, so the record
@@ -121,10 +115,10 @@ impl<T: Serialize> Serializer<T> for SchemaRegistryAvroSerializer<T> {
             serde_format: SerdeFormat::Avro,
             headers: None,
         };
-        // Blocks this worker thread until the registry answers, while
-        // `block_in_place` hands its other tasks to the rest of the runtime.
-        tokio::task::block_in_place(|| self.runtime.block_on(self.inner.serialize_ser(&context, data)))
-            .map(Some)
+        self.inner
+            .serialize_ser(&context, data)
+            .await
+            .map(|bytes| Some(Cow::Owned(bytes)))
             .map_err(|e| Error::serialization(format!("cannot serialize the Avro record for topic {topic}: {e}")))
     }
 }

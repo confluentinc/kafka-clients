@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::metrics::KafkaMetric;
-use crate::common::serialization::Deserializer;
+use crate::common::serialization::DynDeserializer;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AsyncKafkaConsumer;
 use crate::consumer::{
@@ -67,7 +67,8 @@ where
     V: Send + Sync + 'static,
 {
     /// Constructs a new consumer from a configuration and explicit key/value
-    /// [`Deserializer`]s.
+    /// deserializers, any [`Deserializer`](crate::common::serialization::Deserializer)
+    /// boxed as a [`DynDeserializer`].
     ///
     /// For `group.protocol=consumer` (KIP-848), the delegate is
     /// `AsyncKafkaConsumer::new(...)` — the production consumer built
@@ -78,10 +79,10 @@ where
     /// (classic protocol deferred to a later milestone).
     ///
     /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
-    /// them as explicit `Box<dyn>` parameters (Phase 1 decision not to
-    /// translate reflection machinery). The consumer wraps them in
-    /// `Arc<Deserializers<K, V>>` internally for sharing with
-    /// `Fetcher`/`FetchCollector` (Shape B).
+    /// them as explicit `Box<dyn DynDeserializer>` parameters (Phase 1
+    /// decision not to translate reflection machinery). The consumer hands
+    /// them to its `FetchCollector`, which calls them for every fetched
+    /// record, and closes them when the consumer closes.
     ///
     /// `MockConsumer` does NOT come through this constructor — it has its own.
     ///
@@ -92,8 +93,8 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new(
         config: ConsumerConfig,
-        key_deserializer: Box<dyn Deserializer<K>>,
-        value_deserializer: Box<dyn Deserializer<V>>,
+        key_deserializer: Box<dyn DynDeserializer<K>>,
+        value_deserializer: Box<dyn DynDeserializer<V>>,
     ) -> Result<Self, Error> {
         // The `GroupProtocol::Consumer` arm builds the production delegate with
         // [`AsyncKafkaConsumer::new`], which translates the Java primary

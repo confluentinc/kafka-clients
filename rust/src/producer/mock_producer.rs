@@ -57,7 +57,7 @@ use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::Serializer;
+use crate::common::serialization::DynSerializer;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 
@@ -182,6 +182,14 @@ use super::Callback;
 #[doc(alias = "org.apache.kafka.clients.producer.MockProducer")]
 pub struct MockProducer<K, V> {
     inner: Mutex<MockProducerInner<K, V>>,
+    /// Java `keySerializer` (`MockProducer.java:65`), or `None`. Outside the
+    /// mutex: Java assigns it once in the constructor and only reads it, and a
+    /// serializer is awaited, which must not happen with the `inner` guard held
+    /// (CLAUDE.md §11.6).
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    /// Java `valueSerializer` (`MockProducer.java:66`), or `None`. Outside the
+    /// mutex, as `key_serializer`.
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
 /// The offsets one transaction contributed, grouped by consumer group id.
@@ -196,10 +204,6 @@ struct MockProducerInner<K, V> {
     /// Java `partitioner` (`MockProducer.java:58`) — the partition strategy, or
     /// `None` when the mock was created without one.
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
-    /// Java `keySerializer` (`MockProducer.java:65`), or `None`.
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    /// Java `valueSerializer` (`MockProducer.java:66`), or `None`.
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
     auto_complete: bool,
     /// Java `sent` (`MockProducer.java:59`).
     sent: Vec<ProducerRecord<K, V>>,
@@ -328,48 +332,65 @@ impl<K, V> MockProducerInner<K, V> {
         }
     }
 
-    /// Computes the partition for the given record.
-    ///
-    /// Corresponds to Java's `partition(ProducerRecord, Cluster)`
-    /// (`MockProducer.java:598`). An explicit record partition is validated
-    /// against the topic's partition count and returned as-is; otherwise the
-    /// key/value are serialized (surfacing any serializer error, as Java does at
-    /// `:612-613`) and the partition is chosen by the partitioner — or, when
-    /// none is set, by the first partition of the topic (`:614-615`), exactly as
-    /// Java's `partitioner == null` branch.
-    fn partition(&self, record: &ProducerRecord<K, V>) -> Result<i32, Error> {
+    /// The explicit-partition branch of Java's `partition(ProducerRecord,
+    /// Cluster)` (`MockProducer.java:598-610`): the record's own partition,
+    /// validated against the topic's partition count, or `None` when the record
+    /// has none and the key/value must be serialized first.
+    fn explicit_partition(&self, record: &ProducerRecord<K, V>) -> Result<Option<i32>, Error> {
+        let Some(partition) = record.partition() else {
+            return Ok(None);
+        };
+        let num_partitions = self.cluster.partitions_for_topic(record.topic()).len() as i32;
+        // they have given us a partition, use it
+        if partition < 0 || partition >= num_partitions {
+            return Err(Error::local_illegal_argument(format!(
+                "Invalid partition given with record: {partition} is not in the range [0...{num_partitions}]."
+            )));
+        }
+        Ok(Some(partition))
+    }
+
+    /// The rest of Java's `partition(ProducerRecord, Cluster)`
+    /// (`MockProducer.java:611-616`), once the key and value are serialized:
+    /// the partitioner's choice or, when there is none, the first partition of
+    /// the topic (`:614-615`), exactly as Java's `partitioner == null` branch.
+    fn partition(&self, record: &ProducerRecord<K, V>, key_bytes: Option<&[u8]>, value_bytes: Option<&[u8]>) -> i32 {
         let topic = record.topic();
-        if let Some(partition) = record.partition() {
-            let num_partitions = self.cluster.partitions_for_topic(topic).len() as i32;
-            // they have given us a partition, use it
-            if partition < 0 || partition >= num_partitions {
-                return Err(Error::local_illegal_argument(format!(
-                    "Invalid partition given with record: {partition} is not in the range [0...{num_partitions}]."
-                )));
-            }
-            return Ok(partition);
-        }
-        let key_bytes = match self.key_serializer.as_ref() {
-            Some(key_serializer) => key_serializer.serialize_with_headers(topic, record.headers(), record.key())?,
-            None => None,
-        };
-        let value_bytes = match self.value_serializer.as_ref() {
-            Some(value_serializer) => {
-                value_serializer.serialize_with_headers(topic, record.headers(), record.value())?
-            },
-            None => None,
-        };
         match self.partitioner.as_ref() {
-            None => Ok(self.cluster.partitions_for_topic(topic)[0].partition()),
-            Some(partitioner) => Ok(partitioner.partition(
-                topic,
-                record.key(),
-                key_bytes.as_deref(),
-                record.value(),
-                value_bytes.as_deref(),
-                &self.cluster,
-            )),
+            None => self.cluster.partitions_for_topic(topic)[0].partition(),
+            Some(partitioner) => {
+                partitioner.partition(topic, record.key(), key_bytes, record.value(), value_bytes, &self.cluster)
+            },
         }
+    }
+
+    /// The checks Java's `send` makes before it partitions the record
+    /// (`MockProducer.java:288-303`).
+    fn verify_can_send(&self) -> Result<(), Error> {
+        if self.closed {
+            return Err(Error::local_illegal_state("MockProducer is already closed."));
+        }
+
+        // Java `:293` throws `KafkaException("MockProducer is fenced.", new
+        // ProducerFencedException("Fenced"))` — deliberately a DIFFERENT value from
+        // `verifyNotFenced`'s bare `ProducerFencedException("MockProducer is fenced.")`
+        // (`:256`): here the fenced error is the *cause* of a bare `KafkaException`,
+        // which is what `shouldThrowOnSendIfProducerGotFenced` asserts
+        // (`assertThrows(KafkaException.class, ..)` plus
+        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`). The outer
+        // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
+        // for it and `true` for `ProducerFencedError`.
+        if self.producer_fenced {
+            return Err(Error::kafka_message_source(
+                "MockProducer is fenced.",
+                Error::with_message(Errors::ProducerFenced, "Fenced"),
+            ));
+        }
+
+        if let Some(err) = self.send_error.as_ref() {
+            return Err(err.clone());
+        }
+        Ok(())
     }
 }
 
@@ -455,10 +476,10 @@ pub struct MockProducerOptions<K, V> {
     pub(crate) partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// The key serializer, or `None`. Java's `keySerializer`, which `:149`
     /// passes as `null`.
-    pub(crate) key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    pub(crate) key_serializer: Option<Box<dyn DynSerializer<K>>>,
     /// The value serializer, or `None`. Java's `valueSerializer`, which `:149`
     /// passes as `null`.
-    pub(crate) value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    pub(crate) value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
 /// Fluent builder for [`MockProducerOptions`].
@@ -474,8 +495,8 @@ pub struct MockProducerOptionsBuilder<K, V> {
     cluster: Option<Cluster>,
     auto_complete: Option<bool>,
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
 impl<K, V> Default for MockProducerOptionsBuilder<K, V> {
@@ -514,12 +535,12 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
         self
     }
     /// Sets `MockProducerOptions::key_serializer`.
-    pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>) -> Self {
+    pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn DynSerializer<K>>>) -> Self {
         self.key_serializer = key_serializer;
         self
     }
     /// Sets `MockProducerOptions::value_serializer`.
-    pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>) -> Self {
+    pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn DynSerializer<V>>>) -> Self {
         self.value_serializer = value_serializer;
         self
     }
@@ -615,8 +636,6 @@ impl<K, V> MockProducer<K, V> {
             inner: Mutex::new(MockProducerInner {
                 cluster,
                 partitioner,
-                key_serializer,
-                value_serializer,
                 auto_complete,
                 sent: Vec::new(),
                 uncommitted_sends: Vec::new(),
@@ -643,6 +662,8 @@ impl<K, V> MockProducer<K, V> {
                 close_error: None,
                 mock_metrics: HashMap::new(),
             }),
+            key_serializer,
+            value_serializer,
         }
     }
 
@@ -1186,53 +1207,65 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         record: ProducerRecord<K, V>,
         callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        let mut inner = self.inner.lock().unwrap();
+        // Java's `send` is `synchronized` throughout, serializers included. Here
+        // the serializers are awaited, which must not happen with the `inner`
+        // guard held (CLAUDE.md §11.6), so the method locks twice: once for the
+        // checks and the explicit partition, then again after serializing. The
+        // checks run again under the second lock, since another task may have
+        // closed or fenced the producer while the serializers ran.
+        let (has_partitions, explicit_partition) = {
+            let inner = self.inner.lock().unwrap();
+            inner.verify_can_send()?;
+            // Java 309-316: with cluster metadata for the topic, delegate to
+            // `partition()`; otherwise serialize key/value (with fresh
+            // `RecordHeaders`) and leave the partition at 0.
+            let has_partitions = !inner.cluster.partitions_for_topic(record.topic()).is_empty();
+            let explicit_partition = if has_partitions {
+                inner.explicit_partition(&record)?
+            } else {
+                None
+            };
+            (has_partitions, explicit_partition)
+        };
 
-        if inner.closed {
-            return Err(Error::local_illegal_state("MockProducer is already closed."));
-        }
-
-        // Java `:293` throws `KafkaException("MockProducer is fenced.", new
-        // ProducerFencedException("Fenced"))` — deliberately a DIFFERENT value from
-        // `verifyNotFenced`'s bare `ProducerFencedException("MockProducer is fenced.")`
-        // (`:256`): here the fenced error is the *cause* of a bare `KafkaException`,
-        // which is what `shouldThrowOnSendIfProducerGotFenced` asserts
-        // (`assertThrows(KafkaException.class, ..)` plus
-        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`). The outer
-        // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
-        // for it and `true` for `ProducerFencedError`.
-        if inner.producer_fenced {
-            return Err(Error::kafka_message_source(
-                "MockProducer is fenced.",
-                Error::with_message(Errors::ProducerFenced, "Fenced"),
-            ));
-        }
-
-        if let Some(err) = inner.send_error.as_ref() {
-            return Err(err.clone());
-        }
-
-        // Java 309-316: with cluster metadata for the topic, delegate to
-        // `partition()`; otherwise serialize key/value (with fresh
-        // `RecordHeaders`) and leave the partition at 0.
-        let partition = if !inner.cluster.partitions_for_topic(record.topic()).is_empty() {
-            inner.partition(&record)?
+        // `partition()` serializes with the record's headers (`:612-613`); the
+        // empty-cluster branch with fresh ones (`:313-314`).
+        //
+        // DEVIATION (`definition-of-done.md` §7): in the empty-cluster branch Java
+        // serializes purely for the `ClassCastException` side effect (Java 313
+        // comment) — a case static typing rules out in Rust — and then uses
+        // partition 0. Rust still consults the serializers when present, so a
+        // serializer error surfaces as Java's would, but honours an explicit
+        // `record.partition()` before falling back to 0 so the C FFI
+        // empty-cluster mock keeps working
+        // (`c/tests/test_mock_producer.c:133,600,640,735,1637`).
+        let fresh_headers = RecordHeaders::new();
+        let headers = if has_partitions {
+            record.headers()
         } else {
-            // DEVIATION (`definition-of-done.md` §7): Java serializes here purely
-            // for the `ClassCastException` side effect (Java 313 comment) — a
-            // case static typing rules out in Rust — and then uses partition 0.
-            // Rust still consults the serializers when present, so a serializer
-            // error surfaces as Java's would, but honours an explicit
-            // `record.partition()` before falling back to 0 so the C FFI
-            // empty-cluster mock keeps working
-            // (`c/tests/test_mock_producer.c:133,600,640,735,1637`).
-            if let Some(key_serializer) = inner.key_serializer.as_ref() {
-                key_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.key())?;
+            &fresh_headers
+        };
+        let mut key_bytes = None;
+        let mut value_bytes = None;
+        if explicit_partition.is_none() {
+            if let Some(key_serializer) = self.key_serializer.as_deref() {
+                key_bytes =
+                    DynSerializer::serialize_with_headers(key_serializer, record.topic(), headers, record.key())
+                        .await?;
             }
-            if let Some(value_serializer) = inner.value_serializer.as_ref() {
-                value_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.value())?;
+            if let Some(value_serializer) = self.value_serializer.as_deref() {
+                value_bytes =
+                    DynSerializer::serialize_with_headers(value_serializer, record.topic(), headers, record.value())
+                        .await?;
             }
-            record.partition().unwrap_or(0)
+        }
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.verify_can_send()?;
+        let partition = match explicit_partition {
+            Some(partition) => partition,
+            None if has_partitions => inner.partition(&record, key_bytes.as_deref(), value_bytes.as_deref()),
+            None => record.partition().unwrap_or(0),
         };
         let tp = TopicPartition::new(record.topic().to_string(), partition);
 

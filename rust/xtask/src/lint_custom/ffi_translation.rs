@@ -109,7 +109,11 @@
 //!     the default), a bare `unsafe extern "C" fn(..)` otherwise, and the
 //!     `_new` parameter is always the bare typedef name (cbindgen does not
 //!     see through `Option<alias>` in a signature); an async method's
-//!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
+//!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`,
+//!     except on a dual-mode interface ([`DUAL_MODE_INTERFACES`]), whose
+//!     `_fn_t`s keep the synchronous form and which adds `_new_async` with
+//!     one reported-form `_async_fn_t` per method, `__is_async` and its own
+//!     `__set_callback_result`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
 //!     `__set_callback_result(self, callback_id, result, error)` when it
@@ -176,8 +180,10 @@ const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
 
 /// Public Rust types that deliberately have no C counterpart: `KafkaError`
 /// is the embedded `KafkaException` base, which never crosses the boundary on
-/// its own (CLAUDE.md §4).
-const NO_C_TYPE: &[&str] = &["KafkaError"];
+/// its own (CLAUDE.md §4); `InlineFuture` is the future a `DynSerializer` /
+/// `DynDeserializer` call returns, which C never holds: a C caller of a
+/// waiting function gets its result through the `_cb` twin (§4 rule 5).
+const NO_C_TYPE: &[&str] = &["KafkaError", "InlineFuture"];
 
 /// Package-less free helpers the FFI may export besides the `kafka_<Type>_t`
 /// containers: the deallocator of an owned string (CLAUDE.md §4 rule 6).
@@ -207,6 +213,27 @@ struct ReportedInterface {
 /// Whether the interface with C prefix `prefix` is reported.
 fn is_reported(prefix: &str) -> bool {
     REPORTED_INTERFACES.iter().any(|r| r.prefix == prefix)
+}
+
+/// Interfaces a C implementation registers in one of two modes, fixed at
+/// construction: `<prefix>_new` takes the synchronous `_fn_t`s (the value
+/// returned, the error stored in `out_err`), whose functions Rust runs on a
+/// blocking task; `<prefix>_new_async` takes the `_async_fn_t`s in the
+/// reported form of an async method (`void`, a trailing `callback_id`),
+/// whose implementation reports through the interface's own
+/// `<prefix>__set_callback_result(self, callback_id, result, error)`, and
+/// `<prefix>__is_async(self)` tells the two apart. These are the serdes,
+/// called once per key and per value: a C serde that blocks must not stall
+/// the client's runtime, and one that waits on its own I/O must not hold a
+/// thread, so C chooses (CLAUDE.md §4 "Traits", §11).
+const DUAL_MODE_INTERFACES: &[&str] = &[
+    "kafka_common_serialization_Serializer",
+    "kafka_common_serialization_Deserializer",
+];
+
+/// Whether the interface with C prefix `prefix` is dual-mode.
+fn is_dual_mode(prefix: &str) -> bool {
+    DUAL_MODE_INTERFACES.contains(&prefix)
 }
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
@@ -659,6 +686,13 @@ impl Mapper<'_> {
                 },
                 _ => {},
             }
+            // `DynSerializer` is `Serializer`'s dyn-compatible companion
+            // (check-dyn-compatible), left out of the surface: C sees one
+            // `Serializer_t`, so `Box<dyn DynSerializer<K>>` maps onto it.
+            let name = match name.strip_prefix("Dyn") {
+                Some(base) if !self.by_name.contains_key(&name) => base.to_string(),
+                _ => name,
+            };
             if let Some([(prefix, TypeClass::Trait)]) = self.by_name.get(&name).map(Vec::as_slice) {
                 return Ok(CType::Handle { prefix: prefix.clone(), mutable: owned || mut_ref });
             }
@@ -2029,7 +2063,13 @@ fn param_traits(sig: &syn::Signature, traits: &BTreeMap<&str, &RustType>) -> BTr
     let mut visit = |ty: &syn::Type| {
         let mut names = BTreeSet::new();
         collect_bound_traits(ty, &generics, &mut names);
-        out.extend(names.into_iter().filter(|n| traits.contains_key(n.as_str())));
+        // `dyn DynSerializer<K>` accepts a `Serializer`: the companion is left
+        // out of the surface and C implements the base trait's interface.
+        let names = names.into_iter().map(|n| match n.strip_prefix("Dyn") {
+            Some(base) if !traits.contains_key(n.as_str()) => base.to_string(),
+            _ => n,
+        });
+        out.extend(names.filter(|n| traits.contains_key(n.as_str())));
     };
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
@@ -2194,7 +2234,10 @@ fn expect_method(
 }
 
 /// Adds the C interface of an accepted trait: `_new` and one `_fn_t` per
-/// method (CLAUDE.md §4 rule 3).
+/// method (CLAUDE.md §4 rule 3). A dual-mode interface
+/// ([`DUAL_MODE_INTERFACES`]) also has `_new_async` taking one `_async_fn_t`
+/// per method, `__is_async` and `__set_callback_result`, and its `_fn_t`s
+/// keep the synchronous form whether the Rust method is async or not.
 fn expect_interface<'a>(
     out: &mut Expectations,
     mapper_for: &dyn Fn(&syn::Signature) -> Mapper<'a>,
@@ -2202,22 +2245,29 @@ fn expect_interface<'a>(
     methods: &[RustMethod],
     file: &str,
 ) {
+    let dual = is_dual_mode(prefix);
     let mut new_params = vec![Param::new("self", "*mut c_void".to_string())];
+    let mut new_async_params = new_params.clone();
     for m in methods {
         let fn_t = format!("{prefix}_{}_fn_t", m.name);
+        let async_fn_t = format!("{prefix}_{}_async_fn_t", m.name);
         new_params.push(Param::new(
             &m.name,
             CType::FnPtr { name: fn_t.clone(), nullable: m.has_default }.render(),
         ));
+        new_async_params.push(Param::new(
+            &m.name,
+            CType::FnPtr { name: async_fn_t.clone(), nullable: m.has_default }.render(),
+        ));
 
         let mapper = mapper_for(&m.sig);
         let (is_async, output) = method_output(&m.sig, &mapper);
-        let mut sig = Sig { params: vec![Param::new("self", "*mut c_void".to_string())], ret: None };
+        let mut params = vec![Param::new("self", "*mut c_void".to_string())];
         let mut failed = false;
         for arg in &m.sig.inputs {
             let syn::FnArg::Typed(pt) = arg else { continue };
             match map_param(&mapper, &param_name(pt), &pt.ty) {
-                Ok(c) => sig.params.extend(c),
+                Ok(c) => params.extend(c),
                 Err(_) => failed = true,
             }
         }
@@ -2238,28 +2288,65 @@ fn expect_interface<'a>(
         if failed {
             // Reported once, on the invoker, by `expect_method`.
             out.add(fn_t, Shape::Unknown, file);
+            if dual {
+                out.add(async_fn_t, Shape::Unknown, file);
+            }
             continue;
         }
-        if is_async || is_reported(prefix) {
-            // The result is reported through `__set_callback_result`.
-            sig.params.push(Param::new("callback_id", "i64".to_string()));
-        } else {
-            match (&output, &value) {
-                (Ok(Output::Fallible(_)), v) => {
-                    sig.params.push(Param::out_err());
-                    sig.ret = v.as_ref().map(CType::render);
-                },
-                (Ok(Output::Value(_)), Some(v)) => sig.ret = Some(v.render()),
-                _ => {},
-            }
+        // The synchronous form: the value returned, the error stored in `out_err`.
+        let mut sync_sig = Sig { params: params.clone(), ret: None };
+        match (&output, &value) {
+            (Ok(Output::Fallible(_)), v) => {
+                sync_sig.params.push(Param::out_err());
+                sync_sig.ret = v.as_ref().map(CType::render);
+            },
+            (Ok(Output::Value(_)), Some(v)) => sync_sig.ret = Some(v.render()),
+            _ => {},
         }
-        out.add(fn_t, Shape::FnPtr { sig, nullable: m.has_default }, file);
+        // The reported form: the result reported through `__set_callback_result`.
+        let mut reported_sig = Sig { params, ret: None };
+        reported_sig.params.push(Param::new("callback_id", "i64".to_string()));
+        if dual {
+            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+            out.add(async_fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+        } else if is_async || is_reported(prefix) {
+            out.add(fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+        } else {
+            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+        }
     }
+    let handle = format!("*mut {prefix}_t");
     out.add(
         format!("{prefix}_new"),
-        Shape::Fn(Sig { params: new_params, ret: Some(format!("*mut {prefix}_t")) }),
+        Shape::Fn(Sig { params: new_params, ret: Some(handle.clone()) }),
         file,
     );
+    if dual {
+        out.add(
+            format!("{prefix}_new_async"),
+            Shape::Fn(Sig { params: new_async_params, ret: Some(handle) }),
+            file,
+        );
+        let self_param = || Param::new("self", format!("*const {prefix}_t"));
+        out.add(
+            format!("{prefix}__is_async"),
+            Shape::Fn(Sig { params: vec![self_param()], ret: Some("i8".to_string()) }),
+            file,
+        );
+        out.add(
+            format!("{prefix}__set_callback_result"),
+            Shape::Fn(Sig {
+                params: vec![
+                    self_param(),
+                    Param::new("callback_id", "i64".to_string()),
+                    Param::new("result", "*mut c_void".to_string()),
+                    Param::new("error", "*mut kafka_common_Error_t".to_string()),
+                ],
+                ret: None,
+            }),
+            file,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3435,6 +3522,24 @@ mod tests {
         assert!(findings.is_empty(), "{findings:?}");
     }
 
+    /// A parameter taking the dyn-compatible companion
+    /// (`Box<dyn DynSerializer<K>>`) maps onto the base trait's handle and
+    /// accepts the base trait's interface, as `Box<dyn Serializer<K>>` did.
+    #[test]
+    fn test_dyn_companion_parameter_maps_onto_the_base_trait() {
+        let rust = TRAIT_RUST
+            .replace(
+                "            #[doc(alias = \"org.apache.kafka.clients.producer.KafkaProducer\")]",
+                "            #[doc(alias = \"rust-only\")]\n            \
+                 pub trait DynPartitioner<K, V>: Send + Sync {}\n            \
+                 #[doc(alias = \"org.apache.kafka.clients.producer.KafkaProducer\")]",
+            )
+            .replace("Box<dyn Partitioner<K, V>>", "Box<dyn DynPartitioner<K, V>>");
+        assert!(rust.contains("Box<dyn DynPartitioner<K, V>>") && rust.contains("pub trait DynPartitioner"));
+        let findings = run("trait-dyn-companion", &rust, TRAIT_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
     #[test]
     fn test_trait_without_invoker_or_new() {
         let ffi = TRAIT_FFI
@@ -3590,6 +3695,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dual_mode_interface_expects_both_constructors() {
+        let rust = r#"
+            pub mod common {
+                pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+                pub use error::Error;
+                pub mod serialization {
+                    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
+                    pub trait Deserializer: Send + Sync {
+                        async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, crate::common::Error>;
+                        async fn close(&mut self) {}
+                    }
+                    #[doc(alias = "rust-only")]
+                    pub struct Holder;
+                    impl Holder { pub fn new(deserializer: Box<dyn Deserializer>) -> Self { Holder } }
+                }
+            }
+        "#;
+        let findings = run("dual-mode", rust, "");
+        let prefix = "kafka_common_serialization_Deserializer";
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_deserialize_fn_t")),
+            format!(
+                "expected `type {prefix}_deserialize_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: *const \
+                 c_char, data: kafka_Bytes_t, out_err: *mut *mut kafka_common_Error_t) -> *mut c_char`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_deserialize_async_fn_t")),
+            format!(
+                "expected `type {prefix}_deserialize_async_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: \
+                 *const c_char, data: kafka_Bytes_t, callback_id: i64)`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_close_async_fn_t")),
+            format!("expected `type {prefix}_close_async_fn_t = Option<unsafe extern \"C\" fn(self: *mut c_void, callback_id: i64)>`")
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_new_async")),
+            format!(
+                "expected `fn(self: *mut c_void, deserialize: {prefix}_deserialize_async_fn_t, close: \
+                 {prefix}_close_async_fn_t) -> *mut {prefix}_t`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}__is_async")),
+            format!("expected `fn(self: *const {prefix}_t) -> i8`")
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}__set_callback_result")),
+            format!(
+                "expected `fn(self: *const {prefix}_t, callback_id: i64, result: *mut c_void, error: *mut \
+                 kafka_common_Error_t)`"
+            )
+        );
+        assert!(keys(&findings).contains(&"missing kafka_common_serialization_Deserializer_deserialize_cb_t"));
+    }
+
     const AS_RUST: &str = r#"
         pub mod common {
             pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3603,10 +3767,10 @@ mod tests {
                 pub struct StringSerializer;
                 impl StringSerializer { pub fn new() -> Self { StringSerializer } }
                 impl Serializer<str> for StringSerializer {
-                    fn serialize(&self, topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
+                    async fn serialize(&self, topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
                 }
                 impl Serializer<String> for StringSerializer {
-                    fn serialize(&self, topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
+                    async fn serialize(&self, topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
                 }
             }
         }

@@ -2932,11 +2932,11 @@ struct FailingSerializer;
 
 #[cfg(feature = "integration-tests")]
 impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSerializer {
-    fn serialize(
-        &self,
-        _topic: &str,
-        _data: Option<&Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, confluent_kafka::common::Error> {
+    async fn serialize<'a>(
+        &'a self,
+        _topic: &'a str,
+        _data: Option<&'a Vec<u8>>,
+    ) -> Result<Option<std::borrow::Cow<'a, [u8]>>, confluent_kafka::common::Error> {
         Err(confluent_kafka::common::Error::serialization("FailingSerializer always fails"))
     }
 }

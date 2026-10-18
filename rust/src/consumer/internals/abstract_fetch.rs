@@ -1602,7 +1602,7 @@ mod tests {
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }
@@ -1714,7 +1714,7 @@ mod tests {
             FetchMetricsManager::for_test(),
             Arc::new(SystemTime),
         );
-        let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
+        let fetch = collector.collect_fetch_now(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
         let recs = fetch.records_with_partition(&partition);
