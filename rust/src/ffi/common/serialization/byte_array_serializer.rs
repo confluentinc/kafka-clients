@@ -19,14 +19,16 @@
 //! Its `void *` is a `const kafka_Bytes_t *`; a `NULL` pointer or a
 //! `NULL` `data` inside the array is Java's `null`. One `__as_Serializer`
 //! view serves both Rust impls (`Serializer<[u8]>` and `Serializer<Vec<u8>>`):
-//! over a `void *` the bytes are always copied, so the zero-copy owned path
-//! has nothing to pass through.
+//! over a `void *` they are the same call, and the invoker copies the bytes
+//! out before it returns.
+
+use std::borrow::Cow;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
 use crate::common::serialization::{ByteArraySerializer, Serializer};
 use crate::ffi::common::serialization::SerializerHandle;
-use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_t;
+use crate::ffi::common::serialization::serializer::{FfiSerializer, kafka_common_serialization_Serializer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, kafka_Bytes_t};
 
@@ -58,31 +60,37 @@ unsafe fn bytes<'a>(data: Option<&GenericValue>) -> Option<&'a [u8]> {
 }
 
 impl Serializer<GenericValue> for GenericByteArraySerializer {
-    fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
+    async fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
         // invoker on the view `kafka_common_serialization_ByteArraySerializer__as_Serializer`
-        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose
-        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
-        // call, so `bytes`'s `# Safety` holds for this call. The borrow ends before return: the
-        // inner serializer copies the bytes.
-        Serializer::<[u8]>::serialize(&self.0, topic, unsafe { bytes(data) })
+        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose `# Safety` requires
+        // `data` to be null or that representation, alive and unchanged for the call, which is `'a`
+        // here, so `bytes`'s `# Safety` holds for `'a`. The bytes returned may borrow it for `'a`:
+        // the invoker copies them out before it returns.
+        let data: Option<&'a [u8]> = unsafe { bytes(data) };
+        Serializer::<[u8]>::serialize(&self.0, topic, data).await
     }
 
-    fn serialize_with_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        data: Option<&GenericValue>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    async fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
         // invoker on the view `kafka_common_serialization_ByteArraySerializer__as_Serializer`
-        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose
-        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
-        // call, so `bytes`'s `# Safety` holds for this call. The borrow ends before return: the
-        // inner serializer copies the bytes.
-        Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, unsafe { bytes(data) })
+        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose `# Safety` requires
+        // `data` to be null or that representation, alive and unchanged for the call, which is `'a`
+        // here, so `bytes`'s `# Safety` holds for `'a`. The bytes returned may borrow it for `'a`:
+        // the invoker copies them out before it returns.
+        let data: Option<&'a [u8]> = unsafe { bytes(data) };
+        Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, data).await
     }
 }
 
@@ -91,14 +99,12 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle, alive for `'a`.
-unsafe fn handle<'a>(
-    self_: *const kafka_common_serialization_ByteArraySerializer_t,
-) -> &'a SerializerHandle<GenericByteArraySerializer> {
+unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArraySerializer_t) -> &'a SerializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle alive
     // for `'a`, the `SerializerHandle::boxed` of
     // `kafka_common_serialization_ByteArraySerializer_new`, as `SerializerHandle::from_ptr`
     // requires.
-    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle<GenericByteArraySerializer>) }
+    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
 }
 
 /// `new ByteArraySerializer()`. Owned, freed with
@@ -107,7 +113,7 @@ unsafe fn handle<'a>(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
 -> *mut kafka_common_serialization_ByteArraySerializer_t {
-    SerializerHandle::boxed(GenericByteArraySerializer(ByteArraySerializer::new()))
+    SerializerHandle::boxed(FfiSerializer::ByteArray(GenericByteArraySerializer(ByteArraySerializer::new())))
         as *mut kafka_common_serialization_ByteArraySerializer_t
 }
 
@@ -144,7 +150,7 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer_destroy(
     // SAFETY: Per this function's `# Safety`, `self_` is null or an owned byte-array-serializer
     // handle not yet destroyed, as `SerializerHandle::destroy` requires: the
     // `SerializerHandle::boxed` of `kafka_common_serialization_ByteArraySerializer_new`.
-    unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle<GenericByteArraySerializer>) }
+    unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle) }
 }
 
 #[cfg(test)]
@@ -157,9 +163,7 @@ mod tests {
         box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
     use crate::ffi::common::serialization::serializer::{
-        kafka_common_serialization_Serializer_serialize,
-        kafka_common_serialization_Serializer_serialize_owned_with_headers,
-        kafka_common_serialization_Serializer_serialize_with_headers,
+        kafka_common_serialization_Serializer_serialize, kafka_common_serialization_Serializer_serialize_with_headers,
     };
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
             let mut err = ptr::null_mut();
             // One call at a time: each view is valid until the next call on the handle.
             let err_slot = &raw mut err;
-            let calls: [&dyn Fn() -> kafka_Bytes_t; 3] = [
+            let calls: [&dyn Fn() -> kafka_Bytes_t; 2] = [
                 &|| {
                     kafka_common_serialization_Serializer_serialize(
                         view,
@@ -191,15 +195,6 @@ mod tests {
                 },
                 &|| {
                     kafka_common_serialization_Serializer_serialize_with_headers(
-                        view,
-                        topic.as_ptr(),
-                        headers,
-                        &raw const payload as *const c_void,
-                        err_slot,
-                    )
-                },
-                &|| {
-                    kafka_common_serialization_Serializer_serialize_owned_with_headers(
                         view,
                         topic.as_ptr(),
                         headers,

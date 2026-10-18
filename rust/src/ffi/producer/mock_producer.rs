@@ -37,7 +37,7 @@ use crate::ffi::common::fail_with;
 use crate::ffi::common::metric_name::{kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metrics::kafka_metric::{kafka_common_metrics_KafkaMetric_t, kafka_metric_ref};
 use crate::ffi::common::serialization::serializer::{
-    DynSerializer, kafka_common_serialization_Serializer_t, take_serializer,
+    SerializerInner, kafka_common_serialization_Serializer_t, take_serializer,
 };
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_ref,
@@ -93,8 +93,8 @@ struct OptionsInner {
     cluster: Cluster,
     auto_complete: bool,
     partitioner: Option<Arc<SharedPartitioner>>,
-    key_serializer: Option<Arc<DynSerializer>>,
-    value_serializer: Option<Arc<DynSerializer>>,
+    key_serializer: Option<Arc<SerializerInner>>,
+    value_serializer: Option<Arc<SerializerInner>>,
 }
 
 impl OptionsInner {
@@ -108,11 +108,11 @@ impl OptionsInner {
             }),
             key_serializer: self.key_serializer.as_ref().map(|s| {
                 Box::new(ArcSerializer(Arc::clone(s)))
-                    as Box<dyn crate::common::serialization::Serializer<GenericValue> + Send + Sync>
+                    as Box<dyn crate::common::serialization::DynSerializer<GenericValue>>
             }),
             value_serializer: self.value_serializer.as_ref().map(|s| {
                 Box::new(ArcSerializer(Arc::clone(s)))
-                    as Box<dyn crate::common::serialization::Serializer<GenericValue> + Send + Sync>
+                    as Box<dyn crate::common::serialization::DynSerializer<GenericValue>>
             }),
         }
     }
@@ -125,8 +125,8 @@ struct BuilderInner {
     cluster: Option<Cluster>,
     auto_complete: Option<bool>,
     partitioner: Option<Arc<SharedPartitioner>>,
-    key_serializer: Option<Arc<DynSerializer>>,
-    value_serializer: Option<Arc<DynSerializer>>,
+    key_serializer: Option<Arc<SerializerInner>>,
+    value_serializer: Option<Arc<SerializerInner>>,
 }
 
 /// The class state behind a handle.

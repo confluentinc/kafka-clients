@@ -47,7 +47,7 @@ impl StringDeserializer {
 }
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         // Java's `new String(data, UTF_8)` replaces malformed sequences with
         // U+FFFD; `from_utf8_lossy` reproduces that behavior exactly.
         Ok(String::from_utf8_lossy(data).into_owned())
@@ -60,46 +60,47 @@ mod tests {
     use crate::common::serialization::Serializer;
     use crate::common::serialization::StringSerializer;
 
-    #[test]
-    fn test_deserialize_string() {
+    #[tokio::test]
+    async fn test_deserialize_string() {
         let deserializer = StringDeserializer::new();
-        let result = deserializer.deserialize("topic", b"my string").unwrap();
+        let result = deserializer.deserialize("topic", b"my string").await.unwrap();
         assert_eq!(result, "my string".to_string());
     }
 
-    #[test]
-    fn test_deserialize_empty() {
+    #[tokio::test]
+    async fn test_deserialize_empty() {
         let deserializer = StringDeserializer::new();
-        let result = deserializer.deserialize("topic", b"").unwrap();
+        let result = deserializer.deserialize("topic", b"").await.unwrap();
         assert_eq!(result, String::new());
     }
 
-    #[test]
-    fn test_deserialize_utf8() {
+    #[tokio::test]
+    async fn test_deserialize_utf8() {
         let deserializer = StringDeserializer::new();
         let unicode_str = "\u{00e9}\u{00e8}\u{00ea}"; // accented chars
-        let result = deserializer.deserialize("topic", unicode_str.as_bytes()).unwrap();
+        let result = deserializer.deserialize("topic", unicode_str.as_bytes()).await.unwrap();
         assert_eq!(result, unicode_str.to_string());
     }
 
-    #[test]
-    fn test_deserialize_malformed_is_lossy() {
+    #[tokio::test]
+    async fn test_deserialize_malformed_is_lossy() {
         // Java's `new String(bytes, UTF_8)` replaces malformed bytes with
         // U+FFFD instead of throwing; the Rust translation matches.
         let deserializer = StringDeserializer::new();
-        let result = deserializer.deserialize("topic", &[0xff, 0xfe]).unwrap();
+        let result = deserializer.deserialize("topic", &[0xff, 0xfe]).await.unwrap();
         assert_eq!(result, "\u{fffd}\u{fffd}".to_string());
     }
 
-    #[test]
-    fn test_serialize_deserialize_round_trip() {
+    #[tokio::test]
+    async fn test_serialize_deserialize_round_trip() {
         let serializer = StringSerializer::new();
         let deserializer = StringDeserializer::new();
         let original = "round trip \u{00e9}";
         let bytes = Serializer::<str>::serialize(&serializer, "topic", Some(original))
+            .await
             .unwrap()
             .unwrap();
-        let decoded = deserializer.deserialize("topic", &bytes).unwrap();
+        let decoded = deserializer.deserialize("topic", &bytes).await.unwrap();
         assert_eq!(decoded, original.to_string());
     }
 }

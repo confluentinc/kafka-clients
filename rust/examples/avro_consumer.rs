@@ -22,12 +22,11 @@
 //! returns decoded records, like any other deserializer.
 //!
 //! The registry deserializer is `async`, because it fetches the writer schema
-//! by the id embedded in each record, while the [`Deserializer`] trait is
-//! synchronous so it runs inline on the fetch path. The wrapper bridges the
-//! two with `tokio::task::block_in_place`, which needs the multi-thread
-//! runtime `#[tokio::main]` starts. Only the first record of each schema waits
-//! on the network: the registry client caches the schema by id, so every
-//! later call completes without blocking.
+//! by the id embedded in each record, and so is the [`Deserializer`] trait:
+//! the wrapper awaits the registry deserializer directly inside `poll`. Only
+//! the first record of each schema reaches the registry: the registry client
+//! caches the schema by id, so every later call completes without a network
+//! round trip.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -53,8 +52,6 @@ use schema_registry_client::serdes::serde::SerializationContext;
 use schema_registry_client::serdes::serde::SubjectNameStrategyType;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use tokio::runtime::Handle;
-
 use uuid::Uuid;
 
 const TOPIC_NAME: &str = "avro-users";
@@ -82,22 +79,19 @@ struct User {
 struct SchemaRegistryAvroDeserializer<T> {
     inner: AvroDeserializer<'static, SchemaRegistryClient>,
     serde_type: SerdeType,
-    /// The runtime the registry calls run on, captured at construction.
-    runtime: Handle,
     _record: PhantomData<fn() -> T>,
 }
 
 impl<T> SchemaRegistryAvroDeserializer<T> {
-    /// Must be called inside the Tokio runtime the consumer runs on.
     fn new(serde_type: SerdeType, config: DeserializerConfig) -> Result<Self, Error> {
         let inner = AvroDeserializer::new(&*REGISTRY, None, config)
             .map_err(|e| Error::serialization(format!("cannot create the Avro deserializer: {e}")))?;
-        Ok(Self { inner, serde_type, runtime: Handle::current(), _record: PhantomData })
+        Ok(Self { inner, serde_type, _record: PhantomData })
     }
 }
 
 impl<T: DeserializeOwned + 'static> Deserializer<T> for SchemaRegistryAvroDeserializer<T> {
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error> {
+    async fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8]) -> Result<T, Error> {
         // The schema id travels in the payload prefix, so the record headers
         // are not consulted.
         let context = SerializationContext {
@@ -106,10 +100,10 @@ impl<T: DeserializeOwned + 'static> Deserializer<T> for SchemaRegistryAvroDeseri
             serde_format: SerdeFormat::Avro,
             headers: None,
         };
-        // Blocks this worker thread until the registry answers, while
-        // `block_in_place` hands its other tasks to the rest of the runtime.
-        let decoded = tokio::task::block_in_place(|| self.runtime.block_on(self.inner.deserialize(&context, data)))
-            .map_err(|e| Error::serialization(format!("cannot deserialize the Avro record from topic {topic}: {e}")))?;
+        let decoded =
+            self.inner.deserialize(&context, data).await.map_err(|e| {
+                Error::serialization(format!("cannot deserialize the Avro record from topic {topic}: {e}"))
+            })?;
         apache_avro::from_value(&decoded.value)
             .map_err(|e| Error::serialization(format!("the Avro record from topic {topic} does not fit the type: {e}")))
     }

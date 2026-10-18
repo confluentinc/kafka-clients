@@ -22,11 +22,13 @@
 
 use std::ffi::{CStr, c_char};
 
+use std::borrow::Cow;
+
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
 use crate::common::serialization::{Serializer, StringSerializer};
 use crate::ffi::common::serialization::SerializerHandle;
-use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_t;
+use crate::ffi::common::serialization::serializer::{FfiSerializer, kafka_common_serialization_Serializer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::GenericValue;
 
@@ -62,31 +64,37 @@ unsafe fn string<'a>(data: Option<&GenericValue>) -> Result<Option<&'a str>, Err
 }
 
 impl Serializer<GenericValue> for GenericStringSerializer {
-    fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
+    async fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
-        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer` returns,
-        // whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose
-        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
-        // call, so `string`'s `# Safety` holds for this call. The borrow ends before return: the
-        // inner serializer copies the bytes.
-        Serializer::<str>::serialize(&self.0, topic, unsafe { string(data) }?)
+        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer`
+        // returns, whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose `# Safety` requires
+        // `data` to be null or that representation, alive and unchanged for the call, which is `'a`
+        // here, so `string`'s `# Safety` holds for `'a`. The bytes returned may borrow it for `'a`:
+        // the invoker copies them out before it returns.
+        let data: Option<&'a str> = unsafe { string(data) }?;
+        Serializer::<str>::serialize(&self.0, topic, data).await
     }
 
-    fn serialize_with_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        data: Option<&GenericValue>,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    async fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
-        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer` returns,
-        // whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose
-        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
-        // call, so `string`'s `# Safety` holds for this call. The borrow ends before return: the
-        // inner serializer copies the bytes.
-        Serializer::<str>::serialize_with_headers(&self.0, topic, headers, unsafe { string(data) }?)
+        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer`
+        // returns, whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose `# Safety` requires
+        // `data` to be null or that representation, alive and unchanged for the call, which is `'a`
+        // here, so `string`'s `# Safety` holds for `'a`. The bytes returned may borrow it for `'a`:
+        // the invoker copies them out before it returns.
+        let data: Option<&'a str> = unsafe { string(data) }?;
+        Serializer::<str>::serialize_with_headers(&self.0, topic, headers, data).await
     }
 }
 
@@ -95,13 +103,11 @@ impl Serializer<GenericValue> for GenericStringSerializer {
 /// # Safety
 ///
 /// `self_` must be a valid string-serializer handle, alive for `'a`.
-unsafe fn handle<'a>(
-    self_: *const kafka_common_serialization_StringSerializer_t,
-) -> &'a SerializerHandle<GenericStringSerializer> {
+unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringSerializer_t) -> &'a SerializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-serializer handle alive for
     // `'a`, the `SerializerHandle::boxed` of `kafka_common_serialization_StringSerializer_new`, as
     // `SerializerHandle::from_ptr` requires.
-    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle<GenericStringSerializer>) }
+    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
 }
 
 /// `new StringSerializer()`. Owned, freed with
@@ -110,7 +116,7 @@ unsafe fn handle<'a>(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafka_common_serialization_StringSerializer_t
 {
-    SerializerHandle::boxed(GenericStringSerializer(StringSerializer::new()))
+    SerializerHandle::boxed(FfiSerializer::String(GenericStringSerializer(StringSerializer::new())))
         as *mut kafka_common_serialization_StringSerializer_t
 }
 
@@ -147,7 +153,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringSerializer_destroy(
     // SAFETY: Per this function's `# Safety`, `self_` is null or an owned string-serializer handle
     // not yet destroyed, as `SerializerHandle::destroy` requires: the `SerializerHandle::boxed` of
     // `kafka_common_serialization_StringSerializer_new`.
-    unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle<GenericStringSerializer>) }
+    unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle) }
 }
 
 #[cfg(test)]

@@ -1,0 +1,240 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! The dyn-compatible view of [`Serializer`].
+//!
+//! Has no Java counterpart (`definition-of-done.md` §7). A Java interface is
+//! always usable as a runtime-polymorphic type, so a producer holds its
+//! `Serializer<K>` whatever its class. The Rust [`Serializer`] trait returns
+//! `impl Future` from its methods, which keeps a statically dispatched call
+//! free of a boxed future but makes the trait itself not dyn-compatible.
+//! `DynSerializer` restores the Java capability (CLAUDE.md §3, "traits must be
+//! dyn-compatible") the way `DynProducer` does for `Producer`, except that its
+//! futures are [`InlineFuture`]s rather than boxes: a serializer is called once
+//! per key and once per value of every record, so a box per call would be an
+//! allocation per record on the send path (CLAUDE.md §13).
+//!
+//! A method added to [`Serializer`] goes in three places here: the trait, the
+//! blanket impl and the impl on `dyn DynSerializer`. `cargo xtask lint-custom`
+//! (`check-dyn-forwarding`) fails until all three forward it.
+
+use std::borrow::Cow;
+
+use crate::common::Error;
+use crate::common::header::RecordHeaders;
+use crate::common::serialization::InlineFuture;
+use crate::common::serialization::Serializer;
+
+mod private {
+    // Deliberately unnameable: it seals `DynSerializer` to `Serializer` implementors.
+    #[expect(unnameable_types)]
+    pub trait Sealed<T: ?Sized> {}
+}
+
+impl<T: ?Sized, S: super::Serializer<T>> private::Sealed<T> for S {}
+
+/// A dyn-compatible [`Serializer`], for holding a serializer of any type
+/// behind one type, as the producer does with `Box<dyn DynSerializer<K>>`.
+///
+/// Every [`Serializer`] implements `DynSerializer` automatically, and the trait
+/// is sealed, so it cannot be implemented directly: implement [`Serializer`]
+/// instead. Each method forwards to the [`Serializer`] method of the same name
+/// and returns its future as an [`InlineFuture`], which allocates nothing while
+/// the future fits its buffer. `dyn DynSerializer<T>` implements [`Serializer`]
+/// in turn, so a boxed serializer can be passed as `&*boxed` to generic code
+/// taking `S: Serializer<T> + ?Sized`.
+///
+/// Box a serializer as `dyn` once: a serializer that wraps a
+/// `dyn DynSerializer` has a future that holds the inner [`InlineFuture`],
+/// which no longer fits a second one, so boxing the wrapper as `dyn` again
+/// allocates on every call.
+///
+/// With both traits in scope a method call on a `dyn DynSerializer` is
+/// ambiguous, since both define it; call it as
+/// `DynSerializer::serialize(&*serializer, topic, data)`, or import only one of
+/// the two traits.
+///
+/// ```
+/// use confluent_kafka::common::serialization::{DynSerializer, StringSerializer};
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let serializer: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+/// let bytes = DynSerializer::serialize(&*serializer, "topic", Some("value")).await.unwrap();
+/// assert_eq!(Some(&b"value"[..]), bytes.as_deref());
+/// # }
+/// ```
+// the dyn-compatible companion of the `Serializer` trait (CLAUDE.md §3)
+#[doc(alias = "rust-only")]
+pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
+    /// See [`Serializer::serialize`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Serializer::serialize`].
+    fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a T>,
+    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>>;
+
+    /// See [`Serializer::serialize_with_headers`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Serializer::serialize_with_headers`].
+    fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a T>,
+    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>>;
+}
+
+impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
+    fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a T>,
+    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>> {
+        InlineFuture::new(Serializer::serialize(self, topic, data))
+    }
+
+    fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a T>,
+    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>> {
+        InlineFuture::new(Serializer::serialize_with_headers(self, topic, headers, data))
+    }
+}
+
+// On the trait object rather than on `Box<dyn DynSerializer>`: a boxed
+// serializer that implemented `Serializer` would also pick up the blanket
+// `DynSerializer` impl, and a call on the box would then nest one
+// `InlineFuture` in another, which no longer fits inline.
+impl<T: ?Sized> Serializer<T> for dyn DynSerializer<T> + '_ {
+    fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a T>,
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+        DynSerializer::serialize(self, topic, data)
+    }
+
+    fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a T>,
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+        DynSerializer::serialize_with_headers(self, topic, headers, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
+    use super::*;
+    use crate::common::serialization::ByteArraySerializer;
+    use crate::common::serialization::StringSerializer;
+
+    async fn through_generic<S: Serializer<str> + ?Sized>(serializer: &S, value: &str) -> Vec<u8> {
+        Serializer::serialize(serializer, "topic", Some(value))
+            .await
+            .expect("serialize")
+            .expect("bytes")
+            .into_owned()
+    }
+
+    #[tokio::test]
+    async fn test_dyn_serializer_is_a_serializer() {
+        let boxed: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        assert_eq!(b"value".to_vec(), through_generic(&*boxed, "value").await);
+    }
+
+    #[test]
+    fn test_dyn_call_on_a_built_in_is_ready_and_borrows() {
+        let boxed: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
+        let data = [1u8, 2, 3];
+        let headers = RecordHeaders::new();
+        let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
+            &*boxed,
+            "topic",
+            &headers,
+            Some(&data[..])
+        ));
+        match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(Ok(Some(Cow::Borrowed(bytes)))) => assert_eq!(data.as_ptr(), bytes.as_ptr()),
+            other => panic!("expected ready borrowed bytes, got {other:?}"),
+        }
+    }
+
+    /// CLAUDE.md §13: a call through `dyn` on the send path allocates nothing,
+    /// neither for the future (it fits the `InlineFuture` buffer) nor for the
+    /// bytes (the built-ins borrow the input).
+    #[test]
+    fn test_dyn_call_allocates_nothing() {
+        let string: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        let array: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
+        let headers = RecordHeaders::new();
+        let data = [1u8, 2, 3];
+        let mut cx = Context::from_waker(Waker::noop());
+        let count = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
+                &*string,
+                "topic",
+                &headers,
+                Some("value")
+            ));
+            assert!(matches!(
+                future.as_mut().poll(&mut cx),
+                Poll::Ready(Ok(Some(Cow::Borrowed(b"value"))))
+            ));
+            let mut future = std::pin::pin!(DynSerializer::serialize(&*array, "topic", Some(&data[..])));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(Some(Cow::Borrowed(_))))));
+            crate::AllocTrackingGuard::count()
+        };
+        assert_eq!(0, count, "a dyn serializer call must not allocate");
+    }
+
+    #[test]
+    fn test_errors_pass_through_unchanged() {
+        struct Failing;
+        impl Serializer<str> for Failing {
+            async fn serialize<'a>(
+                &'a self,
+                _topic: &'a str,
+                _data: Option<&'a str>,
+            ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+                Err(Error::serialization("cannot serialize"))
+            }
+        }
+        let boxed: Box<dyn DynSerializer<str>> = Box::new(Failing);
+        let mut future = std::pin::pin!(DynSerializer::serialize(&*boxed, "topic", Some("v")));
+        match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(Err(error)) => {
+                assert!(error.is_serialization_error());
+                assert_eq!("cannot serialize", error.message());
+            },
+            other => panic!("expected a ready error, got {other:?}"),
+        }
+    }
+}

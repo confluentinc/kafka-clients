@@ -53,7 +53,7 @@ use crate::common::network::Selector;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::Serializer;
+use crate::common::serialization::DynSerializer;
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::consumer::OffsetAndMetadata;
@@ -184,9 +184,9 @@ pub struct KafkaProducer<K, V> {
     /// The client ID used for this producer.
     client_id: String,
     /// The key serializer.
-    key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer.
-    value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    value_serializer: Box<dyn DynSerializer<V>>,
     /// The maximum size of a request in bytes.
     max_request_size: i32,
     /// The total memory size for the buffer pool.
@@ -311,9 +311,9 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// The producer configuration. Java's `config`.
     pub config: &'a ProducerConfig,
     /// The key serializer. Java's `keySerializer`.
-    pub key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    pub key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer. Java's `valueSerializer`.
-    pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    pub value_serializer: Box<dyn DynSerializer<V>>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
     /// The record accumulator. Java's `accumulator`. A producer built through these options
@@ -360,8 +360,8 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
 /// satisfy that naming rule (DoD #7).
 pub(crate) struct KafkaProducerOptionsBuilder<'a, K, V> {
     config: Option<&'a ProducerConfig>,
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
     running: Option<Arc<AtomicBool>>,
@@ -407,12 +407,12 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
         self
     }
     /// Sets [`KafkaProducerOptions::key_serializer`], a mandatory parameter.
-    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn Serializer<K> + Send + Sync>) -> Self {
+    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn DynSerializer<K>>) -> Self {
         self.key_serializer = Some(key_serializer);
         self
     }
     /// Sets [`KafkaProducerOptions::value_serializer`], a mandatory parameter.
-    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn Serializer<V> + Send + Sync>) -> Self {
+    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn DynSerializer<V>>) -> Self {
         self.value_serializer = Some(value_serializer);
         self
     }
@@ -546,9 +546,9 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     /// The producer configuration. Java's `config`.
     pub config: &'a ProducerConfig,
     /// The key serializer. Java's `keySerializer`.
-    pub key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    pub key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer. Java's `valueSerializer`.
-    pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    pub value_serializer: Box<dyn DynSerializer<V>>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
     /// The record accumulator. Java has no `accumulator` parameter on `:352`;
@@ -585,8 +585,8 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
 /// [`Error::LocalIllegalArgument`] if they were not set.
 pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     config: Option<&'a ProducerConfig>,
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
     chunked_accumulator: Option<ChunkedRecordAccumulator>,
@@ -634,12 +634,12 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
         self
     }
     /// Sets [`KafkaProducerClientOptions::key_serializer`], a mandatory parameter.
-    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn Serializer<K> + Send + Sync>) -> Self {
+    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn DynSerializer<K>>) -> Self {
         self.key_serializer = Some(key_serializer);
         self
     }
     /// Sets [`KafkaProducerClientOptions::value_serializer`], a mandatory parameter.
-    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn Serializer<V> + Send + Sync>) -> Self {
+    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn DynSerializer<V>>) -> Self {
         self.value_serializer = Some(value_serializer);
         self
     }
@@ -926,8 +926,8 @@ impl<K, V> KafkaProducer<K, V> {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map,Serializer,Serializer)")]
     pub fn new(
         config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
     ) -> Result<Self, Error>
     where
         K: 'static,
@@ -964,8 +964,8 @@ impl<K, V> KafkaProducer<K, V> {
     /// (`KafkaProducer.java:519-524`).
     fn new_inner(
         mut config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
     ) -> Result<Self, Error>
     where
         K: 'static,
@@ -2065,50 +2065,62 @@ impl<K, V> KafkaProducer<K, V> {
         // callback and yields a failed future (`:1130`), anything else is returned
         // as `Err` (`:1147` / `:1151`). Rewriting every serializer error as
         // `SerializationException` flipped `is_retriable_error()` for the first
-        // case and skipped its callback entirely. Both branches below — the
-        // custom-partitioner one that serializes by borrowing and the owned
-        // zero-copy one — dispatch the same way.
-        if self.partitioner.is_some() {
-            // A custom partitioner is handed the *typed* key/value
-            // (`KafkaProducer.java:1561-1562` passes `record.key()` / `record.value()`),
-            // so serialize by BORROWING — `serialize_with_headers` keeps `key`/`value`
-            // alive — and compute the partition here, with the typed references. That
-            // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
-            // short-circuits its own partition step so the partitioner runs EXACTLY
-            // once, even a stateful one such as `RoundRobinPartitioner`.
-            let serialized_key =
-                match self
-                    .key_serializer
-                    .serialize_with_headers(&record_topic, &record_headers, key.as_ref())
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
-                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
-                        return self
-                            .handle_api_error(e, &record_topic, partition, callback)
-                            .map(TrySendOutcome::Accepted);
-                    },
-                    Err(e) => return Err(e),
-                };
+        // case and skipped its callback entirely.
+        //
+        // The serializers borrow `key` / `value`, so a serializer whose input
+        // already is the bytes (`ByteArraySerializer`, `StringSerializer`) hands
+        // back a borrow of the record's own buffer, and the accumulator's append
+        // is the only copy (CLAUDE.md §14). Each serializer future lives inside
+        // this method's own future, so awaiting one through `dyn` allocates
+        // nothing (`InlineFuture`).
+        let serialized_key = match DynSerializer::serialize_with_headers(
+            &*self.key_serializer,
+            &record_topic,
+            &record_headers,
+            key.as_ref(),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) if e.is_api_error() => {
+                // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                return self
+                    .handle_api_error(e, &record_topic, partition, callback)
+                    .map(TrySendOutcome::Accepted);
+            },
+            Err(e) => return Err(e),
+        };
 
-            let serialized_value =
-                match self
-                    .value_serializer
-                    .serialize_with_headers(&record_topic, &record_headers, value.as_ref())
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
-                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
-                        return self
-                            .handle_api_error(e, &record_topic, partition, callback)
-                            .map(TrySendOutcome::Accepted);
-                    },
-                    Err(e) => return Err(e),
-                };
+        let serialized_value = match DynSerializer::serialize_with_headers(
+            &*self.value_serializer,
+            &record_topic,
+            &record_headers,
+            value.as_ref(),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) if e.is_api_error() => {
+                // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                return self
+                    .handle_api_error(e, &record_topic, partition, callback)
+                    .map(TrySendOutcome::Accepted);
+            },
+            Err(e) => return Err(e),
+        };
 
-            let partition = self.compute_partition(
+        // A custom partitioner is handed the *typed* key/value
+        // (`KafkaProducer.java:1561-1562` passes `record.key()` / `record.value()`),
+        // so with one the partition is computed here, where the typed references
+        // are still at hand. It is passed to `do_send_bytes` as an explicit
+        // `Some(..)`, which short-circuits that method's own partition step so the
+        // partitioner runs EXACTLY once, even a stateful one such as
+        // `RoundRobinPartitioner`. Without one, `do_send_bytes` runs the built-in
+        // key-hash partitioning on the serialized key.
+        let partition = if self.partitioner.is_some() {
+            Some(self.compute_partition(
                 &record_topic,
                 partition_opt,
                 key.as_ref(),
@@ -2116,78 +2128,27 @@ impl<K, V> KafkaProducer<K, V> {
                 value.as_ref(),
                 serialized_value.as_deref(),
                 &cluster,
-            )?;
-
-            let headers = record_headers.to_array();
-
-            self.do_send_bytes(
-                &record_topic,
-                Some(partition),
-                timestamp_opt,
-                serialized_key.as_deref(),
-                serialized_value.as_deref(),
-                headers,
-                callback,
-                now_ms,
-                remaining_wait_ms,
-                &cluster,
-                wait,
-            )
-            .await
+            )?)
         } else {
-            // No custom partitioner: keep the zero-copy owned path.
-            // `serialize_owned_with_headers` moves the key/value so a `Vec<u8>` payload
-            // is written into the batch without a copy (CLAUDE.md §14); `do_send_bytes`
-            // then runs the built-in key-hash partitioning via `compute_partition`.
-            let serialized_key =
-                match self
-                    .key_serializer
-                    .serialize_owned_with_headers(&record_topic, &record_headers, key)
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
-                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
-                        return self
-                            .handle_api_error(e, &record_topic, partition, callback)
-                            .map(TrySendOutcome::Accepted);
-                    },
-                    Err(e) => return Err(e),
-                };
+            partition_opt
+        };
 
-            let serialized_value =
-                match self
-                    .value_serializer
-                    .serialize_owned_with_headers(&record_topic, &record_headers, value)
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
-                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
-                        return self
-                            .handle_api_error(e, &record_topic, partition, callback)
-                            .map(TrySendOutcome::Accepted);
-                    },
-                    Err(e) => return Err(e),
-                };
+        let headers = record_headers.to_array();
 
-            let headers = record_headers.to_array();
-
-            self.do_send_bytes(
-                &record_topic,
-                partition_opt,
-                timestamp_opt,
-                serialized_key.as_deref(),
-                serialized_value.as_deref(),
-                headers,
-                callback,
-                now_ms,
-                remaining_wait_ms,
-                &cluster,
-                wait,
-            )
-            .await
-        }
+        self.do_send_bytes(
+            &record_topic,
+            partition,
+            timestamp_opt,
+            serialized_key.as_deref(),
+            serialized_value.as_deref(),
+            headers,
+            callback,
+            now_ms,
+            remaining_wait_ms,
+            &cluster,
+            wait,
+        )
+        .await
     }
 
     /// The non-blocking form of `send`: the same path, except that it never waits.
@@ -3094,6 +3055,7 @@ mod tests {
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
+    use crate::common::serialization::Serializer;
     use crate::common::serialization::StringSerializer;
     use crate::common::utils::Utils;
     use crate::producer::MockPartitioner;
@@ -3102,6 +3064,7 @@ mod tests {
     use crate::producer::RoundRobinPartitioner;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+    use std::borrow::Cow;
 
     const TOPIC: &str = "test-topic";
 
@@ -3222,7 +3185,11 @@ mod tests {
     struct FailingSerializer(Error);
 
     impl Serializer<String> for FailingSerializer {
-        fn serialize(&self, _topic: &str, _data: Option<&String>) -> Result<Option<Vec<u8>>, Error> {
+        async fn serialize<'a>(
+            &'a self,
+            _topic: &'a str,
+            _data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error> {
             Err(self.0.clone())
         }
     }
@@ -3230,7 +3197,7 @@ mod tests {
     fn create_producer_with_key_serializer(
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
-        key_serializer: Box<dyn Serializer<String> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<String>>,
     ) -> KafkaProducer<String, String> {
         KafkaProducer::with_options(
             KafkaProducerOptionsBuilder::new()
@@ -5776,6 +5743,112 @@ mod tests {
             without, with,
             "dispatching through a custom Partitioner must add no per-record allocation \
              to the send path; got {without} without a partitioner vs {with} with one"
+        );
+    }
+
+    /// CLAUDE.md §13 / §14: with a custom partitioner, a `Vec<u8>` record goes
+    /// through the serializers (the partitioner needs the typed key and value)
+    /// and still allocates nothing for them: `ByteArraySerializer` borrows the
+    /// record's own buffers, and its future fits the `InlineFuture` buffer. So
+    /// the whole `send` costs exactly what appending the already-serialized
+    /// bytes costs.
+    #[tokio::test]
+    async fn test_vec_send_with_a_custom_partitioner_allocates_nothing_for_the_serializers() {
+        use crate::common::serialization::ByteArraySerializer;
+
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
+            1024 * 1024,
+            Compression::none().build(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
+            None,
+        ));
+        let config = ProducerConfig::default();
+        let partitioner: Option<Box<dyn Partitioner<Vec<u8>, Vec<u8>>>> = Some(Box::new(RoundRobinPartitioner::new()));
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&config)
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(Arc::clone(&metadata))
+                .set_accumulator(accumulator)
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .set_partitioner(partitioner)
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+        let cluster = metadata.fetch();
+        let record = || ProducerRecord::with_key(TOPIC.to_string(), Some(b"k".to_vec()), Some(b"v".to_vec()));
+
+        let send_bytes = || {
+            producer.do_send_bytes(
+                TOPIC,
+                None,
+                None,
+                Some(b"k"),
+                Some(b"v"),
+                &[],
+                None,
+                0,
+                0,
+                &cluster,
+                SendWait::MaxBlock,
+            )
+        };
+
+        // Warm up both paths: the topic info, the deque, the batch and the
+        // partitioner's per-topic counter. Ten records, so the two measured
+        // below (the 11th and 12th) do not land on a doubling of the batch's
+        // per-record vectors, which would charge an amortized growth to one
+        // side only.
+        for _ in 0..5 {
+            producer
+                .do_send(record(), None, SendWait::MaxBlock)
+                .await
+                .expect("append should succeed");
+            send_bytes().await.expect("append should succeed");
+        }
+
+        let through_serializers = {
+            let record = record();
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            producer
+                .do_send(record, None, SendWait::MaxBlock)
+                .await
+                .expect("append should succeed");
+            crate::AllocTrackingGuard::count()
+        };
+        let bytes_only = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            send_bytes().await.expect("append should succeed");
+            crate::AllocTrackingGuard::count()
+        };
+        // `do_send` waits on the metadata before serializing, as Java's
+        // `doSend` does; that step's own cost is not the serializers'.
+        let metadata_wait = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            producer
+                .wait_on_metadata(TOPIC, None, 0, 0)
+                .await
+                .expect("the metadata is cached");
+            crate::AllocTrackingGuard::count()
+        };
+        assert!(bytes_only > 0, "the tracker must actually be measuring");
+        assert_eq!(
+            bytes_only + metadata_wait,
+            through_serializers,
+            "serializing a Vec<u8> record must add no allocation to the send path; got \
+             {through_serializers} through the serializers vs {bytes_only} for the bytes alone \
+             plus {metadata_wait} for the metadata wait"
         );
     }
 

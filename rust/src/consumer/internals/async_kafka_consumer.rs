@@ -51,7 +51,12 @@
 //! `ClientTelemetryReporter` / `ClientTelemetryUtils` are NOT translated;
 //! the corresponding fields are `None`. Per Phase 11 PLAN.md deferral #6.
 
-#![expect(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
+// Phase 11 commits 5-7 wire commit / state-query / close. Which items are
+// dead differs between the library and its test build (the tests use some,
+// others are reached only from non-test code), so `expect` holds for neither
+// alone: expect it in the library, allow it in the test build.
+#![cfg_attr(not(test), expect(dead_code))]
+#![cfg_attr(test, allow(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -1735,7 +1740,7 @@ impl NetworkThreadCloseHandle {
 ///     `wakeup_trigger`, `network_thread_close` (the erased handle).
 ///   - **App-side only**: `client_id`, `group_id`, `group_metadata`,
 ///     `rebalance_listener_invoker`,
-///     `offset_commit_callback_invoker`, `deserializers`,
+///     `offset_commit_callback_invoker`,
 ///     `interceptors`, `auto_commit_enabled`, `default_api_timeout_ms`,
 ///     `closed`, `rebalance_listener`.
 ///
@@ -1859,9 +1864,6 @@ where
     /// Drains pending `OffsetCommitCallback` invocations at the top of
     /// every blocking-style API.
     offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
-    /// Key + value deserializers, shared with `Fetcher` /
-    /// `FetchCollector`.
-    deserializers: Arc<Deserializers<K, V>>,
     /// User-supplied interceptors. Wrapped in `Mutex` because
     /// `on_consume` takes `&mut self` per Phase 2.
     interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
@@ -2653,7 +2655,6 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
-    pub deserializers: Arc<Deserializers<K, V>>,
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
     pub isolation_level: IsolationLevel,
     pub time: Arc<dyn Time>,
@@ -2783,8 +2784,8 @@ where
     /// reasoning, which is not repeated here.
     pub fn new(
         config: ConsumerConfig,
-        key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
-        value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
+        key_deserializer: Box<dyn crate::common::serialization::DynDeserializer<K>>,
+        value_deserializer: Box<dyn crate::common::serialization::DynDeserializer<V>>,
     ) -> Result<Self, Error> {
         Self::new_inner(config, key_deserializer, value_deserializer).map_err(|err| {
             // Java's wrap is UNCONDITIONAL — unlike
@@ -2805,8 +2806,8 @@ where
     /// `catch (Throwable t)` wrap applied to every error it returns.
     fn new_inner(
         mut config: ConsumerConfig,
-        key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
-        value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
+        key_deserializer: Box<dyn crate::common::serialization::DynDeserializer<K>>,
+        value_deserializer: Box<dyn crate::common::serialization::DynDeserializer<V>>,
     ) -> Result<Self, Error> {
         use crate::ApiVersions;
         use crate::ClientUtils;
@@ -2882,7 +2883,7 @@ where
             Arc::new(Mutex::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
 
         // Java line 410 — `deserializers = new Deserializers<>(...)`.
-        let _deserializers: Arc<Deserializers<K, V>> =
+        let deserializers: Arc<Deserializers<K, V>> =
             Arc::new(Deserializers::new(key_deserializer, value_deserializer));
 
         // Java line 412-414 — `clusterResourceListeners`. Phase-11
@@ -3558,7 +3559,7 @@ where
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             fetch_config,
-            Arc::clone(&_deserializers),
+            deserializers,
             Arc::clone(&fetch_metrics_manager),
             Arc::clone(&time),
         ));
@@ -3704,7 +3705,6 @@ where
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
-            deserializers: _deserializers,
             interceptors: _interceptors,
             isolation_level: _isolation_level,
             time,
@@ -3809,7 +3809,6 @@ where
             positions_validator: components.positions_validator,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
             offset_commit_callback_invoker: Arc::clone(&components.offset_commit_callback_invoker),
-            deserializers: components.deserializers,
             interceptors: components.interceptors,
             auto_commit_enabled,
             default_api_timeout_ms,
@@ -5723,7 +5722,7 @@ where
 
         // Java `:2057`.
         if self.positions_validator.can_skip_update_fetch_positions()? {
-            return self.fetch_collector.collect_fetch(&self.fetch_buffer);
+            return self.fetch_collector.collect_fetch(&self.fetch_buffer).await;
         }
 
         // Java `:2062`. With the non-blocking async poll, it's critical that
@@ -5737,7 +5736,7 @@ where
             return Ok(ConsumerRecords::empty());
         }
 
-        self.fetch_collector.collect_fetch(&self.fetch_buffer)
+        self.fetch_collector.collect_fetch(&self.fetch_buffer).await
     }
 
     // ── Commit ─────────────────────────────────────────────────────────
@@ -6873,6 +6872,22 @@ where
         self.fetch_metrics_manager.close();
         self.rebalance_callback_metrics_manager.close();
 
+        // Java: `closeQuietly(deserializers, "consumer deserializers",
+        // firstException)` (`AsyncKafkaConsumer.java:1679`). The collector
+        // holds the only reference to the deserializers, and nothing else
+        // holds the collector once the background task has been joined, so
+        // closing them through `&mut` cannot fail on sharing in practice;
+        // `close_deserializers` still reports it rather than skipping the close.
+        let deserializers_closed = match Arc::get_mut(&mut self.fetch_collector) {
+            Some(fetch_collector) => fetch_collector.close_deserializers().await,
+            None => Err(Error::local_illegal_state(
+                "Cannot close the consumer deserializers: the fetch collector is still shared",
+            )),
+        };
+        if let Err(err) = deserializers_closed {
+            record(&mut first_error, "Failed to close consumer deserializers", err);
+        }
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -7394,7 +7409,7 @@ mod tests {
     struct TestBytesDeserializer;
 
     impl Deserializer<Vec<u8>> for TestBytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -7540,7 +7555,7 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&subs),
             fetch_config,
-            Arc::clone(&deserializers),
+            deserializers,
             Arc::clone(&fetch_metrics_manager),
             Arc::new(crate::common::utils::SystemTime),
         ));
@@ -7595,7 +7610,6 @@ mod tests {
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
-            deserializers,
             interceptors,
             isolation_level: IsolationLevel::ReadUncommitted,
             time,
@@ -8237,7 +8251,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -8334,7 +8348,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -8380,7 +8394,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -8431,7 +8445,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -8493,7 +8507,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -8535,7 +8549,7 @@ mod tests {
         // Local string deserializer matching the smoke-test pattern.
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -14401,7 +14415,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
@@ -14444,7 +14458,7 @@ mod tests {
 
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
                 String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }

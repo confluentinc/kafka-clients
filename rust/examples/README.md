@@ -51,10 +51,9 @@ These two examples use Robert Yokota's
 crate for the registry round trip, wrapped in implementations of this
 client's `Serializer` and `Deserializer` traits: the producer is a
 `KafkaProducer<String, User>` and the consumer's `poll` returns decoded
-`User` records. The crate's serializers are `async` while the traits are
-synchronous, so the wrappers wait on them with `tokio::task::block_in_place`,
-which needs Tokio's multi-thread runtime. Only the first record of a schema
-reaches the registry; the client caches the schema and its id after that.
+`User` records. The crate's serializers are `async`, like the traits, so the
+wrappers await them directly. Only the first record of a schema reaches the
+registry; the registry client caches the schema and its id after that.
 
 ## Run an example
 
