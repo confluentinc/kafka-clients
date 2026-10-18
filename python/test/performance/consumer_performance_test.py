@@ -554,11 +554,13 @@ class _Measurement:
         # sparse {1 ms bucket: count}, a latency above CONSUMER_MAX_LATENCY_MS
         # counted in the top bucket (as rust/consumer-perf, librdkafka_e2e.c
         # and JavaE2E.java). The exact sum / min / max are kept beside it for
-        # the summary's avg / min / max; measured_messages is the sample count.
+        # the summary's avg / min / max; latency_samples is the sample count.
+        # measured_messages counts every measured record, latency or not.
         self.latency_hist = {}
         self.latency_sum_ms = 0
         self.latency_min_ms = None
         self.latency_max_ms = 0
+        self.latency_samples = 0
         self.measured_messages = 0
         self.consume_start = None
         self.warmup_complete = (cfg.warmup_seconds <= 0)
@@ -586,7 +588,10 @@ class _Measurement:
             self.metrics.measurement_start_ms = _now_ms()
         self.no_data_deadline = time.monotonic() + 120
 
-    def process_record(self, ts_ms, nbytes):
+    def process_record(self, ts_ms, nbytes, poll_now_ms):
+        """``poll_now_ms`` is the wall clock when the record's poll returned:
+        one clock per poll, as the other consumer harnesses take it, so the
+        harness's own per-record work is not counted as latency."""
         if self.consume_start is None:
             self.consume_start = time.monotonic()
         now = time.monotonic()
@@ -601,20 +606,24 @@ class _Measurement:
                 print(f">>> warmup complete ({self.cfg.warmup_seconds}s); measuring", flush=True)
             return
 
+        # Every measured record counts towards throughput, as in the other
+        # consumer harnesses; only a record with a CreateTime has a latency.
+        self.metrics.bytes.add_measurement(nbytes)
+        self.metrics.messages.add_measurement(1)
+        self.measured_messages += 1
         if ts_ms and ts_ms > 0:
-            latency = _now_ms() - ts_ms
-            if latency >= 0:
-                idx = min(int(latency), CONSUMER_MAX_LATENCY_MS)
-                self.latency_hist[idx] = self.latency_hist.get(idx, 0) + 1
-                self.latency_sum_ms += latency
-                if self.latency_min_ms is None or latency < self.latency_min_ms:
-                    self.latency_min_ms = latency
-                if latency > self.latency_max_ms:
-                    self.latency_max_ms = latency
-                self.metrics.latency.add_measurement(latency)
-                self.metrics.bytes.add_measurement(nbytes)
-                self.metrics.messages.add_measurement(1)
-                self.measured_messages += 1
+            latency = poll_now_ms - ts_ms
+            # A negative latency (a clock step) lands in bucket 0, as in
+            # JavaE2E.java.
+            idx = min(max(int(latency), 0), CONSUMER_MAX_LATENCY_MS)
+            self.latency_hist[idx] = self.latency_hist.get(idx, 0) + 1
+            self.latency_sum_ms += latency
+            if self.latency_min_ms is None or latency < self.latency_min_ms:
+                self.latency_min_ms = latency
+            if latency > self.latency_max_ms:
+                self.latency_max_ms = latency
+            self.metrics.latency.add_measurement(latency)
+            self.latency_samples += 1
 
         if self.cfg.num_messages > 0 and self.measured_messages >= self.cfg.num_messages:
             raise _Done()
@@ -742,8 +751,11 @@ def run(cfg, metrics=None):
     try:
         try:
             while not _terminating:
+                poll_now_ms = None
                 for ts_ms, nbytes in poll():
-                    meas.process_record(ts_ms, nbytes)
+                    if poll_now_ms is None:
+                        poll_now_ms = _now_ms()
+                    meas.process_record(ts_ms, nbytes, poll_now_ms)
                 if meas.time_limit_reached():
                     break
                 if meas.no_data_timeout():
@@ -840,8 +852,11 @@ async def run_async(cfg, metrics=None):
     try:
         try:
             while not _terminating:
+                poll_now_ms = None
                 async for ts_ms, nbytes in poll():
-                    meas.process_record(ts_ms, nbytes)
+                    if poll_now_ms is None:
+                        poll_now_ms = _now_ms()
+                    meas.process_record(ts_ms, nbytes, poll_now_ms)
                 if meas.time_limit_reached():
                     break
                 if meas.no_data_timeout():
@@ -882,7 +897,7 @@ def _summarize(cfg, meas, measured_duration, metrics=None):
     p95 = percentile_from_hist(latency_hist, 0.95)
     p99 = percentile_from_hist(latency_hist, 0.99)
     p999 = percentile_from_hist(latency_hist, 0.999)
-    avg = meas.latency_sum_ms / measured_messages if measured_messages else 0.0
+    avg = meas.latency_sum_ms / meas.latency_samples if meas.latency_samples else 0.0
     mn = meas.latency_min_ms if meas.latency_min_ms is not None else 0
     mx = meas.latency_max_ms
     thr_msg = (measured_messages / measured_duration) if measured_duration > 0 else 0.0
@@ -906,9 +921,11 @@ def _summarize(cfg, meas, measured_duration, metrics=None):
         n = metrics.total_external_metrics
         cpu_avg = metrics.total_cpu / n
         rss_avg_mb = metrics.total_rss / n / (1024.0 * 1024.0)
-        stats["cpu_avg_pct"] = round(cpu_avg, 2)
         stats["rss_avg_mb"] = round(rss_avg_mb, 2)
-        stats["rss_avg_kib"] = round(rss_avg_mb * 1024.0, 2)
+    # Always written, 0 without a sample, as the other harnesses do: the
+    # perf-cloud driver reads both.
+    stats["cpu_avg_pct"] = round(cpu_avg or 0.0, 2)
+    stats["rss_avg_kib"] = round((rss_avg_mb or 0.0) * 1024.0, 2)
     print("\n" + "=" * 72)
     print(f"SUMMARY - CLIENT_VERSION={cfg.client_version} (warmup excluded)")
     print("=" * 72)
@@ -926,8 +943,8 @@ def _summarize(cfg, meas, measured_duration, metrics=None):
         try:
             with open(cfg.results_file, "w") as fh:
                 json.dump(stats, fh, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"Could not write {cfg.results_file}: {e}", file=sys.stderr)
     return stats
 
 
