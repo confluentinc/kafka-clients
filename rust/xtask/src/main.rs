@@ -2673,8 +2673,8 @@ fn print_help() {
                     e.g. cargo xtask chaos-matrix-status --watch 30
                     --out DIR (default: the most recently active matrix)
   transactional-producer-perf-test  Run the env-driven transactional producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
-  perf-cloud      Run the producer performance harnesses against a remote SASL_SSL
-                  cluster (e.g. Confluent Cloud) and compare the clients:
+  perf-cloud      Run the producer, transactional and consumer performance harnesses
+                  against a remote SASL_SSL cluster (e.g. Confluent Cloud) and compare the clients:
                   list / check / build / run; `cargo xtask perf-cloud help` lists the flags
 
 Usage:
