@@ -734,7 +734,7 @@ def test_close_marks_closed_and_later_calls_raise() -> None:
 def test_close_with_a_negative_timeout_closes_the_mock() -> None:
     # Java's MockConsumer.close(CloseOptions) never reads the timeout.
     consumer = earliest()
-    consumer.close(option=CloseOptions.timeout(-1))
+    consumer.close(option=CloseOptions.timeout(timeout=-1))
     assert consumer.closed()
 
 

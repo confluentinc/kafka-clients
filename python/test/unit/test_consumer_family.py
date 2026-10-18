@@ -334,7 +334,7 @@ def test_every_stub_form_works() -> None:
     c.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
                     callback=lambda offsets, exception: None)
     c.close()
-    c.close(option=CloseOptions.timeout(timedelta(seconds=1)))
+    c.close(option=CloseOptions.timeout(timeout=timedelta(seconds=1)))
 
 
 async def test_cancelling_close_waits_for_its_teardown() -> None:

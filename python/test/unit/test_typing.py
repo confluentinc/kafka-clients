@@ -295,8 +295,8 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
-    kc.close(option=CloseOptions.timeout(1.0))
-    assert_type(CloseOptions.timeout(1.0).timeout(), "float | None")
+    kc.close(option=CloseOptions.timeout(timeout=1.0))
+    assert_type(CloseOptions.timeout(timeout=1.0).timeout(), "float | None")
     base: Consumer[bytes, str] = kc
     assert_type(base.poll(timeout=0), "ConsumerRecords[bytes, str]")
 
@@ -327,7 +327,7 @@ def _consumer_family_types(c: object = None) -> None:
                                            callback=None), None)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)
-        await ac.close(option=CloseOptions.timeout(1.0))
+        await ac.close(option=CloseOptions.timeout(timeout=1.0))
         abase: AsyncConsumer[str, bytes] = ac
         assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
         am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")

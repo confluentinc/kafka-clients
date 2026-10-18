@@ -141,7 +141,7 @@ thread, on the event loop for an async client.
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
   raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
   thread, it makes the waiting call raise `WakeupError`.
-- `close()` closes with Java's default timeout; `close(option=CloseOptions.timeout(…))`
+- `close()` closes with Java's default timeout; `close(option=CloseOptions(timeout=…))`
   bounds it. Java's deprecated `close(Duration)` is not generated.
 - A deserializer defaults to the `key.deserializer` / `value.deserializer`
   config key, else to `bytes_deserializer()`; the consumer closes both when it

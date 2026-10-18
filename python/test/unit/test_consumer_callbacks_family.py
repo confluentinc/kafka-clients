@@ -57,7 +57,7 @@ def mock_consumer() -> MockConsumer[bytes, bytes]:
 
 
 def close(consumer: Consumer[Any, Any]) -> None:
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ async def deliver(consumer: AsyncConsumer[Any, Any], call: str) -> None:
         # Java's commitAsync runs the queued callbacks first (executeCallbacks).
         await consumer.commit_nowait(offsets={}, callback=None)
     else:
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
 
 @pytest.mark.parametrize("make", ASYNC_MAKERS)
@@ -215,7 +215,7 @@ def test_async_coroutine_callback_is_awaited_before_the_delivering_call_returns(
         await deliver(consumer, call)
         assert seen == [("start", threading.get_ident()), ("end", None)]
         if call != "close":
-            await consumer.close(option=CloseOptions.timeout(5))
+            await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -244,7 +244,7 @@ def test_async_coroutine_callbacks_run_one_after_another(make: Any) -> None:
         await consumer.commit_nowait(offsets=offsets, callback=plain)
         await consumer.commit(offsets={})
         assert events == ["start first", "end first", "start second", "end second", "plain"]
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -265,7 +265,7 @@ def test_async_core_delivers_the_next_callback_only_after_the_coroutine_reported
         await consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
         await consumer.commit(offsets={})
         assert queued_meanwhile == [0]
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -301,7 +301,7 @@ def test_async_raising_coroutine_callback_propagates(make: Any, raised: BaseExce
         assert e.value is raised
         # Raised once: the consumer goes on.
         await consumer.commit(offsets={})
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -325,7 +325,7 @@ def test_async_plain_raising_callback_propagates(make: Any) -> None:
             with pytest.raises(CallbackError) as e:
                 await consumer.commit(offsets={})
         assert e.value is raised
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -348,7 +348,7 @@ def test_async_mock_commit_nowait_awaits_a_coroutine_callback_inside_the_call() 
                                      callback=callback)
         events.append("returned")
         assert events == ["start", "end", "returned"]
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
         assert consumer.closed()
 
     asyncio.run(main())
@@ -381,7 +381,7 @@ def test_async_kafka_consumer_raising_coroutine_callback_inside_a_nested_commit(
         assert e.value is raised
         assert events == ["first end", "raising"]
         await asyncio.wait_for(consumer.commit(offsets={}), 10)
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -408,7 +408,7 @@ def test_async_kafka_consumer_close_wraps_a_raising_commit_callback(
 
         await consumer.commit_nowait(offsets={}, callback=awaited if coroutine else plain)
         with pytest.raises(KafkaError) as e:
-            await consumer.close(option=CloseOptions.timeout(5))
+            await consumer.close(option=CloseOptions.timeout(timeout=5))
         assert type(e.value) is KafkaError
         assert str(e.value) == "Failed to close kafka consumer"
         assert e.value.__cause__ is raised
@@ -458,7 +458,7 @@ def test_async_kafka_consumer_poll_returns_its_records_before_a_deferred_callbac
             assert e.value is raised
         else:
             with pytest.raises(KafkaError) as wrapped:
-                await consumer.close(option=CloseOptions.timeout(5))
+                await consumer.close(option=CloseOptions.timeout(timeout=5))
             assert type(wrapped.value) is KafkaError
             assert str(wrapped.value) == "Failed to close kafka consumer"
             assert wrapped.value.__cause__ is raised
@@ -468,7 +468,7 @@ def test_async_kafka_consumer_poll_returns_its_records_before_a_deferred_callbac
             return
         # Raised once: the consumer goes on.
         await asyncio.wait_for(consumer.poll(timeout=0), 10)
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -491,7 +491,7 @@ def test_async_coroutine_callback_calls_back_into_the_consumer(make: Any) -> Non
                                      callback=callback)
         await consumer.commit(offsets={})
         assert seen == [{TP}, {TP}]
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -597,7 +597,7 @@ def test_async_kafka_consumer_commit_inside_a_coroutine_callback_runs_the_queued
             # awaited by the delivering call after it (deviation).
             expected = ["first", "queued it", "first end", "queued"]
         assert events == (expected + ["nested"] if nested == "commit_nowait" else expected)
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -618,7 +618,7 @@ def test_async_mock_commit_nowait_inside_a_coroutine_callback_runs_its_callback(
         # Java's mock runs commitAsync's callback inline, the nested one too.
         assert events == ["first", "nested", "first end"]
         assert await consumer.committed(partitions=[TP]) == {TP: OffsetAndMetadata(offset=2)}
-        await consumer.close(option=CloseOptions.timeout(5))
+        await consumer.close(option=CloseOptions.timeout(timeout=5))
 
     asyncio.run(main())
 
@@ -804,7 +804,7 @@ def test_async_the_listener_exception_lives_in_its_error_until_it_is_dropped() -
         del e
         gc.collect()
         assert ref() is None
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -823,6 +823,6 @@ def test_async_the_listener_exception_reference_is_released_once() -> None:
         error.__traceback__ = None
         gc.collect()
         assert sys.getrefcount(error) == baseline
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())

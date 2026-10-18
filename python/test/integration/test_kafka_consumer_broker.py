@@ -140,7 +140,7 @@ def test_commit_inside_on_partitions_revoked_succeeds(kafka_broker: Any) -> None
         committed = consumer.committed(partitions=[tp])[tp]
         assert committed is not None and committed.offset() == 3
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_rebalance_does_not_advance_until_the_listener_returns(kafka_broker: Any) -> None:
@@ -187,7 +187,7 @@ def test_rebalance_does_not_advance_until_the_listener_returns(kafka_broker: Any
     assert outcome == {"values": ["a"]}
     assert inside == {"assignment": {tp}, "position": 0}
     assert consumer.assignment() == {tp}
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_async_commit_inside_an_async_on_partitions_revoked_succeeds(kafka_broker: Any) -> None:
@@ -213,7 +213,7 @@ def test_async_commit_inside_an_async_on_partitions_revoked_succeeds(kafka_broke
             committed = (await consumer.committed(partitions=[tp]))[tp]
             assert committed is not None and committed.offset() == 2
         finally:
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -246,7 +246,7 @@ def test_async_rebalance_does_not_advance_until_the_listener_returns(kafka_broke
         release.set()
         assert await asyncio.wait_for(polling, DEADLINE) == ["a"]
         assert consumer.assignment() == {tp}
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -292,7 +292,7 @@ def test_async_commit_callback_runs_on_the_event_loop(kafka_broker: Any) -> None
             await consumer.commit()  # waits for the pending async commit
             assert seen == [threading.get_ident()]
         finally:
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -323,7 +323,7 @@ def test_wakeup_breaks_a_waiting_poll(kafka_broker: Any) -> None:
     assert outcome["result"] == "wakeup" and outcome["elapsed"] < 15
     # The call after proceeds normally.
     consumer.poll(timeout=0)
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: Any) -> None:
@@ -369,7 +369,7 @@ def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: 
         consumer.seek(partition=error.topic_partition(), offset=error.offset() + 1)
         assert _poll_until(consumer, lambda v: len(v) >= 1) == ["c"]
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ class _Member:
         member.subscribe(topics=[topic])
         while not self._stop.is_set():
             member.poll(timeout=0.2)
-        member.close(option=CloseOptions.timeout(0))
+        member.close(option=CloseOptions.timeout(timeout=0))
 
     def stop(self) -> None:
         self._stop.set()
@@ -633,7 +633,7 @@ def test_async_rejected_call_does_not_stall_the_polling_task(kafka_broker: Any) 
         finally:
             if member is not None:
                 member.stop()
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -677,7 +677,7 @@ def test_listener_value_error_is_wrapped_as_java_does(kafka_broker: Any) -> None
         assert str(error) == "User rebalance callback throws an error"
         assert error.__cause__ is raised
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 @pytest.mark.parametrize("raised", [
@@ -695,7 +695,7 @@ def test_listener_kafka_error_is_raised_as_the_same_instance(kafka_broker: Any,
         if isinstance(raised, TopicAuthorizationError):
             assert error.unauthorized_topics() == {"t1"}  # type: ignore[attr-defined]
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None:
@@ -724,7 +724,7 @@ def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None
                     assert error.__cause__ is raised
                     return
         finally:
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -748,7 +748,7 @@ def test_close_wraps_a_listener_kafka_error(kafka_broker: Any) -> None:
         assert time.monotonic() < deadline, "the consumer never got its assignment"
         consumer.poll(timeout=0.5)
     with pytest.raises(KafkaError) as e:
-        consumer.close(option=CloseOptions.timeout(10))
+        consumer.close(option=CloseOptions.timeout(timeout=10))
     assert type(e.value) is KafkaError
     assert str(e.value) == "Failed to close kafka consumer"
     assert e.value.__cause__ is raised
@@ -805,7 +805,7 @@ def test_async_poll_returns_its_records_before_a_deferred_commit_callback_error(
             assert type(errors[0]) is KafkaError
             assert errors[0].__cause__ is raised
         finally:
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -833,7 +833,7 @@ def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any)
         assert offsets is None
         assert isinstance(error, RetriableCommitFailedError)
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +878,7 @@ def test_next_offsets_skip_the_transaction_marker(kafka_broker: Any) -> None:
         assert consumer.position(partition=tp) == 4
         assert records.next_offsets()[tp].offset() == 4
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +915,7 @@ def _commit(configs: dict[str, Any], offsets: dict[TopicPartition, OffsetAndMeta
         committer.assign(partitions=list(offsets))
         committer.commit(offsets=offsets)
     finally:
-        committer.close(option=CloseOptions.timeout(0))
+        committer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def _poll_eventually_raises(consumer: KafkaConsumer[Any, Any]) -> BaseException:
@@ -941,7 +941,7 @@ def test_missing_offset_no_reset_policy(kafka_broker: Any) -> None:
         assert isinstance(error, NoOffsetForPartitionError)
         assert error.partitions() == {tp}  # type: ignore[attr-defined]
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_reset_to_committed_offset(kafka_broker: Any) -> None:
@@ -955,7 +955,7 @@ def test_reset_to_committed_offset(kafka_broker: Any) -> None:
         consumer.poll(timeout=0)
         assert consumer.position(partition=tp) == 2
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 @pytest.mark.parametrize("strategy, expected", [("latest", 3), ("by_duration:PT1H", 0)],
@@ -973,7 +973,7 @@ def test_reset_using_auto_reset_policy(kafka_broker: Any, strategy: str, expecte
         consumer.poll(timeout=0)
         assert consumer.position(partition=tp) == expected
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_offset_is_valid_after_seek(kafka_broker: Any) -> None:
@@ -987,7 +987,7 @@ def test_offset_is_valid_after_seek(kafka_broker: Any) -> None:
         consumer.poll(timeout=0)
         assert consumer.position(partition=tp) == 1
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_commits_fetched_during_assign(kafka_broker: Any) -> None:
@@ -1006,7 +1006,7 @@ def test_commits_fetched_during_assign(kafka_broker: Any) -> None:
         committed = consumer.committed(partitions={tp1})[tp1]
         assert committed is not None and committed.offset() == 2
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_committed_does_not_leak_the_leader_epoch(kafka_broker: Any) -> None:
@@ -1035,7 +1035,7 @@ def test_committed_does_not_leak_the_leader_epoch(kafka_broker: Any) -> None:
         control = int("1000")
         assert sys.getrefcount(epoch) == sys.getrefcount(control)
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_no_committed_offsets(kafka_broker: Any) -> None:
@@ -1052,7 +1052,7 @@ def test_no_committed_offsets(kafka_broker: Any) -> None:
         assert tp0_committed is not None and tp0_committed.offset() == 1
         assert committed[tp1] is None
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 @pytest.mark.parametrize("auto_commit", [True, False],
@@ -1103,7 +1103,7 @@ def test_manual_assignment_change(kafka_broker: Any, auto_commit: bool) -> None:
                 break
             time.sleep(0.1)
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_offset_of_paused_partitions(kafka_broker: Any) -> None:
@@ -1126,7 +1126,7 @@ def test_offset_of_paused_partitions(kafka_broker: Any) -> None:
         assert consumer.position(partition=tp1) == 3
         consumer.unsubscribe()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_list_offset_should_update_subscriptions(kafka_broker: Any) -> None:
@@ -1143,7 +1143,7 @@ def test_list_offset_should_update_subscriptions(kafka_broker: Any) -> None:
         assert consumer.end_offsets(partitions={tp}) == {tp: 3}
         assert consumer.current_lag(topic_partition=tp) == 2
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_subscription_on_invalid_topic(kafka_broker: Any) -> None:
@@ -1154,7 +1154,7 @@ def test_subscription_on_invalid_topic(kafka_broker: Any) -> None:
         error = _poll_eventually_raises(consumer)
         assert isinstance(error, InvalidTopicError)
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_verify_no_coordinator_lookup_for_manual_assignment_with_seek(kafka_broker: Any) -> None:
@@ -1179,7 +1179,7 @@ def test_verify_no_coordinator_lookup_for_manual_assignment_with_seek(kafka_brok
         assert consumer.position(partition=tp) == 3
         assert {p: oam.offset() for p, oam in records.next_offsets().items()} == {tp: 3}
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_poll_sends_request_to_join(kafka_broker: Any) -> None:
@@ -1199,4 +1199,4 @@ def test_poll_sends_request_to_join(kafka_broker: Any) -> None:
             consumer.poll(timeout=0)
             time.sleep(0.05)
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))

@@ -176,45 +176,77 @@ def test_kafka_consumer_group_metadata_deep_copies_to_itself() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CloseOptions: CloseOptionsTest
+# CloseOptions: CloseOptionsTest, then the binding's own checks of the keyword
+# constructor Java builds through setters (CLAUDE.md, Python Binding
+# Conventions, Signatures).
 # --------------------------------------------------------------------------- #
 
 
 def test_operation_should_not_be_null() -> None:
     with pytest.raises(NullPointerError) as exc:
-        CloseOptions.group_membership_operation(None)  # type: ignore[arg-type]
+        CloseOptions.group_membership_operation(operation=None)  # type: ignore[arg-type]
     assert str(exc.value) == "operation should not be null"
     with pytest.raises(NullPointerError):
-        CloseOptions.timeout(0).with_group_membership_operation(None)  # type: ignore[arg-type]
+        CloseOptions.timeout(timeout=0).with_group_membership_operation(operation=None)  # type: ignore[arg-type]
+    # The keyword constructor calls the setter, so an explicit None raises as it does.
+    with pytest.raises(NullPointerError) as exc:
+        CloseOptions(operation=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "operation should not be null"
 
 
 def test_operation_should_have_default_value() -> None:
-    assert CloseOptions.timeout(0).group_membership_operation() is _DEFAULT
+    assert CloseOptions.timeout(timeout=0).group_membership_operation() is _DEFAULT
 
 
 def test_timeout_could_be_null() -> None:
-    options = CloseOptions.timeout(None)
+    options = CloseOptions.timeout(timeout=None)
     assert options.timeout() is None
+    assert CloseOptions(timeout=None).timeout() is None
 
 
 def test_timeout_should_be_default_empty() -> None:
-    assert CloseOptions.group_membership_operation(_DEFAULT).timeout() is None
+    assert CloseOptions.group_membership_operation(operation=_DEFAULT).timeout() is None
 
 
-def test_close_options_builder_shape() -> None:
-    with pytest.raises(TypeError) as exc:
-        CloseOptions()
-    assert str(exc.value) == (
-        "CloseOptions cannot be constructed directly; use CloseOptions.timeout(...) or "
-        "CloseOptions.group_membership_operation(...)")
+def test_close_options_keyword_constructor() -> None:
+    """Java's private ``CloseOptions()``, then one keyword per setter field."""
+    default = CloseOptions()
+    assert default.timeout() is None and default.group_membership_operation() is _DEFAULT
     leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
-    options = CloseOptions.timeout(timedelta(seconds=3)).with_group_membership_operation(leave)
+    options = CloseOptions(timeout=timedelta(seconds=3), operation=leave)
     # A returned Duration is a float of seconds.
     assert options.timeout() == 3.0
     assert options.group_membership_operation() is leave
-    assert options.with_timeout(1.5) is options and options.timeout() == 1.5
+    assert CloseOptions(operation=leave).timeout() is None
+    assert CloseOptions(timeout=2.5).group_membership_operation() is _DEFAULT
+
+
+def test_close_options_factories_and_setters() -> None:
+    leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
+    options = CloseOptions.timeout(timeout=timedelta(seconds=3)).with_group_membership_operation(
+        operation=leave)
+    assert options.timeout() == 3.0
+    assert options.group_membership_operation() is leave
+    assert options.with_timeout(timeout=1.5) is options and options.timeout() == 1.5
+    assert CloseOptions.group_membership_operation(operation=leave).group_membership_operation() is leave
     assert [m.value for m in CloseOptions.GroupMembershipOperation] == [
         "LEAVE_GROUP", "REMAIN_IN_GROUP", "DEFAULT"]
+
+
+def test_close_options_positional_calls_are_type_errors() -> None:
+    """Every parameter is keyword-only (Signatures); the one-argument setters and
+    factories included, since ruling 13 removed the fluent-setter exemption."""
+    leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
+    with pytest.raises(TypeError):
+        CloseOptions(1.0)  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        CloseOptions.timeout(1.0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions.group_membership_operation(leave)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions().with_timeout(1.0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions().with_group_membership_operation(leave)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
