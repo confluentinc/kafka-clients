@@ -810,6 +810,11 @@ def run_producer(index, bootstrap_servers, measured_start_ns,
                         record_committed_record(commit_ns - produce_ns[r], ok)
 
             txn_index += 1
+        # The wait owed for the last transaction's records, which the next
+        # begin_transaction would have taken: without it a fast client ends a
+        # counted run early and overstates throughput.
+        if not terminating and 0 < per_producer_num_messages <= records_sent:
+            rate.maybe_wait(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Producer {index} failed: {e}")
     finally:
@@ -961,6 +966,9 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
                 eos_add_processed(batch_records)
                 txn_index += 1
                 _eos_note_progress()
+        # This producer's owed wait, as in the produce loop.
+        if not terminating and num_messages > 0 and eos_target_reached():
+            rate.maybe_wait(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"EOS producer {index} failed: {e}")
     finally:
@@ -1427,6 +1435,11 @@ async def run_producer_async(index, bootstrap_servers, measured_start_ns,
                         ok = _verify_async_result(results[r]) if r < len(results) else False
                         record_committed_record(commit_ns - produce_ns[r], ok)
             txn_index += 1
+        # The wait owed for the last transaction's records, which the next
+        # begin_transaction would have taken: without it a fast client ends a
+        # counted run early and overstates throughput.
+        if not terminating and 0 < per_producer_num_messages <= records_sent:
+            await rate.maybe_wait_async(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Async producer {index} failed: {e}")
     finally:
@@ -1541,6 +1554,9 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                 eos_add_processed(batch_records)
                 txn_index += 1
                 _eos_note_progress()
+        # This producer's owed wait, as in the produce loop.
+        if not terminating and num_messages > 0 and eos_target_reached():
+            await rate.maybe_wait_async(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Async EOS producer {index} failed: {e}")
     finally:

@@ -70,16 +70,16 @@ import java.util.concurrent.atomic.AtomicLong;
  *                           (the time cap prints a `capped:` line, not a failure)
  *   KEY_SIZE                key size in bytes (0 = no key, default 0)
  *   VALUE_SIZE              value size in bytes (default 2048)
- *   BATCH_SIZE              batch.size in KB (default 977 ≈ 1MB; matches Python default)
- *   MAX_REQUEST_SIZE        max.request.size in KB (default 8 * BATCH_SIZE)
+ *   BATCH_SIZE              batch.size in KiB (default 1024)
+ *   MAX_REQUEST_SIZE        max.request.size in KiB (default 64 * BATCH_SIZE), capped at 8 MiB
  *   BUFFER_MEMORY           buffer.memory in MB (default unset)
- *   LINGER_MS               linger.ms
+ *   LINGER_MS               linger.ms (default 5)
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
  *   ACKS                    all / -1 / 1 / 0 (default all)
  *   USE_DEFAULTS            True / False (default False); omit all tuning knobs, use client defaults
  *   MAX_IN_FLIGHT           max.in.flight.requests.per.connection
- *   WARMUP_SECONDS          warmup duration (default 0)
+ *   WARMUP_SECONDS          warmup duration (default 120)
  *   TEST_DURATION_SECONDS   measured interval (default 600)
  *   DO_VERIFY               verify RecordMetadata fields (default True)
  *   VERIFY_CONSUMED         consume back and verify partition placement (default False)
@@ -304,6 +304,18 @@ public class ProducerPerformanceTest {
                 continueSending = !terminating;
                 if (NUM_MESSAGES > 0) {
                     continueSending = continueSending && messagesSent < NUM_MESSAGES;
+                }
+            }
+
+            // The wait owed for the records after the last checkpoint, as the
+            // C harness takes it: without it a fast client ends a counted run
+            // early and overstates throughput.
+            if (LIMIT_RPS > 0 && messagesSent > 0 && !terminating) {
+                long deadlineNs = firstMessageNs + (long) (messagesSent / rateRps * 1e9);
+                long now = System.nanoTime();
+                if (now < deadlineNs) {
+                    long sleepNs = deadlineNs - now;
+                    Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
                 }
             }
 

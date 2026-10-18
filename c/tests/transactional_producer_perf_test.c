@@ -1307,6 +1307,13 @@ static void* producer_thread_func(void* arg) {
         txn_index++;
     }
 
+    // The wait owed for the last transaction's records, which the next
+    // begin_transaction would have taken: without it a fast client ends a
+    // counted run early and overstates throughput.
+    if (pa->num_messages > 0 && records_sent >= pa->num_messages && !interrupted) {
+        sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
+    }
+
     atomic_fetch_add(&records_sent_total, records_sent);
     free(futures);
     free(produce_ts);
@@ -1652,6 +1659,12 @@ static void* eos_producer_thread_func(void* arg) {
         atomic_fetch_add(&eos_records_processed, batch);
     }
 
+    // This producer's owed wait, as in producer_thread_func.
+    if (pa->num_messages > 0 && atomic_load(&eos_records_processed) >= pa->num_messages &&
+        !interrupted) {
+        sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
+    }
+
 cleanup:
     atomic_fetch_add(&records_sent_total, records_sent);
     free(futures);
@@ -1792,15 +1805,15 @@ static void run_warmup(Message* messages) {
             RD_KAFKA_V_END);
         if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
             // Never enqueued, so no delivery report will fire (waiting for one
-            // would hang the warmup): abort the warmup transaction and stop
-            // warming up. A rejected produce fails the run, as in the measured
-            // loop; one record every 100 ms cannot be rejected for load.
+            // would hang the warmup): abort the warmup transaction and fail
+            // the run before it measures (see run_test). One record every
+            // 100 ms cannot be rejected for load.
             log_produce_rejection(rd_kafka_err2str(err));
             atomic_store(&produce_rejected, true);
             free(f);
             check_txn_error(rd_kafka_abort_transaction(rk, 60000), "warmup abort_transaction");
             rd_kafka_destroy(rk);
-            fprintf(stderr, "Warmup stopped: a produce was rejected (see above)\n");
+            fprintf(stderr, "Warmup failed: a produce was rejected (see above)\n");
             return;
         }
         check_txn_error(rd_kafka_commit_transaction(rk, 60000), "warmup commit_transaction");
@@ -1958,6 +1971,12 @@ static void run_test() {
 
     if (WARMUP_S > 0) {
         run_warmup(messages);
+        // As producer_perf_test.c: a rejection in the warmup is one the measured
+        // run would hit too, so the run fails without measuring.
+        if (atomic_load(&produce_rejected)) {
+            free_message_data(messages);
+            return;
+        }
     }
 
     // === EOS: seed SOURCE_TOPIC BEFORE the measured clock (canonical KAFKA_BIN
