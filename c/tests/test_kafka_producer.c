@@ -358,6 +358,60 @@ void test_send_cb_unreachable_broker_fails_future_with_timeout(void) {
     callback_pump_destroy(&pump);
 }
 
+void test_send_cb_unreachable_broker_returns_at_once_and_queues_the_record(void) {
+    /* The producer would have to wait on metadata it can never fetch, so
+     * `send_cb` returns at once without firing `cb`: the record was queued
+     * for the submission task, and `cb` fires later, on the pumping thread,
+     * with the future `send` would have returned, failed on the metadata
+     * timeout. */
+    const char *const pairs[] = {
+        "bootstrap.servers", "localhost:1",   /* unreachable on purpose */
+        "max.block.ms",      "1000",
+        NULL
+    };
+    kafka_producer_KafkaProducer_t *producer = make_producer(pairs);
+    const kafka_producer_Producer_t *view = kafka_producer_KafkaProducer__as_Producer(producer);
+    callback_pump_t pump;
+    callback_pump_install(&pump, view);
+
+    static const uint8_t value_bytes[] = "v";
+    static const kafka_Bytes_t value = { value_bytes, 1 };
+    kafka_producer_ProducerRecord_t *record = kafka_producer_ProducerRecord_new("unreachable-topic", &value);
+    send_result_t result;
+    memset(&result, 0, sizeof(result));
+    struct timespec before, after;
+    clock_gettime(CLOCK_MONOTONIC, &before);
+    kafka_producer_Producer_send_cb(view, record, on_send, &result);
+    clock_gettime(CLOCK_MONOTONIC, &after);
+    kafka_producer_ProducerRecord_destroy(record);
+
+    /* Queued: `cb` has not fired, and there was no wait on `max.block.ms`. */
+    long elapsed_ms = (after.tv_sec - before.tv_sec) * 1000 + (after.tv_nsec - before.tv_nsec) / 1000000;
+    TEST_ASSERT_TRUE_MESSAGE(elapsed_ms < 500, "send_cb waited on metadata");
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_NOT_NULL(result.future);
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(result.future));
+
+    void *metadata = NULL;
+    kafka_common_Error_t *err = NULL;
+    metadata = kafka_common_KafkaFuture_get(result.future, &err);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(metadata);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
+    TEST_ASSERT_EQUAL_STRING("Topic unreachable-topic not present in metadata after 1000 ms.",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    kafka_common_KafkaFuture_destroy(result.future);
+
+    close_and_destroy(producer);
+    callback_pump_destroy(&pump);
+}
+
 /* What a delivery callback that calls back into its producer saw: the error
  * `flush` and `flush_cb` returned inside it, and how long a
  * `close_with_timeout(60 s)` from inside it took. */
@@ -846,6 +900,7 @@ int main(void) {
 
     /* Send */
     RUN_TEST(test_send_cb_unreachable_broker_fails_future_with_timeout);
+    RUN_TEST(test_send_cb_unreachable_broker_returns_at_once_and_queues_the_record);
     RUN_TEST(test_delivery_callback_cannot_flush_and_closes_without_blocking);
 
     /* Transactions */
