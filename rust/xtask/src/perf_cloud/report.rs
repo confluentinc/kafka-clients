@@ -22,13 +22,11 @@
 //! column per comparison giving a client's change against its librdkafka
 //! baseline: in the `rust` group Rust and Java each against librdkafka, in
 //! the `python` group each Rust-based client against the librdkafka-based one
-//! of its mode. Never Rust against Java. The Rust-based clients' changes are
-//! banded, with no legend:
+//! of its mode. Never Rust against Java. Every change is banded, with no
+//! legend:
 //!
 //! - 🟢 better, or at most 10 % worse;
 //! - 🔴 more than 10 % worse.
-//!
-//! Java's change is a neutral reference, shown without a band.
 //!
 //! "Worse" follows the metric: lower throughput or transactions/s, higher
 //! latency, CPU or RSS. Counts (messages, transactions) get no Δ. A Δ is
@@ -53,29 +51,26 @@ const HELD_RATE_SHARE: f64 = 0.95;
 
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// A Δ column: `candidate`'s change against `baseline`, under `header`,
-/// banded when `banded` (a Rust-based client) and plain otherwise (Java, a
-/// neutral reference).
+/// A Δ column: `candidate`'s change against `baseline`, under `header`.
 pub(crate) struct Comparison {
     pub(crate) candidate: Arm,
     pub(crate) baseline: Arm,
     header: &'static str,
-    banded: bool,
 }
 
 /// The comparisons of a group, in column order. The baseline is always a
 /// librdkafka-based client.
 pub(crate) fn comparisons(group: Group) -> &'static [Comparison] {
-    const fn c(candidate: Arm, baseline: Arm, header: &'static str, banded: bool) -> Comparison {
-        Comparison { candidate, baseline, header, banded }
+    const fn c(candidate: Arm, baseline: Arm, header: &'static str) -> Comparison {
+        Comparison { candidate, baseline, header }
     }
     const RUST: &[Comparison] = &[
-        c(Arm::Rust, Arm::Librdkafka, "Δ Rust vs librdkafka", true),
-        c(Arm::Java, Arm::Librdkafka, "Δ Java vs librdkafka", false),
+        c(Arm::Rust, Arm::Librdkafka, "Δ Rust vs librdkafka"),
+        c(Arm::Java, Arm::Librdkafka, "Δ Java vs librdkafka"),
     ];
     const PYTHON: &[Comparison] = &[
-        c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync", true),
-        c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async", true),
+        c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync"),
+        c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async"),
     ];
     match group {
         Group::Rust => RUST,
@@ -482,8 +477,7 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
                             "cluster-bound".to_string()
                         },
                         (Some(c), Some(b)) => match delta(c, b, better) {
-                            Some((pct, band)) if comparison.banded => format!("{band} {pct:+.1}%"),
-                            Some((pct, _)) => format!("{pct:+.1}%"),
+                            Some((pct, band)) => format!("{band} {pct:+.1}%"),
                             None => "n/a".to_string(),
                         },
                         _ => "n/a".to_string(),
@@ -947,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_shows_javas_delta_without_a_band() {
+    fn markdown_bands_javas_delta_too() {
         let results = vec![TestResult {
             test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
             arms: vec![
@@ -958,18 +952,18 @@ mod tests {
         }];
         let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
         let md = render(Group::Rust, &all, None, &results);
-        // The same change: banded for Rust, plain for Java.
+        // The same change, banded alike for Rust and Java.
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 600 | 1,000 | 600 | 🔴 -40.0% | -40.0% |"
+            "| Throughput (msg/s) | 600 | 1,000 | 600 | 🔴 -40.0% | 🔴 -40.0% |"
         );
         assert_eq!(
             line_starting(&md, "| Latency p99 (ms) |"),
-            "| Latency p99 (ms) | 9.00 | 10.00 | 9.00 | 🟢 -10.0% | -10.0% |"
+            "| Latency p99 (ms) | 9.00 | 10.00 | 9.00 | 🟢 -10.0% | 🟢 -10.0% |"
         );
         assert_rectangular(&md);
 
-        // Java's Δ alone: still plain.
+        // Java's Δ alone.
         let md = render(Group::Rust, &[Arm::Librdkafka, Arm::Java], None, &results);
         assert_eq!(
             line_starting(&md, "| Metric |"),
@@ -977,7 +971,7 @@ mod tests {
         );
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 1,000 | 600 | -40.0% |"
+            "| Throughput (msg/s) | 1,000 | 600 | 🔴 -40.0% |"
         );
         assert_rectangular(&md);
     }
