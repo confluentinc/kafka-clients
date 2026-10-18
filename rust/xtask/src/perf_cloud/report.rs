@@ -14,9 +14,10 @@
 
 //! `report.md` and `junit.xml` of a `perf-cloud run`.
 //!
-//! The markdown opens with a table of the run's parameters. A run of one test
-//! (as CI runs) lists the test's settings there too; a run of several lists
-//! each test's settings under its heading. Each test then has a table with a
+//! The markdown opens with the results and ends with the run's parameters, as
+//! a list. A run of one test (as CI runs) lists the test's settings there
+//! too; a run of several lists each test's settings under its results. Each
+//! test has a table with a
 //! row per metric, a column per client that ran and, after the clients, a Δ
 //! column per comparison giving a client's change against its librdkafka
 //! baseline: in the `rust` group Rust and Java each against librdkafka, in
@@ -385,49 +386,58 @@ fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
 
 pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# {}\n", title(info.group));
+    let _ = writeln!(out, "# {}", title(info.group));
+    // A run of one test (as CI runs) lists the test's settings with the
+    // run's; a run of several lists each test's under its results.
+    let single = match info.tests.as_slice() {
+        [test] => Some(test),
+        _ => None,
+    };
+    let columns = columns(info);
+    if results.is_empty() {
+        let _ = writeln!(out, "\nNo test has finished yet.");
+    }
+    for result in results {
+        match single {
+            Some(_) => {
+                let _ = writeln!(out, "\n## Results\n");
+                results_table(&mut out, info, &columns, result);
+            },
+            None => {
+                let _ = writeln!(out, "\n## {}\n", inline(&result.test.id));
+                results_table(&mut out, info, &columns, result);
+                let _ = writeln!(out, "\n### Parameters\n");
+                parameter_list(&mut out, &parameters(&result.test));
+            },
+        }
+    }
+
     let clients: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
     let mut rows = vec![
         ("Start time".to_string(), start_time(&info.started)),
         ("Clients".to_string(), clients.join(", ")),
     ];
-    // A run of one test (as CI runs) lists the test's settings with the
-    // run's; a run of several lists each test's under its heading.
-    let single = match info.tests.as_slice() {
-        [test] => Some(test),
-        _ => None,
-    };
     if let Some(test) = single {
         rows.extend(parameters(test));
     }
     rows.push(("Warmup".to_string(), format!("{} min per client", info.warmup_min)));
     rows.push(("Measurement".to_string(), format!("{} min per client", info.duration_min)));
     rows.extend(info.facts.iter().cloned());
-    parameter_table(&mut out, &rows);
-
-    let columns = columns(info);
-    if results.is_empty() {
-        let _ = writeln!(out, "\nNo test has finished yet.");
-    }
-    for result in results {
-        if single.is_some() {
-            let _ = writeln!(out, "\n## Results\n");
-        } else {
-            let _ = writeln!(out, "\n## {}\n", cell(&result.test.id));
-            parameter_table(&mut out, &parameters(&result.test));
-            out.push('\n');
-        }
-        results_table(&mut out, info, &columns, result);
-    }
+    let _ = writeln!(out, "\n## Parameters\n");
+    parameter_list(&mut out, &rows);
     out
 }
 
-/// A two-column table of `(parameter, value)` rows.
-fn parameter_table(out: &mut String, rows: &[(String, String)]) {
-    let _ = writeln!(out, "| Parameter | Value |\n|---|---|");
+/// `(parameter, value)` rows as a list.
+fn parameter_list(out: &mut String, rows: &[(String, String)]) {
     for (name, value) in rows {
-        let _ = writeln!(out, "| {} | {} |", cell(name), cell(value));
+        let _ = writeln!(out, "- {}: {}", inline(name), inline(value));
     }
+}
+
+/// Text that stays on its line.
+fn inline(text: &str) -> String {
+    text.replace(['\n', '\r'], " ")
 }
 
 /// A test's results table and the notes on it.
@@ -786,12 +796,14 @@ mod tests {
         }];
         let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
         let md = render(Group::Rust, &all, Some(600.0), &results);
+        // The results first, the parameters after them, as a list.
         assert!(
-            md.starts_with("# Rust client performance results\n\n| Parameter | Value |\n|---|---|\n"),
+            md.starts_with("# Rust client performance results\n\n## Results\n\n| Metric |"),
             "{md}"
         );
-        assert!(md.contains("| Clients | Rust, librdkafka, Java |\n"), "{md}");
-        assert!(md.contains("| Cluster size | 2 CKU |\n"), "{md}");
+        assert!(!md.contains("| Parameter |"), "{md}");
+        assert!(md.contains("\n- Clients: Rust, librdkafka, Java\n"), "{md}");
+        assert!(md.contains("\n- Cluster size: 2 CKU\n"), "{md}");
         // No legend: the colors read on their own.
         assert!(!md.contains("Δ columns") && !md.contains("Worse means"), "{md}");
         // The clients come first, then the comparisons.
@@ -821,7 +833,7 @@ mod tests {
         // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
         // The cluster-bound Δ needs no note.
         assert!(
-            md.ends_with("\n**Notes**\n\n- Java failed: harness exited \\| with 1.\n"),
+            md.contains("\n**Notes**\n\n- Java failed: harness exited \\| with 1.\n\n## Parameters\n"),
             "{md}"
         );
         assert_rectangular(&md);
@@ -839,20 +851,22 @@ mod tests {
         }];
         let md = render(Group::Rust, &[Arm::Rust], Some(600.0), &results);
         assert!(
-            md.starts_with(
-                "# Rust client performance results\n\n\
-                 | Parameter | Value |\n|---|---|\n\
-                 | Start time | 2026-10-14 10:00:00 UTC |\n\
-                 | Clients | Rust |\n\
-                 | Workload | Consumer |\n\
-                 | Partitions | 200 |\n\
-                 | Value size | 1,024 B |\n\
-                 | Rate | 10,000 msg/s |\n\
-                 | Compression | none |\n\
-                 | Warmup | 5 min per client |\n\
-                 | Measurement | 30 min per client |\n\
-                 | Cluster size | 2 CKU |\n\
-                 \n## Results\n\n| Metric | Rust |\n"
+            md.starts_with("# Rust client performance results\n\n## Results\n\n| Metric | Rust |\n"),
+            "{md}"
+        );
+        assert!(
+            md.ends_with(
+                "\n## Parameters\n\n\
+                 - Start time: 2026-10-14 10:00:00 UTC\n\
+                 - Clients: Rust\n\
+                 - Workload: Consumer\n\
+                 - Partitions: 200\n\
+                 - Value size: 1,024 B\n\
+                 - Rate: 10,000 msg/s\n\
+                 - Compression: none\n\
+                 - Warmup: 5 min per client\n\
+                 - Measurement: 30 min per client\n\
+                 - Cluster size: 2 CKU\n"
             ),
             "{md}"
         );
@@ -872,33 +886,40 @@ mod tests {
         .map(|line| TestResult { test: test(line), arms: vec![] })
         .collect();
         let md = render(Group::Rust, &[Arm::Rust], None, &results);
-        let (run, tests) = md.split_once("\n## ").unwrap();
-        assert!(!run.contains("Workload"), "{md}");
         assert!(
-            tests.starts_with(
-                "a\n\n| Parameter | Value |\n|---|---|\n\
-                 | Workload | Producer |\n\
-                 | Partitions | 1 |\n\
-                 | Value size | 100 B |\n\
-                 | Rate | Unbounded |\n\
-                 \n| Metric | Rust |\n"
+            md.starts_with("# Rust client performance results\n\n## a\n\n| Metric | Rust |\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "- Rust did not run.\n\
+                 \n### Parameters\n\n\
+                 - Workload: Producer\n\
+                 - Partitions: 1\n\
+                 - Value size: 100 B\n\
+                 - Rate: Unbounded\n\
+                 \n## b\n\n| Metric | Rust |\n"
             ),
             "{md}"
         );
         assert!(
             md.contains(
-                "\n## b\n\n| Parameter | Value |\n|---|---|\n\
-                 | Workload | Transactional (EOS) |\n\
-                 | Partitions | 36 |\n\
-                 | Value size | 1,024 B |\n\
-                 | Rate | 1,000 msg/s |\n\
-                 | Records per transaction | 1,000 |\n\
-                 | Abort rate | 0.5 |\n\
-                 | Transactional producers | 16 |\n\
-                 \n| Metric | Rust |\n"
+                "- Rust did not run.\n\
+                 \n### Parameters\n\n\
+                 - Workload: Transactional (EOS)\n\
+                 - Partitions: 36\n\
+                 - Value size: 1,024 B\n\
+                 - Rate: 1,000 msg/s\n\
+                 - Records per transaction: 1,000\n\
+                 - Abort rate: 0.5\n\
+                 - Transactional producers: 16\n\
+                 \n## Parameters\n\n- Start time:"
             ),
             "{md}"
         );
+        // The run's parameters leave the tests' to their sections.
+        let (_, run) = md.rsplit_once("\n## Parameters\n").unwrap();
+        assert!(!run.contains("Workload"), "{md}");
         assert_eq!(md.matches("- Rust did not run.\n").count(), 2, "{md}");
         assert_rectangular(&md);
     }
@@ -913,7 +934,7 @@ mod tests {
             ],
         }];
         let md = render(Group::Rust, &[Arm::Rust, Arm::Java], None, &results);
-        assert!(md.contains("| Clients | Rust, Java |\n"), "{md}");
+        assert!(md.contains("\n- Clients: Rust, Java\n"), "{md}");
         // librdkafka is the only baseline: Rust and Java are never compared.
         assert_eq!(line_starting(&md, "| Metric |"), "| Metric | Rust | Java |");
         assert_eq!(
@@ -984,12 +1005,13 @@ mod tests {
             "| Throughput (msg/s) | – | – | – | – | n/a | n/a |"
         );
         assert!(
-            md.ends_with(
+            md.contains(
                 "\n**Notes**\n\n\
                  - Python sync (Rust) failed: interrupted.\n\
                  - Python sync (librdkafka) did not run.\n\
                  - Python async (Rust) did not run.\n\
-                 - Python async (librdkafka) did not run.\n"
+                 - Python async (librdkafka) did not run.\n\
+                 \n## Parameters\n"
             ),
             "{md}"
         );
@@ -1031,7 +1053,7 @@ mod tests {
             ],
         }];
         let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
-        assert!(md.contains("| Workload | Transactional (produce) |\n"), "{md}");
+        assert!(md.contains("\n- Workload: Transactional (produce)\n"), "{md}");
         assert_eq!(
             line_starting(&md, "| Transactions/s |"),
             "| Transactions/s | 50.00 | 40.00 | 🟢 +25.0% |"
