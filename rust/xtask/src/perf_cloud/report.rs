@@ -18,12 +18,17 @@
 //! (as CI runs) lists the test's settings there too; a run of several lists
 //! each test's settings under its heading. Each test then has a table with a
 //! row per metric, a column per client that ran and, after the clients, a Δ
-//! column per comparison giving the change of the Rust-based client against
-//! its baseline, banded:
+//! column per comparison giving a client's change against its librdkafka
+//! baseline: in the `rust` group Rust and Java each against librdkafka, in
+//! the `python` group each Rust-based client against the librdkafka-based one
+//! of its mode. Never Rust against Java. The Rust-based clients' changes are
+//! banded:
 //!
 //! - 🟢 better, or at most 10 % worse;
 //! - 🟡 10–20 % worse;
 //! - 🔴 more than 20 % worse.
+//!
+//! Java's change is a neutral reference, shown without a band.
 //!
 //! "Worse" follows the metric: lower throughput or transactions/s, higher
 //! latency, CPU or RSS. Counts (messages, transactions) get no Δ. A Δ is
@@ -47,31 +52,50 @@ const HELD_RATE_SHARE: f64 = 0.95;
 
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// The comparisons of a group: `(candidate, baseline, Δ column header)`. The
-/// candidate runs before its baseline.
-pub(crate) fn comparisons(group: Group) -> &'static [(Arm, Arm, &'static str)] {
+/// A Δ column: `candidate`'s change against `baseline`, under `header`,
+/// banded when `banded` (a Rust-based client) and plain otherwise (Java, a
+/// neutral reference).
+pub(crate) struct Comparison {
+    pub(crate) candidate: Arm,
+    pub(crate) baseline: Arm,
+    header: &'static str,
+    banded: bool,
+}
+
+/// The comparisons of a group, in column order. The baseline is always a
+/// librdkafka-based client.
+pub(crate) fn comparisons(group: Group) -> &'static [Comparison] {
+    const fn c(candidate: Arm, baseline: Arm, header: &'static str, banded: bool) -> Comparison {
+        Comparison { candidate, baseline, header, banded }
+    }
+    const RUST: &[Comparison] = &[
+        c(Arm::Rust, Arm::Librdkafka, "Δ Rust vs librdkafka", true),
+        c(Arm::Java, Arm::Librdkafka, "Δ Java vs librdkafka", false),
+    ];
+    const PYTHON: &[Comparison] = &[
+        c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync", true),
+        c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async", true),
+    ];
     match group {
-        Group::Rust => &[
-            (Arm::Rust, Arm::Librdkafka, "Δ vs librdkafka"),
-            (Arm::Rust, Arm::Java, "Δ vs Java"),
-        ],
-        Group::Python => &[
-            (Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync"),
-            (Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async"),
-        ],
+        Group::Rust => RUST,
+        Group::Python => PYTHON,
     }
 }
 
-/// A group's report title, and what its Δ columns compare.
+/// The legend of a banded Δ.
+const BANDS: &str = "Colors: 🟢 better or up to 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. Worse means \
+                     lower throughput, or higher latency, CPU or memory usage.";
+
+/// A group's report title, and the first sentence of its Δ legend.
 fn group_text(group: Group) -> (&'static str, &'static str) {
     match group {
         Group::Rust => (
             "Rust client performance results",
-            "the Rust client's difference from the named client",
+            "Δ columns show each client's difference from librdkafka, the baseline.",
         ),
         Group::Python => (
             "Python client performance results",
-            "the Rust-based client's difference from the librdkafka-based client in the same mode",
+            "Δ columns show the Rust-based client's difference from the librdkafka-based client in the same mode.",
         ),
     }
 }
@@ -157,20 +181,16 @@ const ROWS: &[Row] = &[
 /// A column of a test's table after the metric names.
 enum Column {
     Client(Arm),
-    Delta {
-        candidate: Arm,
-        baseline: Arm,
-        header: &'static str,
-    },
+    Delta(&'static Comparison),
 }
 
 /// The run's clients in order, then a Δ column per comparison whose clients
 /// both ran.
 fn columns(info: &RunInfo) -> Vec<Column> {
     let mut columns: Vec<Column> = info.arms.iter().map(|&arm| Column::Client(arm)).collect();
-    for &(candidate, baseline, header) in comparisons(info.group) {
-        if info.arms.contains(&candidate) && info.arms.contains(&baseline) {
-            columns.push(Column::Delta { candidate, baseline, header });
+    for comparison in comparisons(info.group) {
+        if info.arms.contains(&comparison.candidate) && info.arms.contains(&comparison.baseline) {
+            columns.push(Column::Delta(comparison));
         }
     }
     columns
@@ -377,7 +397,7 @@ fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
 }
 
 pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
-    let (title, compared) = group_text(info.group);
+    let (title, intro) = group_text(info.group);
     let mut out = String::new();
     let _ = writeln!(out, "# {title}\n");
     let clients: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
@@ -400,12 +420,27 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     parameter_table(&mut out, &rows);
 
     let columns = columns(info);
-    if columns.iter().any(|c| matches!(c, Column::Delta { .. })) {
-        let _ = writeln!(
-            out,
-            "\nΔ columns show {compared}: 🟢 better or up to 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. \
-             Worse means lower throughput, or higher latency, CPU or memory usage."
-        );
+    let compared: Vec<&Comparison> = columns
+        .iter()
+        .filter_map(|c| match c {
+            Column::Delta(comparison) => Some(*comparison),
+            Column::Client(_) => None,
+        })
+        .collect();
+    if !compared.is_empty() {
+        let mut legend = intro.to_string();
+        if compared.iter().any(|c| c.banded) {
+            legend.push(' ');
+            legend.push_str(BANDS);
+        }
+        for comparison in compared.iter().filter(|c| !c.banded) {
+            let _ = write!(
+                legend,
+                " {}'s Δ is a neutral reference and is not colored.",
+                comparison.candidate.label()
+            );
+        }
+        let _ = writeln!(out, "\n{legend}");
     }
     if results.is_empty() {
         let _ = writeln!(out, "\nNo test has finished yet.");
@@ -438,7 +473,7 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
         .iter()
         .map(|c| match c {
             Column::Client(arm) => arm.label(),
-            Column::Delta { header, .. } => header,
+            Column::Delta(comparison) => comparison.header,
         })
         .collect();
     let _ = writeln!(out, "| Metric | {} |", headers.join(" | "));
@@ -459,22 +494,22 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
                     Some(v) => number(v, row.decimals),
                     None => "–".to_string(),
                 },
-                Column::Delta { candidate, baseline, .. } => {
+                Column::Delta(comparison) => {
                     let Some(better) = row.better else {
                         return String::new();
                     };
+                    let (candidate, baseline) = (comparison.candidate, comparison.baseline);
                     let pair = (
-                        passed_metrics_of(&result.arms, *candidate).and_then(row.value),
-                        passed_metrics_of(&result.arms, *baseline).and_then(row.value),
+                        passed_metrics_of(&result.arms, candidate).and_then(row.value),
+                        passed_metrics_of(&result.arms, baseline).and_then(row.value),
                     );
                     match pair {
-                        (Some(_), Some(_))
-                            if row.throughput && (near_ingress(*candidate) || near_ingress(*baseline)) =>
-                        {
+                        (Some(_), Some(_)) if row.throughput && (near_ingress(candidate) || near_ingress(baseline)) => {
                             "cluster-bound".to_string()
                         },
                         (Some(c), Some(b)) => match delta(c, b, better) {
-                            Some((pct, band)) => format!("{band} {pct:+.1}%"),
+                            Some((pct, band)) if comparison.banded => format!("{band} {pct:+.1}%"),
+                            Some((pct, _)) => format!("{pct:+.1}%"),
                             None => "n/a".to_string(),
                         },
                         _ => "n/a".to_string(),
@@ -811,16 +846,16 @@ mod tests {
         assert!(md.contains("| Cluster size | 2 CKU |\n"), "{md}");
         assert!(
             md.contains(
-                "\nΔ columns show the Rust client's difference from the named client: 🟢 better or up to 10% worse, \
-                 🟡 10–20% worse, 🔴 more than 20% worse. Worse means lower throughput, or higher latency, CPU or \
-                 memory usage.\n"
+                "\nΔ columns show each client's difference from librdkafka, the baseline. Colors: 🟢 better or up to \
+                 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. Worse means lower throughput, or higher \
+                 latency, CPU or memory usage. Java's Δ is a neutral reference and is not colored.\n"
             ),
             "{md}"
         );
         // The clients come first, then the comparisons.
         assert_eq!(
             line_starting(&md, "| Metric |"),
-            "| Metric | Rust | librdkafka | Java | Δ vs librdkafka | Δ vs Java |"
+            "| Metric | Rust | librdkafka | Java | Δ Rust vs librdkafka | Δ Java vs librdkafka |"
         );
         assert_eq!(line_starting(&md, "|---|---:"), "|---|---:|---:|---:|---:|---:|");
         // A failure is a note, not a row.
@@ -941,17 +976,55 @@ mod tests {
         }];
         let md = render(Group::Rust, &[Arm::Rust, Arm::Java], None, &results);
         assert!(md.contains("| Clients | Rust, Java |\n"), "{md}");
-        assert_eq!(line_starting(&md, "| Metric |"), "| Metric | Rust | Java | Δ vs Java |");
+        // librdkafka is the only baseline: Rust and Java are never compared.
+        assert_eq!(line_starting(&md, "| Metric |"), "| Metric | Rust | Java |");
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 1,000 | 1,500 | 🔴 -33.3% |"
+            "| Throughput (msg/s) | 1,000 | 1,500 |"
         );
         assert!(!md.contains("librdkafka"), "{md}");
+        assert!(!md.contains("Δ"), "{md}");
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_shows_javas_delta_without_a_band() {
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 600.0, 9.0))),
+                arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 1000.0, 10.0))),
+                arm(Arm::Java, Outcome::Passed, Some(metrics("java", 600.0, 9.0))),
+            ],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let md = render(Group::Rust, &all, None, &results);
+        // The same change: banded for Rust, plain for Java.
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 600 | 1,000 | 600 | 🔴 -40.0% | -40.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency p99 (ms) |"),
+            "| Latency p99 (ms) | 9.00 | 10.00 | 9.00 | 🟢 -10.0% | -10.0% |"
+        );
         assert_rectangular(&md);
 
-        // Without a candidate and its baseline there is no Δ, nor its legend.
-        let md = render(Group::Rust, &[Arm::Librdkafka, Arm::Java], None, &[]);
-        assert!(!md.contains("Δ"), "{md}");
+        // Java's Δ alone: no colors to explain.
+        let md = render(Group::Rust, &[Arm::Librdkafka, Arm::Java], None, &results);
+        assert_eq!(
+            line_starting(&md, "| Metric |"),
+            "| Metric | librdkafka | Java | Δ Java vs librdkafka |"
+        );
+        assert!(
+            md.contains(
+                "\nΔ columns show each client's difference from librdkafka, the baseline. Java's Δ is a neutral \
+                 reference and is not colored.\n"
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("Colors"), "{md}");
+        assert_rectangular(&md);
     }
 
     #[test]
@@ -970,7 +1043,7 @@ mod tests {
         assert!(
             md.contains(
                 "Δ columns show the Rust-based client's difference from the librdkafka-based client in the same \
-                 mode: 🟢"
+                 mode. Colors: 🟢"
             ),
             "{md}"
         );

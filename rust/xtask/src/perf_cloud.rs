@@ -24,8 +24,9 @@
 //! after them. Each test runs every selected client (an **arm**), one after
 //! another, against the same cluster:
 //!
-//! - `rust`: Rust (native), librdkafka (C) and Java. Rust is compared with
-//!   both of the others.
+//! - `rust`: Rust (native), librdkafka (C) and Java. Rust and Java are each
+//!   compared with librdkafka, the baseline; Rust is never compared with
+//!   Java.
 //! - `python`: the Rust-backed and the librdkafka-backed Python clients, sync
 //!   and async. Each Rust-backed client is compared with its librdkafka
 //!   equivalent (sync with sync, async with async).
@@ -46,8 +47,8 @@
 //! - `build` builds the group's harnesses once.
 //! - `run` creates each arm's topics, runs the arm, collects its
 //!   `results.json` and deletes the topics, then writes `report.md` (per
-//!   test, a column per client and a row per metric, with the change of each
-//!   Rust-based client against its baseline) and `junit.xml`. With
+//!   test, a column per client and a row per metric, with each client's
+//!   change against its librdkafka baseline) and `junit.xml`. With
 //!   `--push-artifacts` they also go to Semaphore: the job's artifacts, and
 //!   `report.md` as the workflow's report (its Report tab).
 //!
