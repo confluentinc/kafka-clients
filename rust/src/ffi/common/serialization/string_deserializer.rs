@@ -25,12 +25,13 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use bytes::Bytes;
+use futures_util::FutureExt;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::{Deserializer, StringDeserializer};
 use crate::ffi::common::serialization::DeserializerHandle;
-use crate::ffi::common::serialization::deserializer::kafka_common_serialization_Deserializer_t;
+use crate::ffi::common::serialization::deserializer::{FfiDeserializer, kafka_common_serialization_Deserializer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, into_c_string};
 
@@ -51,34 +52,40 @@ fn string_value(result: Result<String, Error>) -> Result<GenericValue, Error> {
 }
 
 impl Deserializer<GenericValue> for GenericStringDeserializer {
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
-        string_value(self.0.deserialize(topic, data))
+    // `map` rather than `async fn`: the future holds only the inner one, which
+    // keeps the consumer's wrapper within `InlineFuture`'s buffer.
+    fn deserialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize(topic, data).map(string_value)
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
-        string_value(self.0.deserialize_with_headers(topic, headers, data))
+    fn deserialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize_with_headers(topic, headers, data).map(string_value)
     }
 
-    fn deserialize_from_shared(&self, topic: &str, source: &Bytes, data: &[u8]) -> Result<GenericValue, Error> {
-        string_value(self.0.deserialize_from_shared(topic, source, data))
+    fn deserialize_with_headers_bytes<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a Bytes,
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize_with_headers_bytes(topic, headers, data).map(string_value)
     }
 
-    fn deserialize_from_shared_with_headers(
-        &self,
-        topic: &str,
-        headers: &dyn Headers,
-        source: &Bytes,
-        data: &[u8],
-    ) -> Result<GenericValue, Error> {
-        string_value(self.0.deserialize_from_shared_with_headers(topic, headers, source, data))
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        self.0.configure(configs, is_key).await;
     }
 
-    fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.configure(configs, is_key);
-    }
-
-    fn close(&mut self) {
-        self.0.close();
+    async fn close(&mut self) {
+        self.0.close().await;
     }
 }
 
@@ -87,14 +94,12 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
 /// # Safety
 ///
 /// `self_` must be a valid string-deserializer handle, alive for `'a`.
-unsafe fn handle<'a>(
-    self_: *const kafka_common_serialization_StringDeserializer_t,
-) -> &'a DeserializerHandle<GenericStringDeserializer> {
+unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringDeserializer_t) -> &'a DeserializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-deserializer handle alive
     // for `'a`, the `DeserializerHandle::boxed` of
     // `kafka_common_serialization_StringDeserializer_new`, as `DeserializerHandle::from_ptr`
     // requires.
-    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle<GenericStringDeserializer>) }
+    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
 }
 
 /// `new StringDeserializer()`. Owned, freed with
@@ -103,7 +108,7 @@ unsafe fn handle<'a>(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_StringDeserializer_new()
 -> *mut kafka_common_serialization_StringDeserializer_t {
-    DeserializerHandle::boxed(GenericStringDeserializer(StringDeserializer::new()))
+    DeserializerHandle::boxed(FfiDeserializer::String(GenericStringDeserializer(StringDeserializer::new())))
         as *mut kafka_common_serialization_StringDeserializer_t
 }
 
@@ -141,7 +146,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer_destroy(
     // SAFETY: Per this function's `# Safety`, `self_` is null or an owned string-deserializer
     // handle not yet destroyed, as `DeserializerHandle::destroy` requires: the
     // `DeserializerHandle::boxed` of `kafka_common_serialization_StringDeserializer_new`.
-    unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle<GenericStringDeserializer>) }
+    unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle) }
 }
 
 #[cfg(test)]
@@ -150,17 +155,14 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::common::header::RecordHeaders;
     use crate::ffi::common::header::internals::record_headers::{
-        box_record_headers, kafka_common_header_internals_RecordHeaders__as_Headers,
-        kafka_common_header_internals_RecordHeaders_destroy,
+        box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
     use crate::ffi::common::serialization::deserializer::{
         kafka_common_serialization_Deserializer_close, kafka_common_serialization_Deserializer_configure,
         kafka_common_serialization_Deserializer_deserialize,
-        kafka_common_serialization_Deserializer_deserialize_from_shared,
-        kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers,
         kafka_common_serialization_Deserializer_deserialize_with_headers,
+        kafka_common_serialization_Deserializer_deserialize_with_headers_bytes,
     };
     use crate::ffi::util::{kafka_Bytes_t, kafka_string_destroy};
 
@@ -178,18 +180,17 @@ mod tests {
     fn produces_an_owned_c_string_through_the_view() {
         let handle = kafka_common_serialization_StringDeserializer_new();
         let topic = CString::new("t").unwrap();
-        let record_headers = box_record_headers(RecordHeaders::new());
+        let headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
-        // the end, after the last use of its view `view`; `record_headers` comes from
-        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
-        // valid slot pointing at null, left null by every call (asserted), and every value returned
-        // is an owned string that `take_string` frees once; `configure` gets a null map, which reads as empty.
+        // the end, after the last use of its view `view`; `headers` comes from
+        // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
+        // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
+        // null, left null by every call (asserted), and every value returned is an owned string
+        // that `take_string` frees once; `configure` gets a null map, which reads as empty.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));
-            let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut err = ptr::null_mut();
 
             let out = kafka_common_serialization_Deserializer_deserialize(
@@ -211,26 +212,15 @@ mod tests {
             assert!(err.is_null());
             assert_eq!(take_string(out), "hi");
 
-            let out = kafka_common_serialization_Deserializer_deserialize_from_shared(
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
                 view,
                 topic.as_ptr(),
-                kafka_Bytes_t::from_slice(source),
+                headers,
                 kafka_Bytes_t::from_slice(&source[6..]),
                 &raw mut err,
             );
             assert!(err.is_null());
             assert_eq!(take_string(out), "world");
-
-            let out = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
-                view,
-                topic.as_ptr(),
-                headers,
-                kafka_Bytes_t::from_slice(source),
-                kafka_Bytes_t::from_slice(&source[..5]),
-                &raw mut err,
-            );
-            assert!(err.is_null());
-            assert_eq!(take_string(out), "hello");
 
             // Malformed UTF-8 is replaced, as Java does; an interior NUL
             // truncates, as a C string must.
@@ -247,7 +237,7 @@ mod tests {
             kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1);
             kafka_common_serialization_Deserializer_close(view);
 
-            kafka_common_header_internals_RecordHeaders_destroy(record_headers);
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_StringDeserializer_destroy(handle);
             kafka_common_serialization_StringDeserializer_destroy(ptr::null_mut());
         }

@@ -12,156 +12,168 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `kafka_common_metrics_MetricValueProvider_t`:
-//! `org.apache.kafka.common.metrics.MetricValueProvider` (CLAUDE.md §4).
+//! `kafka_common_metrics_MetricValueProvider_t`: the
+//! `org.apache.kafka.common.metrics.MetricValueProvider` interface (CLAUDE.md
+//! §4, "Traits").
 //!
-//! Java's marker interface has two implementations, `Measurable` and
-//! `Gauge`; the Rust enum's two data-carrying variants follow the enum rule
-//! for variants with data (§4, "Enums"): each is built from its
-//! implementation and returned owned. A provider is passed to the registry
-//! by `const` pointer and copied: the copy shares the implementation.
+//! Java's `MetricValueProvider<T>` produces a `T`; the Rust provider produces
+//! the type-erased `MetricValue`, so a C implementation builds its reading with
+//! one of the `kafka_common_MetricValue_*` constructors and Rust takes it over.
+//! A provider is passed to the registry by `const` pointer and copied: the copy
+//! shares the implementation.
 
 #![expect(non_camel_case_types)]
 
+use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
 use crate::common::MetricValue;
-use crate::common::metrics::{Gauge, Measurable, MetricValueProvider};
-use crate::ffi::common::metric::{box_metric_value, kafka_common_MetricValue_t};
-use crate::ffi::common::metrics::gauge::{ArcGauge, kafka_common_metrics_Gauge_t, take_gauge};
-use crate::ffi::common::metrics::measurable::{ArcMeasurable, kafka_common_metrics_Measurable_t, take_measurable};
-use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_ref};
+use crate::common::metrics::{Measurable, MetricConfig, MetricValueProvider};
+use crate::ffi::common::metric::{box_metric_value, kafka_common_MetricValue_t, take_metric_value};
+use crate::ffi::common::metrics::metric_config::{
+    MetricConfigInner, kafka_common_metrics_MetricConfig_t, metric_config_ref,
+};
+use crate::ffi::common::metrics::{Interface, c_type_name, type_name_c_str};
 use crate::ffi::ffi_guard;
 
-/// Opaque handle to a [`MetricValueProvider`].
+/// Opaque handle to a [`MetricValueProvider`] implementation.
 #[repr(C)]
 pub struct kafka_common_metrics_MetricValueProvider_t {
     _private: [u8; 0],
 }
 
-/// The variants of [`MetricValueProvider`], for a `switch`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum kafka_common_metrics_MetricValueProvider_e {
-    kafka_common_metrics_MetricValueProvider_MEASURABLE,
-    kafka_common_metrics_MetricValueProvider_GAUGE,
+/// `value(MetricConfig config, long now)` of a C implementation: `config` is
+/// borrowed for the call; the returned reading (never null) is owned and
+/// taken over by Rust.
+pub type kafka_common_metrics_MetricValueProvider_value_fn_t = unsafe extern "C" fn(
+    self_: *mut c_void,
+    config: *const kafka_common_metrics_MetricConfig_t,
+    now: i64,
+) -> *mut kafka_common_MetricValue_t;
+
+/// The Rust-only `type_name` of a C implementation, the provider's name in
+/// `KafkaMetric_to_string`: a NUL-terminated string that stays valid and
+/// unchanged for the rest of the program (a string literal), or `NULL` for
+/// none. A `NULL` slot is the default for a C implementation: no type name,
+/// as for a closure.
+pub type kafka_common_metrics_MetricValueProvider_type_name_fn_t =
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
+
+/// A C implementation of [`MetricValueProvider`] registered through
+/// [`kafka_common_metrics_MetricValueProvider_new`].
+struct CMetricValueProvider {
+    self_: *mut c_void,
+    value: kafka_common_metrics_MetricValueProvider_value_fn_t,
+    type_name: kafka_common_metrics_MetricValueProvider_type_name_fn_t,
 }
 
-/// What a [`kafka_common_metrics_MetricValueProvider_t`] points at: the
-/// implementation, shared so the provider can be copied into the registry
-/// (the Rust enum holds a `Box` and is not `Clone`).
-enum MetricValueProviderInner {
-    Measurable(Arc<dyn Measurable>),
-    Gauge(Arc<dyn Gauge>),
-}
+// SAFETY: `self_` and the function pointers are what the C caller registered through
+// `kafka_common_metrics_MetricValueProvider_new`: the C user is responsible for the thread-safety
+// of `self_`, which that function's rustdoc states, and the function pointers are trivially
+// shareable. `CMetricValueProvider` itself never dereferences `self_`; it only passes it back to the
+// functions registered with it.
+unsafe impl Send for CMetricValueProvider {}
+// SAFETY: `Sync` is required by the `MetricValueProvider` trait, whose implementations are shared
+// behind an `Arc` and called through `&self` from any thread. A `&CMetricValueProvider` exposes only
+// the opaque `self_` and the function pointers, which the type never dereferences;
+// `kafka_common_metrics_MetricValueProvider_new`'s rustdoc lets them be called from any thread,
+// concurrently, and the C user is responsible for the thread-safety of `self_` under those calls.
+unsafe impl Sync for CMetricValueProvider {}
 
-impl MetricValueProviderInner {
-    /// A fresh provider sharing the implementation.
-    fn provider(&self) -> MetricValueProvider {
-        match self {
-            Self::Measurable(measurable) => {
-                MetricValueProvider::Measurable(Box::new(ArcMeasurable(Arc::clone(measurable))))
-            },
-            Self::Gauge(gauge) => MetricValueProvider::Gauge(Box::new(ArcGauge(Arc::clone(gauge)))),
-        }
+impl MetricValueProvider for CMetricValueProvider {
+    fn value(&self, config: &MetricConfig, now: i64) -> MetricValue {
+        let config = MetricConfigInner::borrowed(config);
+        // SAFETY: `self.value` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_MetricValueProvider_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed or, once copied into a registry, until that
+        // registry is, which is after this `&self` call, and allows the call to come from any
+        // thread, concurrently with others. `config` is the handle `MetricConfigInner::borrowed`
+        // made from the `&MetricConfig` this method holds, valid for the call, which is all the
+        // function type's rustdoc promises the C side. The function type's rustdoc has the C
+        // function return an owned, non-null metric-value handle, which `take_metric_value` takes
+        // over, once.
+        unsafe { take_metric_value((self.value)(self.self_, config.as_ptr(), now)) }
+    }
+
+    fn type_name(&self) -> Option<&'static str> {
+        // SAFETY: `self.type_name` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_MetricValueProvider_new`, whose rustdoc has the C function
+        // return `NULL` or a string valid for the rest of the program and allows the call from any
+        // thread, as `c_type_name` requires.
+        unsafe { c_type_name(self.type_name, self.self_) }
     }
 }
 
-fn boxed(inner: MetricValueProviderInner) -> *mut kafka_common_metrics_MetricValueProvider_t {
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_metrics_MetricValueProvider_t
+/// A shared [`MetricValueProvider`] seen as the boxed one the Rust API takes.
+struct ArcMetricValueProvider(Arc<dyn MetricValueProvider>);
+
+impl MetricValueProvider for ArcMetricValueProvider {
+    fn value(&self, config: &MetricConfig, now: i64) -> MetricValue {
+        self.0.value(config, now)
+    }
+
+    fn type_name(&self) -> Option<&'static str> {
+        self.0.type_name()
+    }
+
+    fn as_measurable(&self) -> Option<&dyn Measurable> {
+        self.0.as_measurable()
+    }
 }
 
-/// What a handle points at.
+/// The implementation behind a handle.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-value-provider handle, alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_common_metrics_MetricValueProvider_t) -> &'a MetricValueProviderInner {
-    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value-provider handle alive
-    // for `'a`, so it points at a live `MetricValueProviderInner`, the `Box::into_raw` of `boxed`
-    // (no view of this type is handed out). No call mutates a `MetricValueProviderInner`, so the
-    // shared reference is sound for `'a`.
-    unsafe { &*(self_ as *const MetricValueProviderInner) }
-}
-
-/// The provider behind a handle, as a fresh value sharing the
-/// implementation.
-///
-/// # Safety
-///
-/// `provider` must be a valid metric-value-provider handle.
-pub(crate) unsafe fn metric_value_provider_of(
+/// `provider` must be a valid metric-value-provider handle, alive for `'a`.
+unsafe fn provider_ref<'a>(
     provider: *const kafka_common_metrics_MetricValueProvider_t,
-) -> MetricValueProvider {
+) -> &'a Interface<dyn MetricValueProvider> {
+    // SAFETY: Per this function's `# Safety`, `provider` is a valid metric-value-provider handle
+    // alive for `'a`, as `Interface::from_ptr` requires: every
+    // `kafka_common_metrics_MetricValueProvider_t` is an `Interface<dyn MetricValueProvider>`; the
+    // reference returned lives for the same `'a`.
+    unsafe { Interface::<dyn MetricValueProvider>::from_ptr(provider as *const Interface<dyn MetricValueProvider>) }
+}
+
+/// Takes the implementation a `*mut` parameter received (see
+/// [`Interface::take`]), as the boxed provider the Rust API takes.
+///
+/// # Safety
+///
+/// `provider` must be a valid metric-value-provider handle, not used again
+/// by the caller when it was owned.
+pub(crate) unsafe fn take_metric_value_provider(
+    provider: *mut kafka_common_metrics_MetricValueProvider_t,
+) -> Box<dyn MetricValueProvider> {
     // SAFETY: Per this function's `# Safety`, `provider` is a valid metric-value-provider handle,
-    // as `inner` requires; the `provider` method clones the `Arc`, so the borrow lasts for this
-    // call only.
-    unsafe { inner(provider) }.provider()
+    // not used again by the caller when it was owned, as `Interface::take` requires; every such
+    // handle is an `Interface` of this trait object.
+    Box::new(ArcMetricValueProvider(unsafe {
+        Interface::take(provider as *mut Interface<dyn MetricValueProvider>)
+    }))
 }
 
-/// `MetricValueProvider::Measurable`: `value` is consumed (an owned handle
-/// is freed, the view of a stat class or metric is shared). Owned, freed
-/// with [`kafka_common_metrics_MetricValueProvider_destroy`].
-///
-/// # Safety
-///
-/// `value` must be a valid measurable handle, not used again by the caller
-/// when it was owned.
+/// Registers a C implementation of `MetricValueProvider`. The caller owns
+/// `self_` and keeps it alive until the handle is destroyed with
+/// [`kafka_common_metrics_MetricValueProvider_destroy`] or, once a `*mut`
+/// parameter consumed it, until the registry it went into is destroyed. The functions may be called from any thread,
+/// concurrently, so the C caller is responsible for their thread-safety on
+/// `self_`. `type_name` may be `NULL` (see
+/// [`kafka_common_metrics_MetricValueProvider_type_name_fn_t`]).
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_measurable(
-    value: *mut kafka_common_metrics_Measurable_t,
+pub extern "C" fn kafka_common_metrics_MetricValueProvider_new(
+    self_: *mut c_void,
+    value: kafka_common_metrics_MetricValueProvider_value_fn_t,
+    type_name: kafka_common_metrics_MetricValueProvider_type_name_fn_t,
 ) -> *mut kafka_common_metrics_MetricValueProvider_t {
-    // SAFETY: Per this function's `# Safety`, `value` is a valid measurable handle, not used again
-    // by the caller when it was owned, as `take_measurable` requires; the `Arc` it returns is
-    // owned.
-    boxed(MetricValueProviderInner::Measurable(unsafe { take_measurable(value) }))
+    let provider: Arc<dyn MetricValueProvider> = Arc::new(CMetricValueProvider { self_, value, type_name });
+    Interface::owned(provider) as *mut kafka_common_metrics_MetricValueProvider_t
 }
 
-/// `MetricValueProvider::Gauge`: `value` is consumed.
-///
-/// # Safety
-///
-/// `value` must be a valid gauge handle, not used again by the caller when
-/// it was owned.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_gauge(
-    value: *mut kafka_common_metrics_Gauge_t,
-) -> *mut kafka_common_metrics_MetricValueProvider_t {
-    // SAFETY: Per this function's `# Safety`, `value` is a valid gauge handle, not used again by
-    // the caller when it was owned, as `take_gauge` requires; the `Arc` it returns is owned.
-    boxed(MetricValueProviderInner::Gauge(unsafe { take_gauge(value) }))
-}
-
-/// The variant of a provider, for a `switch`.
-///
-/// A caught Rust panic returns `kafka_common_metrics_MetricValueProvider_MEASURABLE`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
-/// # Safety
-///
-/// `self_` must be a valid metric-value-provider handle.
-#[ffi_guard(fallback = kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(
-    self_: *const kafka_common_metrics_MetricValueProvider_t,
-) -> kafka_common_metrics_MetricValueProvider_e {
-    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value-provider handle, as
-    // `inner` requires; the reference is used only within this call.
-    match unsafe { inner(self_) } {
-        MetricValueProviderInner::Measurable(_) => {
-            kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE
-        },
-        MetricValueProviderInner::Gauge(_) => {
-            kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_GAUGE
-        },
-    }
-}
-
-/// `value(MetricConfig config, long now)`: the reading, a double for a
-/// measurable, owned and freed with `kafka_common_MetricValue_destroy`.
+/// `value(MetricConfig config, long now)`: the reading, owned and freed with
+/// `kafka_common_MetricValue_destroy`.
 ///
 /// # Safety
 ///
@@ -174,20 +186,36 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> *mut kafka_common_MetricValue_t {
-    // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
-    // `metric_config_ref` requires; the reference is used only within this call.
-    let config = unsafe { metric_config_ref(config) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value-provider handle, as
-    // `inner` requires; the reference is used only within this call, and the reading is boxed into
-    // an owned handle.
-    let value: MetricValue = match unsafe { inner(self_) } {
-        MetricValueProviderInner::Measurable(measurable) => MetricValue::Double(measurable.measure(config, now)),
-        MetricValueProviderInner::Gauge(gauge) => gauge.value(config, now),
-    };
-    box_metric_value(value)
+    // `provider_ref` requires, and `config` a valid metric-config handle, as `metric_config_ref`
+    // requires; both references are used only within this call, and the reading is boxed into an
+    // owned handle.
+    box_metric_value(
+        unsafe { provider_ref(self_) }
+            .get()
+            .value(unsafe { metric_config_ref(config) }, now),
+    )
 }
 
-/// Frees an owned metric-value-provider handle; null is a no-op.
+/// The Rust-only `type_name()`: the provider's type name as
+/// `KafkaMetric_to_string` reports it, or `NULL` for none (a closure). The
+/// string is borrowed and stays valid for the rest of the program.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric-value-provider handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_type_name(
+    self_: *const kafka_common_metrics_MetricValueProvider_t,
+) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value-provider handle, as
+    // `provider_ref` requires; the reference is used only within this call.
+    type_name_c_str(unsafe { provider_ref(self_) }.get().type_name())
+}
+
+/// Frees an owned metric-value-provider handle; null is a no-op. A registry
+/// it was copied into keeps its own copy.
 ///
 /// # Safety
 ///
@@ -197,38 +225,21 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_destroy(
     self_: *mut kafka_common_metrics_MetricValueProvider_t,
 ) {
-    if !self_.is_null() {
-        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
-        // handle not yet destroyed, i.e. the `Box::into_raw` of a `MetricValueProviderInner` in
-        // `boxed` (no view of this type is handed out), so `from_raw` reclaims that allocation,
-        // once.
-        drop(unsafe { Box::from_raw(self_ as *mut MetricValueProviderInner) });
-    }
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Interface::destroy` requires.
+    unsafe { Interface::<dyn MetricValueProvider>::destroy(self_ as *mut Interface<dyn MetricValueProvider>) }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::c_void;
     use std::ptr;
 
     use super::*;
-    use crate::common::metrics::MetricConfig;
-    use crate::ffi::common::metric::{
-        kafka_common_MetricValue_as_double, kafka_common_MetricValue_destroy, kafka_common_MetricValue_string,
-    };
-    use crate::ffi::common::metrics::gauge::kafka_common_metrics_Gauge_new;
-    use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_new;
+    use crate::ffi::common::metric::kafka_common_MetricValue_string;
     use crate::ffi::common::metrics::metric_config::{
         kafka_common_metrics_MetricConfig_destroy, kafka_common_metrics_MetricConfig_new,
     };
 
-    unsafe extern "C" fn c_measure(
-        _self: *mut c_void,
-        _config: *const kafka_common_metrics_MetricConfig_t,
-        now: i64,
-    ) -> f64 {
-        now as f64 / 2.0
-    }
     unsafe extern "C" fn c_value(
         _self: *mut c_void,
         _config: *const kafka_common_metrics_MetricConfig_t,
@@ -238,50 +249,32 @@ mod tests {
         unsafe { kafka_common_MetricValue_string(c"up".as_ptr()) }
     }
 
-    #[test]
-    fn variants_are_built_from_their_implementation_and_copied_shared() {
-        let config = kafka_common_metrics_MetricConfig_new();
-        // SAFETY: Test code: `config` comes from `kafka_common_metrics_MetricConfig_new` and each
-        // provider from its constructor, which consumes the owned measurable or gauge handle passed
-        // to it (both ignore the null `self_`); each provider, value and `config` is destroyed
-        // once, after its last use.
-        unsafe {
-            let measurable = kafka_common_metrics_MetricValueProvider_measurable(kafka_common_metrics_Measurable_new(
-                ptr::null_mut(),
-                c_measure,
-                None,
-            ));
-            assert_eq!(
-                kafka_common_metrics_MetricValueProvider__enum(measurable),
-                kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE
-            );
-            let value = kafka_common_metrics_MetricValueProvider_value(measurable, config, 3);
-            assert_eq!(kafka_common_MetricValue_as_double(value), 1.5);
-            kafka_common_MetricValue_destroy(value);
-            // The copy the registry would take shares the C implementation.
-            assert_eq!(
-                metric_value_provider_of(measurable).value(&MetricConfig::new(), 8),
-                MetricValue::Double(4.0)
-            );
-            kafka_common_metrics_MetricValueProvider_destroy(measurable);
+    unsafe extern "C" fn c_type_name_slot(_self: *mut c_void) -> *const c_char {
+        c"my.CProvider".as_ptr()
+    }
 
-            let gauge = kafka_common_metrics_MetricValueProvider_gauge(kafka_common_metrics_Gauge_new(
-                ptr::null_mut(),
-                c_value,
-                None,
-            ));
+    #[test]
+    fn c_implementation_is_driven_through_the_trait_and_taken() {
+        let provider = kafka_common_metrics_MetricValueProvider_new(ptr::null_mut(), c_value, Some(c_type_name_slot));
+        let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: `provider` comes from `kafka_common_metrics_MetricValueProvider_new`
+        // (its functions ignore the null `self_`) and `config` from
+        // `kafka_common_metrics_MetricConfig_new`; `take_metric_value_provider` consumes
+        // `provider` after its last use, and every other handle and value is destroyed once,
+        // after its last use.
+        unsafe {
+            let value = kafka_common_metrics_MetricValueProvider_value(provider, config, 0);
+            assert_eq!(take_metric_value(value), MetricValue::String("up".to_string()));
             assert_eq!(
-                kafka_common_metrics_MetricValueProvider__enum(gauge),
-                kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_GAUGE
+                std::ffi::CStr::from_ptr(kafka_common_metrics_MetricValueProvider_type_name(provider)),
+                c"my.CProvider"
             );
-            let value = kafka_common_metrics_MetricValueProvider_value(gauge, config, 0);
-            assert!(kafka_common_MetricValue_as_double(value).is_nan());
-            kafka_common_MetricValue_destroy(value);
-            assert_eq!(
-                metric_value_provider_of(gauge).value(&MetricConfig::new(), 0),
-                MetricValue::String("up".to_string())
-            );
-            kafka_common_metrics_MetricValueProvider_destroy(gauge);
+            // The provider the registry takes is the C implementation, and a C provider is not a
+            // measurable.
+            let taken = take_metric_value_provider(provider);
+            assert_eq!(taken.value(&MetricConfig::new(), 8), MetricValue::String("up".to_string()));
+            assert_eq!(taken.type_name(), Some("my.CProvider"));
+            assert!(taken.as_measurable().is_none());
             kafka_common_metrics_MetricValueProvider_destroy(ptr::null_mut());
             kafka_common_metrics_MetricConfig_destroy(config);
         }

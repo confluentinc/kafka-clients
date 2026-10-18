@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use crate::common::Metric;
 use crate::common::metrics::MetricsShared;
 use crate::common::metrics::{
-    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, QuotaViolationError, Stat,
+    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, QuotaViolationError, Stat,
 };
 use crate::common::utils::Time;
 use crate::common::{Error, MetricName};
@@ -414,7 +414,7 @@ impl Sensor {
         let measurable_view: Arc<dyn Measurable> = Arc::clone(&stat) as Arc<dyn Measurable>;
         let metric = Arc::new(KafkaMetric::new(
             metric_name.clone(),
-            MetricValueProvider::Measurable(Box::new(MeasurableArc(measurable_view))),
+            Box::new(MeasurableArc(measurable_view)),
             Arc::clone(&stat_config),
             Arc::clone(&self.time),
         ));
@@ -476,7 +476,7 @@ impl Sensor {
         for child in children {
             let metric = Arc::new(KafkaMetric::new(
                 child.name().clone(),
-                MetricValueProvider::Measurable(Box::new(MeasurableArc(child.stat()))),
+                Box::new(MeasurableArc(child.stat())),
                 Arc::clone(&stat_config),
                 Arc::clone(&self.time),
             ));

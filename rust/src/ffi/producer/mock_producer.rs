@@ -26,7 +26,7 @@
 //! same pointers.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use crate::common::{Cluster, TopicPartition};
@@ -37,7 +37,7 @@ use crate::ffi::common::fail_with;
 use crate::ffi::common::metric_name::{kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metrics::kafka_metric::{kafka_common_metrics_KafkaMetric_t, kafka_metric_ref};
 use crate::ffi::common::serialization::serializer::{
-    DynSerializer, kafka_common_serialization_Serializer_t, take_serializer,
+    SerializerInner, kafka_common_serialization_Serializer_t, take_serializer,
 };
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_ref,
@@ -54,8 +54,7 @@ use crate::ffi::producer::partitioner::{
 use crate::ffi::producer::producer_record::{box_producer_record, kafka_producer_ProducerRecord_destroy};
 use crate::ffi::producer::{ProducerHandle, kafka_producer_Producer_t};
 use crate::ffi::util::{
-    GenericValue, box_list, box_map, box_string_keyed_map, c_str_to_string, kafka_List_t, kafka_Map_destroy,
-    kafka_Map_t,
+    GenericValue, box_list, box_map, box_string_keyed_map, kafka_List_t, kafka_Map_destroy, kafka_Map_t,
 };
 use crate::producer::{MockProducer, MockProducerOptions, MockProducerOptionsBuilder};
 
@@ -94,8 +93,8 @@ struct OptionsInner {
     cluster: Cluster,
     auto_complete: bool,
     partitioner: Option<Arc<SharedPartitioner>>,
-    key_serializer: Option<Arc<DynSerializer>>,
-    value_serializer: Option<Arc<DynSerializer>>,
+    key_serializer: Option<Arc<SerializerInner>>,
+    value_serializer: Option<Arc<SerializerInner>>,
 }
 
 impl OptionsInner {
@@ -109,11 +108,11 @@ impl OptionsInner {
             }),
             key_serializer: self.key_serializer.as_ref().map(|s| {
                 Box::new(ArcSerializer(Arc::clone(s)))
-                    as Box<dyn crate::common::serialization::Serializer<GenericValue> + Send + Sync>
+                    as Box<dyn crate::common::serialization::DynSerializer<GenericValue>>
             }),
             value_serializer: self.value_serializer.as_ref().map(|s| {
                 Box::new(ArcSerializer(Arc::clone(s)))
-                    as Box<dyn crate::common::serialization::Serializer<GenericValue> + Send + Sync>
+                    as Box<dyn crate::common::serialization::DynSerializer<GenericValue>>
             }),
         }
     }
@@ -126,8 +125,8 @@ struct BuilderInner {
     cluster: Option<Cluster>,
     auto_complete: Option<bool>,
     partitioner: Option<Arc<SharedPartitioner>>,
-    key_serializer: Option<Arc<DynSerializer>>,
-    value_serializer: Option<Arc<DynSerializer>>,
+    key_serializer: Option<Arc<SerializerInner>>,
+    value_serializer: Option<Arc<SerializerInner>>,
 }
 
 /// The class state behind a handle.
@@ -403,33 +402,6 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_hist
         .map(|groups| group_offsets_map(groups) as *mut c_void)
         .collect();
     box_list(elements, Some(destroy_map))
-}
-
-/// `MockProducer.committedOffset(String group, TopicPartition)`: owned,
-/// `NULL` when none (Java's `null`).
-///
-/// # Safety
-///
-/// `self_` and `topic_partition` must be live handles and `group` a
-/// NUL-terminated string.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
-    self_: *const kafka_producer_MockProducer_t,
-    group: *const c_char,
-    topic_partition: *const kafka_common_TopicPartition_t,
-) -> *mut kafka_consumer_OffsetAndMetadata_t {
-    // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let group = unsafe { c_str_to_string(group) };
-    // SAFETY: Per this function's `# Safety`, `topic_partition` is a live handle, as
-    // `topic_partition_ref` requires; the reference is used only within this call.
-    let topic_partition = unsafe { topic_partition_ref(topic_partition) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
-    // reference is used only within this call.
-    unsafe { mock(self_) }
-        .committed_offset(&group, topic_partition)
-        .map_or(std::ptr::null_mut(), box_offset_and_metadata)
 }
 
 /// `MockProducer.uncommittedOffsets()`: an owned `kafka_Map_t` of `char *`
@@ -1055,7 +1027,7 @@ mod tests {
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
         kafka_common_KafkaFuture_t,
     };
-    use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
+    use crate::ffi::producer::callback::kafka_producer_Callback_new;
     use crate::ffi::producer::producer_record::{
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new, kafka_producer_ProducerRecord_value,
     };
@@ -1069,7 +1041,9 @@ mod tests {
         kafka_producer_Producer_init_transactions, kafka_producer_Producer_send, kafka_producer_Producer_send_cb,
         kafka_producer_Producer_send_with_callback,
     };
-    use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
+    use crate::ffi::util::{
+        c_str_to_string, kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy,
+    };
 
     struct Seen {
         completions: AtomicI32,
@@ -1189,7 +1163,6 @@ mod tests {
             assert_eq!(c_str_to_string(kafka_common_Error_message(err)), "boom");
             kafka_common_Error_destroy(err);
 
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
             kafka_producer_MockProducer_destroy(std::ptr::null_mut());
@@ -1349,6 +1322,7 @@ mod tests {
 
                 // A record completing after the flush began registers after its mark: the flush
                 // runs its callback too, but does not wait for its report.
+                let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
                 let second = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
                 assert!(err.is_null());
                 assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
@@ -1381,7 +1355,6 @@ mod tests {
                 kafka_common_KafkaFuture_destroy(second);
             });
             kafka_common_KafkaFuture_destroy(first);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
         }
@@ -1406,7 +1379,6 @@ mod tests {
             assert!(err.is_null());
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 0);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
 
             // Destroy completes the callback as if it had reported, so no future is left waiting.
@@ -1445,8 +1417,8 @@ mod tests {
     #[test]
     fn a_mock_flushes_and_closes_from_inside_a_delivery_callback() {
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock`, `record` and
-        // `callback` are live from their constructor to their single destroy below, `view` is used
+        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock` and `record` are live
+        // from their constructor to their single destroy below, the send consumes `callback`, `view` is used
         // only before the mock is destroyed, and the future is destroyed once after its last use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
@@ -1460,7 +1432,6 @@ mod tests {
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 1, "the callback reported");
             assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
             kafka_common_KafkaFuture_destroy(future);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
         }

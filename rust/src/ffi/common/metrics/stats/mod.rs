@@ -17,23 +17,26 @@
 //!
 //! Every stat class is a handle on a shared stat ([`StatHandle`]) and hands
 //! out borrowed views of the interfaces it implements through
-//! `__as_Stat`, `__as_Measurable`, `__as_MeasurableStat` and, for `Meter`,
+//! `__as_Stat`, `__as_Measurable`, `__as_MeasurableStat`,
+//! `__as_MetricValueProvider` and, for `Meter`,
 //! `__as_CompoundStat` (§4, "Traits"). A view is valid as long as the class
 //! handle; passing it where the sensor consumes a `*mut` interface handle
 //! shares the stat with the sensor and leaves the class handle valid, so
 //! the C caller can keep measuring through it. `MeasurableStat` comes from
-//! Rust's blanket `impl<T: Stat + Measurable> MeasurableStat for T`.
+//! Rust's blanket `impl<T: Stat + Measurable> MeasurableStat for T`, and
+//! `MetricValueProvider` from `impl<M: Measurable> MetricValueProvider for M`.
 //!
 //! Each class file writes its exports out in full (the translation lint
 //! reads the source without expanding macros).
 
 use std::sync::{Arc, OnceLock};
 
-use crate::common::metrics::{CompoundStat, Measurable, MeasurableStat, Stat};
+use crate::common::metrics::{CompoundStat, Measurable, MeasurableStat, MetricValueProvider, Stat};
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::compound_stat::kafka_common_metrics_CompoundStat_t;
 use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_t;
 use crate::ffi::common::metrics::measurable_stat::kafka_common_metrics_MeasurableStat_t;
+use crate::ffi::common::metrics::metric_value_provider::kafka_common_metrics_MetricValueProvider_t;
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 
 pub(crate) mod avg;
@@ -57,6 +60,7 @@ pub(crate) struct StatHandle<T> {
     as_measurable: OnceLock<Interface<dyn Measurable>>,
     as_measurable_stat: OnceLock<Interface<dyn MeasurableStat>>,
     as_compound_stat: OnceLock<Interface<dyn CompoundStat>>,
+    as_metric_value_provider: OnceLock<Interface<dyn MetricValueProvider>>,
 }
 
 impl<T> StatHandle<T> {
@@ -68,6 +72,7 @@ impl<T> StatHandle<T> {
             as_measurable: OnceLock::new(),
             as_measurable_stat: OnceLock::new(),
             as_compound_stat: OnceLock::new(),
+            as_metric_value_provider: OnceLock::new(),
         }))
     }
 
@@ -123,6 +128,15 @@ impl<T: Measurable + 'static> StatHandle<T> {
             .as_measurable
             .get_or_init(|| Interface::view(Arc::clone(&self.stat) as Arc<dyn Measurable>));
         view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t
+    }
+
+    /// The stat as a `MetricValueProvider` (Java's `Measurable` extends it):
+    /// a view valid as long as the handle.
+    pub(crate) fn as_metric_value_provider(&self) -> *const kafka_common_metrics_MetricValueProvider_t {
+        let view = self
+            .as_metric_value_provider
+            .get_or_init(|| Interface::view(Arc::clone(&self.stat) as Arc<dyn MetricValueProvider>));
+        view as *const Interface<dyn MetricValueProvider> as *const kafka_common_metrics_MetricValueProvider_t
     }
 }
 

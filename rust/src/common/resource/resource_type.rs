@@ -43,18 +43,22 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
-    /// All resource types, in declaration (code) order. Mirrors Java's
-    /// `ResourceType.values()`.
-    pub const VALUES: [ResourceType; 8] = [
-        ResourceType::Unknown,
-        ResourceType::Any,
-        ResourceType::Topic,
-        ResourceType::Group,
-        ResourceType::Cluster,
-        ResourceType::TransactionalId,
-        ResourceType::DelegationToken,
-        ResourceType::User,
-    ];
+    /// All resource types, in declaration (code) order.
+    ///
+    /// Mirrors `ResourceType.values()`.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceType#values")]
+    pub fn values() -> &'static [Self] {
+        &[
+            ResourceType::Unknown,
+            ResourceType::Any,
+            ResourceType::Topic,
+            ResourceType::Group,
+            ResourceType::Cluster,
+            ResourceType::TransactionalId,
+            ResourceType::DelegationToken,
+            ResourceType::User,
+        ]
+    }
 
     /// Return the code of this resource.
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#code")]
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testCode")]
     fn test_code() {
-        assert_eq!(ResourceType::VALUES.len(), INFOS.len());
+        assert_eq!(ResourceType::values().len(), INFOS.len());
         for info in &INFOS {
             assert_eq!(info.code, info.resource_type.code());
             assert_eq!(info.resource_type, ResourceType::from_code(info.code));
@@ -193,9 +197,9 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testExhaustive")]
     fn test_exhaustive() {
-        assert_eq!(INFOS.len(), ResourceType::VALUES.len());
+        assert_eq!(INFOS.len(), ResourceType::values().len());
         for (i, info) in INFOS.iter().enumerate() {
-            assert_eq!(info.resource_type, ResourceType::VALUES[i]);
+            assert_eq!(info.resource_type, ResourceType::values()[i]);
         }
     }
 }

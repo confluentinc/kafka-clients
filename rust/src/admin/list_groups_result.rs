@@ -63,15 +63,17 @@ impl ListGroupsResult {
     /// A future yielding just the valid listings (never fails). Mirrors `valid()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<GroupListing>> {
-        self.source
-            .then_apply(|results| Ok(results.into_iter().filter_map(Result::ok).collect()))
+        self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {
+            Ok(results.into_iter().filter_map(Result::ok).collect())
+        })
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
-        self.source
-            .then_apply(|results| Ok(results.into_iter().filter_map(Result::err).collect()))
+        self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {
+            Ok(results.into_iter().filter_map(Result::err).collect())
+        })
     }
 }
 

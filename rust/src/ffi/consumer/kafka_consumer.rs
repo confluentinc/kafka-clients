@@ -29,13 +29,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
-use crate::common::serialization::Deserializer;
+use crate::common::header::RecordHeaders;
+use crate::common::serialization::{Deserializer, DynDeserializer};
 use crate::consumer::KafkaConsumer;
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::serialization::deserializer::{
-    SharedDeserializer, kafka_common_serialization_Deserializer_t, take_deserializer,
+    DeserializerInner, kafka_common_serialization_Deserializer_t, take_deserializer,
 };
 use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_ConsumerConfig_t};
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
@@ -49,74 +49,63 @@ pub struct kafka_consumer_KafkaConsumer_t {
 }
 
 /// The deserializer standing for a `NULL` one: the record's `void *` is an
-/// owned `kafka_Bytes_t *` over the fetched bytes, sliced from the fetch
-/// buffer without copying when the receive path offers it
+/// owned `kafka_Bytes_t *` over the fetched bytes, sharing the fetch buffer
+/// without copying when the receive path offers it as `Bytes`
 /// (consumer-threading.md §27).
 struct BytesPassthroughDeserializer;
 
 impl Deserializer<GenericValue> for BytesPassthroughDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
         // No shared buffer to borrow from: one copy into an owned buffer.
         Ok(GenericValue::new(box_bytes(Bytes::copy_from_slice(data)).cast()))
     }
 
-    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<GenericValue, Error> {
-        Ok(GenericValue::new(box_bytes(source.slice_ref(data)).cast()))
-    }
-
-    fn deserialize_from_shared_with_headers(
+    async fn deserialize_with_headers_bytes(
         &self,
-        topic: &str,
-        _headers: &dyn Headers,
-        source: &Bytes,
-        data: &[u8],
+        _topic: &str,
+        _headers: &RecordHeaders,
+        data: &Bytes,
     ) -> Result<GenericValue, Error> {
-        self.deserialize_from_shared(topic, source, data)
+        Ok(GenericValue::new(box_bytes(data.clone()).cast()))
     }
 }
 
-/// A C deserializer taken over from its handle: the consumer owns the
-/// `Arc`, the `&mut self` methods go through the mutex.
-struct ArcDeserializer(Arc<SharedDeserializer>);
+/// A C deserializer taken over from its handle: the consumer shares the
+/// `Arc` with any view of the handle, and keeps the handle pointer valid for
+/// an asynchronous implementation's reports, and every call goes through its Tokio
+/// mutex, awaited rather than blocked on, so a call waiting for it holds no
+/// thread.
+struct ArcDeserializer(Arc<DeserializerInner>);
 
 impl Deserializer<GenericValue> for ArcDeserializer {
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).deserialize(topic, data)
+    async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
+        Deserializer::deserialize(&*self.0.imp().lock().await, topic, data).await
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .deserialize_with_headers(topic, headers, data)
-    }
-
-    fn deserialize_from_shared(&self, topic: &str, source: &Bytes, data: &[u8]) -> Result<GenericValue, Error> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .deserialize_from_shared(topic, source, data)
-    }
-
-    fn deserialize_from_shared_with_headers(
+    async fn deserialize_with_headers(
         &self,
         topic: &str,
-        headers: &dyn Headers,
-        source: &Bytes,
+        headers: &RecordHeaders,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .deserialize_from_shared_with_headers(topic, headers, source, data)
+        Deserializer::deserialize_with_headers(&*self.0.imp().lock().await, topic, headers, data).await
     }
 
-    fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).configure(configs, is_key);
+    async fn deserialize_with_headers_bytes(
+        &self,
+        topic: &str,
+        headers: &RecordHeaders,
+        data: &Bytes,
+    ) -> Result<GenericValue, Error> {
+        Deserializer::deserialize_with_headers_bytes(&*self.0.imp().lock().await, topic, headers, data).await
     }
 
-    fn close(&mut self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).close();
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        Deserializer::configure(&mut *self.0.imp().lock().await, configs, is_key).await;
+    }
+
+    async fn close(&mut self) {
+        Deserializer::close(&mut *self.0.imp().lock().await).await;
     }
 }
 
@@ -129,7 +118,7 @@ impl Deserializer<GenericValue> for ArcDeserializer {
 /// caller afterwards.
 unsafe fn deserializer_from(
     deserializer: *mut kafka_common_serialization_Deserializer_t,
-) -> (Box<dyn Deserializer<GenericValue>>, bool) {
+) -> (Box<dyn DynDeserializer<GenericValue>>, bool) {
     if deserializer.is_null() {
         (Box::new(BytesPassthroughDeserializer), true)
     } else {
@@ -160,11 +149,9 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_KafkaConsumer_t {
-    // SAFETY: Per this function's `# Safety`, `config` is a live handle; no setter can run on it
-    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
-    // time, so `consumer_config_ref`'s requirement holds for this statement, the only use of the
-    // reference.
-    let config = unsafe { consumer_config_ref(config) }.config().clone();
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this
+    // statement, the only use of the reference, as `consumer_config_ref` requires.
+    let config = unsafe { consumer_config_ref(config) }.clone();
     // SAFETY: Per this function's `# Safety`, `key_deserializer` is null or a live handle not used
     // afterwards, as `deserializer_from` requires.
     let (key, owns_key) = unsafe { deserializer_from(key_deserializer) };
@@ -243,15 +230,182 @@ mod tests {
     use super::*;
     use crate::ffi::util::{kafka_Bytes_destroy, kafka_Bytes_t};
 
+    /// A C deserializer's calls go through `ArcDeserializer`, whose futures
+    /// (awaiting the Tokio mutex, then the `FfiDeserializer` variant's future)
+    /// must fit `InlineFuture`'s buffer, or every record would box one: for a
+    /// built-in, a synchronous C implementation (a blocking-pool task) and an
+    /// asynchronous one (a pending report).
     #[test]
-    fn passthrough_slices_the_shared_buffer_without_copying() {
-        let source = Bytes::from_static(b"hello world");
-        let value = BytesPassthroughDeserializer
-            .deserialize_from_shared("t", &source, &source[6..])
+    fn arc_deserializer_futures_are_stored_inline() {
+        use std::ffi::{c_char, c_void};
+
+        use crate::common::serialization::InlineFuture;
+        use crate::ffi::common::kafka_common_Error_t;
+        use crate::ffi::common::serialization::deserializer::{
+            DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_new,
+            kafka_common_serialization_Deserializer_new_async,
+        };
+        use crate::ffi::common::serialization::string_deserializer::GenericStringDeserializer;
+
+        // Never called: the futures are only built.
+        unsafe extern "C" fn sync_fn(
+            _: *mut c_void,
+            _: *const c_char,
+            _: kafka_Bytes_t,
+            _: *mut *mut kafka_common_Error_t,
+        ) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+        unsafe extern "C" fn async_fn(_: *mut c_void, _: *const c_char, _: kafka_Bytes_t, _: i64) {}
+
+        let built_in = ArcDeserializer(DeserializerInner::view(Arc::new(tokio::sync::Mutex::new(
+            FfiDeserializer::String(GenericStringDeserializer::default()),
+        ))));
+        // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
+        // consumer's `Arc` frees it.
+        let (sync, asynchronous) = unsafe {
+            (
+                ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new(
+                    std::ptr::null_mut(),
+                    sync_fn,
+                    None,
+                    None,
+                    None,
+                    None,
+                ))),
+                ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new_async(
+                    std::ptr::null_mut(),
+                    async_fn,
+                    None,
+                    None,
+                    None,
+                    None,
+                ))),
+            )
+        };
+        let headers = RecordHeaders::new();
+        let data = Bytes::from_static(b"v");
+        for (kind, deserializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
+            let future = Deserializer::deserialize(deserializer, "t", &data);
+            assert!(
+                InlineFuture::<()>::is_inline_for(&future),
+                "{kind} deserialize: {} bytes",
+                size_of_val(&future)
+            );
+            let future = Deserializer::deserialize_with_headers(deserializer, "t", &headers, &data);
+            assert!(
+                InlineFuture::<()>::is_inline_for(&future),
+                "{kind} with_headers: {} bytes",
+                size_of_val(&future)
+            );
+            let future = Deserializer::deserialize_with_headers_bytes(deserializer, "t", &headers, &data);
+            assert!(
+                InlineFuture::<()>::is_inline_for(&future),
+                "{kind} with_headers_bytes: {} bytes",
+                size_of_val(&future)
+            );
+        }
+    }
+
+    /// An asynchronous C deserializer costs no allocation per record on the
+    /// consumer's path: through `dyn DynDeserializer`, the `ArcDeserializer`
+    /// future stays inline, the Tokio lock is uncontended, the registry slot
+    /// and its arguments are reused, and the empty headers and the shared
+    /// fetch buffer are not copied.
+    #[test]
+    fn async_c_deserializer_through_dyn_allocates_nothing_per_record() {
+        use std::ffi::{c_char, c_void};
+        use std::sync::atomic::{AtomicPtr, Ordering};
+
+        use crate::AllocTrackingGuard;
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t;
+        use crate::ffi::common::serialization::deserializer::{
+            kafka_common_serialization_Deserializer__set_callback_result,
+            kafka_common_serialization_Deserializer_new_async, kafka_common_serialization_Deserializer_t,
+        };
+        use crate::ffi::common::serialization::ready;
+
+        /// The value every call reports: a static, so reporting allocates nothing.
+        static VALUE: u8 = 7;
+
+        /// Reports `VALUE` during the call, through the handle `self_` points at.
+        unsafe extern "C" fn report_inline(
+            self_: *mut c_void,
+            _topic: *const c_char,
+            _headers: *const kafka_common_header_internals_RecordHeaders_t,
+            _data: kafka_Bytes_t,
+            callback_id: i64,
+        ) {
+            // SAFETY: Test code: `self_` is the `AtomicPtr` holding the live handle, which the test
+            // keeps alive; the value is a static, and the error null.
+            unsafe {
+                let handle =
+                    (*(self_ as *const AtomicPtr<kafka_common_serialization_Deserializer_t>)).load(Ordering::SeqCst);
+                kafka_common_serialization_Deserializer__set_callback_result(
+                    handle,
+                    callback_id,
+                    &VALUE as *const u8 as *mut c_void,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        unsafe extern "C" fn unused(_: *mut c_void, _: *const c_char, _: kafka_Bytes_t, _: i64) {
+            unreachable!("the consumer calls the headers-and-bytes method")
+        }
+
+        let slot = AtomicPtr::new(std::ptr::null_mut());
+        let handle = kafka_common_serialization_Deserializer_new_async(
+            &slot as *const AtomicPtr<_> as *mut c_void,
+            unused,
+            None,
+            Some(report_inline),
+            None,
+            None,
+        );
+        slot.store(handle, Ordering::SeqCst);
+        // SAFETY: Test code: `handle` comes from its constructor and is consumed once, here; the
+        // `Arc` keeps it valid for the reports, and `slot` outlives the deserializer.
+        let deserializer: Box<dyn DynDeserializer<GenericValue>> =
+            Box::new(ArcDeserializer(unsafe { take_deserializer(handle) }));
+        let headers = RecordHeaders::new();
+        let data = Bytes::from_static(b"value");
+        let record = || {
+            let value = ready(DynDeserializer::deserialize_with_headers_bytes(
+                &*deserializer,
+                "topic",
+                &headers,
+                &data,
+            ))
+            .expect("an inline report completes the first poll")
             .unwrap();
+            assert_eq!(value.as_ptr(), &VALUE as *const u8 as *mut c_void);
+        };
+        // Warm up: the registry's slab and the slot's arguments are allocated once.
+        record();
+        let _guard = AllocTrackingGuard::new();
+        for _ in 0..100 {
+            record();
+        }
+        assert_eq!(AllocTrackingGuard::count(), 0, "allocations per 100 records");
+    }
+
+    #[test]
+    fn passthrough_shares_the_fetch_buffer_without_copying() {
+        use crate::ffi::common::serialization::ready;
+        let source = Bytes::from_static(b"hello world");
+        let data = source.slice(6..);
+        let headers = RecordHeaders::new();
+        let value = ready(Deserializer::deserialize_with_headers_bytes(
+            &BytesPassthroughDeserializer,
+            "t",
+            &headers,
+            &data,
+        ))
+        .unwrap()
+        .unwrap();
         let bytes = value.as_ptr() as *mut kafka_Bytes_t;
-        // SAFETY: Test code: `bytes` is the `kafka_Bytes_t` `deserialize_from_shared` just boxed
-        // over `source`, which outlives this read.
+        // SAFETY: Test code: `bytes` is the `kafka_Bytes_t` `deserialize_with_headers_bytes` just
+        // boxed over a clone of `data`, which keeps the static buffer alive for this read.
         let slice = unsafe { (*bytes).as_slice() }.unwrap();
         assert_eq!(slice, b"world");
         assert_eq!(slice.as_ptr(), source[6..].as_ptr(), "zero-copy: the same memory");
@@ -259,7 +413,9 @@ mod tests {
         // use.
         unsafe { kafka_Bytes_destroy(bytes) };
 
-        let value = BytesPassthroughDeserializer.deserialize("t", b"copy").unwrap();
+        let value = ready(Deserializer::deserialize(&BytesPassthroughDeserializer, "t", b"copy"))
+            .unwrap()
+            .unwrap();
         let bytes = value.as_ptr() as *mut kafka_Bytes_t;
         // SAFETY: Test code: `bytes` is the `kafka_Bytes_t` `deserialize` just boxed over its own
         // copy.

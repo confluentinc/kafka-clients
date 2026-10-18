@@ -806,7 +806,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 // `KafkaFuture.BaseFunction` and `thenApply`
 // ---------------------------------------------------------------------------
 
-/// `typedef void *(*kafka_common_KafkaFuture_BaseFunction_apply_fn_t)(void *self, void *a, kafka_common_Error_t **out_err);`
+/// `typedef void *(*kafka_common_KafkaFuture_BaseFunction_apply_fn_t)(void *self, const void *a, kafka_common_Error_t **out_err);`
 ///
 /// `BaseFunction.apply(A a)`: `a` is the source future's value, borrowed for
 /// the duration of the call (`NULL` for a `Void` future). Returns the result,
@@ -816,7 +816,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 /// that error fails the derived future, as a throwing Java function does; the
 /// returned value is then ignored.
 pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
+    unsafe extern "C" fn(self_: *mut c_void, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
 
 /// A C implementation of `KafkaFuture.BaseFunction` (CLAUDE.md §4 rule 3):
 /// the caller's `void *self` plus its `apply`.
@@ -827,7 +827,7 @@ struct BaseFunctionInner {
 
 impl BaseFunctionInner {
     /// Invokes the C `apply` on `a`.
-    fn apply(&self, a: *mut c_void) -> Result<*mut c_void, Error> {
+    fn apply(&self, a: *const c_void) -> Result<*mut c_void, Error> {
         let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
         // SAFETY: `apply` is the function pointer the C caller registered,
         // called with its own `self` and a slot pointing at null.
@@ -843,8 +843,8 @@ impl BaseFunctionInner {
 
 /// Opaque handle to a C implementation of `KafkaFuture.BaseFunction<A, B>`,
 /// the function `then_apply` runs on a future's value. Java declares it as a
-/// functional interface that the Rust API takes as a closure; C has no
-/// closures, so it is an interface built with
+/// functional interface, the Rust `common::kafka_future::BaseFunction` trait,
+/// which C cannot implement, so it is an interface built with
 /// [`kafka_common_KafkaFuture_BaseFunction_new`].
 #[repr(C)]
 pub struct kafka_common_KafkaFuture_BaseFunction_t {
@@ -867,11 +867,11 @@ unsafe fn base_function_ref<'a>(function: *const kafka_common_KafkaFuture_BaseFu
 
 /// Registers a C `BaseFunction`: `self_` is the caller's opaque pointer
 /// passed first to `apply`. The caller owns `self_` and keeps it alive until
-/// every future derived through this function has been destroyed; the handle
-/// itself may be destroyed as soon as `then_apply` returns, since the derived
-/// future keeps its own copy of the registration.
+/// every future derived through this function has been destroyed.
 ///
-/// Owned, freed with [`kafka_common_KafkaFuture_BaseFunction_destroy`].
+/// Owned until [`kafka_common_KafkaFuture_then_apply`] consumes it, as the
+/// Rust `then_apply` takes its function by value; freed with
+/// [`kafka_common_KafkaFuture_BaseFunction_destroy`] only when not consumed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
@@ -893,7 +893,7 @@ pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
     self_: *const kafka_common_KafkaFuture_BaseFunction_t,
-    a: *mut c_void,
+    a: *const c_void,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid function handle; the
@@ -905,12 +905,12 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
     }
 }
 
-/// Frees a function handle; null is a no-op. Futures derived through it stay
-/// valid: they hold their own copy of the registration.
+/// Frees a function handle `then_apply` did not consume; null is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned function handle not yet destroyed.
+/// `self_` must be null or an owned function handle neither destroyed nor
+/// consumed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
@@ -918,9 +918,8 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
 ) {
     if !self_.is_null() {
         // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`,
-        // an owned function handle not yet destroyed, that is the `Box::into_raw` of
-        // `kafka_common_KafkaFuture_BaseFunction_new`, reclaimed here once. Derived
-        // futures hold their own copy, not a borrow of it.
+        // an owned function handle neither destroyed nor consumed, that is the `Box::into_raw`
+        // of `kafka_common_KafkaFuture_BaseFunction_new`, reclaimed here once.
         drop(unsafe { Box::from_raw(self_ as *mut BaseFunctionInner) });
     }
 }
@@ -935,30 +934,29 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
 /// over the source; a C function may have side effects, so its first outcome
 /// is memoized, as Java runs it once.) The value it produces is a `void *`
 /// owned by the C side and never freed by Rust; the source value is borrowed
-/// for the call only (module docs). `function` is borrowed: the derived future
-/// keeps its own copy of the registration, so the handle may be destroyed right
-/// after this returns, while the `self` it was built with must outlive the
-/// derived future. The result is owned, freed with
+/// for the call only (module docs). `function` is consumed, as the Rust
+/// `then_apply` takes its function by value, while the `self` it was built with
+/// must outlive the derived future. The result is owned, freed with
 /// [`kafka_common_KafkaFuture_destroy`], and belongs to the same client as
 /// this future.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle and `function` a valid function
-/// handle.
+/// handle, not used again.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
     self_: *const kafka_common_KafkaFuture_t,
-    function: *const kafka_common_KafkaFuture_BaseFunction_t,
+    function: *mut kafka_common_KafkaFuture_BaseFunction_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only (the derived future clones what it keeps).
     let inner = unsafe { future_ref(self_) };
-    // SAFETY: per this function's `# Safety`, `function` is a valid function handle; the
-    // borrow lasts for this call only (the registration is copied out below).
-    let registration = unsafe { base_function_ref(function) };
-    let function = BaseFunctionInner { self_: registration.self_, apply: registration.apply };
+    // SAFETY: per this function's `# Safety`, `function` is a valid function handle, i.e. the
+    // `Box::into_raw` of `kafka_common_KafkaFuture_BaseFunction_new`, not used again, so
+    // `Box::from_raw` reclaims it exactly once and the registration moves into the closure.
+    let function = *unsafe { Box::from_raw(function as *mut BaseFunctionInner) };
     let memo: Mutex<Option<Result<Arc<FfiValue>, Error>>> = Mutex::new(None);
     let derived = inner.future.then_apply(move |source: Arc<FfiValue>| {
         let mut memo = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1200,8 +1198,8 @@ mod tests {
         let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
         // SAFETY: Test code: `f` and `plain` are the fresh handles above and `function` a fresh
-        // function handle over `doubler`, a live local that outlives the derived future; each is
-        // destroyed once at the end. `err` is a valid slot pointing at null; the error a
+        // function handle over `doubler`, a live local that outlives the derived future, consumed
+        // by `then_apply`; each other handle is destroyed once at the end. `err` is a valid slot pointing at null; the error a
         // timed-out get stores there is destroyed once.
         let derived = unsafe {
             let mut err = std::ptr::null_mut();
@@ -1238,7 +1236,6 @@ mod tests {
         unsafe {
             assert_eq!(*(get(f).unwrap() as *const i64), 21);
             kafka_common_KafkaFuture_destroy(derived);
-            kafka_common_KafkaFuture_BaseFunction_destroy(function);
             kafka_common_KafkaFuture_destroy(plain);
             kafka_common_KafkaFuture_destroy(f);
         }
@@ -1254,7 +1251,8 @@ mod tests {
         let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
         // SAFETY: Test code: `completed`, `failed`, `derived` and `all` are fresh future
         // handles and `function` a fresh function handle over `doubler`, a live local that
-        // outlives `derived`; each handle is destroyed once after its last use. `completed`
+        // outlives `derived`, consumed by `then_apply`; each other handle is destroyed once after
+        // its last use. `completed`
         // borrows `value`, a live local, and `failed` consumes a fresh `box_error` handle;
         // each `err` is the fresh error handle a failed get returned, destroyed once. `out`
         // is a live local, and every value read through it points at `value` or into
@@ -1264,7 +1262,6 @@ mod tests {
                 kafka_common_KafkaFuture_completed_future(&value as *const i64 as *const c_void, std::ptr::null_mut());
             let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
             let derived = kafka_common_KafkaFuture_then_apply(completed, function);
-            kafka_common_KafkaFuture_BaseFunction_destroy(function);
             let list = kafka_List_new();
             kafka_List_add(list, completed as *mut c_void);
             kafka_List_add(list, derived as *mut c_void);
@@ -1629,7 +1626,7 @@ mod tests {
 
     unsafe extern "C" fn double(
         self_: *mut c_void,
-        a: *mut c_void,
+        a: *const c_void,
         _out_err: *mut *mut kafka_common_Error_t,
     ) -> *mut c_void {
         // SAFETY: Test code: every registration of this function passes a live `Doubler` as
@@ -1645,7 +1642,7 @@ mod tests {
 
     unsafe extern "C" fn fail(
         _self: *mut c_void,
-        _a: *mut c_void,
+        _a: *const c_void,
         out_err: *mut *mut kafka_common_Error_t,
     ) -> *mut c_void {
         // SAFETY: Test code: the function-pointer contract hands every implementation a valid
@@ -1659,7 +1656,7 @@ mod tests {
         let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
         let failing = kafka_common_KafkaFuture_BaseFunction_new(std::ptr::null_mut(), fail);
-        let mut a = 21i64;
+        let a = 21i64;
         let mut error = std::ptr::null_mut();
         // SAFETY: Test code: `function` (over `doubler`, a live local) and `failing` are fresh
         // function handles, each destroyed once at the end; `a` is a live local, and `out`
@@ -1667,12 +1664,14 @@ mod tests {
         // fresh handle `fail` stored, destroyed once after its message is read. Null is
         // accepted by `kafka_common_KafkaFuture_BaseFunction_destroy`.
         unsafe {
-            let out = kafka_common_KafkaFuture_BaseFunction_apply(function, &raw mut a as *mut c_void, &raw mut error);
+            let out =
+                kafka_common_KafkaFuture_BaseFunction_apply(function, &raw const a as *const c_void, &raw mut error);
             assert!(error.is_null());
             assert_eq!(*(out as *const i64), 42);
             assert_eq!(doubler.calls.load(Ordering::SeqCst), 1);
 
-            let out = kafka_common_KafkaFuture_BaseFunction_apply(failing, &raw mut a as *mut c_void, &raw mut error);
+            let out =
+                kafka_common_KafkaFuture_BaseFunction_apply(failing, &raw const a as *const c_void, &raw mut error);
             assert!(!error.is_null());
             assert!(out.is_null());
             assert_eq!(
@@ -1696,13 +1695,13 @@ mod tests {
 
         // SAFETY: Test code: `source`, `derived` and `chained` are fresh future handles and
         // `function` and `again` fresh function handles over `doubler`, a live local that
-        // outlives every derived future; each handle is destroyed once after its last use.
+        // outlives every derived future, each consumed by its `then_apply`; each future handle is
+        // destroyed once after its last use.
         // `first` and the chained value point into `doubler`, and the source value is the
         // `i64` `source` caches, read before it is destroyed.
         unsafe {
+            // The function handle is consumed.
             let derived = kafka_common_KafkaFuture_then_apply(source, function);
-            // The registration is copied: the handle can go right away.
-            kafka_common_KafkaFuture_BaseFunction_destroy(function);
             assert_eq!(kafka_common_KafkaFuture_is_done(derived), 0);
             assert_eq!(
                 doubler.calls.load(Ordering::SeqCst),
@@ -1729,7 +1728,6 @@ mod tests {
             assert_eq!(doubler.calls.load(Ordering::SeqCst), 2);
             assert_eq!(*(get(source).unwrap() as *const i64), 21);
 
-            kafka_common_KafkaFuture_BaseFunction_destroy(again);
             kafka_common_KafkaFuture_destroy(chained);
             kafka_common_KafkaFuture_destroy(derived);
             kafka_common_KafkaFuture_destroy(source);
@@ -1746,8 +1744,8 @@ mod tests {
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
         // SAFETY: Test code: `source`, `derived`, `failed_source` and `from_failed` are fresh
         // future handles, `failing` and `function` fresh function handles (`function` over
-        // `doubler`, a live local that outlives its derived future); each is destroyed once
-        // after its last use. `failed_source` consumes a fresh `box_error` handle.
+        // `doubler`, a live local that outlives its derived future), each consumed by its
+        // `then_apply`; every future handle is destroyed once after its last use. `failed_source` consumes a fresh `box_error` handle.
         unsafe {
             let derived = kafka_common_KafkaFuture_then_apply(source, failing);
             assert_eq!(get(derived), Err("apply failed".to_string()));
@@ -1760,8 +1758,6 @@ mod tests {
             assert_eq!(get(from_failed), Err("late".to_string()));
             assert_eq!(doubler.calls.load(Ordering::SeqCst), 0);
 
-            kafka_common_KafkaFuture_BaseFunction_destroy(failing);
-            kafka_common_KafkaFuture_BaseFunction_destroy(function);
             kafka_common_KafkaFuture_destroy(derived);
             kafka_common_KafkaFuture_destroy(source);
             kafka_common_KafkaFuture_destroy(from_failed);
@@ -1783,7 +1779,8 @@ mod tests {
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
         // SAFETY: Test code: `source` is a fresh future handle and `function` a fresh function
         // handle over `doubler`, a live local that outlives the derived future; `derived` is
-        // the handle `then_apply` returns. All three are destroyed once at the end.
+        // the handle `then_apply` returns, which consumes `function`. Both futures are destroyed
+        // once at the end.
         let derived = unsafe { kafka_common_KafkaFuture_then_apply(source, function) };
 
         let seen: Mutex<Vec<i64>> = Mutex::new(Vec::new());
@@ -1801,7 +1798,6 @@ mod tests {
         assert_eq!(seen.into_inner().unwrap(), vec![8]);
         // SAFETY: Test code: each handle is still live and destroyed here, once.
         unsafe {
-            kafka_common_KafkaFuture_BaseFunction_destroy(function);
             kafka_common_KafkaFuture_destroy(derived);
             kafka_common_KafkaFuture_destroy(source);
         }

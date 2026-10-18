@@ -461,11 +461,10 @@ impl Builder {
         self
     }
 
-    /// Mirrors Java's `usingRaftController(boolean)`.
-    ///
-    /// The value is stored, but it has no effect yet: its only Java reader is
-    /// `MockAdminClient.unregisterBroker`, which this client does not translate
-    /// yet.
+    /// Sets whether the mocked cluster runs a KRaft (Raft) controller quorum,
+    /// which decides whether `unregister_controller` succeeds (default
+    /// `false`). Mirrors Java's `usingRaftController(boolean)`; as in Java the
+    /// value is fixed once the mock is built.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#usingRaftController")]
     pub fn set_using_raft_controller(mut self, using_raft_controller: bool) -> Self {
         self.using_raft_controller = using_raft_controller;
@@ -765,38 +764,6 @@ impl MockAdminClient {
         })
     }
 
-    /// Seeds the finalized feature levels, along with the minimum and maximum
-    /// supported feature levels, returned by `describe_features` and consulted
-    /// by `update_features`.
-    ///
-    /// Mirrors Java's `MockAdminClient.Builder.featureLevels` /
-    /// `minSupportedFeatureLevels` / `maxSupportedFeatureLevels`.
-    // Java seeds the feature levels only through Builder.featureLevels and its min/max siblings; the C binding and tests reseed a built mock
-    #[doc(alias = "rust-only")]
-    pub fn set_feature_levels(
-        &self,
-        feature_levels: HashMap<String, i16>,
-        min_supported_feature_levels: HashMap<String, i16>,
-        max_supported_feature_levels: HashMap<String, i16>,
-    ) {
-        let mut state = self.state.lock().unwrap();
-        state.feature_levels = feature_levels;
-        state.min_supported_feature_levels = min_supported_feature_levels;
-        state.max_supported_feature_levels = max_supported_feature_levels;
-    }
-
-    /// Sets whether the mocked cluster runs a KRaft (Raft) controller quorum,
-    /// which decides whether `unregister_controller` succeeds.
-    ///
-    /// Mirrors Java's `MockAdminClient.Builder.usingRaftController` (default
-    /// `false`). Like [`set_feature_levels`](Self::set_feature_levels), a Java
-    /// builder option becomes a setter on the constructed mock.
-    // Java sets this only through Builder.usingRaftController; the C binding and tests change it on a built mock
-    #[doc(alias = "rust-only")]
-    pub fn set_using_raft_controller(&self, using_raft_controller: bool) {
-        self.state.lock().unwrap().using_raft_controller = using_raft_controller;
-    }
-
     // --- seeding mutators ---------------------------------------------------
     //
     // Convention for this group: a seeding helper whose Java counterpart is a
@@ -836,29 +803,6 @@ impl MockAdminClient {
     pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
         state.committed_offsets.extend(new_offsets);
-    }
-
-    /// Overrides the log directories for a broker (mirrors Java's
-    /// `Builder.brokerLogDirs`). Useful for exercising multi-log-dir replica
-    /// moves in tests.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::LocalIllegalArgument`] if `broker_id` is not one of the
-    /// mock's brokers. Java has no equivalent setter — `Builder.brokerLogDirs`
-    /// installs the whole list up front — so this message has no Java
-    /// counterpart; it exists because indexing `brokerLogDirs` out of range
-    /// would otherwise panic.
-    // Java sets these only through Builder.brokerLogDirs; the C binding and tests override one broker on a built mock
-    #[doc(alias = "rust-only")]
-    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), Error> {
-        let mut state = self.state.lock().unwrap();
-        let slot = usize::try_from(broker_id)
-            .ok()
-            .and_then(|id| state.broker_log_dirs.get_mut(id))
-            .ok_or_else(|| Error::local_illegal_argument(format!("Broker {broker_id} does not exist.")))?;
-        *slot = log_dirs;
-        Ok(())
     }
 
     /// Adds an existing topic to the mock's state.
@@ -1347,9 +1291,9 @@ impl Admin for MockAdminClient {
     fn delete_topics_with_options(&self, topics: TopicCollection, _options: DeleteTopicsOptions) -> DeleteTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut result = HashMap::new();
-                for name in names {
+                for name in collection.topic_names().iter().cloned() {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
                         handle.complete_with_error(timeout_error());
@@ -1371,9 +1315,9 @@ impl Admin for MockAdminClient {
                 }
                 DeleteTopicsResult::of_topic_names(result)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut result = HashMap::new();
-                for id in ids {
+                for id in collection.topic_ids().iter().copied() {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
                         handle.complete_with_error(timeout_error());
@@ -1434,10 +1378,10 @@ impl Admin for MockAdminClient {
     ) -> DescribeTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut result = HashMap::new();
                 let timing_out = state.timeout_next_requests > 0;
-                for requested in &names {
+                for requested in collection.topic_names() {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
                         handle.complete_with_error(timeout_error());
@@ -1485,10 +1429,10 @@ impl Admin for MockAdminClient {
                 }
                 DescribeTopicsResult::of_topic_names(result)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut result = HashMap::new();
                 let timing_out = state.timeout_next_requests > 0;
-                for requested in &ids {
+                for requested in collection.topic_ids() {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
                         handle.complete_with_error(timeout_error());
@@ -3170,13 +3114,12 @@ mod tests {
     /// the range [1, 5] (mirrors the shape used by Java's `MockAdminClient`
     /// feature tests).
     fn admin_with_features() -> MockAdminClient {
-        let mock = Builder::new().build().expect("a fresh builder has one broker");
-        mock.set_feature_levels(
-            HashMap::from([("feature".to_string(), 3i16)]),
-            HashMap::from([("feature".to_string(), 1i16)]),
-            HashMap::from([("feature".to_string(), 5i16)]),
-        );
-        mock
+        Builder::new()
+            .set_feature_levels(HashMap::from([("feature".to_string(), 3i16)]))
+            .set_min_supported_feature_levels(HashMap::from([("feature".to_string(), 1i16)]))
+            .set_max_supported_feature_levels(HashMap::from([("feature".to_string(), 5i16)]))
+            .build()
+            .expect("a fresh builder has one broker")
     }
 
     async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), Error> {
@@ -3200,17 +3143,13 @@ mod tests {
     /// With `usingRaftController(true)` the future is already completed.
     #[tokio::test]
     async fn mock_unregister_controller_with_raft_controller_succeeds() {
-        let mock = admin();
-        mock.set_using_raft_controller(true);
+        let mock = Builder::new()
+            .set_using_raft_controller(true)
+            .build()
+            .expect("a fresh builder has one broker");
         let result = mock.unregister_controller_with_options(1, UnregisterControllerOptions::new());
         assert!(result.all().is_done());
         result.all().get().await.unwrap();
-        // Flipping it back restores the unsupported answer.
-        mock.set_using_raft_controller(false);
-        assert_eq!(
-            mock.unregister_controller(1).all().get().await.unwrap_err().error(),
-            Errors::UnsupportedVersion
-        );
     }
     #[tokio::test]
     async fn mock_describe_features_returns_seeded_ranges() {
@@ -3410,8 +3349,10 @@ mod tests {
 
     #[tokio::test]
     async fn mock_create_topics_rejects_a_leader_with_no_log_directories() {
-        let client = admin();
-        client.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
+        let client = Builder::new()
+            .set_broker_log_dirs(vec![Vec::new()])
+            .build()
+            .expect("a fresh builder has one broker");
         let result = client.create_topics_with_options(
             &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
             CreateTopicsOptions::new(),
@@ -4344,8 +4285,10 @@ mod tests {
 
     #[test]
     fn mock_add_topic_rejects_a_leader_with_no_log_directories() {
-        let mock = admin();
-        mock.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
+        let mock = Builder::new()
+            .set_broker_log_dirs(vec![Vec::new()])
+            .build()
+            .expect("a fresh builder has one broker");
         let partitions = vec![partition_info(
             0,
             Some(seeded_broker(0)),
@@ -4354,15 +4297,6 @@ mod tests {
         )];
         let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
         assert_eq!(error.message(), "Broker 0 has no log directories.");
-    }
-
-    #[test]
-    fn mock_set_broker_log_dirs_rejects_an_unknown_broker() {
-        let mock = admin();
-        let error = mock.set_broker_log_dirs(7, vec!["/data".to_string()]).unwrap_err();
-        assert_eq!(error.message(), "Broker 7 does not exist.");
-        let error = mock.set_broker_log_dirs(-1, vec!["/data".to_string()]).unwrap_err();
-        assert_eq!(error.message(), "Broker -1 does not exist.");
     }
 
     // --- setFetchesRemainingUntilVisible (MockAdminClient.java:1626-1632) -------

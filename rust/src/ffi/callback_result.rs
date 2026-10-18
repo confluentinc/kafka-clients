@@ -61,10 +61,12 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Waker};
 
 use tokio::sync::Notify;
 
 use crate::common::Error;
+use crate::ffi::callback_queue::SendPtr;
 
 /// What a pending interface call does with its outcome: the method's return
 /// value as the raw pointer C reported, or the reported error. It runs on
@@ -77,6 +79,26 @@ pub(crate) type ResultSink = Box<dyn FnOnce(Result<*mut c_void, Error>) + Send>;
 pub(crate) fn void_sink(deliver: impl FnOnce(Result<(), Error>) + Send + 'static) -> ResultSink {
     Box::new(move |result| deliver(result.map(|_| ())))
 }
+
+/// What a waiting registration ([`CallbackResults::register_waiting`]) keeps
+/// alive for the C implementation until it reports: the arguments it was
+/// handed pointers into. Each slot owns one, boxed once, when the slot first
+/// waits, and reused by every later call through the slot, so its address is
+/// stable while the slab grows and its buffers keep their capacity.
+pub(crate) trait KeepAlive: Default + Send + 'static {
+    /// Releases what the last call kept alive, keeping the capacity of any
+    /// buffer for the next one.
+    fn clear(&mut self);
+}
+
+impl KeepAlive for () {
+    fn clear(&mut self) {}
+}
+
+/// Reads a successful report's `result` into the slot's [`KeepAlive`] on
+/// the reporting thread, while the pointer is still valid (a serializer's
+/// `kafka_Bytes_t *`); the waiting future then takes it from there.
+pub(crate) type Convert<K> = fn(&mut K, *mut c_void);
 
 /// The pending calls of the standalone invokers, which invoke a C
 /// implementation with no client of their own:
@@ -112,15 +134,36 @@ struct Pending {
     sink: ResultSink,
 }
 
+/// A waiting registration: the future polling it, the outcome once
+/// reported, and whether the future was dropped first.
+struct WaitingSlot<K> {
+    waker: Option<Waker>,
+    outcome: Option<Result<SendPtr, Error>>,
+    /// The future was dropped before the report: the report frees the slot.
+    abandoned: bool,
+    convert: Convert<K>,
+}
+
+/// What occupies a slot.
+enum Entry<K> {
+    /// A [`ResultSink`], run by the report.
+    Sink(Pending),
+    /// A future waiting for the report.
+    Waiting(WaitingSlot<K>),
+}
+
 /// One slab entry: the generation an id of its current occupant carries.
-struct Slot {
+struct Slot<K> {
     generation: u32,
-    pending: Option<Pending>,
+    entry: Option<Entry<K>>,
+    /// The arguments a waiting registration keeps alive, boxed the first
+    /// time this slot waits and reused afterwards.
+    keep_alive: Option<Box<K>>,
 }
 
 /// What the registry's mutex guards.
-struct Slab {
-    slots: Vec<Slot>,
+struct Slab<K> {
+    slots: Vec<Slot<K>>,
     /// Indices of the free slots, reused last-freed first.
     free: Vec<u32>,
     /// The registration order of the next registration.
@@ -129,11 +172,12 @@ struct Slab {
     epoch_base: u64,
     /// The number of pending sinks of each epoch from `epoch_base` to the
     /// current one, the last entry. Never empty, and its first entry is not
-    /// 0 unless it is the only one.
+    /// 0 unless it is the only one. Waiting registrations are not counted:
+    /// their future waits for them.
     outstanding: VecDeque<usize>,
 }
 
-impl Slab {
+impl<K: KeepAlive> Slab<K> {
     /// The epoch new registrations fall in.
     fn current_epoch(&self) -> u64 {
         // `outstanding` is never empty, so the subtraction cannot underflow.
@@ -148,26 +192,74 @@ impl Slab {
         }
     }
 
-    /// Takes the sink `id` names out of its slot and frees the slot; `None`
-    /// for an id this registry did not issue or whose sink was taken.
-    fn take(&mut self, id: i64, tag: i64) -> Option<ResultSink> {
+    /// A free slot's index, growing the slab when none is free.
+    fn allocate(&mut self) -> u32 {
+        match self.free.pop() {
+            Some(index) => index,
+            None => {
+                let index = u32::try_from(self.slots.len()).expect("more than u32::MAX callbacks pending at once");
+                self.slots.push(Slot { generation: 1, entry: None, keep_alive: None });
+                index
+            },
+        }
+    }
+
+    /// The id of the occupant of slot `index`.
+    fn id(&self, index: u32, tag: i64) -> i64 {
+        tag | (i64::from(self.slots[index as usize].generation) << INDEX_BITS) | i64::from(index)
+    }
+
+    /// The index of the occupied slot `id` names; `None` for an id this
+    /// registry did not issue or whose slot was freed since.
+    fn find(&self, id: i64, tag: i64) -> Option<usize> {
         if id & TAG_BIT != tag {
             return None;
         }
         // Both fit by construction: the index is the low 32 bits and the generation the 30 above.
-        let index = (id & i64::from(u32::MAX)) as u32;
+        let index = (id & i64::from(u32::MAX)) as u32 as usize;
         let generation = ((id >> INDEX_BITS) & i64::from(GENERATION_MASK)) as u32;
-        let slot = self.slots.get_mut(index as usize)?;
-        if slot.generation != generation {
+        let slot = self.slots.get(index)?;
+        (slot.generation == generation && slot.entry.is_some()).then_some(index)
+    }
+
+    /// Frees slot `index`: its occupant's ids are unknown afterwards, and
+    /// what it kept alive is released.
+    fn release(&mut self, index: usize) {
+        let slot = &mut self.slots[index];
+        slot.entry = None;
+        slot.generation = next_generation(slot.generation);
+        if let Some(keep_alive) = &mut slot.keep_alive {
+            keep_alive.clear();
+        }
+        // Every index fits: `allocate` hands out `u32` indices only.
+        self.free.push(index as u32);
+    }
+
+    /// Takes the sink `id` names out of its slot and frees the slot; `None`
+    /// for an id this registry did not issue, whose sink was taken, or that
+    /// names a waiting registration.
+    fn take(&mut self, id: i64, tag: i64) -> Option<ResultSink> {
+        let index = self.find(id, tag)?;
+        if !matches!(self.slots[index].entry, Some(Entry::Sink(_))) {
             return None;
         }
-        let pending = slot.pending.take()?;
-        slot.generation = next_generation(slot.generation);
-        self.free.push(index);
+        let Some(Entry::Sink(pending)) = self.slots[index].entry.take() else {
+            return None;
+        };
+        self.release(index);
         // A pending sink's epoch is never trimmed (its count is not 0), so it is in range.
         self.outstanding[(pending.epoch - self.epoch_base) as usize] -= 1;
         self.trim();
         Some(pending.sink)
+    }
+
+    /// The waiting registration in slot `index`, if that is what occupies it.
+    fn waiting(&mut self, index: usize) -> Option<(&mut WaitingSlot<K>, &mut K)> {
+        let slot = &mut self.slots[index];
+        match (&mut slot.entry, &mut slot.keep_alive) {
+            (Some(Entry::Waiting(waiting)), Some(keep_alive)) => Some((waiting, keep_alive)),
+            _ => None,
+        }
     }
 }
 
@@ -180,11 +272,13 @@ fn next_generation(generation: u32) -> u32 {
     }
 }
 
-/// The sinks awaiting a report, by the id C reports with.
-pub(crate) struct CallbackResults {
+/// The calls awaiting a report, by the id C reports with: boxed
+/// [`ResultSink`]s, and waiting registrations whose [`KeepAlive`] `K` holds
+/// what the C implementation reads until it reports.
+pub(crate) struct CallbackResults<K = ()> {
     /// [`TAG_BIT`] for a tagged registry, 0 otherwise.
     tag: i64,
-    slab: Mutex<Slab>,
+    slab: Mutex<Slab<K>>,
     /// Sinks taken by `complete` and still running, outside the mutex; a
     /// waiter waits for them too, so a report counts once its sink returned.
     in_sink: AtomicUsize,
@@ -207,6 +301,19 @@ impl CallbackResults {
         Self::with_tag(TAG_BIT)
     }
 
+    /// Whether `id` was issued by a [`Self::new_tagged`] registry.
+    pub(crate) fn is_tagged(id: i64) -> bool {
+        id & TAG_BIT != 0
+    }
+}
+
+impl<K: KeepAlive> CallbackResults<K> {
+    /// An empty untagged registry whose waiting registrations keep a `K`
+    /// alive.
+    pub(crate) fn with_keep_alive() -> Self {
+        Self::with_tag(0)
+    }
+
     fn with_tag(tag: i64) -> Self {
         let mut outstanding = VecDeque::new();
         outstanding.push_back(0);
@@ -219,14 +326,9 @@ impl CallbackResults {
         }
     }
 
-    /// Whether `id` was issued by a [`Self::new_tagged`] registry.
-    pub(crate) fn is_tagged(id: i64) -> bool {
-        id & TAG_BIT != 0
-    }
-
     /// The registry's state. No critical section can panic midway short of
     /// an allocation failure, so a poisoned lock is taken as is.
-    fn lock(&self) -> MutexGuard<'_, Slab> {
+    fn lock(&self) -> MutexGuard<'_, Slab<K>> {
         self.slab.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -240,43 +342,143 @@ impl CallbackResults {
         if let Some(count) = slab.outstanding.back_mut() {
             *count += 1;
         }
-        let index = match slab.free.pop() {
-            Some(index) => index,
-            None => {
-                let index = u32::try_from(slab.slots.len()).expect("more than u32::MAX callbacks pending at once");
-                slab.slots.push(Slot { generation: 1, pending: None });
-                index
-            },
-        };
-        let slot = &mut slab.slots[index as usize];
-        slot.pending = Some(Pending { seq, epoch, sink });
-        self.tag | (i64::from(slot.generation) << INDEX_BITS) | i64::from(index)
+        let index = slab.allocate();
+        slab.slots[index as usize].entry = Some(Entry::Sink(Pending { seq, epoch, sink }));
+        slab.id(index, self.tag)
     }
 
-    /// Delivers a report to the sink registered under `id`, running it on
-    /// the calling thread outside the registry's lock, so the sink may
-    /// register or report again. The error comes first: `Some(error)` is the
-    /// outcome and `result` is not taken (it stays the caller's); `None`
-    /// hands the sink `result`. Returns `false` for an id this registry did
-    /// not issue, or whose report already arrived (or was drained): nothing
-    /// is delivered, `error` is dropped and `result` is not taken.
+    /// Registers a call whose report a [`WaitReport`] future waits for, and
+    /// returns its id with what `fill` returns. `fill` stores in the slot's
+    /// [`KeepAlive`] what the C implementation will read, typically returning
+    /// the pointers into it to pass: they stay valid until the report, even
+    /// when the future is dropped first. `convert` reads a successful
+    /// report's `result` on the reporting thread.
+    ///
+    /// Once the slab has grown, this allocates nothing beyond what `fill`
+    /// does: the slot and its `K` are reused.
+    pub(crate) fn register_waiting<R>(&self, convert: Convert<K>, fill: impl FnOnce(&mut K) -> R) -> (i64, R) {
+        let mut slab = self.lock();
+        let index = slab.allocate();
+        let slot = &mut slab.slots[index as usize];
+        let filled = fill(slot.keep_alive.get_or_insert_with(Box::default));
+        slot.entry = Some(Entry::Waiting(WaitingSlot {
+            waker: None,
+            outcome: None,
+            abandoned: false,
+            convert,
+        }));
+        (slab.id(index, self.tag), filled)
+    }
+
+    /// Delivers a report to the call registered under `id`. The error comes
+    /// first: `Some(error)` is the outcome and `result` is not taken (it
+    /// stays the caller's); `None` hands the call `result`.
+    ///
+    /// A sink runs on the calling thread outside the registry's lock, so it
+    /// may register or report again. A waiting registration converts
+    /// `result` on the calling thread, stores the outcome and wakes its
+    /// future; when the future was dropped first, the report frees the slot
+    /// and what it kept alive, and the outcome is dropped.
+    ///
+    /// Returns `false` for an id this registry did not issue, or whose report
+    /// already arrived (or was drained): nothing is delivered, `error` is
+    /// dropped and `result` is not taken.
     pub(crate) fn complete(&self, id: i64, result: *mut c_void, error: Option<Error>) -> bool {
-        let sink = {
-            let mut slab = self.lock();
-            let sink = slab.take(id, self.tag);
-            if sink.is_some() {
-                // Counted inside the critical section that uncounts the pending sink, so a waiter
-                // never sees the report as done while its sink still runs.
-                self.in_sink.fetch_add(1, Ordering::SeqCst);
-            }
-            sink
+        let mut slab = self.lock();
+        let Some(index) = slab.find(id, self.tag) else {
+            return false;
         };
+        if let Some((waiting, keep_alive)) = slab.waiting(index) {
+            if waiting.outcome.is_some() {
+                // A second report.
+                return false;
+            }
+            if waiting.abandoned {
+                slab.release(index);
+                return true;
+            }
+            let outcome = match error {
+                Some(error) => Err(error),
+                None => {
+                    (waiting.convert)(keep_alive, result);
+                    Ok(SendPtr(result))
+                },
+            };
+            waiting.outcome = Some(outcome);
+            let waker = waiting.waker.take();
+            drop(slab);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            return true;
+        }
+        let sink = slab.take(id, self.tag);
+        if sink.is_some() {
+            // Counted inside the critical section that uncounts the pending sink, so a waiter
+            // never sees the report as done while its sink still runs.
+            self.in_sink.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(slab);
         let Some(sink) = sink else {
             return false;
         };
         let _running = SinkRunning(self);
         sink(error.map_or(Ok(result), Err));
         true
+    }
+
+    /// Polls the waiting registration `id`: once reported, `finish` takes
+    /// the outcome and what the slot kept alive (where `convert` left the
+    /// result), the slot is freed and its result returned; until then the
+    /// waker is stored. An id that names no waiting registration (never the
+    /// case for the [`WaitReport`] that registered it) is an error.
+    fn poll_waiting<R>(
+        &self,
+        id: i64,
+        cx: &mut Context<'_>,
+        finish: impl FnOnce(&mut K, Result<*mut c_void, Error>) -> R,
+    ) -> Poll<Result<R, Error>> {
+        let mut slab = self.lock();
+        let Some((index, (waiting, keep_alive))) =
+            slab.find(id, self.tag).and_then(|index| Some(index).zip(slab.waiting(index)))
+        else {
+            return Poll::Ready(Err(Error::local_illegal_state(
+                "The pending serde call is unknown to its registry",
+            )));
+        };
+        match waiting.outcome.take() {
+            Some(outcome) => {
+                let result = finish(keep_alive, outcome.map(SendPtr::get));
+                slab.release(index);
+                Poll::Ready(Ok(result))
+            },
+            None => {
+                match &waiting.waker {
+                    Some(waker) if waker.will_wake(cx.waker()) => {},
+                    _ => waiting.waker = Some(cx.waker().clone()),
+                }
+                Poll::Pending
+            },
+        }
+    }
+
+    /// The future waiting for registration `id` was dropped: a report that
+    /// already arrived frees the slot now, otherwise the report will, and
+    /// until then the slot keeps alive what the C implementation reads.
+    fn abandon(&self, id: i64) {
+        let mut slab = self.lock();
+        let Some(index) = slab.find(id, self.tag) else {
+            return;
+        };
+        let Some((waiting, _)) = slab.waiting(index) else {
+            return;
+        };
+        if waiting.outcome.is_some() {
+            slab.release(index);
+        } else {
+            waiting.abandoned = true;
+            waiting.waker = None;
+        }
     }
 
     /// The point a later [`Self::wait_reported`] waits for: the callbacks
@@ -288,8 +490,8 @@ impl CallbackResults {
         Mark(slab.current_epoch())
     }
 
-    /// Returns once every callback registered before `mark` was reported,
-    /// and its sink returned, or was drained. Cancellation-safe: dropping
+    /// Returns once every sink registered before `mark` was reported,
+    /// and returned, or was drained. Cancellation-safe: dropping
     /// the future leaves nothing behind.
     ///
     /// It also waits for the sinks of the reports arriving meanwhile,
@@ -313,8 +515,8 @@ impl CallbackResults {
         }
     }
 
-    /// Whether no callback registered before `mark` is awaiting its report
-    /// or running its sink.
+    /// Whether no sink registered before `mark` is awaiting its report
+    /// or running.
     fn reported_before(&self, mark: Mark) -> bool {
         let slab = self.lock();
         let earlier = usize::try_from(mark.0.saturating_sub(slab.epoch_base)).unwrap_or(usize::MAX);
@@ -323,24 +525,24 @@ impl CallbackResults {
 
     /// Takes every sink still awaiting a report, in registration order, for
     /// a client that completes them itself when it is destroyed; their ids
-    /// are unknown afterwards, and the waiters are released.
+    /// are unknown afterwards, and the waiters are released. Waiting
+    /// registrations stay: their futures, or their reports, free them.
     pub(crate) fn drain(&self) -> Vec<ResultSink> {
         let mut drained = {
             let mut slab = self.lock();
             let current = slab.current_epoch();
-            let Slab { slots, free, outstanding, epoch_base, .. } = &mut *slab;
             let mut drained = Vec::new();
-            for (index, slot) in slots.iter_mut().enumerate() {
-                if let Some(pending) = slot.pending.take() {
-                    slot.generation = next_generation(slot.generation);
-                    // Every index fits: `register` hands out `u32` indices only.
-                    free.push(index as u32);
-                    drained.push(pending);
+            for index in 0..slab.slots.len() {
+                if matches!(slab.slots[index].entry, Some(Entry::Sink(_))) {
+                    if let Some(Entry::Sink(pending)) = slab.slots[index].entry.take() {
+                        drained.push(pending);
+                    }
+                    slab.release(index);
                 }
             }
-            outstanding.clear();
-            outstanding.push_back(0);
-            *epoch_base = current;
+            slab.outstanding.clear();
+            slab.outstanding.push_back(0);
+            slab.epoch_base = current;
             drained
         };
         if self.waiters.load(Ordering::SeqCst) > 0 {
@@ -351,11 +553,65 @@ impl CallbackResults {
     }
 }
 
+/// The future of a waiting registration
+/// ([`CallbackResults::register_waiting`]): ready with what `finish` makes of
+/// the outcome once the report arrives. Dropping it first leaves the slot,
+/// and what it keeps alive, to the report.
+///
+/// A hand-written future rather than an `async` block so that it stays two
+/// words and a function pointer, small enough for the serde futures that
+/// await it to be stored inline (`InlineFuture`).
+pub(crate) struct WaitReport<'a, K: KeepAlive, R> {
+    results: &'a CallbackResults<K>,
+    id: i64,
+    /// Set once the outcome was taken, so `Drop` does not abandon a freed slot.
+    done: bool,
+    finish: fn(&mut K, Result<*mut c_void, Error>) -> Result<R, Error>,
+}
+
+impl<'a, K: KeepAlive, R> WaitReport<'a, K, R> {
+    /// Waits for registration `id` of `results`, made by the caller.
+    pub(crate) fn new(
+        results: &'a CallbackResults<K>,
+        id: i64,
+        finish: fn(&mut K, Result<*mut c_void, Error>) -> Result<R, Error>,
+    ) -> Self {
+        WaitReport { results, id, done: false, finish }
+    }
+}
+
+impl<K: KeepAlive, R> Future for WaitReport<'_, K, R> {
+    type Output = Result<R, Error>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `WaitReport` is `Unpin`: it holds no self-reference.
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(Err(Error::local_illegal_state("The serde call was already reported")));
+        }
+        match this.results.poll_waiting(this.id, cx, this.finish) {
+            Poll::Ready(result) => {
+                this.done = true;
+                Poll::Ready(result.and_then(|r| r))
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<K: KeepAlive, R> Drop for WaitReport<'_, K, R> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.results.abandon(self.id);
+        }
+    }
+}
+
 /// Counts a sink `complete` runs; on drop (also when the sink panics) it
 /// wakes the waiters once the last running sink returned.
-struct SinkRunning<'a>(&'a CallbackResults);
+struct SinkRunning<'a, K: KeepAlive>(&'a CallbackResults<K>);
 
-impl Drop for SinkRunning<'_> {
+impl<K: KeepAlive> Drop for SinkRunning<'_, K> {
     fn drop(&mut self) {
         let results = self.0;
         if results.in_sink.fetch_sub(1, Ordering::SeqCst) == 1 && results.waiters.load(Ordering::SeqCst) > 0 {
@@ -645,5 +901,151 @@ mod tests {
         assert!(poll_once(wait.as_mut()).is_pending());
         assert!(results.complete(id, ptr::null_mut(), None));
         assert!(poll_once(wait.as_mut()).is_ready());
+    }
+
+    /// What a test waiting registration keeps alive: a buffer C would read,
+    /// and the value a report converted.
+    #[derive(Default)]
+    struct TestKeepAlive {
+        input: Vec<u8>,
+        converted: Option<i32>,
+        cleared: usize,
+    }
+
+    impl KeepAlive for TestKeepAlive {
+        fn clear(&mut self) {
+            self.input.clear();
+            self.converted = None;
+            self.cleared += 1;
+        }
+    }
+
+    /// Reads a reported `*mut i32` into the keep-alive, as a serializer's
+    /// convert copies its `kafka_Bytes_t`.
+    fn convert_i32(keep_alive: &mut TestKeepAlive, result: *mut c_void) {
+        // SAFETY: Test code: every success report passes a pointer to a live `i32`.
+        keep_alive.converted = Some(unsafe { *(result as *const i32) });
+    }
+
+    fn finish_i32(keep_alive: &mut TestKeepAlive, outcome: Result<*mut c_void, Error>) -> Result<i32, Error> {
+        outcome.map(|_| keep_alive.converted.take().expect("converted on report"))
+    }
+
+    /// Registers a waiting call keeping `input` alive; returns its id and the
+    /// address C would read.
+    fn register_input(results: &CallbackResults<TestKeepAlive>, input: &[u8]) -> (i64, *const u8) {
+        results.register_waiting(convert_i32, |keep_alive| {
+            keep_alive.input.extend_from_slice(input);
+            keep_alive.input.as_ptr()
+        })
+    }
+
+    #[test]
+    fn waiting_report_before_the_first_poll_is_ready_at_once() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let (id, _) = register_input(&results, b"abc");
+        let mut value = 5_i32;
+        assert!(results.complete(id, ptr::addr_of_mut!(value) as *mut c_void, None));
+        let mut wait = pin!(WaitReport::new(&results, id, finish_i32));
+        assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(5))));
+        assert!(!results.complete(id, ptr::null_mut(), None), "the slot was freed");
+    }
+
+    #[test]
+    fn waiting_report_after_a_poll_wakes_the_future() {
+        let results = Arc::new(CallbackResults::<TestKeepAlive>::with_keep_alive());
+        let (id, input) = register_input(&results, b"abc");
+        let input = SendPtr(input as *mut c_void);
+        let reporter = {
+            let results = Arc::clone(&results);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                // SAFETY: Test code: the slot keeps the 3 input bytes alive until this report.
+                let read = unsafe { std::slice::from_raw_parts(input.get() as *const u8, 3) }.to_vec();
+                let mut value = 9_i32;
+                assert!(results.complete(id, ptr::addr_of_mut!(value) as *mut c_void, None));
+                read
+            })
+        };
+        let value = crate::ffi::common::serialization::block_on_thread(WaitReport::new(&results, id, finish_i32));
+        assert_eq!(value.unwrap(), 9);
+        assert_eq!(reporter.join().unwrap(), b"abc");
+    }
+
+    #[test]
+    fn waiting_error_report_skips_the_conversion() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let (id, _) = register_input(&results, b"x");
+        assert!(results.complete(id, ptr::null_mut(), Some(Error::local_illegal_state("bad"))));
+        let mut wait = pin!(WaitReport::new(&results, id, finish_i32));
+        match poll_once(wait.as_mut()) {
+            Poll::Ready(Err(error)) => assert_eq!(error.message(), "bad"),
+            _ => panic!("expected the reported error"),
+        }
+    }
+
+    #[test]
+    fn a_second_waiting_report_is_ignored() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let (id, _) = register_input(&results, b"x");
+        let mut first = 1_i32;
+        let mut second = 2_i32;
+        assert!(results.complete(id, ptr::addr_of_mut!(first) as *mut c_void, None));
+        assert!(!results.complete(id, ptr::addr_of_mut!(second) as *mut c_void, None));
+        let mut wait = pin!(WaitReport::new(&results, id, finish_i32));
+        assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(1))));
+    }
+
+    #[test]
+    fn an_abandoned_waiting_slot_keeps_its_input_until_the_report() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let (id, input) = register_input(&results, b"keep");
+        {
+            let mut wait = pin!(WaitReport::new(&results, id, finish_i32));
+            assert!(poll_once(wait.as_mut()).is_pending());
+        }
+        // SAFETY: Test code: the abandoned slot keeps the 4 input bytes alive until the report.
+        assert_eq!(unsafe { std::slice::from_raw_parts(input, 4) }, b"keep");
+        let mut value = 3_i32;
+        assert!(
+            results.complete(id, ptr::addr_of_mut!(value) as *mut c_void, None),
+            "the report frees it"
+        );
+        assert!(!results.complete(id, ptr::null_mut(), None));
+        // The freed slot, and its keep-alive, are reused, cleared.
+        let (again, _) = results.register_waiting(convert_i32, |keep_alive| {
+            assert!(keep_alive.input.is_empty());
+            assert_eq!(keep_alive.cleared, 1);
+        });
+        assert_ne!(again, id, "a reused slot gets a new generation");
+    }
+
+    #[test]
+    fn a_waiting_slot_dropped_after_its_report_is_freed() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let (id, _) = register_input(&results, b"x");
+        let mut value = 3_i32;
+        assert!(results.complete(id, ptr::addr_of_mut!(value) as *mut c_void, None));
+        drop(WaitReport::new(&results, id, finish_i32));
+        assert!(!results.complete(id, ptr::null_mut(), None));
+        assert_eq!(results.lock().free.len(), 1, "the slot is free again");
+    }
+
+    #[test]
+    fn waiting_registrations_do_not_allocate_once_warm() {
+        let results = CallbackResults::<TestKeepAlive>::with_keep_alive();
+        let round = || {
+            let (id, _) = register_input(&results, b"abcd");
+            let mut value = 1_i32;
+            assert!(results.complete(id, ptr::addr_of_mut!(value) as *mut c_void, None));
+            let mut wait = pin!(WaitReport::new(&results, id, finish_i32));
+            assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(1))));
+        };
+        round();
+        let _guard = AllocTrackingGuard::new();
+        for _ in 0..100 {
+            round();
+        }
+        assert_eq!(AllocTrackingGuard::count(), 0);
     }
 }

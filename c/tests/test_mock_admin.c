@@ -1529,8 +1529,8 @@ static void test_mock_admin_describe_topics_by_names(void) {
         kafka_admin_Admin_describe_topics_with_topic_names_options(f.admin, names, options);
     kafka_admin_DescribeTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_id_values(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_all_topic_ids(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
 
@@ -1618,8 +1618,8 @@ static void test_mock_admin_describe_topics_by_ids(void) {
     TEST_ASSERT_NOT_NULL(collection);
     kafka_admin_DescribeTopicsResult_t *result = kafka_admin_Admin_describe_topics_with_topics(f.admin, collection);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_ID, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_name_values(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_all_topic_names(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     const kafka_admin_TopicDescription_t *d = (const kafka_admin_TopicDescription_t *)get_ok(future_for(values, id));
@@ -1692,7 +1692,6 @@ static void test_mock_admin_delete_topics_by_names(void) {
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_options(f.admin, collection, options);
     kafka_admin_DeleteTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
@@ -1734,7 +1733,6 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_ID, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
@@ -4670,9 +4668,10 @@ static void test_mock_admin_delegation_token_async(void) {
 // features
 // ---------------------------------------------------------------------------
 
-/* Seeds metadata.version 17 in [14, 21], transaction.version 2 in [1, 3]
- * and group.version 1 in [0, 4], at finalized epoch 123. */
-static void seed_features(fixture_t *f) {
+/* A one-broker mock whose builder seeds metadata.version 17 in [14, 21],
+ * transaction.version 2 in [1, 3] and group.version 1 in [0, 4], at finalized
+ * epoch 123. */
+static void fixture_init_with_features(fixture_t *f) {
     int16_t levels[3] = {17, 2, 1};
     int16_t mins[3] = {14, 1, 0};
     int16_t maxs[3] = {21, 3, 4};
@@ -4685,10 +4684,15 @@ static void seed_features(fixture_t *f) {
         kafka_Map_put(min_map, (void *)names[i], &mins[i]);
         kafka_Map_put(max_map, (void *)names[i], &maxs[i]);
     }
-    kafka_admin_MockAdminClient_set_feature_levels(f->mock, level_map, min_map, max_map);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    kafka_admin_MockAdminClient_Builder_set_feature_levels(builder, level_map);
+    kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels(builder, min_map);
+    kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels(builder, max_map);
     kafka_Map_destroy(level_map);
     kafka_Map_destroy(min_map);
     kafka_Map_destroy(max_map);
+    fixture_from_builder(f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
 }
 
 static int16_t finalized_level(fixture_t *f, const char *feature) {
@@ -4718,8 +4722,7 @@ static kafka_admin_FeatureUpdate_t *feature_update(int16_t level, const kafka_ad
  * fixed at 123 (MockAdminClient.java). */
 static void test_mock_admin_describe_features(void) {
     fixture_t f;
-    fixture_init(&f, 1);
-    seed_features(&f);
+    fixture_init_with_features(&f);
     kafka_admin_DescribeFeaturesOptions_t *options = kafka_admin_DescribeFeaturesOptions_new();
     kafka_admin_DescribeFeaturesOptions_set_node_id(options, 0);
     kafka_admin_DescribeFeaturesOptions_set_timeout_ms(options, 5000);
@@ -4764,8 +4767,7 @@ static void test_mock_admin_describe_features(void) {
 static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
-    fixture_init(&f, 1);
-    seed_features(&f);
+    fixture_init_with_features(&f);
     kafka_admin_FeatureUpdate_t *update = feature_update(19, kafka_admin_FeatureUpdate_UpgradeType_upgrade());
     TEST_ASSERT_EQUAL_INT16(19, kafka_admin_FeatureUpdate_max_version_level(update));
     TEST_ASSERT_TRUE(kafka_admin_FeatureUpdate_upgrade_type(update) == kafka_admin_FeatureUpdate_UpgradeType_upgrade());
@@ -4815,8 +4817,7 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
 static void test_mock_admin_update_features_rejects_bad_updates(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
-    fixture_init(&f, 1);
-    seed_features(&f);
+    fixture_init_with_features(&f);
     kafka_admin_FeatureUpdate_t *too_high = feature_update(99, kafka_admin_FeatureUpdate_UpgradeType_upgrade());
     kafka_Map_t *updates = kafka_Map_new();
     kafka_Map_put(updates, (void *)"metadata.version", too_high);
@@ -4872,8 +4873,7 @@ static void test_mock_admin_update_features_rejects_bad_updates(void) {
 static void test_mock_admin_features_async(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
-    fixture_init(&f, 1);
-    seed_features(&f);
+    fixture_init_with_features(&f);
     kafka_admin_DescribeFeaturesResult_t *described = kafka_admin_Admin_describe_features(f.admin);
     kafka_common_KafkaFuture_t *future = kafka_admin_DescribeFeaturesResult_feature_metadata(described);
     cb_result_t r;
@@ -5086,9 +5086,8 @@ static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(v
 
 /* `unregisterController` (KAFKA-20395, Kafka 4.4): Java's
  * `MockAdminClient.unregisterController` succeeds when the mock uses a Raft
- * controller and otherwise fails with `UnsupportedVersionException("")`. The
- * mock's `usingRaftController` is a builder option in Java and a setter on the
- * constructed mock here. */
+ * controller (`Builder.usingRaftController(true)`) and otherwise fails with
+ * `UnsupportedVersionException("")`. */
 static void test_mock_admin_unregister_controller_follows_raft_controller(void) {
     fixture_t f;
     fixture_init(&f, 1);
@@ -5101,8 +5100,12 @@ static void test_mock_admin_unregister_controller_follows_raft_controller(void) 
     assert_error_message(err, "");
     kafka_common_KafkaFuture_destroy(all);
     kafka_admin_UnregisterControllerResult_destroy(result);
+    fixture_destroy(&f);
 
-    kafka_admin_MockAdminClient_set_using_raft_controller(f.mock, 1);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    kafka_admin_MockAdminClient_Builder_set_using_raft_controller(builder, 1);
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
     result = kafka_admin_Admin_unregister_controller(f.admin, 1);
     expect_void_ok(kafka_admin_UnregisterControllerResult_all(result));
     kafka_admin_UnregisterControllerResult_destroy(result);
@@ -5117,15 +5120,6 @@ static void test_mock_admin_unregister_controller_follows_raft_controller(void) 
     get_cb_pumped(&f, all, &r);
     TEST_ASSERT_EQUAL_INT(0, r.had_error);
     TEST_ASSERT_NULL(r.value);
-    kafka_common_KafkaFuture_destroy(all);
-    kafka_admin_UnregisterControllerResult_destroy(result);
-
-    kafka_admin_MockAdminClient_set_using_raft_controller(f.mock, 0);
-    result = kafka_admin_Admin_unregister_controller(f.admin, 1);
-    all = kafka_admin_UnregisterControllerResult_all(result);
-    get_cb_pumped(&f, all, &r);
-    TEST_ASSERT_EQUAL_INT(1, r.had_error);
-    TEST_ASSERT_EQUAL_STRING("", r.message);
     kafka_common_KafkaFuture_destroy(all);
     kafka_admin_UnregisterControllerResult_destroy(result);
     kafka_admin_UnregisterControllerResult_destroy(NULL);

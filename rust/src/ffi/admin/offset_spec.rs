@@ -159,16 +159,6 @@ pub extern "C" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut k
     box_offset_spec(OffsetSpec::for_timestamp(timestamp))
 }
 
-/// The `timestamp` kind built from its data (CLAUDE.md §4, "Enums": the
-/// value carrying data is built by the Java static factory), the same as
-/// [`kafka_admin_OffsetSpec_for_timestamp`]: an owned handle freed with
-/// [`kafka_admin_OffsetSpec_destroy`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub extern "C" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_admin_OffsetSpec_t {
-    box_offset_spec(OffsetSpec::Timestamp(value))
-}
-
 /// The C enumerator of a handle, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_OffsetSpec_EARLIEST`, the first enumerator: the enum
@@ -253,15 +243,15 @@ mod tests {
     #[test]
     fn timestamp_spec_is_owned() {
         let handle = kafka_admin_OffsetSpec_for_timestamp(42);
-        let other = kafka_admin_OffsetSpec_timestamp(42);
-        assert_ne!(handle, other);
+        let other = kafka_admin_OffsetSpec_for_timestamp(42);
+        assert_ne!(handle, other, "each forTimestamp call owns its handle");
         assert!(!is_singleton(handle));
-        // SAFETY: Test code: `handle` and `other` are the owned handles the two timestamp factories
+        // SAFETY: Test code: `handle` and `other` are the owned handles the two factory calls
         // returned, used only on this thread and each destroyed once, last; destroying null is a
         // no-op.
         unsafe {
-            assert_eq!(offset_spec_value_of(handle), OffsetSpec::Timestamp(42));
-            assert_eq!(offset_spec_value_of(other), OffsetSpec::for_timestamp(42));
+            assert_eq!(offset_spec_value_of(handle), OffsetSpec::for_timestamp(42));
+            assert_eq!(offset_spec_value_of(other), offset_spec_value_of(handle));
             assert_eq!(
                 kafka_admin_OffsetSpec__enum(handle),
                 kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_TIMESTAMP

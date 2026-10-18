@@ -1055,7 +1055,7 @@ mod round_trip {
     /// Identity (byte-array) deserializer — Java's `ByteArrayDeserializer`.
     struct BytesDeserializer;
     impl Deserializer<Vec<u8>> for BytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -1066,7 +1066,7 @@ mod round_trip {
         fail_value: Vec<u8>,
     }
     impl Deserializer<Vec<u8>> for FailOnValueDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             if data == self.fail_value.as_slice() {
                 return Err(Error::serialization("simulated value deserialization failure"));
             }
@@ -1795,7 +1795,7 @@ mod round_trip {
                 FetchMetricsManager::for_test(),
                 Arc::new(SystemTime),
             );
-            collector.collect_fetch(&self.fetch_buffer).expect("collect_fetch")
+            collector.collect_fetch_now(&self.fetch_buffer).expect("collect_fetch")
         }
 
         /// Collects records via `FetchCollector::collect_fetch`, returning the
@@ -1813,7 +1813,7 @@ mod round_trip {
                 Arc::new(SystemTime),
             );
             collector
-                .collect_fetch(&self.fetch_buffer)
+                .collect_fetch_now(&self.fetch_buffer)
                 .expect("collect_fetch should not error in this fixture")
         }
 
@@ -1830,7 +1830,7 @@ mod round_trip {
                 FetchMetricsManager::for_test(),
                 Arc::new(SystemTime),
             );
-            collector.collect_fetch(&self.fetch_buffer)
+            collector.collect_fetch_now(&self.fetch_buffer)
         }
 
         /// Like [`Self::collect_records`] but with a value-deserializer that
@@ -1851,7 +1851,7 @@ mod round_trip {
                 FetchMetricsManager::for_test(),
                 Arc::new(SystemTime),
             );
-            collector.collect_fetch(&self.fetch_buffer)
+            collector.collect_fetch_now(&self.fetch_buffer)
         }
     }
 

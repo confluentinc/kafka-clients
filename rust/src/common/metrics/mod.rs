@@ -21,13 +21,13 @@
 //! replaced by the [`MetricsReporter`] trait seam.
 
 mod compound_stat;
-mod gauge;
+pub mod gauge;
 pub(crate) mod internals;
 mod kafka_metric;
 mod measurable;
 mod measurable_stat;
 mod metric_config;
-mod metric_value_provider;
+pub mod metric_value_provider;
 #[expect(clippy::module_inception)]
 mod metrics;
 mod metrics_reporter;
@@ -39,7 +39,7 @@ pub mod stats;
 mod time_unit;
 
 pub use compound_stat::{CompoundStat, NamedMeasurable};
-pub use gauge::{ClosureGauge, Gauge};
+pub use gauge::Gauge;
 pub use kafka_metric::KafkaMetric;
 pub use measurable::{ClosureMeasurable, Measurable};
 pub use measurable_stat::MeasurableStat;

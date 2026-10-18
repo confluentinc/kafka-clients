@@ -124,9 +124,10 @@ impl Default for PartitionerConfig {
 /// object and passes the *reference* to `accumulator.append(..)`
 /// (`KafkaProducer.java:1110`), so after `append` throws it still holds the
 /// callback and its `catch (ApiException e)` block invokes it exactly once with a
-/// null-metadata `RecordMetadata` (`KafkaProducer.java:1130-1136`). Rust's
-/// [`Callback`] is a `Box<dyn FnOnce>` — deliberately non-`Clone`, which is what
-/// makes "exactly once" a type-level guarantee — so it is *moved* into `append`
+/// null-metadata `RecordMetadata` (`KafkaProducer.java:1130-1136`). In Rust the
+/// callback is a `Box<dyn `[`Callback`]`>` whose `on_completion` consumes it —
+/// deliberately non-`Clone`, which is what makes "exactly once" a type-level
+/// guarantee — so it is *moved* into `append`
 /// and the only way the caller can still honour the callback obligation
 /// (CLAUDE.md §11.5) is for `append` to give it back. That is the same
 /// `returned_callback` mechanism [`RecordAccumulator::try_append`] already uses
@@ -141,18 +142,22 @@ pub struct AppendFailure {
     pub error: Error,
     /// The callback, when this append did not consume it. `None` when the caller
     /// passed no callback, or when the callback was already handed to a batch.
-    pub callback: Option<Callback>,
+    pub callback: Option<Box<dyn Callback>>,
 }
 
 impl AppendFailure {
     /// An append that failed without ever taking the callback, boxed for the
     /// `Result` position (see the type-level note).
-    pub(crate) fn boxed(error: Error, callback: Option<Callback>) -> Box<Self> {
+    pub(crate) fn boxed(error: Error, callback: Option<Box<dyn Callback>>) -> Box<Self> {
         Box::new(Self { error, callback })
     }
 }
 
-// A `Callback` is a `Box<dyn FnOnce>` and cannot derive `Debug`, but `Debug` is
+/// The outcome of a `try_append`: the append result plus the callback when the
+/// append did not hand it to a batch, or the failure carrying it back.
+pub(crate) type TryAppendResult = Result<(RecordAppendResult, Option<Box<dyn Callback>>), Box<AppendFailure>>;
+
+// A `Box<dyn Callback>` cannot derive `Debug`, but `Debug` is
 // what `Result::unwrap`/`expect` need, so report whether one came back instead.
 impl std::fmt::Debug for AppendFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -786,7 +791,7 @@ impl RecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
@@ -845,7 +850,7 @@ impl RecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
@@ -1226,15 +1231,12 @@ impl RecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
-        try_append: impl FnOnce(
-            &mut VecDeque<ProducerBatch>,
-            Option<Callback>,
-        ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>>,
+        callback: Option<Box<dyn Callback>>,
+        try_append: impl FnOnce(&mut VecDeque<ProducerBatch>, Option<Box<dyn Callback>>) -> TryAppendResult,
         records_builder_supplier: impl FnOnce() -> Result<MemoryRecordsBuilder, Error>,
         create_producer_batch: impl FnOnce(TopicPartition, MemoryRecordsBuilder, i64) -> Result<ProducerBatch, Error>,
         now_ms: i64,
-    ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
+    ) -> TryAppendResult {
         debug_assert!(partition != RecordMetadata::UNKNOWN_PARTITION);
 
         let (append_result, callback) = try_append(deque, callback)?;
@@ -1388,12 +1390,12 @@ impl RecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         deque: &mut VecDeque<ProducerBatch>,
         topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
-    ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
+    ) -> TryAppendResult {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Self::closed_while_send_in_progress(callback));
         }
@@ -1446,7 +1448,7 @@ impl RecordAccumulator {
     /// appended, so nothing else owns it, and it is `do_send_bytes` — not the
     /// accumulator — that decides whether an error fires it. The
     /// `Box<dyn FnOnce>` cannot be cloned, so handing it back is the only way.
-    pub(crate) fn closed_while_send_in_progress(callback: Option<Callback>) -> Box<AppendFailure> {
+    pub(crate) fn closed_while_send_in_progress(callback: Option<Box<dyn Callback>>) -> Box<AppendFailure> {
         AppendFailure::boxed(Error::kafka_message("Producer closed while send in progress"), callback)
     }
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#isMuted")]
@@ -4506,7 +4508,7 @@ mod tests {
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);
-            let cb: Callback = Box::new(move |_metadata, _error| {
+            let cb: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
             accum
@@ -4576,7 +4578,7 @@ mod tests {
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);
-            let cb: Callback = Box::new(move |_metadata, _error| {
+            let cb: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
             accum
@@ -4640,14 +4642,14 @@ mod tests {
 
         // Append two records to the batch
         let acked1 = Arc::clone(&acked);
-        let cb1: Callback = Box::new(move |_meta, _err| {
+        let cb1: Box<dyn Callback> = Box::new(move |_meta: Option<&RecordMetadata>, _err: Option<&Error>| {
             acked1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
         let future1 = batch.try_append(now, None, Some(&v), &[], Some(cb1), now);
         assert!(future1.is_ok());
 
         let acked2 = Arc::clone(&acked);
-        let cb2: Callback = Box::new(move |_meta, _err| {
+        let cb2: Box<dyn Callback> = Box::new(move |_meta: Option<&RecordMetadata>, _err: Option<&Error>| {
             acked2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
         let future2 = batch.try_append(now, None, Some(&v), &[], Some(cb2), now);
@@ -6032,7 +6034,7 @@ mod tests {
         // the allocation fail immediately.
         let fired = Arc::new(AtomicI32::new(0));
         let counter = Arc::clone(&fired);
-        let callback: Callback = Box::new(move |_, _| {
+        let callback: Box<dyn Callback> = Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
             counter.fetch_add(1, Ordering::SeqCst);
         });
         // `RecordAppendResult` is not `Debug`, so unwrap the error by hand.
@@ -6051,7 +6053,7 @@ mod tests {
         );
         let returned = err.callback.expect("the callback must be handed back, not dropped");
         assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
-        returned(None, None);
+        returned.on_completion(None, None);
         assert_eq!(1, fired.load(Ordering::SeqCst), "the handed-back callback must be intact");
     }
 
@@ -6070,7 +6072,7 @@ mod tests {
 
         let fired = Arc::new(AtomicI32::new(0));
         let counter = Arc::clone(&fired);
-        let callback: Callback = Box::new(move |_, _| {
+        let callback: Box<dyn Callback> = Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
             counter.fetch_add(1, Ordering::SeqCst);
         });
         let err = match accum

@@ -98,9 +98,6 @@ where
     /// See [`Consumer::group_metadata`].
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
-    /// See [`Consumer::client_id`].
-    fn client_id(&self) -> &str;
-
     /// See [`Consumer::current_lag`].
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
 
@@ -313,10 +310,6 @@ where
 
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         Consumer::group_metadata(self)
-    }
-
-    fn client_id(&self) -> &str {
-        Consumer::client_id(self)
     }
 
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
@@ -579,10 +572,6 @@ where
 
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         DynConsumer::group_metadata(self)
-    }
-
-    fn client_id(&self) -> &str {
-        DynConsumer::client_id(self)
     }
 
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
