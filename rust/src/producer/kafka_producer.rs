@@ -7104,10 +7104,15 @@ mod tests {
 
     /// `awaitTopicMetadata` waits at most `max.block.ms` for the refresh it
     /// requests, and reports Java's `awaitUpdate` timeout when none arrives.
+    ///
+    /// `max.block.ms` also bounds the `initTransactions` that precedes the
+    /// wait, and `drive` runs on real time: 500 ms, as the other tests that
+    /// wait a timeout out use, leaves the mock round trips headroom when the
+    /// whole suite runs under load, where 100 ms timed `initTransactions` out.
     #[tokio::test]
     async fn test_send_offsets_to_transaction_times_out_waiting_for_topic_metadata() {
         let mut ctx = TxnProducerContext::with_metadata_seed(
-            &[("transactional.id", "some.id"), ("max.block.ms", "100")],
+            &[("transactional.id", "some.id"), ("max.block.ms", "500")],
             1,
             true,
             false,
@@ -7137,7 +7142,7 @@ mod tests {
         .await
         .expect_err("no metadata update arrives");
         assert!(error.is_timeout_error(), "{error:?}");
-        assert_eq!(error.message(), "Failed to update metadata after 100 ms.");
+        assert_eq!(error.message(), "Failed to update metadata after 500 ms.");
         assert!(
             !ctx.transaction_manager.lock().unwrap().has_pending_offset_commits(),
             "the manager is not reached when the metadata wait fails"

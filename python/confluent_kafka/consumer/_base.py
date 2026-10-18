@@ -1335,9 +1335,11 @@ class _ConsumerState:
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_subscription(self) -> set[str]:
+        # Not on the ConsumerHandle (KIP-1306's RebalanceConsumer does not
+        # carry subscription()): from inside a callback the read reports the
+        # busy consumer, as Java's acquire() does from another thread.
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._in_callback()
-                   else self._read(_lib.Consumer_subscription(h)))
+            raw = self._read(_lib.Consumer_subscription(h))
         return set(raw)
 
     def _c_paused(self) -> set[TopicPartition]:
@@ -1413,15 +1415,18 @@ class _ConsumerState:
         ``_with_callback`` / ``_with_offsets_callback`` forms), whose plain
         entry point first runs the commit callbacks queued behind the running
         one on this thread, as Java's ``commit()`` runs ``executeCallbacks()``
-        first; this commit's own callback runs inside a later call."""
+        first; this commit's own callback runs inside a later call. Java has
+        no ``commitAsync(Map)``: given offsets without a callback are
+        ``commitAsync(offsets, null)``, the ``_with_offsets_callback`` form
+        with a no-op registration."""
         if self._in_callback():
             with self._use() as h:
                 spec = None if offsets is None else offsets_to_spec(offsets)
                 adapter = self._wrap_commit_callback(
                     callback, empty_offsets=offsets is not None and not offsets)
                 with self._handle_commit():
-                    if adapter is None:
-                        error = _lib.ConsumerHandle_commit_async(self._handle(), spec)
+                    if adapter is None and spec is None:
+                        error = _lib.ConsumerHandle_commit_async(self._handle())
                     else:
                         error = _lib.ConsumerHandle_commit_async_callback(
                             h, self._handle(), spec, adapter)
@@ -1480,7 +1485,7 @@ class _ConsumerState:
                 raise_if_error(_lib.ConsumerHandle_seek(
                     handle, partition.topic(), partition.partition(), offset))
             return None
-        if op in ("assign", "pause", "resume", "seek_to_beginning", "seek_to_end"):
+        if op in ("pause", "resume", "seek_to_beginning", "seek_to_end"):
             (partitions,) = args
             raise_if_error(getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions)))
             return None

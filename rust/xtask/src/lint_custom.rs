@@ -78,6 +78,7 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(PublicAudience::new(ctx)),
         Box::new(DynCompatible),
         Box::new(DynForwarding),
+        Box::new(ConsumerHandleSurface),
         Box::new(SendFuture),
         Box::new(ErrorPredicate),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
@@ -3615,6 +3616,297 @@ impl Rule for DynForwarding {
 }
 
 // ---------------------------------------------------------------------------
+// Rule: check-consumer-handle
+// ---------------------------------------------------------------------------
+
+/// Checks that `ConsumerHandle`'s public methods are exactly the `Consumer`
+/// methods a rebalance listener or commit callback may call back into
+/// (`consumer-threading.md` §31, KIP-1306).
+///
+/// `ConsumerHandle` is the reentrant view of a consumer: the listener runs
+/// inside the caller's `poll()`, which holds the consumer `&mut`, so the
+/// listener reaches the consumer through this `&self` handle instead. KIP-1306
+/// (KAFKA-20385, Kafka 4.5) names that view `RebalanceConsumer`: the `Consumer`
+/// interface minus the methods that would re-enter or end the running call —
+/// `poll`, `close`, every `subscribe`, `unsubscribe`, `assign`, `wakeup`,
+/// `enforceRebalance` and the two metric-subscription methods — and minus
+/// `subscription()` and `metrics()`, which it does not carry either. The handle
+/// is `rust-only` (Java passes a `RebalanceConsumer` into the callback; Rust
+/// captures a handle), so `check-java-name` skips its methods and nothing else
+/// ties them to the trait.
+///
+/// One difference from `RebalanceConsumer`: the handle keeps `wakeup`. Java's
+/// `Consumer.wakeup()` is the one method another thread may call, on the
+/// consumer object itself, so KIP-1306 has no need to put it on the callback
+/// view. The Rust consumer's methods take `&mut self`, so no other thread can
+/// hold the consumer; the `Send + Sync` handle is the only object through which
+/// Java's cross-thread `wakeup()` contract is honoured. So, with the `Consumer`
+/// trait as the contract:
+///
+///  - every `Consumer` method outside that set is a `pub fn` of the inherent
+///    `impl ConsumerHandle`, taking `&self` and the trait method's parameters,
+///    returning the trait method's type — `impl Future<Output = R> + Send`
+///    where the trait method is `async fn … -> R`;
+///  - no method of that set, nor an overload of one (`close_with_options`,
+///    `subscribe_with_topics`), is a `pub fn` of the handle;
+///  - every `pub fn` of the handle is a `Consumer` method: a handle-only name
+///    (`commit_async_offsets`) is off the §2 overload scheme the trait follows.
+///
+/// A `pub(crate)` method is not checked: the C binding reads `metrics()` and the
+/// mock's flags through such methods so they answer while another call holds
+/// the consumer, as Java's unguarded `metrics()` does.
+struct ConsumerHandleSurface;
+
+/// A method signature reduced to what the rule compares: receiver, named
+/// parameters and return type, as normalized token strings.
+#[derive(PartialEq, Eq)]
+struct HandleSig {
+    name: String,
+    receiver: String,
+    params: Vec<(String, String)>,
+    ret: String,
+}
+
+impl std::fmt::Display for HandleSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fn {}({}", self.name, self.receiver)?;
+        for (name, ty) in &self.params {
+            write!(f, ", {name}: {ty}")?;
+        }
+        write!(f, ")")?;
+        if self.ret != "()" {
+            write!(f, " -> {}", self.ret)?;
+        }
+        Ok(())
+    }
+}
+
+impl ConsumerHandleSurface {
+    /// The module and name of the trait that is the contract.
+    const TRAIT_MODULE: &'static [&'static str] = &["consumer"];
+    const TRAIT: &'static str = "Consumer";
+    /// The handle the rule checks.
+    const HANDLE: &'static str = "ConsumerHandle";
+    /// The §2 base names of the `Consumer` methods a listener may not call,
+    /// KIP-1306's `RebalanceConsumer` omissions in Rust spelling except
+    /// `wakeup` (see the type's documentation), plus `handle`, the Rust-only
+    /// accessor that yields the handle itself.
+    const EXCLUDED: &'static [&'static str] = &[
+        "poll",
+        "close",
+        "subscribe",
+        "unsubscribe",
+        "assign",
+        "enforce_rebalance",
+        "subscription",
+        "metrics",
+        "handle",
+    ];
+
+    /// The §2 base name of `method`: `close_with_options` -> `close`.
+    fn base(method: &str) -> &str {
+        method.split("_with_").next().unwrap_or(method)
+    }
+
+    fn is_excluded(method: &str) -> bool {
+        Self::EXCLUDED.contains(&Self::base(method))
+    }
+
+    /// The finding for an excluded `method` the handle defines.
+    fn excluded_finding(file: &Path, method: &str) -> String {
+        let base = Self::base(method);
+        let overload = if base == method {
+            String::new()
+        } else {
+            format!(", an overload of `{base}`,")
+        };
+        format!(
+            "{}: `{}` defines `{method}`{overload} which KIP-1306's `RebalanceConsumer` keeps from a listener; \
+             remove it",
+            file.display(),
+            Self::HANDLE
+        )
+    }
+
+    /// `ty`'s tokens with every path reduced to its last segment, so the
+    /// handle's `crate::consumer::OffsetCommitCallback` equals the trait's
+    /// imported `OffsetCommitCallback`.
+    fn normalize(ty: &syn::Type) -> String {
+        let mut s = compact(ty);
+        while let Some(end) = s.find("::") {
+            let start = s[..end]
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            s.replace_range(start..end + 2, "");
+        }
+        s
+    }
+
+    /// The return type as the rule compares it: `()` for none, and for an
+    /// `async fn` the `impl Future` its handle counterpart must return. The
+    /// built type is re-parsed so both sides are spaced by [`compact`].
+    fn ret(sig: &syn::Signature) -> String {
+        let inner = match &sig.output {
+            syn::ReturnType::Default => "()".to_string(),
+            syn::ReturnType::Type(_, ty) => Self::normalize(ty),
+        };
+        if sig.asyncness.is_none() {
+            return inner;
+        }
+        let future = format!("impl Future<Output = {inner}> + Send");
+        syn::parse_str::<syn::Type>(&future).map_or(future, |ty| Self::normalize(&ty))
+    }
+
+    /// `sig` reduced for comparison; `receiver` overrides the receiver, which
+    /// is how the expected handle signature is derived from a trait method.
+    fn reduce(sig: &syn::Signature, receiver: Option<&str>) -> HandleSig {
+        let mut actual_receiver = "self".to_string();
+        let mut params = Vec::new();
+        for arg in &sig.inputs {
+            match arg {
+                syn::FnArg::Receiver(r) => {
+                    actual_receiver = match (&r.reference, &r.mutability) {
+                        (Some(_), Some(_)) => "&mut self",
+                        (Some(_), None) => "&self",
+                        (None, _) => "self",
+                    }
+                    .to_string();
+                },
+                syn::FnArg::Typed(pt) => {
+                    let name = match &*pt.pat {
+                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        other => compact(other),
+                    };
+                    params.push((name, Self::normalize(&pt.ty)));
+                },
+            }
+        }
+        HandleSig {
+            name: sig.ident.to_string(),
+            receiver: receiver.map_or(actual_receiver, str::to_string),
+            params,
+            ret: Self::ret(sig),
+        }
+    }
+
+    /// The `pub fn`s of every inherent `impl ConsumerHandle`, with their file.
+    fn handle_methods(krate: &Crate) -> Vec<(&Path, &syn::ImplItemFn)> {
+        let mut out = Vec::new();
+        for module in krate.modules.values() {
+            for item in &module.items {
+                let syn::Item::Impl(imp) = item else {
+                    continue;
+                };
+                if imp.trait_.is_some() {
+                    continue;
+                }
+                let syn::Type::Path(tp) = &*imp.self_ty else {
+                    continue;
+                };
+                if tp.path.segments.last().is_none_or(|s| s.ident != Self::HANDLE) {
+                    continue;
+                }
+                for item in &imp.items {
+                    if let syn::ImplItem::Fn(f) = item {
+                        if matches!(f.vis, syn::Visibility::Public(_)) {
+                            out.push((module.file.as_path(), f));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Rule for ConsumerHandleSurface {
+    fn name(&self) -> &'static str {
+        "check-consumer-handle"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let module_path: ModPath = Self::TRAIT_MODULE.iter().map(ToString::to_string).collect();
+        let Some(module) = krate.modules.get(&module_path) else {
+            return 0;
+        };
+        let Some(consumer) = module.items.iter().find_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == Self::TRAIT => Some(t),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let trait_methods: Vec<&syn::TraitItemFn> = consumer
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let handle_methods = Self::handle_methods(krate);
+        let handle_file = handle_methods.first().map_or(module.file.as_path(), |(file, _)| file);
+        let handle = Self::HANDLE;
+        let contract = Self::TRAIT;
+
+        for tm in &trait_methods {
+            let name = tm.sig.ident.to_string();
+            let defined = handle_methods.iter().find(|(_, f)| f.sig.ident == name);
+            if Self::is_excluded(&name) {
+                if let Some((file, _)) = defined {
+                    findings.push(Self::excluded_finding(file, &name));
+                }
+                continue;
+            }
+            let expected = Self::reduce(&tm.sig, Some("&self"));
+            match defined {
+                None => findings.push(format!(
+                    "{}: `{handle}` lacks `{name}` of `{contract}`; define it as `{expected}`",
+                    handle_file.display()
+                )),
+                Some((file, f)) => {
+                    let actual = Self::reduce(&f.sig, None);
+                    if actual != expected {
+                        findings.push(format!(
+                            "{}: `{handle}::{name}` is `{actual}`; `{contract}::{name}` needs `{expected}`",
+                            file.display()
+                        ));
+                    }
+                },
+            }
+        }
+        for (file, f) in &handle_methods {
+            let name = f.sig.ident.to_string();
+            if trait_methods.iter().any(|tm| tm.sig.ident == name) {
+                continue;
+            }
+            if Self::is_excluded(&name) {
+                findings.push(Self::excluded_finding(file, &name));
+            } else {
+                findings.push(format!(
+                    "{}: `{handle}` defines `{name}`, which `{contract}` lacks; a handle method is a `{contract}` \
+                     method under its CLAUDE.md §2 name",
+                    file.display()
+                ));
+            }
+        }
+        1
+    }
+
+    fn hint(&self) -> &'static str {
+        "   `ConsumerHandle` is the `Consumer` a rebalance listener or commit callback
+   calls back into (consumer-threading.md §31; KIP-1306's `RebalanceConsumer`).
+   Keep its `pub fn`s equal to the `Consumer` trait's methods, each taking
+   `&self` and the trait method's parameters and returning its type (an
+   `async fn … -> R` becomes `impl Future<Output = R> + Send`), minus `poll`,
+   `close`, `subscribe`, `unsubscribe`, `assign`, `enforce_rebalance`,
+   `subscription`, `metrics` and `handle` with their `_with_` overloads.
+   `wakeup` stays: the handle is the only `Send + Sync` object another thread
+   can call it on. A handle-only method has no Java counterpart: add it to
+   `Consumer` under its CLAUDE.md §2 name or drop it."
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule: check-send-future
 // ---------------------------------------------------------------------------
 
@@ -4707,6 +4999,143 @@ mod dyn_forwarding_tests {
             format!("{file}: `impl Bad for dyn DynBad` does not define `get`; define it as a forward to `DynBad::get`"),
             format!("{file}: no blanket `impl<P: Lone> DynLone for P`; every `Lone` must be a `DynLone`"),
             format!("{file}: no `impl Lone for dyn DynLone`; a `dyn DynLone` must be a `Lone`"),
+        ];
+        want.sort();
+        assert_eq!(findings, want);
+    }
+}
+
+#[cfg(test)]
+mod consumer_handle_tests {
+    use super::*;
+
+    /// The `Consumer` trait both fixtures share: two sync getters, one async
+    /// method per shape the rule compares, and one method of each excluded kind.
+    const TRAIT: &str = r#"
+            pub trait Consumer<K, V> {
+                fn assignment(&self) -> HashSet<TopicPartition>;
+                fn subscription(&self) -> HashSet<String>;
+                async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
+                async fn commit_sync(&mut self) -> Result<(), Error>;
+                async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+                async fn commit_async_with_callback(
+                    &mut self,
+                    callback: Arc<dyn OffsetCommitCallback>,
+                ) -> Result<(), Error>;
+                async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+                async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+                fn wakeup(&self);
+                fn handle(&self) -> ConsumerHandle;
+            }
+    "#;
+
+    /// A handle with exactly the permitted methods. The callback type is
+    /// spelled through its module path, as the real handle spells it, and the
+    /// `pub(crate)` and private methods are outside the rule.
+    const GOOD_HANDLE: &str = r#"
+            pub struct ConsumerHandle;
+            impl ConsumerHandle {
+                pub fn assignment(&self) -> HashSet<TopicPartition> { todo!() }
+                pub fn commit_sync(&self) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_sync_with_timeout(
+                    &self,
+                    timeout: Duration,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_async_with_callback(
+                    &self,
+                    callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn seek_with_offset(
+                    &self,
+                    partition: TopicPartition,
+                    offset: i64,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn wakeup(&self) {}
+                pub(crate) fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> { todo!() }
+                fn async_state(&self) -> i32 { 0 }
+            }
+    "#;
+
+    /// A handle breaking each rule once: an excluded method, an excluded
+    /// overload, a handle-only method, a missing async method and a missing
+    /// sync one (`wakeup`, which the handle must keep), and three signature
+    /// drifts (receiver, parameter name, return type).
+    const BAD_HANDLE: &str = r#"
+            pub struct ConsumerHandle;
+            impl ConsumerHandle {
+                pub fn assignment(&self) -> HashSet<TopicPartition> { todo!() }
+                pub fn subscription(&self) -> HashSet<String> { todo!() }
+                pub fn close_with_options(&self, options: CloseOptions) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_async_offsets(&self) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_sync(&self) -> Result<(), Error> { Ok(()) }
+                pub fn commit_async_with_callback(
+                    &self,
+                    cb: Arc<dyn OffsetCommitCallback>,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn seek_with_offset(
+                    &mut self,
+                    partition: TopicPartition,
+                    offset: i64,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+            }
+    "#;
+
+    fn run(name: &str, handle: &str) -> (Vec<String>, String) {
+        let dir = std::env::temp_dir().join(format!("xtask-consumer-handle-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), format!("pub mod consumer {{ {TRAIT} {handle} }}")).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        assert!(krate.parse_errors.is_empty(), "{:#?}", krate.parse_errors);
+        let mut findings = Vec::new();
+        let checked = ConsumerHandleSurface.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(checked, 1);
+        (findings, dir.join("lib.rs").display().to_string())
+    }
+
+    #[test]
+    fn test_permitted_surface_passes() {
+        let (findings, _) = run("good", GOOD_HANDLE);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_each_deviation_is_a_finding() {
+        let (mut findings, file) = run("bad", BAD_HANDLE);
+        findings.sort();
+        let future = "impl Future<Output = Result<(), Error>> + Send";
+        let mut want = vec![
+            format!(
+                "{file}: `ConsumerHandle` defines `subscription` which KIP-1306's `RebalanceConsumer` keeps from a \
+                 listener; remove it"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` defines `close_with_options`, an overload of `close`, which KIP-1306's \
+                 `RebalanceConsumer` keeps from a listener; remove it"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` defines `commit_async_offsets`, which `Consumer` lacks; a handle method is \
+                 a `Consumer` method under its CLAUDE.md §2 name"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` lacks `commit_sync_with_timeout` of `Consumer`; define it as \
+                 `fn commit_sync_with_timeout(&self, timeout: Duration) -> {future}`"
+            ),
+            format!("{file}: `ConsumerHandle` lacks `wakeup` of `Consumer`; define it as `fn wakeup(&self)`"),
+            format!(
+                "{file}: `ConsumerHandle::commit_sync` is `fn commit_sync(&self) -> Result<(), Error>`; \
+                 `Consumer::commit_sync` needs `fn commit_sync(&self) -> {future}`"
+            ),
+            format!(
+                "{file}: `ConsumerHandle::commit_async_with_callback` is `fn commit_async_with_callback(&self, cb: \
+                 Arc<dyn OffsetCommitCallback>) -> {future}`; `Consumer::commit_async_with_callback` needs `fn \
+                 commit_async_with_callback(&self, callback: Arc<dyn OffsetCommitCallback>) -> {future}`"
+            ),
+            format!(
+                "{file}: `ConsumerHandle::seek_with_offset` is `fn seek_with_offset(&mut self, partition: \
+                 TopicPartition, offset: i64) -> {future}`; `Consumer::seek_with_offset` needs `fn \
+                 seek_with_offset(&self, partition: TopicPartition, offset: i64) -> {future}`"
+            ),
         ];
         want.sort();
         assert_eq!(findings, want);
