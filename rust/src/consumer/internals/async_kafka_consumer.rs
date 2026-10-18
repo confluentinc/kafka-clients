@@ -54,7 +54,7 @@
 #![expect(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,7 +64,7 @@ use tokio::task::JoinHandle;
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::Time;
 use crate::common::utils::internals::LogContext;
-use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
+use crate::common::{Error, IsolationLevel, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::ConsumerRecords;
@@ -98,6 +98,8 @@ use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelop
 use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::metrics::KafkaConsumerMetrics;
 use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
+#[cfg(test)]
+use crate::consumer::internals::offset_commit_callback_invoker::CallbackInProgress;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
@@ -162,9 +164,10 @@ enum BgJoin {
 /// # Operations
 ///
 /// Sync: [`wakeup`](Self::wakeup), [`assignment`](Self::assignment),
-/// [`subscription`](Self::subscription), [`paused`](Self::paused).
+/// [`paused`](Self::paused), [`group_metadata`](Self::group_metadata),
+/// [`current_lag`](Self::current_lag).
 ///
-/// Async (reentrant-safe consumer ops): [`assign`](Self::assign),
+/// Async (reentrant-safe consumer ops):
 /// [`seek_with_offset`](Self::seek_with_offset), [`seek_to_beginning`](Self::seek_to_beginning),
 /// [`seek_to_end`](Self::seek_to_end), [`pause`](Self::pause),
 /// [`resume`](Self::resume), [`position`](Self::position),
@@ -172,21 +175,69 @@ enum BgJoin {
 /// [`beginning_offsets`](Self::beginning_offsets),
 /// [`end_offsets`](Self::end_offsets),
 /// [`offsets_for_times`](Self::offsets_for_times),
+/// [`partitions_for`](Self::partitions_for), [`list_topics`](Self::list_topics),
 /// [`commit_sync`](Self::commit_sync),
 /// [`commit_sync_with_offsets`](Self::commit_sync_with_offsets),
 /// [`commit_async`](Self::commit_async),
 /// [`commit_async_with_callback`](Self::commit_async_with_callback),
-/// [`commit_async_offsets`](Self::commit_async_offsets),
-/// [`commit_async_with_offsets_callback`](Self::commit_async_with_offsets_callback).
+/// [`commit_async_with_offsets_callback`](Self::commit_async_with_offsets_callback),
+/// and the `_with_timeout` form of each timed query.
 ///
 /// The commits run the owning consumer's own commit path, as a Java callback
 /// calling `consumer.commitSync()` / `commitAsync()` does: they run the
 /// consumer's queued commit callbacks first, an async commit is one a later
 /// `commit_sync` or `close` waits for, and `interceptors.onCommit` fires.
 ///
-/// Lifecycle / ownership operations (`poll`, `subscribe`, `unsubscribe`,
-/// `close`) are intentionally NOT exposed — Java does not invoke these
-/// reentrantly from callbacks.
+/// # Surface: KIP-1306's `RebalanceConsumer`, plus `wakeup`
+///
+/// The method set is the one KIP-1306 (`RebalanceConsumer`, Kafka 4.5) hands a
+/// rebalance listener, under the CLAUDE.md §2 names of the
+/// [`Consumer`](crate::consumer::Consumer)
+/// methods: every `Consumer` method is here with `&self`, except the ones a
+/// listener must not call while its rebalance is in progress — `poll`, `close`,
+/// `subscribe*`, `unsubscribe`, `assign`, `enforce_rebalance*` — and the two
+/// reads it does not carry, `subscription` and `metrics`. `wakeup` is the one
+/// addition: Java's `Consumer.wakeup()` is callable on the consumer from any
+/// thread, while the Rust consumer's methods take `&mut self`, so the handle
+/// is the only object through which that cross-thread contract is honoured.
+/// `cargo xtask lint-custom` (`check-consumer-handle`) keeps the set aligned
+/// with the trait.
+///
+/// # Threads: the async operations work only inside a callback
+///
+/// Java's `KafkaConsumer` is not thread-safe: `acquire()` rejects a call from
+/// a thread other than the one inside the consumer with
+/// `ConcurrentModificationException`, and a listener may call back only
+/// because the thread running it is the one that holds the consumer. The
+/// Rust consumer turns that runtime guard into `&mut self`; the handle, which
+/// has no borrow of the consumer, carries the guard's other half: an async
+/// operation is admitted only **while the consumer is running a user
+/// callback** on the caller's task — a `ConsumerRebalanceListener` method or
+/// an `OffsetCommitCallback` — and otherwise returns the same
+/// `ConcurrentModificationError` (predicate
+/// `is_local_concurrent_modification_error`, message
+/// `HANDLE_OUTSIDE_CALLBACK_MSG`) before submitting anything. So a `seek`
+/// or `commit_sync` through the handle from a second thread while the owner
+/// is in `poll()` is rejected, as Java rejects it. The check is made when
+/// the operation's future runs, so a future created inside a callback and
+/// awaited after it returned is rejected too.
+///
+/// What is admitted is exactly the Java use: the listener or commit
+/// callback, on the task inside the owner's blocking call, calling back in
+/// while the owner waits for it. The background task keeps spinning during
+/// the callback, so those operations complete (consumer-threading.md §31).
+/// The scope is the consumer's, not the caller's: during a callback, a call
+/// from a third thread passes the check as well and is serialised by the
+/// background task like any other; the handle does not identify its caller.
+///
+/// [`wakeup`](Self::wakeup) and the sync reads (`assignment`, `paused`,
+/// `group_metadata`, `current_lag`) are not gated: Java's
+/// `wakeup()` is callable from any thread by contract, and the reads take
+/// the same short locks the owning consumer's `&self` getters do.
+///
+/// A handle from a `MockConsumer` is not gated either: Java's `MockConsumer`
+/// has no `acquire()`, and the mock handle's commits commit into the mock
+/// from any thread as the mock's own methods do.
 ///
 /// # Concrete `async fn`, no `#[async_trait]`
 ///
@@ -215,9 +266,12 @@ pub(crate) struct AsyncConsumerHandleState {
     /// Subscription / assignment state (sync getters + `position` /
     /// `seek` pre-checks).
     subscriptions: Arc<Mutex<SubscriptionState>>,
-    /// Fetch buffer — `assign` drops buffered fetches for no-longer-owned
-    /// partitions (Java `fetchBuffer.retainAll`).
-    fetch_buffer: Arc<FetchBuffer>,
+    /// The consumer's metadata, whose cached cluster answers
+    /// [`ConsumerHandle::partitions_for`] before any request is made.
+    metadata: Arc<ConsumerMetadata>,
+    /// The consumer's group metadata slot, read by
+    /// [`ConsumerHandle::group_metadata`].
+    group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Time source for deadline computation.
     time: Arc<dyn Time>,
     /// Cached `default.api.timeout.ms`.
@@ -232,7 +286,19 @@ pub(crate) struct AsyncConsumerHandleState {
     /// The consumer's metrics, whose `commit-sync` sensor the handle's
     /// `commit_sync` records.
     kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+    /// How many user callbacks the consumer is running on the caller's task
+    /// right now (`OffsetCommitCallbackInvoker::callbacks_in_progress`). An
+    /// async handle operation is admitted only while it is non-zero: see
+    /// [`ConsumerHandle`]'s `Threads` section.
+    callbacks_in_progress: Arc<AtomicUsize>,
 }
+
+/// The message of the `ConcurrentModificationError` a [`ConsumerHandle`]
+/// operation returns outside a callback. Its first sentence is the one Java's
+/// `KafkaConsumer.acquire()` throws with.
+pub(crate) const HANDLE_OUTSIDE_CALLBACK_MSG: &str = "KafkaConsumer is not safe for multi-threaded access. \
+     ConsumerHandle operations are allowed only from inside a callback the consumer is running \
+     (ConsumerRebalanceListener, OffsetCommitCallback); from another thread call wakeup().";
 
 #[derive(Clone)]
 enum ConsumerHandleInner {
@@ -241,10 +307,11 @@ enum ConsumerHandleInner {
     Async(AsyncConsumerHandleState),
     /// `MockConsumer`: `wakeup()` sets the shared wakeup flag observed by the
     /// next `poll()`, the sync getters read the mock's shared
-    /// `SubscriptionState` and paused set, and every commit commits into the
-    /// mock's shared committed offsets as Java's `MockConsumer.commitAsync` /
-    /// `commitSync` do inside a callback — the ones without offsets commit
-    /// the mock's consumed positions (`commitSync(subscriptions.allConsumed())`).
+    /// `SubscriptionState`, paused set and end offsets, and every commit
+    /// commits into the mock's shared committed offsets as Java's
+    /// `MockConsumer.commitAsync` / `commitSync` do inside a callback — the
+    /// ones without offsets commit the mock's consumed positions
+    /// (`commitSync(subscriptions.allConsumed())`).
     /// The mock has no bg task / event pipeline, so the other async ops are
     /// not wired (they return an `unsupported_version` error — the mock test
     /// surface drives the concrete `MockConsumer` directly). `closed`,
@@ -263,6 +330,9 @@ enum ConsumerHandleInner {
         subscriptions: Arc<Mutex<SubscriptionState>>,
         /// The mock's paused partitions (Java's `MockConsumer.paused`).
         paused: Arc<Mutex<HashSet<TopicPartition>>>,
+        /// The mock's end offsets (Java's `MockConsumer.endOffsets`), read by
+        /// the handle's `current_lag` as the mock's own is.
+        end_offsets: Arc<Mutex<HashMap<TopicPartition, i64>>>,
     },
 }
 
@@ -292,20 +362,37 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::subscription`](crate::consumer::Consumer::subscription) via the shared `SubscriptionState`.
-    pub fn subscription(&self) -> HashSet<String> {
-        match &self.inner {
-            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
-            ConsumerHandleInner::Mock { subscriptions, .. } => lock_mock(subscriptions).subscription(),
-        }
-    }
-
     /// [`Consumer::paused`](crate::consumer::Consumer::paused) via the shared `SubscriptionState`.
     pub fn paused(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
             // Java's `MockConsumer.paused()` returns its own `paused` set.
             ConsumerHandleInner::Mock { paused, .. } => lock_mock(paused).clone(),
+        }
+    }
+
+    /// [`Consumer::group_metadata`](crate::consumer::Consumer::group_metadata)
+    /// via the consumer's shared group-metadata slot; on a `MockConsumer`
+    /// handle, Java's `MockConsumer.groupMetadata()` sentinel values.
+    pub fn group_metadata(&self) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => group_metadata_from(&state.group_metadata, state.group_id.as_deref()),
+            ConsumerHandleInner::Mock { .. } => crate::consumer::mock_consumer::mock_group_metadata(),
+        }
+    }
+
+    /// [`Consumer::current_lag`](crate::consumer::Consumer::current_lag): the
+    /// same sync cached read as `AsyncKafkaConsumer::current_lag`; on a
+    /// `MockConsumer` handle, Java's `MockConsumer.currentLag` over the mock's
+    /// shared end offsets and positions.
+    pub fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
+        match &self.inner {
+            // See `AsyncKafkaConsumer::current_lag`: the sync accessor reads
+            // cached state only, and there is no lag cache yet.
+            ConsumerHandleInner::Async(_) => None,
+            ConsumerHandleInner::Mock { subscriptions, end_offsets, .. } => {
+                crate::consumer::mock_consumer::mock_current_lag(subscriptions, end_offsets, topic_partition)
+            },
         }
     }
 
@@ -358,11 +445,6 @@ impl ConsumerHandle {
     }
 
     // ── Async reentrant-safe consumer ops ───────────────────────────────
-
-    /// [`Consumer::assign`](crate::consumer::Consumer::assign).
-    pub fn assign(&self, partitions: Vec<TopicPartition>) -> impl Future<Output = Result<(), Error>> + Send {
-        async move { self.async_state()?.assign(partitions).await }
-    }
 
     /// `AsyncKafkaConsumer::seek`.
     pub fn seek_with_offset(
@@ -444,6 +526,50 @@ impl ConsumerHandle {
         }
     }
 
+    /// [`Consumer::committed_with_timeout`](crate::consumer::Consumer::committed_with_timeout).
+    pub fn committed_with_timeout(
+        &self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+        async move { self.async_state()?.committed(partitions, timeout).await }
+    }
+
+    /// [`Consumer::partitions_for`](crate::consumer::Consumer::partitions_for).
+    pub fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            state.partitions_for(topic, timeout).await
+        }
+    }
+
+    /// [`Consumer::partitions_for_with_timeout`](crate::consumer::Consumer::partitions_for_with_timeout).
+    pub fn partitions_for_with_timeout(
+        &self,
+        topic: &str,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send {
+        async move { self.async_state()?.partitions_for(topic, timeout).await }
+    }
+
+    /// [`Consumer::list_topics`](crate::consumer::Consumer::list_topics).
+    pub fn list_topics(&self) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send {
+        async move {
+            let state = self.async_state()?;
+            let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+            state.list_topics(timeout).await
+        }
+    }
+
+    /// [`Consumer::list_topics_with_timeout`](crate::consumer::Consumer::list_topics_with_timeout).
+    pub fn list_topics_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HashMap<String, Vec<PartitionInfo>>, Error>> + Send {
+        async move { self.async_state()?.list_topics(timeout).await }
+    }
+
     /// [`Consumer::beginning_offsets`](crate::consumer::Consumer::beginning_offsets).
     pub fn beginning_offsets(
         &self,
@@ -455,6 +581,16 @@ impl ConsumerHandle {
             // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
             state.beginning_or_end_offsets(partitions, -2, timeout).await
         }
+    }
+
+    /// [`Consumer::beginning_offsets_with_timeout`](crate::consumer::Consumer::beginning_offsets_with_timeout).
+    pub fn beginning_offsets_with_timeout(
+        &self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send {
+        // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
+        async move { self.async_state()?.beginning_or_end_offsets(partitions, -2, timeout).await }
     }
 
     /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets).
@@ -470,6 +606,16 @@ impl ConsumerHandle {
         }
     }
 
+    /// [`Consumer::end_offsets_with_timeout`](crate::consumer::Consumer::end_offsets_with_timeout).
+    pub fn end_offsets_with_timeout(
+        &self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, i64>, Error>> + Send {
+        // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
+        async move { self.async_state()?.beginning_or_end_offsets(partitions, -1, timeout).await }
+    }
+
     /// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
     pub fn offsets_for_times(
         &self,
@@ -480,6 +626,15 @@ impl ConsumerHandle {
             let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
             state.offsets_for_times(timestamps_to_search, timeout).await
         }
+    }
+
+    /// [`Consumer::offsets_for_times_with_timeout`](crate::consumer::Consumer::offsets_for_times_with_timeout).
+    pub fn offsets_for_times_with_timeout(
+        &self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+        async move { self.async_state()?.offsets_for_times(timestamps_to_search, timeout).await }
     }
 
     /// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync). Commits the offsets the bg
@@ -503,6 +658,22 @@ impl ConsumerHandle {
         }
     }
 
+    /// [`Consumer::commit_sync_with_timeout`](crate::consumer::Consumer::commit_sync_with_timeout).
+    ///
+    /// On a `MockConsumer` handle, as [`commit_sync`](Self::commit_sync):
+    /// Java's `MockConsumer.commitSync(Duration)` ignores the timeout.
+    pub fn commit_sync_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_sync(None, timeout).await,
+                ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None)
+                        .await
+                },
+            }
+        }
+    }
+
     /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
     /// On a `MockConsumer` handle, commits into the mock's committed offsets
     /// (Java's `MockConsumer.commitSync(Map)`).
@@ -516,6 +687,26 @@ impl ConsumerHandle {
                     let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
                     state.commit_sync(Some(offsets), timeout).await
                 },
+                ConsumerHandleInner::Mock { closed, committed, .. } => {
+                    crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
+                },
+            }
+        }
+    }
+
+    /// [`Consumer::commit_sync_with_offsets_timeout`](crate::consumer::Consumer::commit_sync_with_offsets_timeout).
+    ///
+    /// On a `MockConsumer` handle, as
+    /// [`commit_sync_with_offsets`](Self::commit_sync_with_offsets): Java's
+    /// `MockConsumer.commitSync(Map, Duration)` ignores the timeout.
+    pub fn commit_sync_with_offsets_timeout(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(state) => state.commit_sync(Some(offsets), timeout).await,
                 ConsumerHandleInner::Mock { closed, committed, .. } => {
                     crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
                 },
@@ -569,23 +760,6 @@ impl ConsumerHandle {
         }
     }
 
-    /// `AsyncKafkaConsumer::commit_async_offsets`: commits `offsets` without
-    /// waiting for the result or a callback.
-    /// On a `MockConsumer` handle, commits into the mock's committed offsets.
-    pub fn commit_async_offsets(
-        &self,
-        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            match &self.inner {
-                ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), None).await,
-                ConsumerHandleInner::Mock { closed, committed, .. } => {
-                    crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
-                },
-            }
-        }
-    }
-
     /// [`Consumer::commit_async_with_offsets_callback`](crate::consumer::Consumer::commit_async_with_offsets_callback):
     /// commits `offsets`, then `callback` runs as for
     /// [`commit_async_with_callback`](Self::commit_async_with_callback).
@@ -612,9 +786,17 @@ impl ConsumerHandle {
     /// obtained from a `MockConsumer` (which has no event pipeline). The
     /// mock surface drives the concrete `MockConsumer` directly, so this
     /// path is never hit by faithful mock tests.
+    ///
+    /// On an `AsyncKafkaConsumer` handle the state is handed out only while
+    /// the consumer is running a callback ([`Self`]'s `Threads` section);
+    /// outside one this is the `ConcurrentModificationError` Java's
+    /// `acquire()` throws, before any event is submitted.
     fn async_state(&self) -> Result<&AsyncConsumerHandleState, Error> {
         match &self.inner {
-            ConsumerHandleInner::Async(state) => Ok(state),
+            ConsumerHandleInner::Async(state) => {
+                state.ensure_in_callback()?;
+                Ok(state)
+            },
             ConsumerHandleInner::Mock { .. } => Err(Error::unsupported_version(
                 "ConsumerHandle async operations are not supported on a MockConsumer handle; \
                  drive the MockConsumer directly.",
@@ -629,7 +811,8 @@ impl ConsumerHandle {
 
     /// Builds a mock-consumer handle from its shared wakeup flag and the
     /// mock's shared `closed`, `should_rebalance`, `last_poll_timeout`,
-    /// committed offsets, `SubscriptionState` and paused set.
+    /// committed offsets, `SubscriptionState`, paused set and end offsets.
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn for_mock(
         flag: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
@@ -638,6 +821,7 @@ impl ConsumerHandle {
         committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         paused: Arc<Mutex<HashSet<TopicPartition>>>,
+        end_offsets: Arc<Mutex<HashMap<TopicPartition, i64>>>,
     ) -> Self {
         Self {
             inner: ConsumerHandleInner::Mock {
@@ -648,8 +832,32 @@ impl ConsumerHandle {
                 committed,
                 subscriptions,
                 paused,
+                end_offsets,
             },
         }
+    }
+}
+
+/// Java's `groupMetadata()` body (`AsyncKafkaConsumer.java:1559-1562`) over
+/// the consumer's shared slot, shared by [`AsyncKafkaConsumer::group_metadata`]
+/// and [`ConsumerHandle::group_metadata`]: the seeded metadata, or, for a
+/// groupless consumer whose slot was never seeded, a groupless stub (see the
+/// divergence note on [`AsyncKafkaConsumer::group_metadata`]).
+fn group_metadata_from(
+    slot: &Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>,
+    group_id: Option<&str>,
+) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
+    let guard = slot.lock().unwrap();
+    match guard.as_ref() {
+        Some(meta) => Arc::clone(meta) as Arc<dyn crate::consumer::ConsumerGroupMetadata>,
+        None => {
+            // Groupless (assignment-only) consumer: the slot was never
+            // seeded — `initialize_group_metadata` returns `None` when
+            // `group.id` is absent (Java `:849`). Java would throw
+            // `InvalidGroupIdException` here; per the divergence above we
+            // return a groupless stub instead.
+            Arc::new(ConsumerGroupMetadataImpl::new(group_id.unwrap_or_default().to_string()))
+        },
     }
 }
 
@@ -660,6 +868,21 @@ fn lock_mock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl AsyncConsumerHandleState {
+    /// The handle's translation of the thread check in Java's
+    /// `KafkaConsumer.acquire()`: `Ok` while the consumer is running a user
+    /// callback on the caller's task (a rebalance-listener method or a
+    /// commit callback), the `ConcurrentModificationError` Java throws
+    /// otherwise. Every async handle operation calls this before it touches
+    /// the consumer: [`ConsumerHandle::async_state`] for the event-routed
+    /// ones, [`Self::commit_sync`] and [`Self::commit_async`] for the
+    /// commits.
+    fn ensure_in_callback(&self) -> Result<(), Error> {
+        if self.callbacks_in_progress.load(Ordering::Acquire) == 0 {
+            return Err(Error::local_concurrent_modification(HANDLE_OUTSIDE_CALLBACK_MSG));
+        }
+        Ok(())
+    }
+
     /// Shared submit + wakeup-aware-await core, the **no-drain** sibling
     /// of [`AsyncKafkaConsumer::submit_and_drain`].
     ///
@@ -709,44 +932,68 @@ impl AsyncConsumerHandleState {
         CompletableEvent::calculate_deadline_ms(self.time.milliseconds(), self.default_api_timeout_ms)
     }
 
-    /// Reentrant-safe [`AsyncKafkaConsumer::assign`].
-    async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
-        if partitions.is_empty() {
-            // Phase 41 Issue 4: On the owning consumer, `assign([])` delegates
-            // to `unsubscribe()` (leave the group). The handle intentionally
-            // does NOT expose the unsubscribe / leave-group lifecycle pipeline
-            // (it owns neither `background_event_rx` nor the close path), so it
-            // cannot faithfully reproduce `assign([])`. Submitting an empty
-            // `AssignmentChange` would clear the assignment WITHOUT leaving the
-            // group — a silent divergence from Java's `KafkaConsumer.assign([])`
-            // for a group consumer. Reject it with a clear error pointing the
-            // caller at the owning consumer's `unsubscribe()`.
-            return Err(Error::local_illegal_argument(
-                "ConsumerHandle::assign with an empty collection is not supported: on the owning \
-                 consumer assign([]) leaves the group (equivalent to unsubscribe()), which the \
-                 handle does not expose. Call unsubscribe() on the owning AsyncKafkaConsumer instead.",
-            ));
-        }
-
-        for tp in &partitions {
-            if tp.topic().trim().is_empty() {
-                return Err(Error::local_illegal_argument(
-                    "Topic partitions to assign to cannot have null or empty topic",
-                ));
+    /// Reentrant-safe [`AsyncKafkaConsumer::partitions_for_with_timeout`]
+    /// (`AsyncKafkaConsumer.java:1311-1336`).
+    async fn partitions_for(&self, topic: &str, timeout: Duration) -> Result<Vec<PartitionInfo>, Error> {
+        // Java: `Cluster cluster = this.metadata.fetch();
+        //        List<PartitionInfo> parts = cluster.partitionsForTopic(topic);
+        //        if (!parts.isEmpty()) return parts;`
+        {
+            let cluster = self.metadata.metadata_arc().fetch();
+            let parts = cluster.partitions_for_topic(topic);
+            if !parts.is_empty() {
+                return Ok(parts.to_vec());
             }
         }
 
-        let partitions_set: HashSet<TopicPartition> = partitions.into_iter().collect();
-        self.fetch_buffer.retain_all(&partitions_set);
+        if timeout.is_zero() {
+            // Java: `throw new TimeoutException();` — the same recorded
+            // deviation as `AsyncKafkaConsumer::partitions_for_with_timeout`.
+            return Err(Error::timeout(format!(
+                "Timeout of {}ms expired before partitions for topic {topic} could be determined",
+                timeout.as_millis()
+            )));
+        }
+
         let now_ms = self.time.milliseconds();
-        let deadline_ms = self.default_api_timeout_deadline_ms();
-        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.submit_and_await::<()>(
-            ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(deadline_ms);
+        // Java's `partitionsFor` calls `setActiveTask(future)` — `enable_wakeup=true`.
+        let map = self
+            .submit_and_await::<HashMap<String, Vec<PartitionInfo>>>(
+                ApplicationEvent::TopicMetadata { handle, topic: topic.to_string() },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for TopicMetadata",
+                true,
+            )
+            .await?;
+        Ok(map.get(topic).cloned().unwrap_or_default())
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::list_topics_with_timeout`]
+    /// (`AsyncKafkaConsumer.java:1343-1361`).
+    async fn list_topics(&self, timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
+        if timeout.is_zero() {
+            // Java: `throw new TimeoutException();` — the same recorded
+            // deviation as `AsyncKafkaConsumer::list_topics_with_timeout`.
+            return Err(Error::timeout(format!(
+                "Timeout of {}ms expired before all topics' metadata could be listed",
+                timeout.as_millis()
+            )));
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(deadline_ms);
+        // Java's `listTopics` calls `setActiveTask(future)` — `enable_wakeup=true`.
+        self.submit_and_await::<HashMap<String, Vec<PartitionInfo>>>(
+            ApplicationEvent::AllTopicsMetadata { handle },
             receiver,
             deadline_ms,
-            "Timeout expired while waiting for the assignment-change event to complete",
-            false,
+            "Timeout expired while waiting for AllTopicsMetadata",
+            true,
         )
         .await
     }
@@ -1047,6 +1294,7 @@ impl AsyncConsumerHandleState {
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
         timeout: Duration,
     ) -> Result<(), Error> {
+        self.ensure_in_callback()?;
         // Java: `long commitStart = time.nanoseconds()`, recorded in `finally`.
         let commit_start_ns = self.time.nanoseconds();
         let result = self.commit_sync_inner(offsets, timeout).await;
@@ -1123,6 +1371,7 @@ impl AsyncConsumerHandleState {
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
         callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
     ) -> Result<(), Error> {
+        self.ensure_in_callback()?;
         // Java's commitAsync is non-blocking and never throws Wakeup: the
         // offsets-ready wait runs with wakeup disabled.
         let receiver = self.commit(CommitEventKind::Async { offsets }).await?;
@@ -3736,19 +3985,7 @@ where
     /// (Java throws `BootstrapResolutionException`, KIP-909); see the
     /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
-        let guard = self.group_metadata.lock().unwrap();
-        match guard.as_ref() {
-            Some(meta) => Arc::clone(meta) as Arc<dyn ConsumerGroupMetadata>,
-            None => {
-                // Groupless (assignment-only) consumer: the slot was never
-                // seeded — `initialize_group_metadata` returns `None` when
-                // `group.id` is absent (Java `:849`). Java would throw
-                // `InvalidGroupIdException` here; per the divergence above we
-                // return a groupless stub instead.
-                let group = self.group_id.clone().unwrap_or_default();
-                Arc::new(ConsumerGroupMetadataImpl::new(group))
-            },
-        }
+        group_metadata_from(&self.group_metadata, self.group_id.as_deref())
     }
 
     /// Java: `OptionalLong currentLag(TopicPartition)`.
@@ -3820,14 +4057,26 @@ where
             bg_wakeup: self.network_thread_close.wakeup_fn_clone(),
             application_event_handler: Arc::clone(&self.application_event_handler),
             subscriptions: Arc::clone(&self.subscriptions),
-            fetch_buffer: Arc::clone(&self.fetch_buffer),
+            metadata: Arc::clone(&self.metadata),
+            group_metadata: Arc::clone(&self.group_metadata),
             time: Arc::clone(&self.time),
             default_api_timeout_ms: self.default_api_timeout_ms,
             metrics: Arc::clone(&self.metrics),
             commit_state: Arc::clone(&self.commit_state),
             group_id: self.group_id.clone(),
             kafka_consumer_metrics: Arc::clone(&self.kafka_consumer_metrics),
+            callbacks_in_progress: Arc::clone(self.offset_commit_callback_invoker.callbacks_in_progress()),
         })
+    }
+
+    /// Enters a callback scope by hand, for tests whose body stands in for
+    /// a rebalance-listener or commit-callback body and drives the
+    /// consumer's [`ConsumerHandle`] directly. It is the marker the
+    /// production listener and commit-callback invocations hold, so the
+    /// fixture cannot admit what production would reject.
+    #[cfg(test)]
+    pub(crate) fn enter_callback_scope(&self) -> CallbackInProgress {
+        self.offset_commit_callback_invoker.enter_callback()
     }
 
     /// Returns the cached `max_time_to_wait` value, set by the bg task
@@ -4370,6 +4619,10 @@ where
                     // `SubscriptionState`, so no recursive lock concern.
                     let listener = self.rebalance_listener.lock().unwrap().clone();
 
+                    // The listener may call back into the consumer through
+                    // its `ConsumerHandle` (Java: the same thread re-enters
+                    // `acquire()`); the marker admits it for the duration.
+                    let _in_callback = self.offset_commit_callback_invoker.enter_callback();
                     let result = match listener {
                         Some(listener) => {
                             // Invoke on the caller's task — never `tokio::spawn`.
@@ -4520,6 +4773,9 @@ where
                     // Steps 2 + 3 — run `on_partitions_assigned` if a listener
                     // exists, else complete the future with success.
                     let listener = self.rebalance_listener.lock().unwrap().clone();
+                    // Admits the listener's `ConsumerHandle` calls (see the
+                    // `PartitionsRemoved` arm above).
+                    let _in_callback = self.offset_commit_callback_invoker.enter_callback();
                     let result = match listener {
                         Some(listener) => {
                             self.rebalance_listener_invoker
@@ -6738,6 +6994,9 @@ where
             None => return Ok(()),
         };
 
+        // Admits the listener's `ConsumerHandle` calls (see
+        // `process_background_events_inner`).
+        let _in_callback = self.offset_commit_callback_invoker.enter_callback();
         let result = if member_epoch > 0 {
             self.rebalance_listener_invoker
                 .invoke_partitions_revoked(&listener, &assigned)
@@ -7581,6 +7840,9 @@ mod tests {
     async fn handle_reentrant_op_completes_through_bg_pipeline() {
         let (consumer, mut handles) = make_test_consumer_with_channels();
         let handle = consumer.handle();
+        // The test body stands in for the listener: the consumer is "running
+        // a callback" for as long as this marker lives.
+        let _in_callback = consumer.enter_callback_scope();
 
         let tp = TopicPartition::new("t".to_string(), 0);
         // Submit the reentrant op from another task — exactly how a
@@ -7606,29 +7868,332 @@ mod tests {
         drop(consumer);
     }
 
-    /// Phase 41 Issue 4: `ConsumerHandle::assign([])` must REJECT the empty
-    /// collection (rather than silently clearing the assignment without
-    /// leaving the group). On the owning consumer `assign([])` delegates to
-    /// `unsubscribe()` (group leave), which the handle does not expose, so the
-    /// handle returns a clear error pointing the caller at the owning
-    /// consumer's `unsubscribe()`. A non-empty `assign` still routes through
-    /// the bg pipeline as before.
+    // ─── The ConsumerHandle gate: async ops only inside a callback ───
+
+    /// Asserts a handle op made outside a callback was rejected with Java's
+    /// `ConcurrentModificationException` message and submitted nothing to
+    /// the bg task.
+    fn assert_rejected_outside_callback<T: std::fmt::Debug>(
+        label: &str,
+        result: Result<T, Error>,
+        app_event_rx: &mut mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) {
+        let err = result.expect_err(label);
+        assert!(
+            err.is_local_concurrent_modification_error(),
+            "{label}: unexpected error {err:?}"
+        );
+        assert_eq!(err.message(), HANDLE_OUTSIDE_CALLBACK_MSG, "{label}");
+        assert!(
+            app_event_rx.try_recv().is_err(),
+            "{label}: a rejected op must not submit an application event"
+        );
+    }
+
+    /// Completes every `PausePartitions` / `ResumePartitions` event, standing
+    /// in for the bg task while a handle op is in flight.
+    fn spawn_pause_resume_completer(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::PausePartitions { handle, .. }
+                    | ApplicationEvent::ResumePartitions { handle, .. } => {
+                        handle.complete(());
+                    },
+                    other => panic!("unexpected event {}", other.type_name()),
+                }
+            }
+        })
+    }
+
+    /// Every async operation of a [`ConsumerHandle`] obtained from an
+    /// `AsyncKafkaConsumer` fails with Java's `ConcurrentModificationException`
+    /// when no `ConsumerRebalanceListener` / `OffsetCommitCallback` is
+    /// running, before anything reaches the bg task: the handle is the
+    /// in-callback path only (`Consumer::handle` docs). This is the Rust
+    /// counterpart of Java's `acquire()` for the one path `&mut self` cannot
+    /// guard.
     #[tokio::test]
-    async fn handle_assign_empty_is_rejected() {
+    async fn handle_async_ops_outside_a_callback_fail_with_concurrent_modification() {
+        let (consumer, mut handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        let rx = &mut handles.app_event_rx;
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let tps = std::slice::from_ref(&tp);
+        let timeout = Duration::from_secs(5);
+        let offsets = singleton_offsets(tp.clone(), 1);
+        let cb = || -> Arc<dyn crate::consumer::OffsetCommitCallback> { Arc::new(NoopCallback) };
+
+        assert_rejected_outside_callback("seek_with_offset", handle.seek_with_offset(tp.clone(), 1).await, rx);
+        assert_rejected_outside_callback(
+            "seek_with_offset_and_metadata",
+            handle
+                .seek_with_offset_and_metadata(tp.clone(), OffsetAndMetadata::new(1).expect("offset"))
+                .await,
+            rx,
+        );
+        assert_rejected_outside_callback("seek_to_beginning", handle.seek_to_beginning(tps).await, rx);
+        assert_rejected_outside_callback("seek_to_end", handle.seek_to_end(tps).await, rx);
+        assert_rejected_outside_callback("pause", handle.pause(tps).await, rx);
+        assert_rejected_outside_callback("resume", handle.resume(tps).await, rx);
+        assert_rejected_outside_callback("position", handle.position(&tp).await, rx);
+        assert_rejected_outside_callback("position_with_timeout", handle.position_with_timeout(&tp, timeout).await, rx);
+        assert_rejected_outside_callback("committed", handle.committed(tps).await, rx);
+        assert_rejected_outside_callback(
+            "committed_with_timeout",
+            handle.committed_with_timeout(tps, timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("partitions_for", handle.partitions_for("t").await, rx);
+        assert_rejected_outside_callback(
+            "partitions_for_with_timeout",
+            handle.partitions_for_with_timeout("t", timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("list_topics", handle.list_topics().await, rx);
+        assert_rejected_outside_callback(
+            "list_topics_with_timeout",
+            handle.list_topics_with_timeout(timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("beginning_offsets", handle.beginning_offsets(tps).await, rx);
+        assert_rejected_outside_callback(
+            "beginning_offsets_with_timeout",
+            handle.beginning_offsets_with_timeout(tps, timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("end_offsets", handle.end_offsets(tps).await, rx);
+        assert_rejected_outside_callback(
+            "end_offsets_with_timeout",
+            handle.end_offsets_with_timeout(tps, timeout).await,
+            rx,
+        );
+        let timestamps = HashMap::from([(tp.clone(), 0_i64)]);
+        assert_rejected_outside_callback("offsets_for_times", handle.offsets_for_times(timestamps.clone()).await, rx);
+        assert_rejected_outside_callback(
+            "offsets_for_times_with_timeout",
+            handle.offsets_for_times_with_timeout(timestamps, timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("commit_sync", handle.commit_sync().await, rx);
+        assert_rejected_outside_callback(
+            "commit_sync_with_timeout",
+            handle.commit_sync_with_timeout(timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback(
+            "commit_sync_with_offsets",
+            handle.commit_sync_with_offsets(offsets.clone()).await,
+            rx,
+        );
+        assert_rejected_outside_callback(
+            "commit_sync_with_offsets_timeout",
+            handle.commit_sync_with_offsets_timeout(offsets.clone(), timeout).await,
+            rx,
+        );
+        assert_rejected_outside_callback("commit_async", handle.commit_async().await, rx);
+        assert_rejected_outside_callback(
+            "commit_async_with_callback",
+            handle.commit_async_with_callback(cb()).await,
+            rx,
+        );
+        assert_rejected_outside_callback(
+            "commit_async_with_offsets_callback",
+            handle.commit_async_with_offsets_callback(offsets, cb()).await,
+            rx,
+        );
+        assert!(
+            consumer.commit_state.last_pending_async_commit().is_none(),
+            "a rejected commit_async must not register a pending async commit"
+        );
+    }
+
+    /// The handle's non-waiting methods are not gated: `wakeup()` is the
+    /// cross-thread path Java's `wakeup()` is, and the state reads do not
+    /// touch anything the owning thread mutates unprotected.
+    #[tokio::test]
+    async fn handle_wakeup_and_sync_reads_work_outside_a_callback() {
         let (consumer, _handles) = make_test_consumer_with_channels();
         let handle = consumer.handle();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        consumer
+            .subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp.clone()]))
+            .unwrap();
 
-        let err = handle.assign(Vec::new()).await.expect_err("empty assign must be rejected");
-        assert!(
-            matches!(err, Error::LocalIllegalArgument(_)),
-            "empty assign should be an illegal-argument error, got {err:?}",
+        assert_eq!(handle.assignment(), HashSet::from([tp.clone()]));
+        assert!(handle.paused().is_empty());
+        assert_eq!(handle.group_metadata().group_id(), consumer.group_metadata().group_id());
+        assert_eq!(handle.current_lag(&tp), None);
+
+        let token = consumer.wakeup_trigger.current_token();
+        handle.wakeup();
+        assert!(token.is_cancelled(), "wakeup() is callable from any thread at any time");
+    }
+
+    /// A listener fired by the consumer may use the handle: inside
+    /// `on_partitions_revoked` the op goes through the bg pipeline and
+    /// completes; as soon as the listener has returned the same op is
+    /// rejected again, because the consumer is no longer running a
+    /// callback.
+    #[tokio::test]
+    async fn handle_async_ops_work_inside_a_rebalance_listener_and_fail_after_it_returns() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct PausingListener {
+            handle: ConsumerHandle,
+            outcome: std::sync::Mutex<Option<Result<(), Error>>>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for PausingListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                *self.outcome.lock().unwrap() = Some(self.handle.pause(partitions).await);
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx, .. } = handles;
+        let handle = consumer.handle();
+        let listener = Arc::new(PausingListener { handle: handle.clone(), outcome: std::sync::Mutex::new(None) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+        let completer = spawn_pause_resume_completer(app_event_rx);
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![tp.clone()],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+        consumer.process_background_events().await.expect("listener ran");
+        ack_rx.await.expect("ack").expect("listener returned Ok");
+        match listener.outcome.lock().unwrap().take() {
+            Some(Ok(())) => {},
+            other => panic!("the handle op inside the listener must complete, got {other:?}"),
+        }
+
+        // The listener has returned: the consumer runs no callback.
+        let err = handle.pause(std::slice::from_ref(&tp)).await.expect_err("outside the listener");
+        assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
+        completer.abort();
+    }
+
+    /// An `OffsetCommitCallback` drained by the consumer's own `commit()`
+    /// (Java's `executeCallbacks()` before every commit) may use the handle;
+    /// after the drain the handle is gated again.
+    #[tokio::test]
+    async fn handle_async_ops_work_inside_an_offset_commit_callback_and_fail_after_it_returns() {
+        struct PausingCallback {
+            handle: ConsumerHandle,
+            tp: TopicPartition,
+            outcome: std::sync::Mutex<Option<Result<(), Error>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for PausingCallback {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                _error: Option<&Error>,
+            ) -> Result<(), Error> {
+                *self.outcome.lock().unwrap() = Some(self.handle.pause(std::slice::from_ref(&self.tp)).await);
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let callback =
+            Arc::new(PausingCallback { handle: handle.clone(), tp: tp.clone(), outcome: std::sync::Mutex::new(None) });
+        consumer.offset_commit_callback_invoker.enqueue_user_callback_invocation(
+            Arc::clone(&callback) as Arc<dyn crate::consumer::OffsetCommitCallback>,
+            singleton_offsets(tp.clone(), 1),
+            None,
         );
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsubscribe"),
-            "error must point the caller at unsubscribe(); got: {msg}",
-        );
-        drop(consumer);
+        let completer = spawn_pause_resume_completer(handles.app_event_rx);
+
+        // An empty-offsets commit_sync runs the queued callbacks and then
+        // waits on an already-completed future, submitting nothing.
+        consumer
+            .commit_sync_with_offsets(HashMap::new())
+            .await
+            .expect("commit runs the callback");
+        match callback.outcome.lock().unwrap().take() {
+            Some(Ok(())) => {},
+            other => panic!("the handle op inside the callback must complete, got {other:?}"),
+        }
+
+        let err = handle.pause(std::slice::from_ref(&tp)).await.expect_err("outside the callback");
+        assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
+        completer.abort();
+    }
+
+    /// The gate is checked when the operation's future first runs, not when
+    /// it is created: a future built inside a callback but awaited after the
+    /// callback returned is rejected, and one built outside but awaited inside
+    /// is admitted. Pins the `ConsumerHandle` docs.
+    #[tokio::test]
+    async fn handle_gate_is_checked_when_the_future_runs() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let completer = spawn_pause_resume_completer(handles.app_event_rx);
+
+        let scope = consumer.enter_callback_scope();
+        let built_inside = handle.pause(std::slice::from_ref(&tp));
+        drop(scope);
+        let err = built_inside.await.expect_err("awaited after the callback returned");
+        assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
+
+        let built_outside = handle.pause(std::slice::from_ref(&tp));
+        let _scope = consumer.enter_callback_scope();
+        built_outside.await.expect("awaited inside the callback");
+        completer.abort();
+    }
+
+    /// The gate's scope is the consumer, not the calling task: while the
+    /// consumer runs a callback, a handle op from any other task is admitted
+    /// (and serialised through the bg task like the callback's own). This
+    /// pins the documented limit of the gate rather than a guarantee.
+    #[tokio::test]
+    async fn handle_ops_from_another_task_are_admitted_while_a_callback_runs() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let completer = spawn_pause_resume_completer(handles.app_event_rx);
+
+        let in_callback = consumer.enter_callback_scope();
+        let other_task = tokio::spawn({
+            let handle = handle.clone();
+            let tp = tp.clone();
+            async move { handle.resume(std::slice::from_ref(&tp)).await }
+        });
+        other_task.await.expect("task ok").expect("admitted while the callback runs");
+        drop(in_callback);
+
+        let other_task = tokio::spawn(async move { handle.resume(std::slice::from_ref(&tp)).await });
+        let err = other_task
+            .await
+            .expect("task ok")
+            .expect_err("rejected once the callback returned");
+        assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
+        completer.abort();
     }
 
     /// Phase 12.5 Issue 7 regression: the production ctor must register
@@ -9983,6 +10548,7 @@ mod tests {
         let (consumer, handles) = make_test_consumer_with_channels();
         let ConsumerTestHandles { app_event_rx, bg_event_tx: _bg_event_tx, .. } = handles;
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         let log = Arc::new(Mutex::new(Vec::new()));
         let waker = handle.clone();
         let before_log = Arc::clone(&log);
@@ -10054,6 +10620,7 @@ mod tests {
     async fn handle_wakeup_before_commit_sync_with_empty_offsets_is_left_for_the_next_call() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         handle.wakeup();
 
         handle
@@ -10083,8 +10650,9 @@ mod tests {
     async fn wakeup_before_commit_sync_waiting_on_a_done_async_commit_is_left_armed() {
         let (consumer, _handles) = make_test_consumer_with_channels();
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         handle
-            .commit_async_offsets(HashMap::new())
+            .commit_async_with_offsets_callback(HashMap::new(), Arc::new(NoopCallback))
             .await
             .expect("empty-offsets commit_async");
         assert!(
@@ -10391,6 +10959,7 @@ mod tests {
         assert_wakeup_raised_before_submitting("list_topics", result, &trigger, &mut handles.app_event_rx);
 
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         trigger.wakeup();
         let result = handle.position_with_timeout(&tp, timeout).await;
         assert_wakeup_raised_before_submitting("handle position", result, &trigger, &mut handles.app_event_rx);
@@ -10472,6 +11041,7 @@ mod tests {
                 .unwrap();
             let time = WakeAtUpdateTime::install(&mut consumer, handles.app_event_rx);
             let result = if through_handle {
+                let _in_callback = consumer.enter_callback_scope();
                 consumer.handle().position_with_timeout(&tp, Duration::from_secs(5)).await
             } else {
                 consumer.position_with_timeout(&tp, Duration::from_secs(5)).await
@@ -12076,6 +12646,7 @@ mod tests {
         consumer.seek_with_offset(tp.clone(), 20).await.expect("seek");
         if via_handle {
             let handle = consumer.handle();
+            let _in_callback = consumer.enter_callback_scope();
             match callback {
                 Some(cb) => handle.commit_async_with_callback(cb).await.expect("commit_async"),
                 None => handle.commit_async().await.expect("commit_async"),
@@ -14105,6 +14676,7 @@ mod tests {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t".to_string(), 0);
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         for raising in [
             RaisingCommitCallback::new("sync"),
             RaisingCommitCallback::new("async"),
@@ -14419,6 +14991,7 @@ mod tests {
         // The handle's commit_sync is bounded by `default.api.timeout.ms`.
         consumer.default_api_timeout_ms = 100;
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
 
         let err = handle
             .commit_sync_with_offsets(singleton_offsets(tp.clone(), 20))
@@ -14452,6 +15025,7 @@ mod tests {
             set_up_consumer_with_incomplete_async_commit_via(&tp, Some(callback), true).await;
         consumer.default_api_timeout_ms = 100;
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
 
         let err = handle
             .commit_sync_with_offsets(singleton_offsets(tp.clone(), 20))
@@ -14503,11 +15077,14 @@ mod tests {
 
         let tp = TopicPartition::new("foo".to_string(), 0);
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        consumer
-            .handle()
-            .commit_async_with_offsets_callback(singleton_offsets(tp, 5), nesting_callback("async", &order, None))
-            .await
-            .expect("commit_async");
+        {
+            let _in_callback = consumer.enter_callback_scope();
+            consumer
+                .handle()
+                .commit_async_with_offsets_callback(singleton_offsets(tp, 5), nesting_callback("async", &order, None))
+                .await
+                .expect("commit_async");
+        }
         assert!(order.lock().unwrap().is_empty(), "the commit is still in flight");
 
         consumer.close().await.expect("close ok");
@@ -14568,6 +15145,7 @@ mod tests {
     async fn handle_interceptor_commit_sync() {
         let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
         let completer = spawn_commit_completer(handles.app_event_rx);
+        let _in_callback = consumer.enter_callback_scope();
 
         consumer
             .handle()
@@ -14584,6 +15162,7 @@ mod tests {
         let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
         let expected = Error::kafka_message("Test error");
         let completer = spawn_failing_commit_completer(handles.app_event_rx, expected.clone());
+        let _in_callback = consumer.enter_callback_scope();
 
         let actual = consumer
             .handle()
@@ -14601,6 +15180,7 @@ mod tests {
     async fn handle_interceptor_commit_async() {
         let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
         let completer = spawn_commit_completer(handles.app_event_rx);
+        let _in_callback = consumer.enter_callback_scope();
 
         consumer
             .handle()
@@ -14628,6 +15208,7 @@ mod tests {
     async fn handle_no_interceptor_commit_async_failed() {
         let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
         let completer = spawn_failing_commit_completer(handles.app_event_rx, Error::kafka_message("Test error"));
+        let _in_callback = consumer.enter_callback_scope();
 
         consumer
             .handle()
@@ -14685,6 +15266,7 @@ mod tests {
             }
         }
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _in_callback = consumer.enter_callback_scope();
         consumer
             .handle()
             .commit_async_with_callback(Arc::new(RecordingCallback { seen: Arc::clone(&seen) }))
@@ -14707,6 +15289,7 @@ mod tests {
     async fn handle_commits_without_group_id_fail() {
         let (consumer, _handles) = make_test_consumer_without_group_id();
         let handle = consumer.handle();
+        let _in_callback = consumer.enter_callback_scope();
         let expected = "To use the group management or offset commit APIs, you must provide a valid group.id in \
                         the consumer configuration.";
 
@@ -14748,6 +15331,7 @@ mod tests {
                 .expect("commit-sync-time-ns-total registered")
         };
         let before = total();
+        let _in_callback = consumer.enter_callback_scope();
         consumer
             .handle()
             .commit_sync_with_offsets(singleton_offsets(TopicPartition::new("t".to_string(), 0), 1))

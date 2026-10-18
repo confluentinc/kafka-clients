@@ -5399,15 +5399,6 @@ static PyObject* py_ConsumerHandle_paused(PyObject* self, PyObject* args) {
     return tp_list_to_py(list);
 }
 
-static PyObject* py_ConsumerHandle_subscription(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h;
-    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    kafka_List_t* list = NULL;
-    if (ffi_raise((list = kafka_consumer_ConsumerHandle_subscription_err(handle_self(h), &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    return string_list_to_py(list);
-}
-
 // No-timeout variants of the map-returning shapes (the ConsumerHandle's Java
 // methods have no Duration overload). py(h, tps) / py_cb(h, tps, cb)
 #define DEF_TPLIST_MAP_OPS_NT(pyname, SELF_T, SELF_FN, OP, OP_CB, CONV)                 \
@@ -5519,8 +5510,6 @@ static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {             
 
 #define HANDLE_T const kafka_consumer_ConsumerHandle_t*
 
-DEF_TPLIST_VOID_OPS(ConsumerHandle_assign, HANDLE_T, handle_self,
-                    kafka_consumer_ConsumerHandle_assign, kafka_consumer_ConsumerHandle_assign_cb)
 DEF_TPLIST_VOID_OPS(ConsumerHandle_seek_to_beginning, HANDLE_T, handle_self,
                     kafka_consumer_ConsumerHandle_seek_to_beginning, kafka_consumer_ConsumerHandle_seek_to_beginning_cb)
 DEF_TPLIST_VOID_OPS(ConsumerHandle_seek_to_end, HANDLE_T, handle_self,
@@ -5550,9 +5539,34 @@ DEF_TIMESTAMPS_MAP_OPS_NT(ConsumerHandle_offsets_for_times, HANDLE_T, handle_sel
 DEF_COMMIT_OPS_NT(ConsumerHandle_commit_sync, HANDLE_T, handle_self,
                   kafka_consumer_ConsumerHandle_commit_sync, kafka_consumer_ConsumerHandle_commit_sync_with_offsets,
                   kafka_consumer_ConsumerHandle_commit_sync_cb, kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb)
-DEF_COMMIT_OPS_NT(ConsumerHandle_commit_async, HANDLE_T, handle_self,
-                  kafka_consumer_ConsumerHandle_commit_async, kafka_consumer_ConsumerHandle_commit_async_offsets,
-                  kafka_consumer_ConsumerHandle_commit_async_cb, kafka_consumer_ConsumerHandle_commit_async_offsets_cb)
+
+// ConsumerHandle_commit_async(hh) -> err | None
+//
+// Java's commitAsync() from inside a callback. Java has no commitAsync(Map):
+// a commit of given offsets without a callback is commitAsync(offsets, null),
+// ConsumerHandle_commit_async_callback with a None adapter.
+static PyObject* py_ConsumerHandle_commit_async(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    kafka_common_Error_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    kafka_consumer_ConsumerHandle_commit_async(s, &err);
+    Py_END_ALLOW_THREADS
+    return err_result(err);
+}
+
+static PyObject* py_ConsumerHandle_commit_async_cb(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &h, &cb)) return NULL;
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    Py_BEGIN_ALLOW_THREADS
+    kafka_consumer_ConsumerHandle_commit_async_cb(s, producer_void_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
 
 // ConsumerHandle_commit_async_callback(h, hh, spec | None, adapter) -> err | None
 //
@@ -11074,10 +11088,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_destroy", py_ConsumerHandle_destroy, METH_VARARGS, "Destroy a re-entrancy handle"},
     {"ConsumerHandle_wakeup", py_ConsumerHandle_wakeup, METH_VARARGS, "Wake up the owning consumer"},
     {"ConsumerHandle_assignment", py_ConsumerHandle_assignment, METH_VARARGS, "Assignment as list[(topic, partition)]"},
-    {"ConsumerHandle_subscription", py_ConsumerHandle_subscription, METH_VARARGS, "Subscription as list[str]"},
     {"ConsumerHandle_paused", py_ConsumerHandle_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},
-    {"ConsumerHandle_assign", py_ConsumerHandle_assign, METH_VARARGS, "assign(hh, [(topic, partition)]) -> err | None"},
-    {"ConsumerHandle_assign_cb", py_ConsumerHandle_assign_cb, METH_VARARGS, "assign twin; cb(err | None)"},
     {"ConsumerHandle_seek", py_ConsumerHandle_seek, METH_VARARGS, "seek(hh, topic, partition, offset) -> err | None"},
     {"ConsumerHandle_seek_cb", py_ConsumerHandle_seek_cb, METH_VARARGS, "seek twin; cb(err | None)"},
     {"ConsumerHandle_seek_with_metadata", py_ConsumerHandle_seek_with_metadata, METH_VARARGS,
@@ -11103,7 +11114,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_offsets_for_times_cb", py_ConsumerHandle_offsets_for_times_cb, METH_VARARGS, "offsets_for_times twin; cb(dict | None, err | None)"},
     {"ConsumerHandle_commit_sync", py_ConsumerHandle_commit_sync, METH_VARARGS, "commit_sync(hh, offsets_spec | None) -> err | None"},
     {"ConsumerHandle_commit_sync_cb", py_ConsumerHandle_commit_sync_cb, METH_VARARGS, "commit_sync twin; cb(err | None)"},
-    {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh, offsets_spec | None) -> err | None"},
+    {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh) -> err | None"},
     {"ConsumerHandle_commit_async_cb", py_ConsumerHandle_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
     {"ConsumerHandle_commit_async_callback", py_ConsumerHandle_commit_async_callback, METH_VARARGS,
      "commit_async_callback(h, hh, offsets_spec | None, adapter) -> err | None"},

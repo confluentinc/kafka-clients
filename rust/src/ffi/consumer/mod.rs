@@ -41,7 +41,9 @@
 //! `LOCAL_CONCURRENT_MODIFICATION` through their trailing `out_err`, returning
 //! their value otherwise. `metrics`, which Java does not guard, reads through
 //! the `ConsumerHandle`. `wakeup` and the `ConsumerHandle` never touch the
-//! consumer itself and are callable at any time.
+//! consumer itself and are callable at any time; the handle's async
+//! operations have their own guard, admitting a call only while the
+//! consumer runs a callback (see `consumer_handle.rs`).
 //!
 //! # Callbacks (CLAUDE.md §4 rule 5)
 //!
@@ -2577,7 +2579,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
 /// `Map<String, List<PartitionInfo>>` as an owned map of owned `char *` to
 /// owned `kafka_List_t *` of owned `kafka_common_PartitionInfo_t *`, topics
 /// sorted.
-fn topic_partition_info_map(topics: HashMap<String, Vec<crate::common::PartitionInfo>>) -> *mut kafka_Map_t {
+pub(crate) fn topic_partition_info_map(topics: HashMap<String, Vec<crate::common::PartitionInfo>>) -> *mut kafka_Map_t {
     let mut entries: Vec<_> = topics.into_iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
     box_string_keyed_map(
@@ -3998,6 +4000,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 /// through (consumer-threading.md §31, §41), owned by the caller
 /// (`kafka_consumer_ConsumerHandle_destroy`) and usable after the consumer
 /// is destroyed, when its operations fail.
+///
+/// The handle is outside the consumer's single-owner flag but has its own
+/// guard: on a `KafkaConsumer` its async operations are admitted only while
+/// the consumer is running a callback (a `ConsumerRebalanceListener` method
+/// or an `OffsetCommitCallback`), and otherwise store the
+/// `LOCAL_CONCURRENT_MODIFICATION` error Java's `acquire()` throws. `wakeup`
+/// and the sync reads work from any thread at any time. A `MockConsumer`
+/// handle is not gated, as Java's `MockConsumer` has no `acquire()`.
 ///
 /// # Safety
 ///

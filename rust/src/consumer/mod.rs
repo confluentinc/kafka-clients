@@ -650,6 +650,14 @@ where
     /// `Clone`, so neither is expressible with a
     /// bare reference; capture a [`ConsumerHandle`] instead. See
     /// [`ConsumerHandle`].
+    ///
+    /// The handle carries the other half of the `&mut self` exclusivity: its
+    /// async operations are admitted only while this consumer is running a
+    /// callback (a `ConsumerRebalanceListener` method or an
+    /// `OffsetCommitCallback`), and otherwise return the
+    /// `ConcurrentModificationError` Java's `acquire()` throws. `wakeup` and
+    /// the sync reads work from any thread at any time. See the `Threads`
+    /// section of [`ConsumerHandle`].
     // listener reentrancy handle (consumer-threading.md §31, §41)
     #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;
