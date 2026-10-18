@@ -25,7 +25,7 @@ use std::ffi::c_void;
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::{ByteArrayDeserializer, Deserializer};
 use crate::ffi::common::serialization::DeserializerHandle;
 use crate::ffi::common::serialization::deserializer::kafka_common_serialization_Deserializer_t;
@@ -53,7 +53,12 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
         bytes_value(self.0.deserialize(topic, data))
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
+    fn deserialize_with_headers(
+        &self,
+        topic: &str,
+        headers: &RecordHeaders,
+        data: &[u8],
+    ) -> Result<GenericValue, Error> {
         bytes_value(self.0.deserialize_with_headers(topic, headers, data))
     }
 
@@ -64,7 +69,7 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
     fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
-        headers: &dyn Headers,
+        headers: &RecordHeaders,
         source: &Bytes,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
@@ -148,10 +153,8 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::common::header::RecordHeaders;
     use crate::ffi::common::header::internals::record_headers::{
-        box_record_headers, kafka_common_header_internals_RecordHeaders__as_Headers,
-        kafka_common_header_internals_RecordHeaders_destroy,
+        box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
     use crate::ffi::common::serialization::deserializer::{
         kafka_common_serialization_Deserializer_deserialize,
@@ -176,17 +179,16 @@ mod tests {
     fn produces_an_owned_copy_through_the_view() {
         let handle = kafka_common_serialization_ByteArrayDeserializer_new();
         let topic = CString::new("t").unwrap();
-        let record_headers = box_record_headers(RecordHeaders::new());
+        let headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
-        // the end, after the last use of its view `view`; `record_headers` comes from
-        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
-        // valid slot pointing at null, left null by every call (asserted), and every value returned
-        // is an owned array that `take_bytes` frees once.
+        // the end, after the last use of its view `view`; `headers` comes from
+        // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
+        // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
+        // null, left null by every call (asserted), and every value returned is an owned array that
+        // `take_bytes` frees once.
         unsafe {
             let view = kafka_common_serialization_ByteArrayDeserializer__as_Deserializer(handle);
-            let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut err = ptr::null_mut();
 
             let out = kafka_common_serialization_Deserializer_deserialize(
@@ -241,7 +243,7 @@ mod tests {
             assert!(!(*(out as *const kafka_Bytes_t)).data.is_null());
             assert_eq!(take_bytes(out), b"");
 
-            kafka_common_header_internals_RecordHeaders_destroy(record_headers);
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_ByteArrayDeserializer_destroy(handle);
             kafka_common_serialization_ByteArrayDeserializer_destroy(ptr::null_mut());
         }

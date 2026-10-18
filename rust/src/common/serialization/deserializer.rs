@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 
 /// An interface for converting bytes to objects.
 ///
@@ -93,12 +93,17 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// to inspect headers during deserialization (for example, schema
     /// registry integration).
     ///
-    /// Takes `&dyn Headers` (the trait, not the concrete `RecordHeaders`
-    /// struct) to mirror Java's signature exactly — Java's parameter type
-    /// is the `Headers` interface, which lets test doubles and alternative
-    /// `Headers` implementations interoperate with custom deserializers.
+    /// Takes the concrete [`RecordHeaders`] rather than a `&dyn Headers`
+    /// trait object, as [`Serializer::serialize_with_headers`] does: Java's
+    /// parameter type is the `Headers` interface, but the client only ever
+    /// passes its one implementation, `RecordHeaders`, which is also what
+    /// `ConsumerRecord` and `ProducerRecord` hold. The concrete type keeps the
+    /// two serde traits symmetric and lets the C binding hand the headers over
+    /// as a `RecordHeaders_t` handle instead of an interface view.
+    ///
+    /// [`Serializer::serialize_with_headers`]: crate::common::serialization::Serializer::serialize_with_headers
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
-    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, Error> {
+    fn deserialize_with_headers(&self, topic: &str, _headers: &RecordHeaders, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -138,7 +143,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
-        headers: &dyn Headers,
+        headers: &RecordHeaders,
         _source: &bytes::Bytes,
         data: &[u8],
     ) -> Result<T, Error> {

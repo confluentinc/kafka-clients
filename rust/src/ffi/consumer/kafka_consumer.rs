@@ -29,7 +29,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::Deserializer;
 use crate::consumer::KafkaConsumer;
 use crate::ffi::common::deliver_value;
@@ -67,7 +67,7 @@ impl Deserializer<GenericValue> for BytesPassthroughDeserializer {
     fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
-        _headers: &dyn Headers,
+        _headers: &RecordHeaders,
         source: &Bytes,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
@@ -84,7 +84,12 @@ impl Deserializer<GenericValue> for ArcDeserializer {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).deserialize(topic, data)
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
+    fn deserialize_with_headers(
+        &self,
+        topic: &str,
+        headers: &RecordHeaders,
+        data: &[u8],
+    ) -> Result<GenericValue, Error> {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -101,7 +106,7 @@ impl Deserializer<GenericValue> for ArcDeserializer {
     fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
-        headers: &dyn Headers,
+        headers: &RecordHeaders,
         source: &Bytes,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
