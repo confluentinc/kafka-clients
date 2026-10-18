@@ -4076,6 +4076,85 @@ async def test_a_task_cancelled_at_the_fast_path_yield_has_sent_nothing(
         await p.close(timeout=0)
 
 
+# Between those yields, send() runs the callback pump on entry only on every
+# 64th send in a row that the producer took at once (AsyncProducer._PUMP_EVERY)
+# and on the first send after a suspension; the sends in between only count. A
+# completion that arrives while the caller waits is the notify hook's, which
+# wakes the loop (the tests below), so it never waits for a later send.
+# ---------------------------------------------------------------------------
+
+def _counting_pump(monkeypatch: pytest.MonkeyPatch, order: list[str]) -> None:
+    """Record each run of the callback pump (the C drain) as "pump" in
+    ``order``; the drain still runs."""
+    real = _lib.Producer__execute_callbacks
+
+    def execute_callbacks(c_producer: int) -> Any:
+        order.append("pump")
+        return real(c_producer)
+
+    monkeypatch.setattr(_lib, "Producer__execute_callbacks", execute_callbacks)
+
+
+async def test_the_async_send_runs_the_pump_on_every_64th_send_taken_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(_lib, "Producer_send_cb", _taking_at_once(order))
+    _counting_pump(monkeypatch, order)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        every = AsyncKafkaProducer._PUMP_EVERY  # noqa: SLF001
+        assert every == 64
+        for _ in range(every):
+            await p.send(record=RECORD)
+        # The first send pumped on entry (the count at 0); the next 63 only
+        # counted.
+        assert order == ["pump", "send"] + ["send"] * (every - 1)
+        await p.send(record=RECORD)
+        # The 65th, the count at 64, pumped before touching its record.
+        assert order == ["pump", "send"] + ["send"] * (every - 1) + ["pump", "send"]
+        assert p._fast_path_sends == every + 1  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+async def test_the_first_async_send_after_a_queued_one_runs_the_pump(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    taken = _taking_at_once(order)
+    loop = asyncio.get_running_loop()
+
+    def queued(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        # The record waits for the submission task: send() suspends until the
+        # handover, which comes from the loop here.
+        order.append("queued")
+        loop.call_soon(resolve, 0)
+        loop.call_soon(cb, _METADATA, 0, 0)
+        return 0
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+    _counting_pump(monkeypatch, order)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        for _ in range(10):
+            await p.send(record=RECORD)
+        assert order == ["pump", "send"] + ["send"] * 9
+        monkeypatch.setattr(_lib, "Producer_send_cb", queued)
+        await p.send(record=RECORD)
+        # The count was 10, so this send did not pump; it suspended, and the
+        # count restarted.
+        assert order == ["pump", "send"] + ["send"] * 9 + ["queued"]
+        assert p._fast_path_sends == 0  # noqa: SLF001
+        monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+        await p.send(record=RECORD)
+        # The first send after the suspension pumped on entry.
+        assert order[-2:] == ["pump", "send"]
+        assert p._fast_path_sends == 1  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
 async def test_a_completion_wakes_the_loop_through_the_socket_pair_not_the_notify_callable(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The native producer's notify hook, fired on the Rust task's thread when

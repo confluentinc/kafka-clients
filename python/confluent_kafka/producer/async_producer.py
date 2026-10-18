@@ -33,8 +33,9 @@ notify hook wakes that loop through a socket pair it watches (one byte written
 from the Rust task's thread, no GIL taken there; see
 :meth:`AsyncProducer._install_wake`), or, before the loop is bound and where
 the loop cannot watch a socket, schedules the pump on it with ``call_soon_on``,
-and each async method pumps once on entry, so the callbacks have a single
-drainer. A ``send()`` callback runs on the loop before its record's future
+and each async method pumps on entry (``send()`` on every 64th send in a row
+that the producer took at once, the sends in between only counting; see
+``AsyncProducer._PUMP_EVERY``), so the callbacks have a single drainer. A ``send()`` callback runs on the loop before its record's future
 completes (Implementation over the FFI, Threads and callbacks). Once the loop
 has closed, the pump runs on one helper thread instead, so a completion left
 for it is dropped promptly (see :meth:`AsyncProducer.send`).
@@ -329,6 +330,18 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     # the next send() first gives the loop one iteration (`asyncio.sleep(0)`).
     _FAST_PATH_YIELD_EVERY = 1000
 
+    # Between those yields, the completions of the earlier records are the
+    # notify hook's to deliver, but its wake-up reaches the loop only when the
+    # loop selects, which a run of sends taken at once never lets it do. So
+    # every this many such sends in a row, send() runs the callback pump
+    # itself on entry (the housekeeping of _enter); the sends in between only
+    # count. The first send after a suspension pumps too, the count restarting
+    # at 0 there. The callbacks then run in batches of at most this many
+    # sends' worth, within the same millisecond at full rate, and a caller
+    # that waits between sends gets each from the hook, as soon as the loop
+    # wakes for it.
+    _PUMP_EVERY = 64
+
     # How the native producer wakes the loop when its callback queue turns
     # non-empty: through a socket pair the loop watches (one byte written by
     # the C notify hook, no GIL taken on the Rust task's thread; see
@@ -429,17 +442,20 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._undelivered.free_closed()
         self._release_wake()
 
-    def _enter(self) -> asyncio.AbstractEventLoop:
+    def _enter(self, housekeeping: bool = True) -> asyncio.AbstractEventLoop:
         """The start of each async method: check the running loop is the
         producer's (binding it on the first call; another raises
         ``RuntimeError``), give the loop the socket pair to watch on that first
-        call, run what is already queued, and free what is left for a loop that
-        has closed."""
+        call, and, with ``housekeeping``, run what is already queued and free
+        what is left for a loop that has closed. Only :meth:`send` passes
+        ``False``, for the sends between two of its entry pumps (see
+        ``_PUMP_EVERY``)."""
         loop = self._binding.bind()
         if not self._wake_tried and self._c_producer and not self._closed:
             self._install_wake(loop)
-        self._pump()
-        self._undelivered.free_closed()
+        if housekeeping:
+            self._pump()
+            self._undelivered.free_closed()
         return loop
 
     def _install_wake(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -689,7 +705,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         after 1000 sends in a row that the producer took at once, the next
         ``send()`` gives the event loop one iteration before touching its
         record, so the loop's other callbacks and tasks run even when the
-        caller only sends; a task cancelled there has sent nothing. The returned
+        caller only sends; a task cancelled there has sent nothing. Between
+        those yields every 64th such send runs the producer's queued callbacks
+        on entry, so a caller that only sends gets the earlier records'
+        callbacks in small batches, within the same millisecond at full rate,
+        while a caller that waits between sends gets each callback as soon as
+        the loop wakes for it. The returned
         ``AsyncKafkaFuture`` completes with the record's metadata, so a round
         trip is ``md = await (await p.send(record=r)).get()``; a failed record
         makes ``get()`` raise ``ExecutionError`` from the error. ``cancel()``
@@ -714,7 +735,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
         # Before the serializers, so a call from another loop has no effect.
-        loop = self._enter()
+        # The pump runs on every _PUMP_EVERY-th send taken at once in a row
+        # and on the first after a suspension; the others only count.
+        loop = self._enter(self._fast_path_sends % self._PUMP_EVERY == 0)
         if self._fast_path_sends >= self._FAST_PATH_YIELD_EVERY:
             # Before the record is touched: a task cancelled here has sent
             # nothing (see _FAST_PATH_YIELD_EVERY).
