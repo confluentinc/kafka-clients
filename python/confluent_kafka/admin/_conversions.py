@@ -48,6 +48,7 @@ from confluent_kafka.common.kafka_future import (
     _VALUE,
     AsyncKafkaFuture,
     KafkaFuture,
+    _FutureState,
     _KafkaFutureImpl,
 )
 
@@ -319,15 +320,15 @@ def linked(kind: Kind, loop: asyncio.AbstractEventLoop | None,
     ``futures.get(key).thenApply(...)`` is."""
     impl: _KafkaFutureImpl[_T] = _KafkaFutureImpl()
 
-    def on_key(key_state: _KafkaFutureImpl[Any]) -> None:
+    def on_key(key_state: _FutureState[Any]) -> None:
         if key_state._state == _CANCELLED:
             impl.cancel(key_state._outcome)
 
-    def on_source(source_state: _KafkaFutureImpl[_T]) -> None:
+    def on_source(source_state: _FutureState[_T]) -> None:
         impl._settle(source_state._state, source_state._outcome)
 
-    key_future._state()._add_listener(on_key)
-    source._state()._add_listener(on_source)
+    key_future._python_state()._add_listener(on_key)
+    source._python_state()._add_listener(on_source)
     if kind is Async:
         return AsyncKafkaFuture._of_impl(impl, loop)
     return KafkaFuture._of_impl(impl)
@@ -1213,7 +1214,7 @@ def outcomes(kind: Kind, loop: asyncio.AbstractEventLoop | None,
     lock = threading.Lock()
     remaining = len(futures)
 
-    def settle(key: _T, state: _KafkaFutureImpl[Any]) -> None:
+    def settle(key: _T, state: _FutureState[Any]) -> None:
         nonlocal remaining
         with lock:
             errors[key] = None if state._state == _VALUE else state._outcome
@@ -1222,11 +1223,11 @@ def outcomes(kind: Kind, loop: asyncio.AbstractEventLoop | None,
         if done:
             impl.complete({k: errors[k] for k in futures})
 
-    def listener(key: _T) -> Callable[[_KafkaFutureImpl[Any]], None]:
+    def listener(key: _T) -> Callable[[_FutureState[Any]], None]:
         return lambda state: settle(key, state)
 
     for key, future in futures.items():
-        future._state()._add_listener(listener(key))
+        future._python_state()._add_listener(listener(key))
     if kind is Async:
         return AsyncKafkaFuture._of_impl(impl, loop)
     return KafkaFuture._of_impl(impl)
@@ -1886,9 +1887,9 @@ def fence_producers_result(native: Any, kind: Kind, loop: asyncio.AbstractEventL
         epoch = wrap(kind, loop, native.future("epoch_id", transactional_id))
         impl: _KafkaFutureImpl[_ProducerIdAndEpoch] = _KafkaFutureImpl()
 
-        def settle(_state: _KafkaFutureImpl[Any], impl: _KafkaFutureImpl[Any] = impl,
+        def settle(_state: _FutureState[Any], impl: _KafkaFutureImpl[Any] = impl,
                    producer_id: Any = producer_id, epoch: Any = epoch) -> None:
-            first, second = producer_id._state(), epoch._state()
+            first, second = producer_id._python_state(), epoch._python_state()
             if first._state == _PENDING or second._state == _PENDING:
                 return
             for source in (first, second):
@@ -1898,8 +1899,8 @@ def fence_producers_result(native: Any, kind: Kind, loop: asyncio.AbstractEventL
             impl.complete(_ProducerIdAndEpoch(producer_id=first._outcome,
                                               epoch=second._outcome))
 
-        producer_id._state()._add_listener(settle)
-        epoch._state()._add_listener(settle)
+        producer_id._python_state()._add_listener(settle)
+        epoch._python_state()._add_listener(settle)
         futures[_transactional_id_key(transactional_id)] = (
             AsyncKafkaFuture._of_impl(impl, loop) if kind is Async
             else KafkaFuture._of_impl(impl))

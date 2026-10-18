@@ -1786,6 +1786,44 @@ def test_the_completion_untracks_its_future_without_a_done_callback(
         p.close(timeout=0)
 
 
+async def test_the_async_send_future_is_its_own_state_in_one_object(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # One object per record: the AsyncKafkaFuture send() returns is the
+    # record's own future state, its lock the producer's, and the completion
+    # the C send gets; a dependant built from it is an ordinary future.
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        captured["cb"] = cb
+        resolve(0)  # handed over, its completion held
+        return 0
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        future = await p.send(record=RECORD)
+        assert isinstance(future, AsyncRecordFuture) and isinstance(future, AsyncKafkaFuture)
+        assert captured["cb"] is future
+        assert future._impl is future and future._lock is p._fire_lock  # noqa: SLF001
+        # No self-reference and no __dict__: freed by its reference count.
+        assert future not in gc.get_referents(future) and not hasattr(future, "__dict__")
+        assert str(future) == "KafkaFuture{value=null,exception=null,done=false}"
+        assert not future.is_done() and future.get_now(value_if_absent=None) is None
+        dependant = future.then_apply(function=RecordMetadata.offset)
+        assert isinstance(dependant, AsyncKafkaFuture) and not isinstance(dependant, AsyncRecordFuture)
+        seen: list[tuple[Any, Any]] = []
+        future.when_complete(action=lambda md, exc: seen.append((md, exc)))
+        captured["cb"](_METADATA, 0, 0)
+        assert future.is_done() and future not in p._futures  # noqa: SLF001
+        metadata = await future.get()
+        assert metadata.offset() == _METADATA[2]
+        assert await dependant.get() == _METADATA[2]
+        assert seen == [(metadata, None)]
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
 async def test_an_async_send_future_cannot_be_cancelled_and_is_untracked_by_its_completion(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # Java's FutureRecordMetadata.cancel() returns false: the future stays
