@@ -199,7 +199,7 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         None => new.pep440(),
     };
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize()?;
+    let root = repo_root()?;
     let workspace = read(&root.join(WORKSPACE_MANIFEST))?;
     let current_text =
         table_value(&workspace, "package", "version").context("rust/Cargo.toml has no [package] version")?;
@@ -391,6 +391,29 @@ fn workspace_members(manifest: &str) -> Option<Vec<String>> {
         return Some(members);
     }
     None
+}
+
+/// The repository root, asked of Cargo at run time: `CARGO_MANIFEST_DIR` is
+/// fixed at build time, and Cargo does not rebuild xtask when the same sources
+/// sit at another path, so a binary built in a since-removed worktree would
+/// edit, or fail to find, that worktree's files.
+fn repo_root() -> anyhow::Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .output()
+        .context("running cargo locate-project")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo locate-project --workspace failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let manifest = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    manifest
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .with_context(|| format!("{} is not rust/Cargo.toml in a repository", manifest.display()))
 }
 
 fn read(path: &Path) -> anyhow::Result<String> {
