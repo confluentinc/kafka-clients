@@ -26,7 +26,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration-grpc-python test-integration-grpc-c \
 	test-integration-grpc-python-native test-integration-grpc-c-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat install-rust-analyzer clean
+	format-check check-generated lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -242,6 +242,14 @@ package-check:
 # the tags fetched; not part of `make verify`.
 check-api-compat:
 	cargo xtask api-compat
+
+# Sets one version on the crates and Python packages released together, in
+# each one's syntax: `make bump-version VERSION=0.3.0-rc.1` writes 0.3.0-rc.1
+# in the Cargo manifests and 0.3.0rc1 in the Python packages. PYTHON_VERSION
+# (PEP 440, e.g. 0.3.0.post1) gives the Python packages another version.
+bump-version:
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
+	cargo xtask bump-version $(VERSION) $(if $(PYTHON_VERSION),--python-version $(PYTHON_VERSION))
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the

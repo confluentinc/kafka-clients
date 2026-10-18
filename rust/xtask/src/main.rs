@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod api_compat;
+mod bump_version;
 mod config_types;
 mod error_hierarchy;
 mod error_predicates;
@@ -57,6 +58,7 @@ fn main() -> anyhow::Result<()> {
         Some("producer-perf-test") => producer_perf_test()?,
         Some("package-check") => package_check()?,
         Some("api-compat") => api_compat::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("bump-version") => bump_version::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos") => chaos()?,
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
@@ -2123,6 +2125,10 @@ fn print_help() {
                   change fails unless the Cargo.toml version allows it over the tag's
                     --baseline TAG (default $API_COMPAT_BASELINE, else the highest
                     vX.Y.Z tag not above the current version)
+  bump-version    Set one version on the Rust crates released together, Cargo.lock and
+                  the Python packages: semver in Cargo manifests, PEP 440 in Python
+                    e.g. cargo xtask bump-version 0.3.0-rc.1 (Python gets 0.3.0rc1);
+                    pre-releases are -alpha.N, -beta.N and -rc.N
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2171,6 +2177,7 @@ Usage:
   cargo xtask producer-perf-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
