@@ -22,11 +22,10 @@
 //! baseline: in the `rust` group Rust and Java each against librdkafka, in
 //! the `python` group each Rust-based client against the librdkafka-based one
 //! of its mode. Never Rust against Java. The Rust-based clients' changes are
-//! banded:
+//! banded, with no legend:
 //!
 //! - 🟢 better, or at most 10 % worse;
-//! - 🟡 10–20 % worse;
-//! - 🔴 more than 20 % worse.
+//! - 🔴 more than 10 % worse.
 //!
 //! Java's change is a neutral reference, shown without a band.
 //!
@@ -36,7 +35,8 @@
 //! run) are shown in its column, with a note, but never compared. A
 //! throughput Δ is `cluster-bound` when either client's ingress came near the
 //! cluster's limit, which then capped it rather than the client. The notes
-//! under a table also name the clients that failed or did not run.
+//! under a table name the clients that failed or did not run, and those that
+//! missed a fixed rate.
 
 use std::fmt::Write as _;
 
@@ -82,21 +82,11 @@ pub(crate) fn comparisons(group: Group) -> &'static [Comparison] {
     }
 }
 
-/// The legend of a banded Δ.
-const BANDS: &str = "Colors: 🟢 better or up to 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. Worse means \
-                     lower throughput, or higher latency, CPU or memory usage.";
-
-/// A group's report title, and the first sentence of its Δ legend.
-fn group_text(group: Group) -> (&'static str, &'static str) {
+/// A group's report title.
+fn title(group: Group) -> &'static str {
     match group {
-        Group::Rust => (
-            "Rust client performance results",
-            "Δ columns show each client's difference from librdkafka, the baseline.",
-        ),
-        Group::Python => (
-            "Python client performance results",
-            "Δ columns show the Rust-based client's difference from the librdkafka-based client in the same mode.",
-        ),
+        Group::Rust => "Rust client performance results",
+        Group::Python => "Python client performance results",
     }
 }
 
@@ -343,6 +333,9 @@ fn number(value: f64, decimals: usize) -> String {
     out
 }
 
+/// How much worse than its baseline a client can be and still be green.
+const WORSE_TOLERANCE: f64 = 0.10;
+
 /// The relative change of `candidate` against `baseline` and its band.
 /// `None` when the baseline is zero (no meaningful ratio).
 fn delta(candidate: f64, baseline: f64, better: Better) -> Option<(f64, &'static str)> {
@@ -354,13 +347,7 @@ fn delta(candidate: f64, baseline: f64, better: Better) -> Option<(f64, &'static
         Better::Higher => -change,
         Better::Lower => change,
     };
-    let band = if worse <= 0.10 {
-        "🟢"
-    } else if worse <= 0.20 {
-        "🟡"
-    } else {
-        "🔴"
-    };
+    let band = if worse <= WORSE_TOLERANCE { "🟢" } else { "🔴" };
     Some((change * 100.0, band))
 }
 
@@ -397,9 +384,8 @@ fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
 }
 
 pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
-    let (title, intro) = group_text(info.group);
     let mut out = String::new();
-    let _ = writeln!(out, "# {title}\n");
+    let _ = writeln!(out, "# {}\n", title(info.group));
     let clients: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
     let mut rows = vec![
         ("Start time".to_string(), start_time(&info.started)),
@@ -420,28 +406,6 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     parameter_table(&mut out, &rows);
 
     let columns = columns(info);
-    let compared: Vec<&Comparison> = columns
-        .iter()
-        .filter_map(|c| match c {
-            Column::Delta(comparison) => Some(*comparison),
-            Column::Client(_) => None,
-        })
-        .collect();
-    if !compared.is_empty() {
-        let mut legend = intro.to_string();
-        if compared.iter().any(|c| c.banded) {
-            legend.push(' ');
-            legend.push_str(BANDS);
-        }
-        for comparison in compared.iter().filter(|c| !c.banded) {
-            let _ = write!(
-                legend,
-                " {}'s Δ is a neutral reference and is not colored.",
-                comparison.candidate.label()
-            );
-        }
-        let _ = writeln!(out, "\n{legend}");
-    }
     if results.is_empty() {
         let _ = writeln!(out, "\nNo test has finished yet.");
     }
@@ -545,22 +509,6 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
         let Some(m) = &a.metrics else {
             continue;
         };
-        if let Some(limit) = info.ingress_mb_s {
-            let mb_s = ingress_mb_s(m, abort_rate);
-            if mb_s >= NEAR_INGRESS_SHARE * limit {
-                let aborted = if transactional && abort_rate > 0.0 {
-                    " including aborted records"
-                } else {
-                    ""
-                };
-                notes.push(format!(
-                    "{label} {} {mb_s:.0} MB/s{aborted}, {:.0}% of the cluster's {limit:.0} MB/s ingress limit. The \
-                     cluster may have limited it, so its throughput is not compared.",
-                    if consumer { "consumed" } else { "produced" },
-                    100.0 * mb_s / limit
-                ));
-            }
-        }
         // A consumer reads what its load produced: when the load fell short,
         // so did the consumer, through no fault of its own.
         let short_load = a
@@ -767,12 +715,12 @@ mod tests {
         let (pct, band) = delta(110.0, 100.0, Better::Higher).unwrap();
         assert!((pct - 10.0).abs() < 1e-9 && band == "🟢", "{pct} {band}");
         assert_eq!(delta(90.0, 100.0, Better::Higher).map(|d| d.1), Some("🟢"));
-        assert_eq!(delta(85.0, 100.0, Better::Higher).map(|d| d.1), Some("🟡"));
+        assert_eq!(delta(89.0, 100.0, Better::Higher).map(|d| d.1), Some("🔴"));
         assert_eq!(delta(79.0, 100.0, Better::Higher).map(|d| d.1), Some("🔴"));
         // Latency: lower is better.
         assert_eq!(delta(5.0, 10.0, Better::Lower).map(|d| d.1), Some("🟢"));
-        assert_eq!(delta(11.5, 10.0, Better::Lower).map(|d| d.1), Some("🟡"));
-        assert_eq!(delta(12.5, 10.0, Better::Lower).map(|d| d.1), Some("🔴"));
+        assert_eq!(delta(11.0, 10.0, Better::Lower).map(|d| d.1), Some("🟢"));
+        assert_eq!(delta(11.5, 10.0, Better::Lower).map(|d| d.1), Some("🔴"));
         assert_eq!(delta(1.0, 0.0, Better::Lower), None);
     }
 
@@ -844,14 +792,8 @@ mod tests {
         );
         assert!(md.contains("| Clients | Rust, librdkafka, Java |\n"), "{md}");
         assert!(md.contains("| Cluster size | 2 CKU |\n"), "{md}");
-        assert!(
-            md.contains(
-                "\nΔ columns show each client's difference from librdkafka, the baseline. Colors: 🟢 better or up to \
-                 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. Worse means lower throughput, or higher \
-                 latency, CPU or memory usage. Java's Δ is a neutral reference and is not colored.\n"
-            ),
-            "{md}"
-        );
+        // No legend: the colors read on their own.
+        assert!(!md.contains("Δ columns") && !md.contains("Worse means"), "{md}");
         // The clients come first, then the comparisons.
         assert_eq!(
             line_starting(&md, "| Metric |"),
@@ -877,13 +819,9 @@ mod tests {
         // No transaction rows for a producer test.
         assert!(!md.contains("Transactions/s"), "{md}");
         // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
+        // The cluster-bound Δ needs no note.
         assert!(
-            md.ends_with(
-                "\n**Notes**\n\n\
-                 - Rust produced 512 MB/s, 85% of the cluster's 600 MB/s ingress limit. The cluster may have limited \
-                 it, so its throughput is not compared.\n\
-                 - Java failed: harness exited \\| with 1.\n"
-            ),
+            md.ends_with("\n**Notes**\n\n- Java failed: harness exited \\| with 1.\n"),
             "{md}"
         );
         assert_rectangular(&md);
@@ -1010,20 +948,16 @@ mod tests {
         );
         assert_rectangular(&md);
 
-        // Java's Δ alone: no colors to explain.
+        // Java's Δ alone: still plain.
         let md = render(Group::Rust, &[Arm::Librdkafka, Arm::Java], None, &results);
         assert_eq!(
             line_starting(&md, "| Metric |"),
             "| Metric | librdkafka | Java | Δ Java vs librdkafka |"
         );
-        assert!(
-            md.contains(
-                "\nΔ columns show each client's difference from librdkafka, the baseline. Java's Δ is a neutral \
-                 reference and is not colored.\n"
-            ),
-            "{md}"
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 600 | -40.0% |"
         );
-        assert!(!md.contains("Colors"), "{md}");
         assert_rectangular(&md);
     }
 
@@ -1040,13 +974,6 @@ mod tests {
         let python = Group::Python.arms();
         let md = render(Group::Python, python, None, &results);
         assert!(md.starts_with("# Python client performance results\n"), "{md}");
-        assert!(
-            md.contains(
-                "Δ columns show the Rust-based client's difference from the librdkafka-based client in the same \
-                 mode. Colors: 🟢"
-            ),
-            "{md}"
-        );
         assert_eq!(
             line_starting(&md, "| Metric |"),
             "| Metric | Python sync (Rust) | Python sync (librdkafka) | Python async (Rust) | Python async \
@@ -1176,13 +1103,7 @@ mod tests {
         // 5,000 committed records/s of 1 KiB are 5.1 MB/s; with as many
         // aborted, 10.2 MB/s crossed the 12 MB/s ingress.
         let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], Some(12.0), &results);
-        assert!(
-            md.contains(
-                "\n- Rust produced 10 MB/s including aborted records, 85% of the cluster's 12 MB/s ingress limit."
-            ),
-            "{md}"
-        );
-        assert!(!md.contains("- librdkafka produced"), "{md}");
+        assert!(!md.contains("Notes"), "{md}");
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | 5,000 | 2,000 | cluster-bound |"

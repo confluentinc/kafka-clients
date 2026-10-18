@@ -71,7 +71,9 @@
 //! `PERF_CLUSTER_INGRESS_MB_S` (also enables the "near the ingress limit"
 //! notes). `AGENT_REGION`, `PERF_CLUSTER_ID`, and on Semaphore
 //! `SEMAPHORE_AGENT_MACHINE_TYPE` and `SEMAPHORE_WORKFLOW_ID`, go to the log
-//! only, with this repository's `HEAD` commit and the kernel.
+//! only, with this repository's `HEAD` commit and the kernel. The report also
+//! gives the cluster's AZ IDs, which the driver reads from the cluster itself
+//! (see [`cluster_zones`]).
 
 mod json;
 mod report;
@@ -118,6 +120,9 @@ const STOP_GRACE: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 }
 
 /// Each `kafka-topics.sh` call.
 const TOPIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The `kafka-broker-api-versions.sh` call that reads the brokers' racks.
+const BROKERS_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Topic creation retries: a new API key can take a few minutes before the
 /// cluster accepts it.
@@ -1834,7 +1839,10 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     write_private(&client_properties, &client_properties_text(&options.bootstrap, &credentials))?;
     let redactions = Arc::new(vec![credentials.secret.clone()]);
 
-    let info = run_info(options);
+    let mut info = run_info(options);
+    // Read once a test has run: a new API key can take minutes before the
+    // cluster accepts it.
+    let mut zones_read = false;
     let mut results: Vec<TestResult> = Vec::new();
     let mut interrupted = false;
     'tests: for (i, test) in options.tests.iter().enumerate() {
@@ -1878,6 +1886,19 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
             }
         }
         results.push(TestResult { test: test.clone(), arms });
+        if !zones_read {
+            let zones = cluster_zones(
+                &kafka_bin,
+                &options.bootstrap,
+                &client_properties,
+                work.path(),
+                signals_baseline,
+            );
+            if let Some(zones) = zones {
+                zones_read = true;
+                add_cluster_zones(&mut info.facts, &zones);
+            }
+        }
         write_reports(&results_dir, &info, &results)?;
         if options.push_artifacts {
             push_artifact("job", &results_dir.join(&test.id), &format!("perf-results/{}", test.id));
@@ -1996,6 +2017,93 @@ fn run_info(options: &RunOptions) -> RunInfo {
         facts,
         ingress_mb_s: ingress,
     }
+}
+
+/// The cluster's AZ IDs: its brokers' racks, which Confluent Cloud sets to
+/// the AZ ID each broker runs in, as `kafka-broker-api-versions.sh` lists
+/// them. Its output (every broker's API versions) goes to a file in `work`,
+/// not the job log. Empty when no broker has a rack; `None` when the brokers
+/// could not be read, so a later call can try again.
+fn cluster_zones(
+    kafka_bin: &Path,
+    bootstrap: &str,
+    client_properties: &Path,
+    work: &Path,
+    signals_baseline: u32,
+) -> Option<Vec<String>> {
+    let tool = kafka_bin.join("kafka-broker-api-versions.sh");
+    let output = work.join("brokers.txt");
+    let status = (|| -> anyhow::Result<Option<ExitStatus>> {
+        let mut command = Command::new(&tool);
+        command
+            .args(["--bootstrap-server", bootstrap, "--command-config"])
+            .arg(client_properties)
+            .stdin(Stdio::null())
+            .stdout(File::create(&output)?)
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().with_context(|| format!("starting {}", tool.display()))?;
+        let pgid = child.id();
+        let deadline = Instant::now() + BROKERS_COMMAND_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break Some(status);
+            }
+            if crate::signals::count() > signals_baseline || Instant::now() >= deadline {
+                stop_group(&mut child, pgid, STOP_GRACE)?;
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        reap_group(&mut child, pgid)?;
+        Ok(status)
+    })();
+    let failure = match status {
+        Ok(Some(status)) if status.success() => None,
+        Ok(Some(status)) => Some(format!("it exited with {status}")),
+        Ok(None) => Some("it was stopped".to_string()),
+        Err(e) => Some(format!("{e:#}")),
+    };
+    if let Some(failure) = failure {
+        println!(
+            "Could not read the cluster's AZ IDs with {} ({failure}); trying again after the next test",
+            tool.display()
+        );
+        return None;
+    }
+    let zones = broker_racks(&fs::read_to_string(&output).unwrap_or_default());
+    if zones.is_empty() {
+        println!("The cluster's brokers have no rack, so its AZ IDs are unknown");
+    } else {
+        println!("Cluster AZ IDs: {}", zones.join(", "));
+    }
+    Some(zones)
+}
+
+/// The distinct broker racks in `kafka-broker-api-versions.sh` output, whose
+/// broker lines read `host:port (id: 0 rack: usw2-az1 isFenced: false) -> (`
+/// (`... rack: usw2-az1) -> (` before Kafka 4.0, `rack: null` without one).
+fn broker_racks(output: &str) -> Vec<String> {
+    let mut racks: Vec<String> = output
+        .lines()
+        .filter(|line| line.contains(" (id: "))
+        .filter_map(|line| line.split_once(" rack: ")?.1.split([' ', ')']).next())
+        .filter(|rack| !rack.is_empty() && *rack != "null")
+        .map(str::to_string)
+        .collect();
+    racks.sort();
+    racks.dedup();
+    racks
+}
+
+/// Record the cluster's AZ IDs right after the agent's, so the two read
+/// together. Nothing when they are unknown.
+fn add_cluster_zones(facts: &mut Vec<(String, String)>, zones: &[String]) {
+    if zones.is_empty() {
+        return;
+    }
+    let at = facts.iter().position(|(label, _)| label == "Agent AZ ID").map_or(0, |i| i + 1);
+    facts.insert(at, ("Cluster AZ IDs".to_string(), zones.join(", ")));
 }
 
 fn write_reports(results_dir: &Path, info: &RunInfo, results: &[TestResult]) -> anyhow::Result<()> {
@@ -3935,5 +4043,72 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert!(logged.contains("out <redacted>") && logged.contains("err"), "{logged}");
         assert!(!logged.contains("hunter2"), "{logged}");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_the_broker_racks() {
+        let output = "\
+b0-pkc.example:9092 (id: 0 rack: usw2-az4 isFenced: false) -> (
+\tProduce(0): 3 to 12 [usable: 12],
+)
+b1-pkc.example:9092 (id: 1 rack: usw2-az1 isFenced: false) -> (
+)
+b2-pkc.example:9092 (id: 2 rack: usw2-az4 isFenced: false) -> (
+)
+b3-pkc.example:9092 (id: 3 rack: usw2-az2) -> (
+)
+";
+        assert_eq!(broker_racks(output), strings(&["usw2-az1", "usw2-az2", "usw2-az4"]));
+        assert!(broker_racks("localhost:9092 (id: 1 rack: null isFenced: false) -> (\n)\n").is_empty());
+        assert!(broker_racks("").is_empty());
+
+        let mut facts = vec![
+            ("Agent AZ ID".to_string(), "usw2-az2".to_string()),
+            ("Cluster size".to_string(), "10 CKU".to_string()),
+        ];
+        add_cluster_zones(&mut facts, &[]);
+        assert_eq!(facts.len(), 2);
+        add_cluster_zones(&mut facts, &strings(&["usw2-az1", "usw2-az2"]));
+        assert_eq!(facts[1], ("Cluster AZ IDs".to_string(), "usw2-az1, usw2-az2".to_string()));
+        let mut facts = vec![("Cluster size".to_string(), "10 CKU".to_string())];
+        add_cluster_zones(&mut facts, &strings(&["usw2-az1"]));
+        assert_eq!(facts[0].0, "Cluster AZ IDs");
+    }
+
+    #[test]
+    fn reads_the_cluster_zones_with_the_kafka_tool() {
+        // A signal another test raises would stop the tool here.
+        let _signals = crate::signals::test_lock();
+        let dir = std::env::temp_dir().join(format!("perf-cloud-zones-{}", std::process::id()));
+        let kafka_bin = dir.join("bin");
+        fs::create_dir_all(&kafka_bin).unwrap();
+        let script = kafka_bin.join("kafka-broker-api-versions.sh");
+        let zones = |body: &str| {
+            fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            cluster_zones(
+                &kafka_bin,
+                "broker:9092",
+                Path::new("/private/client.properties"),
+                &dir,
+                crate::signals::count(),
+            )
+        };
+        // The tool gets the bootstrap and the client properties.
+        let read = zones(
+            r#"[ "$*" = "--bootstrap-server broker:9092 --command-config /private/client.properties" ] || exit 9
+echo 'b0:9092 (id: 0 rack: usw2-az2 isFenced: false) -> ('
+echo 'b1:9092 (id: 1 rack: usw2-az1 isFenced: false) -> ('"#,
+        );
+        assert_eq!(read, Some(strings(&["usw2-az1", "usw2-az2"])));
+        // Read, without racks: nothing to try again.
+        assert_eq!(zones("echo 'b0:9092 (id: 0 rack: null) -> ('"), Some(vec![]));
+        // Not read (e.g. the API key is not accepted yet): try again later.
+        assert_eq!(zones("echo 'b0:9092 (id: 0 rack: usw2-az2) -> ('; exit 1"), None);
+        // No tool: not read either, and not an error that stops the run.
+        fs::remove_file(&script).unwrap();
+        let missing = cluster_zones(&kafka_bin, "b:9092", Path::new("/p"), &dir, crate::signals::count());
+        assert_eq!(missing, None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
