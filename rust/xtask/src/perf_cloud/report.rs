@@ -17,10 +17,9 @@
 //! The markdown opens with the results and ends with the run's parameters, as
 //! a list. A run of one test (as CI runs) lists the test's settings there
 //! too; a run of several lists each test's settings under its results. Each
-//! test has a table with a
-//! row per metric, a column per client that ran and, after the clients, a Δ
-//! column per comparison giving a client's change against its librdkafka
-//! baseline: in the `rust` group Rust and Java each against librdkafka, in
+//! test has a table with a row per metric, a column per client that ran and,
+//! after the clients, a Δ column per comparison giving a client's change
+//! against its librdkafka baseline: in the `rust` group Rust and Java each against librdkafka, in
 //! the `python` group each Rust-based client against the librdkafka-based one
 //! of its mode. Never Rust against Java. Every change is banded, with no
 //! legend:
@@ -632,8 +631,26 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::super::{parse_tests, TxnMetrics};
+    use super::super::{parse_tests, TxnMetrics, SETTINGS};
     use super::*;
+
+    #[test]
+    fn names_every_optional_setting() {
+        // Shown apart, in the scenario's and the parameters' first lines.
+        const SHOWN_APART: &[&str] = &["PARTITIONS", "VALUE_SIZE", "LIMIT_RPS", "TXN_MODE"];
+        let named: Vec<&str> = SETTING_NAMES.iter().map(|(key, ..)| *key).collect();
+        for setting in SETTINGS {
+            assert_eq!(
+                named.contains(&setting.key),
+                !SHOWN_APART.contains(&setting.key),
+                "{}",
+                setting.key
+            );
+        }
+        for key in named {
+            assert!(SETTINGS.iter().any(|s| s.key == key), "{key} is not a setting");
+        }
+    }
 
     fn metrics(client: &str, msg_s: f64, p99: f64) -> Metrics {
         Metrics {

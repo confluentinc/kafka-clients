@@ -552,6 +552,13 @@ public class TransactionalProducerPerformanceTest {
             while (!terminating) {
                 if (perProducerNumMessages > 0) {
                     if (recordsSent >= perProducerNumMessages) {
+                        // The wait owed for the last transaction's records,
+                        // which the next beginTransaction would have taken:
+                        // without it a fast client ends a counted run early
+                        // and overstates throughput.
+                        if (perProducerRps > 0) {
+                            paceTo(firstMessageNs, recordsSent, perProducerRps);
+                        }
                         break;
                     }
                     if (System.nanoTime() - firstMessageNs >= COUNTED_RUN_CAP_NS) {
@@ -658,6 +665,10 @@ public class TransactionalProducerPerformanceTest {
             while (!terminating) {
                 if (countMode) {
                     if (eosProcessed.get() >= NUM_MESSAGES) {
+                        // This producer's owed wait, as in the produce loop.
+                        if (perProducerRps > 0) {
+                            paceTo(firstMessageNs, recordsSent, perProducerRps);
+                        }
                         break;
                     }
                     if (System.nanoTime() - firstMessageNs >= COUNTED_RUN_CAP_NS) {

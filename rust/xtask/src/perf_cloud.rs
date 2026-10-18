@@ -62,20 +62,19 @@
 //! `kafka-producer-perf-test.sh` from `--kafka-bin` before measuring.
 //!
 //! The SASL credentials come from `PERF_API_KEY` / `PERF_API_SECRET`, never
-//! from the command line, and the secret is masked in everything this driver
+//! from the command line, and both are masked in everything this driver
 //! prints or writes (harness output included), because the results directory
 //! is meant to be published (e.g. as CI artifacts).
 //!
 //! Optional run metadata, recorded in the report when set: `AGENT_AZ_ID`,
 //! `PERF_CLUSTER_SIZE` (free text, e.g. `10 CKU`) and
-//! `PERF_CLUSTER_INGRESS_MB_S` (also enables the "near the ingress limit"
-//! notes). `AGENT_REGION`, `PERF_CLUSTER_ID`, and on Semaphore
+//! `PERF_CLUSTER_INGRESS_MB_S` (with it, a throughput Δ whose clients came
+//! near that limit reads `cluster-bound`). `AGENT_REGION`, `PERF_CLUSTER_ID`, and on Semaphore
 //! `SEMAPHORE_AGENT_MACHINE_TYPE` and `SEMAPHORE_WORKFLOW_ID`, go to the log
 //! only, with this repository's `HEAD` commit and the kernel. The report also
 //! gives the cluster's AZ IDs, which the driver reads from the cluster itself
 //! (see [`cluster_zones`]).
 
-mod json;
 mod report;
 
 use std::collections::BTreeMap;
@@ -83,7 +82,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead as _, BufReader, Read, Write as _};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -718,14 +717,29 @@ const MAX_TEST_ID_LEN: usize = 60;
 /// while the other clients use the value, so they would not be comparable.
 const MIN_LIBRDKAFKA_BATCH_KIB: u64 = 1024;
 
+/// The value `settings` give `key`.
+fn lookup<'a>(settings: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// The whole number `settings` give `key`.
+fn lookup_number(settings: &[(String, String)], key: &str) -> Option<u64> {
+    lookup(settings, key).and_then(|v| v.parse().ok())
+}
+
+/// The bytes of one record (key plus value).
+fn record_bytes(settings: &[(String, String)]) -> u64 {
+    lookup_number(settings, "KEY_SIZE").unwrap_or(0) + lookup_number(settings, "VALUE_SIZE").unwrap_or(0)
+}
+
 impl PerfTest {
     pub(crate) fn setting(&self, key: &str) -> Option<&str> {
-        self.settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        lookup(&self.settings, key)
     }
 
     fn number(&self, key: &str) -> u64 {
         // Validated when the test was parsed.
-        self.setting(key).and_then(|v| v.parse().ok()).unwrap_or(0)
+        lookup_number(&self.settings, key).unwrap_or(0)
     }
 
     fn partitions(&self) -> u64 {
@@ -744,8 +758,7 @@ impl PerfTest {
         if rps == 0 {
             return None;
         }
-        let size = self.number("KEY_SIZE") + self.number("VALUE_SIZE");
-        Some(rps as f64 * size as f64 / 1e6)
+        Some(rps as f64 * record_bytes(&self.settings) as f64 / 1e6)
     }
 
     /// The minutes an `eos` arm's harness takes to fill its source topic with
@@ -755,7 +768,7 @@ impl PerfTest {
         if !self.is_eos() {
             return 0;
         }
-        let size = self.number("KEY_SIZE") + self.number("VALUE_SIZE");
+        let size = record_bytes(&self.settings);
         let bytes = self.number("LIMIT_RPS") as f64 * (duration_min * 60) as f64 * size as f64;
         (bytes / (SEED_MB_S * 1e6) / 60.0).ceil() as u64
     }
@@ -916,9 +929,9 @@ fn parse_settings<'a>(
             bail!("{what} must set {key}");
         }
     }
-    let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
-    let number = |key: &str| get(key).and_then(|v| v.parse::<u64>().ok());
-    let record = number("KEY_SIZE").unwrap_or(0) + number("VALUE_SIZE").unwrap_or(0);
+    let get = |key: &str| lookup(&settings, key);
+    let number = |key: &str| lookup_number(&settings, key);
+    let record = record_bytes(&settings);
     if record > MAX_RECORD_BYTES {
         bail!(
             "{what}: KEY_SIZE + VALUE_SIZE is {record} bytes, above {MAX_RECORD_BYTES}: larger records exceed the \
@@ -967,8 +980,8 @@ fn parse_settings<'a>(
 /// `consumer-fixed-10k-1kb-200p-fetchmin4mb-maxpoll4000`). A name over
 /// [`MAX_TEST_ID_LEN`] is cut short and ends with a hash of the whole name.
 fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
-    let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
-    let number = |key: &str| get(key).and_then(|v| v.parse::<u64>().ok());
+    let get = |key: &str| lookup(settings, key);
+    let number = |key: &str| lookup_number(settings, key);
     let mut parts: Vec<String> = Vec::new();
     parts.push(
         match (workload, get("TXN_MODE")) {
@@ -1200,8 +1213,8 @@ impl RunOptions {
         let flags = parse_flags(raw, &allowed, &switches)?;
         let group = Group::parse(required(&flags, "--group")?)?;
         let arms = group.select_arms(flags.get("--clients").map_or("all", String::as_str))?;
-        let duration_min = minutes(&flags, "--duration-min", 30, 1, MAX_DURATION_MINUTES)?;
-        let warmup_min = minutes(&flags, "--warmup-min", 5, 0, MAX_WARMUP_MINUTES)?;
+        let duration_min = minutes(&flags, "--duration-min", 1, MAX_DURATION_MINUTES)?.unwrap_or(30);
+        let warmup_min = minutes(&flags, "--warmup-min", 0, MAX_WARMUP_MINUTES)?.unwrap_or(5);
         let tests = match (flags.get("--tests"), flags.get("--scenario")) {
             (Some(list), None) => select_tests(&load_tests()?, list, group)?,
             (None, Some(scenario)) => vec![parse_scenario(scenario, group)?],
@@ -1211,10 +1224,7 @@ impl RunOptions {
         for test in &tests {
             test.check_arms(&arms)?;
         }
-        let budget_min = match flags.get("--budget-min") {
-            Some(_) => Some(minutes(&flags, "--budget-min", 0, 1, u64::from(u32::MAX))?),
-            None => None,
-        };
+        let budget_min = minutes(&flags, "--budget-min", 1, u64::from(u32::MAX))?;
         let ingress_mb_s = match flags.get("--ingress-mb-s") {
             Some(raw) => match raw.trim().parse::<f64>() {
                 Ok(v) if v.is_finite() && v > 0.0 => Some(v),
@@ -1306,9 +1316,10 @@ fn required<'a>(flags: &'a BTreeMap<String, String>, flag: &str) -> anyhow::Resu
     }
 }
 
-fn minutes(flags: &BTreeMap<String, String>, flag: &str, default: u64, min: u64, max: u64) -> anyhow::Result<u64> {
+/// A `flag` of whole minutes from `min` to `max`, `None` when not given.
+fn minutes(flags: &BTreeMap<String, String>, flag: &str, min: u64, max: u64) -> anyhow::Result<Option<u64>> {
     let Some(raw) = flags.get(flag) else {
-        return Ok(default);
+        return Ok(None);
     };
     let value: u64 = raw
         .trim()
@@ -1317,7 +1328,7 @@ fn minutes(flags: &BTreeMap<String, String>, flag: &str, default: u64, min: u64,
     if !(min..=max).contains(&value) {
         bail!("{flag} must be between {min} and {max} minutes, got {value}");
     }
-    Ok(value)
+    Ok(Some(value))
 }
 
 /// Topic names are `<prefix>-<test>-<arm>`, and `<that>-source` for an
@@ -1646,13 +1657,28 @@ struct Credentials {
 impl Credentials {
     fn from_env() -> anyhow::Result<Credentials> {
         let get = |name: &str| -> anyhow::Result<String> {
-            match std::env::var(name) {
-                Ok(v) if !v.is_empty() && v != "null" => Ok(v),
+            let value = match std::env::var(name) {
+                Ok(v) if !v.is_empty() && v != "null" => v,
                 _ => bail!("{name} is not set (the API key and secret come from PERF_API_KEY / PERF_API_SECRET)"),
-            }
+            };
+            check_credential(name, &value)?;
+            Ok(value)
         };
         Ok(Credentials { key: get("PERF_API_KEY")?, secret: get("PERF_API_SECRET")? })
     }
+}
+
+/// The key and secret go into `client.properties` inside a double-quoted JAAS
+/// value, which its readers parse differently: the Java tools through
+/// `Properties.load`, which removes one level of `\` escapes, the Rust
+/// consumer harness as written. No escaping suits both, so a `"`, a `\` or a
+/// control character is refused (Confluent Cloud's never contain one). The
+/// error does not show the value.
+fn check_credential(name: &str, value: &str) -> anyhow::Result<()> {
+    if value.chars().any(|c| c == '"' || c == '\\' || c.is_control()) {
+        bail!("{name} contains a `\"`, a `\\` or a control character, which the harnesses cannot read back");
+    }
+    Ok(())
 }
 
 /// How an arm ended.
@@ -1696,22 +1722,22 @@ pub(crate) struct TxnMetrics {
 
 impl Metrics {
     fn from_results(text: &str) -> anyhow::Result<Metrics> {
-        let v = json::parse(text)?;
+        let v: serde_json::Value = serde_json::from_str(text)?;
         let top = |key: &str| {
             v.get(key)
-                .and_then(json::Value::as_f64)
+                .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| anyhow::anyhow!("no `{key}`"))
         };
         let latency = v.get("latency_ms").ok_or_else(|| anyhow::anyhow!("no `latency_ms`"))?;
         let lat = |key: &str| {
             latency
                 .get(key)
-                .and_then(json::Value::as_f64)
+                .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| anyhow::anyhow!("no `latency_ms.{key}`"))
         };
         let client = v
             .get("client")
-            .and_then(json::Value::as_str)
+            .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("no `client`"))?;
         let txn = match v.get("transactions_per_s") {
             None => None,
@@ -1722,7 +1748,7 @@ impl Metrics {
                 let commit_lat = |key: &str| {
                     commit
                         .get(key)
-                        .and_then(json::Value::as_f64)
+                        .and_then(serde_json::Value::as_f64)
                         .ok_or_else(|| anyhow::anyhow!("no `commit_latency_ms.{key}`"))
                 };
                 Some(TxnMetrics {
@@ -1793,6 +1819,10 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     let signals_baseline = crate::signals::count();
     let repo = repo_root();
     let credentials = Credentials::from_env()?;
+    // The harnesses get them as SASL_USERNAME / SASL_PASSWORD; no other child
+    // process needs them. Nothing else runs yet, so the environment can change.
+    std::env::remove_var("PERF_API_KEY");
+    std::env::remove_var("PERF_API_SECRET");
     let topics_cli = options.kafka_bin.join("kafka-topics.sh");
     if !topics_cli.is_file() {
         bail!("{} not found (--kafka-bin)", topics_cli.display());
@@ -1837,7 +1867,9 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     let work = PrivateDir::create()?;
     let client_properties = work.path().join("client.properties");
     write_private(&client_properties, &client_properties_text(&options.bootstrap, &credentials))?;
-    let redactions = Arc::new(vec![credentials.secret.clone()]);
+    // The key too: not a secret on its own, but the published logs need it no
+    // more than the secret.
+    let redactions = Arc::new(vec![credentials.secret.clone(), credentials.key.clone()]);
 
     let mut info = run_info(options);
     // Read once a test has run: a new API key can take minutes before the
@@ -1845,7 +1877,7 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     let mut zones_read = false;
     let mut results: Vec<TestResult> = Vec::new();
     let mut interrupted = false;
-    'tests: for (i, test) in options.tests.iter().enumerate() {
+    for (i, test) in options.tests.iter().enumerate() {
         println!(
             "\n######## Test {}/{}: {} — {} ########",
             i + 1,
@@ -1857,8 +1889,7 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
         for &arm in &options.arms {
             if crate::signals::count() > signals_baseline {
                 interrupted = true;
-                results.push(TestResult { test: test.clone(), arms });
-                break 'tests;
+                break;
             }
             let topic = topic_name(&options.topic_prefix, test, arm);
             let ctx = ArmContext {
@@ -1877,15 +1908,16 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
                 signals_baseline,
             };
             let result = run_arm(&ctx)?;
-            let stop = matches!(&result.outcome, Outcome::Failed(r) if r == INTERRUPTED);
+            interrupted = matches!(&result.outcome, Outcome::Failed(r) if r == INTERRUPTED);
             arms.push(result);
-            if stop {
-                interrupted = true;
-                results.push(TestResult { test: test.clone(), arms });
-                break 'tests;
+            if interrupted {
+                break;
             }
         }
         results.push(TestResult { test: test.clone(), arms });
+        if interrupted {
+            break;
+        }
         if !zones_read {
             let zones = cluster_zones(
                 &kafka_bin,
@@ -1905,9 +1937,13 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
             push_reports(&results_dir);
         }
     }
-    write_reports(&results_dir, &info, &results)?;
-    if options.push_artifacts {
-        push_reports(&results_dir);
+    // Each finished test already wrote and pushed them; an interrupted one
+    // has not.
+    if interrupted {
+        write_reports(&results_dir, &info, &results)?;
+        if options.push_artifacts {
+            push_reports(&results_dir);
+        }
     }
     println!("\nReport: {}", results_dir.join("report.md").display());
 
@@ -1935,45 +1971,26 @@ fn run_info(options: &RunOptions) -> RunInfo {
     let mut facts = Vec::new();
     // This repository's commit, which is the one built: a CI job may have
     // checked it out from another repository's pipeline.
-    let commit = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_root())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let kernel = Command::new("uname")
-        .arg("-r")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
+    let commit = stdout_of(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo_root()));
+    let kernel = stdout_of(Command::new("uname").arg("-r"));
     // The baseline clients come from package repositories at their latest
     // version, so a report records which one it measured.
     let uses = |arms: &[Arm]| options.arms.iter().any(|a| arms.contains(a));
     let librdkafka = if uses(&[Arm::Librdkafka]) {
-        Command::new("pkg-config")
-            .args(["--modversion", "rdkafka"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
+        stdout_of(Command::new("pkg-config").args(["--modversion", "rdkafka"]))
     } else {
         None
     };
+    // `confluent_kafka.version()` is a `(str, int)` tuple in older releases
+    // and a plain `str` in current ones, where `[0]` would keep only its first
+    // character; `libversion()` is still a tuple.
     let python_librdkafka = if uses(&[Arm::PythonSyncLibrdkafka, Arm::PythonAsyncLibrdkafka]) {
-        Command::new(venv_python(repo_root(), "venv-librdkafka"))
-            .args([
-                "-I",
-                "-c",
-                "import confluent_kafka as c; print(f'{c.version()[0]} (librdkafka {c.libversion()[0]})')",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
+        stdout_of(Command::new(venv_python(repo_root(), "venv-librdkafka")).args([
+            "-I",
+            "-c",
+            "import confluent_kafka as c; v = c.version(); \
+             print(f'{v if isinstance(v, str) else v[0]} (librdkafka {c.libversion()[0]})')",
+        ]))
     } else {
         None
     };
@@ -2019,6 +2036,17 @@ fn run_info(options: &RunOptions) -> RunInfo {
     }
 }
 
+/// A command's standard output, trimmed, when it ran, succeeded and printed
+/// something.
+fn stdout_of(command: &mut Command) -> Option<String> {
+    command
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// The cluster's AZ IDs: its brokers' racks, which Confluent Cloud sets to
 /// the AZ ID each broker runs in, as `kafka-broker-api-versions.sh` lists
 /// them. Its output (every broker's API versions) goes to a file in `work`,
@@ -2044,19 +2072,12 @@ fn cluster_zones(
             .process_group(0);
         let mut child = command.spawn().with_context(|| format!("starting {}", tool.display()))?;
         let pgid = child.id();
-        let deadline = Instant::now() + BROKERS_COMMAND_TIMEOUT;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break Some(status);
-            }
-            if crate::signals::count() > signals_baseline || Instant::now() >= deadline {
-                stop_group(&mut child, pgid, STOP_GRACE)?;
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        };
+        let exit = wait_group(&mut child, pgid, BROKERS_COMMAND_TIMEOUT, signals_baseline, &mut || Ok(false))?;
         reap_group(&mut child, pgid)?;
-        Ok(status)
+        Ok(match exit {
+            Exit::Status(status) => Some(status),
+            _ => None,
+        })
     })();
     let failure = match status {
         Ok(Some(status)) if status.success() => None,
@@ -2137,20 +2158,15 @@ fn push_reports(results_dir: &Path) {
     push_artifact("workflow", &report, ".semaphore/REPORT.md");
 }
 
-/// The Java-form properties `kafka-topics.sh` reads (`--command-config`).
+/// The Java-form properties `kafka-topics.sh` reads (`--command-config`). The
+/// credentials need no escaping (see [`check_credential`]).
 fn client_properties_text(bootstrap: &str, credentials: &Credentials) -> String {
     format!(
         "bootstrap.servers={bootstrap}\nsecurity.protocol=SASL_SSL\nsasl.mechanism=PLAIN\n\
          sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
          username=\"{}\" password=\"{}\";\n",
-        jaas_escape(&credentials.key),
-        jaas_escape(&credentials.secret)
+        credentials.key, credentials.secret
     )
-}
-
-/// A JAAS option value is a double-quoted string; `\` and `"` are escaped.
-fn jaas_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Write `contents` to a new file only the current user can read.
@@ -2170,9 +2186,16 @@ struct PrivateDir(PathBuf);
 
 impl PrivateDir {
     fn create() -> anyhow::Result<PrivateDir> {
-        let path = std::env::temp_dir().join(format!("perf-cloud-{}", std::process::id()));
-        fs::create_dir(&path).with_context(|| format!("creating {}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        // The time too: a killed run leaves its directory behind, and a later
+        // run can get the same process id.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!("perf-cloud-{}-{}", std::process::id(), now.as_nanos()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
         Ok(PrivateDir(path))
     }
 
@@ -2516,7 +2539,6 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         }
     }
     match ctx.arm {
-        // The C harness reads SASL from the environment.
         Arm::Rust | Arm::Librdkafka => {
             // Its MiB/s are records × this size; the rate is for its banner.
             pairs.push(("--message-size", test.number("VALUE_SIZE").to_string()));
@@ -2525,6 +2547,7 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         },
         _ => {},
     }
+    // The C harness reads SASL from the environment instead.
     if matches!(ctx.arm, Arm::Rust | Arm::Java) {
         pairs.push(("--client-config", ctx.client_properties.display().to_string()));
     }
@@ -2737,7 +2760,7 @@ fn sleep_unless_signalled(duration: Duration, log: &ArmLog) -> bool {
 }
 
 /// An arm's log: every line goes to the job output and to `run.log`, with
-/// the secret masked.
+/// the credentials masked.
 struct ArmLog {
     file: Arc<Mutex<File>>,
     redactions: Arc<Vec<String>>,
@@ -2762,7 +2785,11 @@ impl ArmLog {
 }
 
 fn write_line(file: &Mutex<File>, redactions: &[String], text: &str) {
-    let text = redact(text, redactions);
+    write_redacted(file, &redact(text, redactions));
+}
+
+/// [`write_line`] for text already redacted.
+fn write_redacted(file: &Mutex<File>, text: &str) {
     println!("{text}");
     if let Ok(mut f) = file.lock() {
         let _ = writeln!(f, "{text}");
@@ -2835,25 +2862,7 @@ fn run_capturing(
         pump(child.stdout.take(), log, capture.then(|| Arc::clone(&captured))),
         pump(child.stderr.take(), log, None),
     ];
-    let deadline = Instant::now() + timeout;
-    let exit = loop {
-        if let Some(status) = child.try_wait()? {
-            break Exit::Status(status);
-        }
-        if log.interrupted() {
-            stop_group(&mut child, pgid, STOP_GRACE)?;
-            break Exit::Interrupted;
-        }
-        if Instant::now() >= deadline {
-            stop_group(&mut child, pgid, STOP_GRACE)?;
-            break Exit::TimedOut;
-        }
-        if stop_if()? {
-            stop_group(&mut child, pgid, STOP_GRACE)?;
-            break Exit::Stopped;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    };
+    let exit = wait_group(&mut child, pgid, timeout, log.signals_baseline, stop_if)?;
     // A process the command started can outlive it and keep the pipes open;
     // give the group a moment, then stop it so the pumps reach end of file.
     reap_group(&mut child, pgid)?;
@@ -2862,6 +2871,36 @@ fn run_capturing(
     }
     let text = captured.lock().map(|s| s.clone()).unwrap_or_default();
     Ok((exit, text))
+}
+
+/// Wait for `child` to exit, stopping its process group on a signal to the
+/// driver (since `signals_baseline`), after `timeout`, or as soon as
+/// `stop_if` returns `true` (it is asked every half second).
+fn wait_group(
+    child: &mut Child,
+    pgid: u32,
+    timeout: Duration,
+    signals_baseline: u32,
+    stop_if: &mut dyn FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<Exit> {
+    let deadline = Instant::now() + timeout;
+    let exit = loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Exit::Status(status));
+        }
+        if crate::signals::count() > signals_baseline {
+            break Exit::Interrupted;
+        }
+        if Instant::now() >= deadline {
+            break Exit::TimedOut;
+        }
+        if stop_if()? {
+            break Exit::Stopped;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    stop_group(child, pgid, STOP_GRACE)?;
+    Ok(exit)
 }
 
 fn reap_group(child: &mut Child, pgid: u32) -> anyhow::Result<()> {
@@ -2895,11 +2934,11 @@ fn pump(
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
-                    let line = line.trim_end_matches(['\n', '\r']);
-                    write_line(&file, &redactions, line);
+                    let line = redact(line.trim_end_matches(['\n', '\r']), &redactions);
+                    write_redacted(&file, &line);
                     if let Some(keep) = &keep {
                         if let Ok(mut k) = keep.lock() {
-                            let _ = writeln!(k, "{}", redact(line, &redactions));
+                            let _ = writeln!(k, "{line}");
                         }
                     }
                 },
@@ -3068,17 +3107,17 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     #[test]
     fn validates_minutes() {
         let flags = parse_flags(&strings(&["--duration-min", "60", "--warmup-min", "0"]), SHARED_FLAGS, &[]).unwrap();
-        assert_eq!(minutes(&flags, "--duration-min", 30, 1, 60).unwrap(), 60);
-        assert_eq!(minutes(&flags, "--warmup-min", 5, 0, 30).unwrap(), 0);
-        assert_eq!(minutes(&BTreeMap::new(), "--duration-min", 30, 1, 60).unwrap(), 30);
+        assert_eq!(minutes(&flags, "--duration-min", 1, 60).unwrap(), Some(60));
+        assert_eq!(minutes(&flags, "--warmup-min", 0, 30).unwrap(), Some(0));
+        assert_eq!(minutes(&BTreeMap::new(), "--duration-min", 1, 60).unwrap(), None);
         let flags = parse_flags(&strings(&["--duration-min", "61"]), SHARED_FLAGS, &[]).unwrap();
         assert_eq!(
-            minutes(&flags, "--duration-min", 30, 1, 60).unwrap_err().to_string(),
+            minutes(&flags, "--duration-min", 1, 60).unwrap_err().to_string(),
             "--duration-min must be between 1 and 60 minutes, got 61"
         );
         let flags = parse_flags(&strings(&["--duration-min", "half"]), SHARED_FLAGS, &[]).unwrap();
         assert_eq!(
-            minutes(&flags, "--duration-min", 30, 1, 60).unwrap_err().to_string(),
+            minutes(&flags, "--duration-min", 1, 60).unwrap_err().to_string(),
             "--duration-min: `half` is not a whole number of minutes"
         );
     }
@@ -3991,19 +4030,32 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
-    fn masks_the_secret_and_escapes_jaas_values() {
+    fn masks_the_secret_and_writes_the_client_properties() {
         let redactions = vec!["s3cr3t".to_string()];
         assert_eq!(
             redact("password=\"s3cr3t\" again s3cr3t", &redactions),
             "password=\"<redacted>\" again <redacted>"
         );
         assert_eq!(redact("nothing here", &[String::new()]), "nothing here");
-        let text = client_properties_text("b:9092", &Credentials { key: "K".into(), secret: "a\"b\\c".into() });
-        assert!(text.contains(r#"username="K" password="a\"b\\c";"#), "{text}");
+        let text = client_properties_text("b:9092", &Credentials { key: "K".into(), secret: "a+b/c=".into() });
+        assert!(text.contains(r#"username="K" password="a+b/c=";"#), "{text}");
         assert!(
             text.starts_with("bootstrap.servers=b:9092\nsecurity.protocol=SASL_SSL\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn refuses_credentials_the_harnesses_cannot_read_back() {
+        check_credential("PERF_API_SECRET", "Ab+/9=").unwrap();
+        for bad in ["a\"b", "a\\b", "a\nb"] {
+            let e = check_credential("PERF_API_SECRET", bad).unwrap_err().to_string();
+            assert_eq!(
+                e,
+                "PERF_API_SECRET contains a `\"`, a `\\` or a control character, which the harnesses cannot read back"
+            );
+            assert!(!e.contains(bad));
+        }
     }
 
     #[test]
@@ -4085,7 +4137,7 @@ b3-pkc.example:9092 (id: 3 rack: usw2-az2) -> (
         let script = kafka_bin.join("kafka-broker-api-versions.sh");
         let zones = |body: &str| {
             fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
             cluster_zones(
                 &kafka_bin,
                 "broker:9092",

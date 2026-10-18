@@ -53,7 +53,7 @@
 //! | `WARMUP_SECONDS`       | `120` *            | Warmup duration                            |
 //! | `TEST_DURATION_SECONDS`| `600` *            | Measured interval duration                 |
 //! | `DO_VERIFY`            | `True`             | Verify `RecordMetadata` per message        |
-//! | `VERIFY_CONSUMED`      | `False`            | Consumer-side verification (not yet avail.)|
+//! | `VERIFY_CONSUMED`      | `False`            | Consumer-side verification (unimplemented) |
 //! | `P99_LIMIT_MS`         | `0` off *          | Per-message p99 latency budget (asserted)  |
 //! | `SECURITY_PROTOCOL`    | (none)             | `PLAINTEXT`/`SASL_PLAINTEXT`/`SASL_SSL`     |
 //! | `SASL_MECHANISM`       | (none)             | e.g. `PLAIN`                               |
@@ -743,13 +743,11 @@ async fn producer_perf_test() {
     .expect("Failed to create producer");
 
     // --- Consumer-side verification (VERIFY_CONSUMED) ---
-    // Blocked on master: the Consumer API is not yet merged here (only on the
-    // unmerged `consumer-impl` branch). murmur2/partition_for_key DO exist, so
-    // this can be wired up once a Consumer lands.
+    // Not implemented in this harness.
     if config.verify_consumed {
         println!(
             "Consumer verification requested (VERIFY_CONSUMED=True) but skipped: \
-             the Consumer API is not available in this build."
+             not implemented in the Rust harness."
         );
     }
 
@@ -992,8 +990,19 @@ async fn producer_perf_test() {
         }
     }
 
-    // === COOLDOWN ===
+    // The wait owed for the records after the last checkpoint, as the C harness
+    // takes it: without it a fast client ends a counted run early and overstates
+    // throughput.
     let sent_messages = messages_sent.load(Ordering::Relaxed);
+    if rate > 0.0 {
+        let deadline = Duration::from_secs_f64(sent_messages as f64 / rate);
+        let elapsed = test_start.elapsed();
+        if elapsed < deadline {
+            tokio::time::sleep(deadline - elapsed).await;
+        }
+    }
+
+    // === COOLDOWN ===
     println!("Stopping after {sent_messages} messages sent, waiting for in-flight ...");
     drop(produce_calls_tx);
     while in_flight.load(Ordering::Relaxed) > 0 {
@@ -1005,8 +1014,9 @@ async fn producer_perf_test() {
     let measured_secs = test_start.elapsed().as_secs_f64();
     if capped {
         println!(
-            "capped: sent {sent_messages} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + 10 s)",
-            config.num_messages
+            "capped: sent {sent_messages} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + {} s)",
+            config.num_messages,
+            COUNTED_RUN_CAP_SLACK.as_secs()
         );
     }
 
