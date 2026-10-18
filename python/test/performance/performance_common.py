@@ -32,11 +32,11 @@ def recreate_topic(bootstrap_servers, topic, sasl_conf=None, partitions=-1):
                             topic=topic, sasl_conf=sasl_conf or {}, partitions=partitions)
 
 
-def latency_bucket(latency_ns, top_bucket=MAX_LATENCY_MS + 1):
+def latency_bucket(latency_ns):
     """The 1 ms histogram bucket of a latency in nanoseconds:
-    ``floor(latency_ns / 1_000_000)``, clamped to ``0..top_bucket`` (the rule of
-    the Rust and C perf tests)."""
-    return min(max(latency_ns // 1_000_000, 0), top_bucket)
+    ``floor(latency_ns / 1_000_000)``, clamped to ``0..MAX_LATENCY_MS + 1`` (the
+    rule of the Rust and C perf tests)."""
+    return min(max(latency_ns // 1_000_000, 0), MAX_LATENCY_MS + 1)
 
 
 def percentile_from_hist(hist, p):
