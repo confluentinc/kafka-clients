@@ -87,12 +87,14 @@ fn create_consumer(ctx: &TestContext, overrides: &[(&str, &str)]) -> BytesConsum
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::default()),
+            Box::new(ByteArrayDeserializer::default()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// `createProducer()` with `AbstractConsumerTest`'s `producerConfig`

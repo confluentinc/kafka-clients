@@ -1179,7 +1179,7 @@ async fn run_producer(
 #[expect(clippy::too_many_arguments)]
 async fn run_eos_producer(
     producer: KafkaProducer<Vec<u8>, Vec<u8>>,
-    mut consumer: Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    mut consumer: Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>,
     dest_topic: String,
     message_size: u64,
     abort_rate: f64,
@@ -1867,7 +1867,7 @@ async fn transactional_producer_perf_test() {
     // === EOS: seed the in-suite source topic + create the consumers ===
     // Done BEFORE the measured clock starts so seeding does not eat into the
     // measured interval. One consumer per producer, all sharing one group id.
-    let mut consumers: std::collections::VecDeque<Box<dyn Consumer<Vec<u8>, Vec<u8>>>> =
+    let mut consumers: std::collections::VecDeque<Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>> =
         std::collections::VecDeque::new();
     if eos_mode {
         let source = source_topic.clone().expect("eos requires a source topic");
@@ -1913,7 +1913,7 @@ async fn transactional_producer_perf_test() {
         for _ in 0..num_producers {
             let props = config.consumer_props(&bootstrap_servers, &config.consumer_group_id);
             let consumer_config = ConsumerConfig::new(&props).expect("Invalid consumer config");
-            let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+            let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
                 consumer_config,
                 Box::new(ByteArrayDeserializer::new()),
                 Box::new(ByteArrayDeserializer::new()),
@@ -1923,7 +1923,7 @@ async fn transactional_producer_perf_test() {
                 .subscribe_with_topics(vec![source.clone()])
                 .await
                 .expect("consumer subscribe failed");
-            consumers.push_back(consumer);
+            consumers.push_back(Box::new(consumer));
         }
     }
 

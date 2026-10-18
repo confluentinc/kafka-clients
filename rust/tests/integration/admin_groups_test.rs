@@ -94,7 +94,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
+use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer, OffsetAndMetadata};
 
 use crate::common::admin_backend::{
     AdminBackend, admin_for, all_of_exactly, alter_consumer_group_offsets_awaiting_propagation, create_topic,
@@ -135,7 +135,7 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
     }
 }
 
-type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
+type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 
 /// Build a KIP-848 (`group.protocol=consumer`) `ConsumerConfig`.
 fn consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
@@ -167,21 +167,25 @@ fn static_consumer_config(ctx: &TestContext, group_id: &str, instance_id: &str) 
 }
 
 fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(ctx, group_id),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            consumer_config(ctx, group_id),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 fn new_static_bytes_consumer(ctx: &TestContext, group_id: &str, instance_id: &str) -> BytesConsumer {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        static_consumer_config(ctx, group_id, instance_id),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            static_consumer_config(ctx, group_id, instance_id),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Subscribe the consumer to `topic` and poll until it has been assigned

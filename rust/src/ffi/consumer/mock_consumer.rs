@@ -56,8 +56,8 @@ pub struct kafka_consumer_MockConsumer_t {
 
 type Mock = MockConsumer<GenericValue, GenericValue>;
 
-/// The mock behind a guard; a `Consumer` handle from `KafkaConsumer_new`
-/// is never a mock, so the other arm cannot be reached through this type.
+/// The mock behind a guard; a `KafkaConsumer_t`'s `Consumer` view is never
+/// a mock, so the other arm cannot be reached through this type.
 fn mock_of(guard: &mut BusyGuard) -> Result<&mut Mock, Error> {
     match guard.kind_mut() {
         ConsumerKind::Mock(mock) => Ok(&mut **mock),
@@ -127,8 +127,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 }
 
 /// The class as a `Consumer`: a borrowed view valid until the class handle
-/// is destroyed, never passed to `kafka_consumer_Consumer_destroy`
-/// (CLAUDE.md §4 rule 3). `*mut` because `poll` and the other operations
+/// is destroyed, never destroyed itself (CLAUDE.md §4 rule 3). `*mut` because `poll` and the other operations
 /// take `&mut self`.
 ///
 /// # Safety
@@ -145,7 +144,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
     unsafe { &*(self_ as *const ConsumerClassHandle) }.as_consumer()
 }
 
-/// Frees the handle as `kafka_consumer_Consumer_destroy` does; null is a
+/// Frees the handle as `kafka_consumer_KafkaConsumer_destroy` does; null is a
 /// no-op.
 ///
 /// # Safety

@@ -148,10 +148,10 @@ use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::CloseOptions;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRecord;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::KafkaProducer;
@@ -327,7 +327,11 @@ fn consumer_config(bootstrap: &str, group_id: &str, isolation_level: &str) -> Ha
 ///
 /// Callers either `assign` a partition (every verification consumer, so no rebalance
 /// is involved) or `subscribe` — see the module docstring for which and why.
-fn assigned_consumer(ctx: &TestContext, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn assigned_consumer(
+    ctx: &TestContext,
+    group_id: &str,
+    isolation_level: &str,
+) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     let mut props = consumer_config(ctx.protocol_bootstrap_servers(), group_id, isolation_level);
     ctx.apply_security(&mut props);
     consumer_from_props(&props)
@@ -339,17 +343,19 @@ fn assigned_consumer_with_bootstrap(
     bootstrap: &str,
     group_id: &str,
     isolation_level: &str,
-) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     consumer_from_props(&consumer_config(bootstrap, group_id, isolation_level))
 }
 
-fn consumer_from_props(props: &HashMap<String, String>) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(props).expect("invalid consumer config"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+fn consumer_from_props(props: &HashMap<String, String>) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(props).expect("invalid consumer config"),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Sends `values` inside the current transaction, awaiting each ack.
@@ -382,7 +388,7 @@ async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, part
 /// Returns the values in arrival order so a caller can assert on ordering as well
 /// as membership.
 async fn consume_values(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     expected: usize,
     deadline: Duration,
 ) -> Vec<String> {
@@ -400,7 +406,7 @@ async fn consume_values(
 
 /// Polls for a fixed budget and returns everything seen — used for the negative
 /// assertions, where finishing early would make the assertion vacuous.
-async fn drain_for(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>, budget: Duration) -> Vec<String> {
+async fn drain_for(consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, budget: Duration) -> Vec<String> {
     let start = Instant::now();
     let mut collected: Vec<String> = Vec::new();
     while start.elapsed() < budget {
@@ -1038,7 +1044,7 @@ fn create_transactional_producer_with_all_timeouts(
 /// `TransactionsTest.createReadCommittedConsumer` (`TransactionsTest.scala:1067-1078`)
 /// → `TestUtils.createConsumer(..., enableAutoCommit = false, readCommitted = true)`
 /// (`TestUtils.scala:551-573`): `auto.offset.reset=earliest`, the CONSUMER arm.
-fn create_read_committed_consumer(bootstrap: &str, group_id: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn create_read_committed_consumer(bootstrap: &str, group_id: &str) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     assigned_consumer_with_bootstrap(bootstrap, group_id, "read_committed")
 }
 
@@ -1054,7 +1060,7 @@ fn create_consumer(
     read_committed: bool,
     max_poll_records: usize,
     extra: &[(&str, &str)],
-) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
@@ -1073,17 +1079,19 @@ fn create_consumer(
         ),
     ]);
     props.extend(extra.iter().map(|(key, value)| (key.to_string(), value.to_string())));
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("invalid consumer config"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("invalid consumer config"),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// `TransactionsTest.createReadUncommittedConsumer(group)`
 /// (`TransactionsTest.scala:1080-1087`).
-fn create_read_uncommitted_consumer(bootstrap: &str, group_id: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn create_read_uncommitted_consumer(bootstrap: &str, group_id: &str) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     create_consumer(bootstrap, group_id, false, 500, &[])
 }
 
@@ -1129,7 +1137,7 @@ pub(crate) async fn send_record(
 /// poll until at least `num_records` arrive within `DEFAULT_MAX_WAIT_MS`, then
 /// assert exactly that many were consumed.
 async fn consume_records(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     num_records: usize,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
     let records = poll_until_at_least_num_records(consumer, num_records).await;
@@ -1141,7 +1149,7 @@ async fn consume_records(
 /// (`TestUtils.scala:1184-1196`): poll (100 ms each, `pollRecordsUntilTrue`'s
 /// default) until at least `num_records` arrive within `DEFAULT_MAX_WAIT_MS`.
 async fn poll_until_at_least_num_records(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     num_records: usize,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
     let deadline = Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
@@ -1576,7 +1584,7 @@ pub(crate) async fn seed_topic_with_numbered_records(bootstrap: &str, topic: &st
 /// `TestUtils.consumerPositions(consumer)` (`TestUtils.scala:1284-1291`): the
 /// current position of every assigned partition, as offsets to commit.
 pub(crate) async fn consumer_positions(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
 ) -> HashMap<TopicPartition, OffsetAndMetadata> {
     let mut offsets_to_commit = HashMap::new();
     for topic_partition in consumer.assignment() {
@@ -1590,7 +1598,7 @@ pub(crate) async fn consumer_positions(
 /// seek every assigned partition to its committed offset, or to the beginning if
 /// it has none. (Java filters `null` values out of `committed`; the Rust map omits
 /// partitions without a committed offset, which is the same set.)
-pub(crate) async fn reset_to_committed_positions(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>) {
+pub(crate) async fn reset_to_committed_positions(consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>) {
     let assignment: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
     let committed = consumer.committed(&assignment).await.expect("committed");
     for topic_partition in assignment {
@@ -2090,7 +2098,7 @@ fn transactions_test_expiration_cluster() -> ClusterConfig {
 /// `TransactionsTest.consumeRecordsFor(consumer)` (`TransactionsTest.scala:1131-1141`):
 /// everything the consumer returns while polling (50 ms each) for one second.
 async fn consume_records_for(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
     let duration = Duration::from_millis(1000);
     let start = Instant::now();
@@ -2767,7 +2775,7 @@ async fn transactions_expiration_context(transaction_version: i16) -> TestContex
 /// `ClusterInstance.consumer(configs)` (`ClusterInstance.java:161-169`): `configs`
 /// plus byte-array deserializers, `auto.offset.reset=earliest`, a random group id
 /// and the cluster's bootstrap servers — CONSUMER (KIP-848) arm.
-fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     let mut props: HashMap<String, String> = configs
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -2780,12 +2788,14 @@ fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn Cons
     ] {
         props.entry(key.to_string()).or_insert(value);
     }
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("invalid consumer config"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("invalid consumer config"),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Creates `topic` with `num_partitions` partitions at replication factor 3 and

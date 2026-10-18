@@ -21,9 +21,10 @@
 //! `K` and `V` are `void *` (CLAUDE.md §4, "Generic types"): what
 //! `kafka_consumer_ConsumerRecord_key` / `_value` return is whatever the
 //! deserializer the consumer was created with produced. With a `NULL`
-//! deserializer it is a `kafka_Bytes_t *` the record owns, pointing into the
-//! fetch buffer the records handle keeps alive (zero-copy, CLAUDE.md §14),
-//! freed when the record is; with a C deserializer it is the C side's own
+//! deserializer it is a `kafka_Bytes_t *` the record owns, freed when the
+//! record is, pointing into a buffer the records handle keeps alive: the
+//! fetch buffer or, for a compressed batch, the record's own (zero-copy,
+//! CLAUDE.md §14); with a C deserializer it is the C side's own
 //! value, never freed by Rust. A record built from C with
 //! [`kafka_consumer_ConsumerRecord_new`] or `_with_options` never owns its
 //! key or value.

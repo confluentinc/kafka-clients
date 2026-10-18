@@ -42,7 +42,7 @@ pub use gzip_compression::GzipCompression;
 pub use lz4_compression::Lz4Compression;
 pub use zstd_compression::ZstdCompression;
 
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, BufRead, Cursor, Read, Write};
 
 // --- Xerial/snappy-java framing format ---
 //
@@ -296,22 +296,23 @@ impl<W: Write> Write for CompressingWriter<W> {
     }
 }
 
-/// A reader that decompresses data.
+/// A reader that decompresses data, read in place from a [`BufRead`] (see
+/// [`Compression::wrap_for_input`]).
 #[non_exhaustive]
-pub enum DecompressingReader<R: Read> {
+pub enum DecompressingReader<R: BufRead> {
     /// No compression — data is passed through.
     None(R),
     /// Gzip decompression.
-    Gzip(flate2::read::GzDecoder<R>),
+    Gzip(flate2::bufread::GzDecoder<R>),
     /// Snappy decompression using xerial/snappy-java block format.
     Snappy(XerialSnappyReader<R>),
     /// LZ4 decompression.
     Lz4(lz4_flex::frame::FrameDecoder<R>),
     /// Zstd decompression.
-    Zstd(zstd::Decoder<'static, std::io::BufReader<R>>),
+    Zstd(zstd::Decoder<'static, R>),
 }
 
-impl<R: Read> Read for DecompressingReader<R> {
+impl<R: BufRead> Read for DecompressingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::None(r) => r.read(buf),
@@ -552,5 +553,66 @@ mod tests {
             let result = round_trip(&compression, &data);
             assert_eq!(result, data, "Large data round-trip failed for {:?}", compression_type);
         }
+    }
+
+    /// Java's `decompressionOutputSize()`: 16 KiB for gzip and zstd
+    /// (`GzipCompression.java:80-83`, `ZstdCompression.java:106-109`), 2 KiB
+    /// for snappy and lz4 (`SnappyCompression.java:67-72`,
+    /// `Lz4Compression.java:67-72`), and for no compression the interface
+    /// default's error (`Compression.java:61-63`).
+    #[test]
+    fn test_decompression_output_size_matches_java() {
+        assert_eq!(16 * 1024, Compression::gzip().build().decompression_output_size().unwrap());
+        assert_eq!(16 * 1024, Compression::zstd().build().decompression_output_size().unwrap());
+        assert_eq!(2 * 1024, Compression::snappy().build().decompression_output_size().unwrap());
+        assert_eq!(2 * 1024, Compression::lz4().build().decompression_output_size().unwrap());
+        let error = Compression::NONE.decompression_output_size().unwrap_err();
+        assert!(matches!(error, crate::common::Error::UnsupportedVersion(_)), "{error:?}");
+        assert_eq!(
+            "Size of decompression buffer is not defined for this compression type=none",
+            error.message()
+        );
+    }
+
+    /// gzip and zstd decompress the bytes [`Compression::wrap_for_input`] is
+    /// given where they are, through its [`BufRead`]: their [`Read`] forms
+    /// would first copy them through an input buffer of their own, 32 KiB for
+    /// gzip and 128 KiB for zstd.
+    #[test]
+    fn test_gzip_and_zstd_read_their_input_in_place() {
+        // `data` compressed with `compression`.
+        fn compress(compression: &Compression, data: &[u8]) -> Vec<u8> {
+            let mut compressed = Vec::new();
+            let mut writer = compression.wrap_for_output(&mut compressed, TEST_MESSAGE_VERSION).unwrap();
+            writer.write_all(data).unwrap();
+            writer.finish().unwrap();
+            compressed
+        }
+        // The bytes the reader `open` returns holds once it has read a byte.
+        fn held<R: Read>(open: impl FnOnce() -> R) -> isize {
+            let _guard = crate::AllocTrackingGuard::new();
+            let mut reader = open();
+            reader.read_exact(&mut [0u8; 1]).unwrap();
+            crate::AllocTrackingGuard::net_bytes()
+        }
+        let data = vec![7u8; 64 * 1024];
+
+        let gzip = Compression::gzip().build();
+        let input = compress(&gzip, &data);
+        let in_place = held(|| gzip.wrap_for_input(input.as_slice(), TEST_MESSAGE_VERSION).unwrap());
+        let copied = held(|| flate2::read::GzDecoder::new(input.as_slice()));
+        assert!(
+            copied - in_place >= 32 * 1024,
+            "gzip: {in_place} bytes held reading in place, {copied} through its Read form"
+        );
+
+        let zstd = Compression::zstd().build();
+        let input = compress(&zstd, &data);
+        let in_place = held(|| zstd.wrap_for_input(input.as_slice(), TEST_MESSAGE_VERSION).unwrap());
+        let copied = held(|| zstd::Decoder::new(input.as_slice()).unwrap());
+        assert!(
+            copied - in_place >= 128 * 1024,
+            "zstd: {in_place} bytes held reading in place, {copied} through its Read form"
+        );
     }
 }

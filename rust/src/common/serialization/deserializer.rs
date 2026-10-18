@@ -105,9 +105,10 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Deserialize from a byte slice that is a subslice of a refcounted source
     /// buffer, enabling zero-copy `T` for byte-typed deserializers.
     ///
-    /// `source` is the [`bytes::Bytes`] that owns the whole records buffer for
-    /// the current batch (on the receive path); `data` is the key/value
-    /// subslice of `source` for this record. The default implementation ignores
+    /// `source` is the [`bytes::Bytes`] that owns the record's bytes (on the
+    /// receive path): the fetched records buffer for an uncompressed batch, the
+    /// buffer the record was decompressed into for a compressed one; `data` is
+    /// the key/value subslice of `source` for this record. The default implementation ignores
     /// `source` and delegates to [`deserialize`](Deserializer::deserialize) — so
     /// existing deserializers are unaffected. [`BytesDeserializer`] overrides it
     /// to return `source.slice_ref(data)`, a zero-copy refcounted slice instead

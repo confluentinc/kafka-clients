@@ -36,9 +36,10 @@
 //! `Arc<BufferSupplier>` without contention concerns. Critical sections never
 //! await (CLAUDE.md §11), so `std::sync::Mutex` is the right choice.
 //!
-//! The struct is referenced by `CompletedFetch` and `AbstractFetch` later in
-//! Phase 7a; the `#[expect(dead_code)]` keeps the lib's `#![deny(warnings)]`
-//! happy until the wiring lands.
+//! The consumer takes its compressed batches' read buffers from it, through
+//! `ChunkedBytesStream`. `growable()` has no caller outside the tests, hence
+//! the `#[expect(dead_code)]`, which keeps the lib's `#![deny(warnings)]`
+//! happy.
 
 #![cfg_attr(not(test), expect(dead_code))]
 
