@@ -95,11 +95,9 @@ pub(crate) unsafe fn record_header_ref<'a>(
 ) -> &'a RecordHeader {
     // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle alive for
     // `'a`, so it points at a live `RecordHeaderInner`: the `Box::into_raw` of `box_record_header`,
-    // an element of a `HeadersInner`'s `views` (alive until that headers handle's next mutation, as
-    // the module docs of `ffi::common::header` state), or the call-local one
-    // `CHeaders::add_with_header` passes to C; a C `Headers` implementation returns handles of
-    // these kinds. No code mutates a `RecordHeaderInner`'s `header`, so the shared reference is
-    // sound for `'a`.
+    // or an element of a `HeadersInner`'s `views` (alive until that headers handle's next mutation,
+    // as the module docs of `ffi::common::header` state). No code mutates a `RecordHeaderInner`'s
+    // `header`, so the shared reference is sound for `'a`.
     unsafe { &*(header as *const RecordHeaderInner) }.header()
 }
 
@@ -181,8 +179,8 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
 ) -> *const kafka_common_header_Header_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-header handle, so it points
     // at a live `RecordHeaderInner` that does not move while it lives, as `as_header_ptr` requires:
-    // a boxed one, an element of a `HeadersInner`'s `views`, a vector never pushed to after it is
-    // built, or the call-local one `CHeaders::add_with_header` passes to C. The view returned
+    // a boxed one, or an element of a `HeadersInner`'s `views`, a vector never pushed to after it
+    // is built. The view returned
     // points into the handle, so it lives as long as the handle, as the rustdoc states.
     unsafe { &*(self_ as *const RecordHeaderInner) }.as_header_ptr()
 }

@@ -20,7 +20,7 @@
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::Deserializer;
 
 /// Deserializes byte arrays into refcounted [`bytes::Bytes`].
@@ -68,7 +68,7 @@ impl Deserializer<Bytes> for BytesDeserializer {
     fn deserialize_from_shared_with_headers(
         &self,
         _topic: &str,
-        _headers: &dyn Headers,
+        _headers: &RecordHeaders,
         source: &Bytes,
         data: &[u8],
     ) -> Result<Bytes, Error> {
@@ -81,7 +81,6 @@ impl Deserializer<Bytes> for BytesDeserializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::RecordHeaders;
 
     #[test]
     fn test_deserialize_copy_fallback() {

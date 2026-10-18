@@ -170,11 +170,17 @@ static void *upper_deserialize(void *self, const char *topic, kafka_Bytes_t data
     return text;
 }
 
-static void *upper_deserialize_with_headers(void *self, const char *topic, const kafka_common_header_Headers_t *headers,
+static void *upper_deserialize_with_headers(void *self, const char *topic,
+                                            const kafka_common_header_internals_RecordHeaders_t *headers,
                                             kafka_Bytes_t data, kafka_common_Error_t **out_err) {
     upper_deserializer_t *imp = self;
     imp->with_headers_calls++;
-    imp->saw_header_k = kafka_common_header_Headers_last_header(headers, "k") != NULL;
+    // The `Headers` methods are reached through the class handle's interface
+    // view; the copy is the implementation's for the call, so the cast is
+    // the one `__as_Headers` asks for.
+    kafka_common_header_Headers_t *view =
+        kafka_common_header_internals_RecordHeaders__as_Headers((kafka_common_header_internals_RecordHeaders_t *)headers);
+    imp->saw_header_k = kafka_common_header_Headers_last_header(view, "k") != NULL;
     return upper_deserialize(self, topic, data, out_err);
 }
 
@@ -195,10 +201,10 @@ static void test_c_deserializer_is_reached_through_the_invokers(void) {
     // the non-shared methods.
     kafka_common_serialization_Deserializer_t *deserializer = kafka_common_serialization_Deserializer_new(
         &imp, upper_deserialize, upper_deserialize_with_headers, NULL, NULL, upper_configure, upper_close);
-    kafka_common_header_internals_RecordHeaders_t *record_headers = kafka_common_header_internals_RecordHeaders_new();
-    kafka_common_header_Headers_t *headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
+    kafka_common_header_internals_RecordHeaders_t *headers = kafka_common_header_internals_RecordHeaders_new();
     kafka_common_Error_t *error = NULL;
-    kafka_common_header_Headers_add_with_key_value(headers, "k", bytes_of("v"), &error);
+    kafka_common_header_Headers_add_with_key_value(kafka_common_header_internals_RecordHeaders__as_Headers(headers), "k",
+                                                  bytes_of("v"), &error);
     TEST_ASSERT_NULL(error);
 
     void *out = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("hello"), &error);
@@ -259,7 +265,7 @@ static void test_c_deserializer_is_reached_through_the_invokers(void) {
     kafka_common_serialization_Deserializer_close(deserializer);
     TEST_ASSERT_EQUAL_INT(1, imp.close_calls);
 
-    kafka_common_header_internals_RecordHeaders_destroy(record_headers);
+    kafka_common_header_internals_RecordHeaders_destroy(headers);
     kafka_common_serialization_Deserializer_destroy(deserializer);
     kafka_common_serialization_Deserializer_destroy(NULL);
 }

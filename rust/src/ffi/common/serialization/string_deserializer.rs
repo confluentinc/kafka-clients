@@ -27,7 +27,7 @@ use std::ffi::c_void;
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::{Deserializer, StringDeserializer};
 use crate::ffi::common::serialization::DeserializerHandle;
 use crate::ffi::common::serialization::deserializer::kafka_common_serialization_Deserializer_t;
@@ -55,7 +55,12 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
         string_value(self.0.deserialize(topic, data))
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
+    fn deserialize_with_headers(
+        &self,
+        topic: &str,
+        headers: &RecordHeaders,
+        data: &[u8],
+    ) -> Result<GenericValue, Error> {
         string_value(self.0.deserialize_with_headers(topic, headers, data))
     }
 
@@ -66,7 +71,7 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
     fn deserialize_from_shared_with_headers(
         &self,
         topic: &str,
-        headers: &dyn Headers,
+        headers: &RecordHeaders,
         source: &Bytes,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
@@ -150,10 +155,8 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::common::header::RecordHeaders;
     use crate::ffi::common::header::internals::record_headers::{
-        box_record_headers, kafka_common_header_internals_RecordHeaders__as_Headers,
-        kafka_common_header_internals_RecordHeaders_destroy,
+        box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
     use crate::ffi::common::serialization::deserializer::{
         kafka_common_serialization_Deserializer_close, kafka_common_serialization_Deserializer_configure,
@@ -178,18 +181,17 @@ mod tests {
     fn produces_an_owned_c_string_through_the_view() {
         let handle = kafka_common_serialization_StringDeserializer_new();
         let topic = CString::new("t").unwrap();
-        let record_headers = box_record_headers(RecordHeaders::new());
+        let headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
-        // the end, after the last use of its view `view`; `record_headers` comes from
-        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
-        // valid slot pointing at null, left null by every call (asserted), and every value returned
-        // is an owned string that `take_string` frees once; `configure` gets a null map, which reads as empty.
+        // the end, after the last use of its view `view`; `headers` comes from
+        // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
+        // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
+        // null, left null by every call (asserted), and every value returned is an owned string
+        // that `take_string` frees once; `configure` gets a null map, which reads as empty.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));
-            let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut err = ptr::null_mut();
 
             let out = kafka_common_serialization_Deserializer_deserialize(
@@ -247,7 +249,7 @@ mod tests {
             kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1);
             kafka_common_serialization_Deserializer_close(view);
 
-            kafka_common_header_internals_RecordHeaders_destroy(record_headers);
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_StringDeserializer_destroy(handle);
             kafka_common_serialization_StringDeserializer_destroy(ptr::null_mut());
         }
