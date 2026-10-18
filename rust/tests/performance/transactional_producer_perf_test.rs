@@ -93,8 +93,9 @@
 //!
 //! Rate limiting (`LIMIT_RPS`): each producer paces to its exact share
 //! `LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS` (a float, so the shares sum to
-//! `LIMIT_RPS`), only at a transaction boundary, immediately before
-//! `begin_transaction` — see `pace`.
+//! `LIMIT_RPS`), only at a transaction boundary: immediately before
+//! `begin_transaction`, and once more after the last commit of a counted run —
+//! see `pace`.
 //!
 //! Counted runs (`NUM_MESSAGES` > 0, which `LIMIT_RPS` > 0 sets) also stop once
 //! the measured interval reaches `TEST_DURATION_SECONDS` + 10 s, checked at a
@@ -1027,14 +1028,15 @@ struct SharedState {
 }
 
 /// Exact-rate pacing shared by both loops, called only at a transaction
-/// boundary, immediately before `begin_transaction`: with `rate` records/s (0 =
-/// unlimited), sleep until `start + records_sent / rate`, where `records_sent`
-/// counts this producer's records so far. Never between `begin_transaction` and
-/// the commit/abort: that time is counted in the commit latency and in the
-/// latency of the records already sent, so a client that sends faster would
-/// sleep longer there and look slower. The deadline is derived from the
-/// cumulative count, so rates that are not a multiple of 10 — including
-/// fractional per-producer shares — are honoured exactly.
+/// boundary: immediately before `begin_transaction`, and after the last commit
+/// of a counted run for the wait the next `begin_transaction` would have taken.
+/// With `rate` records/s (0 = unlimited), sleep until `start + records_sent /
+/// rate`, where `records_sent` counts this producer's records so far. Never
+/// between `begin_transaction` and the commit/abort: that time is counted in the
+/// commit latency and in the latency of the records already sent, so a client
+/// that sends faster would sleep longer there and look slower. The deadline is
+/// derived from the cumulative count, so rates that are not a multiple of 10 —
+/// including fractional per-producer shares — are honoured exactly.
 async fn pace(rate: f64, records_sent: u64, start: Instant) {
     if rate > 0.0 {
         let deadline = Duration::from_secs_f64(records_sent as f64 / rate);
@@ -1078,6 +1080,10 @@ async fn run_producer(
         // at a transaction boundary so a transaction is never split.
         if num_messages > 0 {
             if records_sent >= num_messages {
+                // The wait owed for the last transaction's records, which the
+                // next `begin_transaction` would have taken: without it a fast
+                // client ends a counted run early and overstates throughput.
+                pace(rate, records_sent, test_start).await;
                 break;
             }
             if test_start.elapsed() >= count_cap {
@@ -1268,6 +1274,8 @@ async fn run_eos_producer(
         // stops a counted run the same way.
         if num_messages > 0 {
             if shared.eos_processed.load(Ordering::Relaxed) >= num_messages {
+                // This producer's owed wait, as in `run_producer`.
+                pace(rate, records_sent, test_start).await;
                 break;
             }
             if test_start.elapsed() >= count_cap {
@@ -2106,8 +2114,9 @@ async fn transactional_producer_perf_test() {
     let capped = shared.capped.load(Ordering::Relaxed);
     if capped {
         println!(
-            "capped: sent {records_sent} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + 10 s)",
-            config.num_messages
+            "capped: sent {records_sent} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + {} s)",
+            config.num_messages,
+            COUNTED_RUN_CAP_SLACK.as_secs()
         );
     }
 

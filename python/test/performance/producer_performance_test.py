@@ -594,18 +594,20 @@ def print_measurement_summary(completed_messages, total_latency_ns,
         latency_budget_exceeded = True
         print(f"p99 latency {p99} ms exceeds budget {p99_limit_ms} ms")
 
-def pacing_wait_s(messages_sent, first_message_time):
+def pacing_wait_s(messages_sent, first_message_time, final=False):
     """Seconds to sleep after ``messages_sent`` measured messages (<= 0 = none).
 
     Every ``max(floor(limit_rps / 10), 1)`` messages (~100 ms of traffic) the
     sender sleeps until ``first_message_time + messages_sent / limit_rps``. The
     deadline is derived from the cumulative count rather than stepped by a fixed
     100 ms per checkpoint, so rates that are not a multiple of 10 are honoured
-    exactly. Unlimited (``limit_rps`` unset) never waits."""
+    exactly. ``final`` (after the last send) waits off the checkpoint too, as
+    the C harness does: without it a fast client ends a counted run early and
+    overstates throughput. Unlimited (``limit_rps`` unset) never waits."""
     if not limit_rps:
         return 0.0
     checkpoint = max(limit_rps // 10, 1)
-    if messages_sent % checkpoint != 0:
+    if not final and messages_sent % checkpoint != 0:
         return 0.0
     deadline_ns = first_message_time + messages_sent * 1e9 / limit_rps
     return (deadline_ns - time.time_ns()) / 1e9
@@ -633,11 +635,12 @@ def report_capped(messages_sent, first_message_time):
 
 def check_completion(completed_messages, messages_sent, capped):
     """Fail the run, unless it was terminated by a signal, when not every
-    completed record verified or (with a message target) not every requested
-    record completed. A counted run stopped by the time cap (``capped``) is not
-    failed for the records it never sent, but must still complete every record
-    it sent, and at least one. The summary and results.json are written
-    regardless."""
+    completed record verified or (with a message target) not every sent record
+    completed, or none did. ``messages_sent`` leaves out the async path's
+    QUEUE_FULL rejections (the sync path retries them), so those reduce the
+    throughput rather than fail the run. A counted run stopped by the time cap
+    (``capped``) sent fewer records than its target and is not failed for that.
+    The summary and results.json are written regardless."""
     if terminating:
         return
     if verified != completed_messages:
@@ -646,13 +649,13 @@ def check_completion(completed_messages, messages_sent, capped):
               f"{completed_messages}")
         fail_run()
     if num_messages > 0:
-        expected = messages_sent if capped else num_messages
-        if completed_messages != expected:
+        if completed_messages != messages_sent:
             print(f"Completed messages {completed_messages} "
-                  f"does not match produced messages {expected}")
+                  f"does not match produced messages {messages_sent}")
             fail_run()
-        if capped and completed_messages == 0:
-            print("No messages completed before the time cap")
+        if completed_messages == 0:
+            print("No messages completed before the time cap" if capped
+                  else "No messages completed")
             fail_run()
 
 
@@ -818,6 +821,9 @@ def main(v2=False):
                     continue_sending = continue_sending and messages_sent < num_messages
 
             if not terminating:
+                time_to_wait_s = pacing_wait_s(messages_sent, first_message_time, final=True)
+                if time_to_wait_s > 0:
+                    time.sleep(time_to_wait_s)
                 # Flush so the producer drives every pending delivery to
                 # completion, then wait for the delivery callbacks (which record
                 # latency/metrics) to drain. Same barrier for both backends.
@@ -1033,6 +1039,10 @@ async def async_main():
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
+            if not terminating:
+                time_to_wait_s = pacing_wait_s(messages_sent, first_message_time, final=True)
+                if time_to_wait_s > 0:
+                    await asyncio.sleep(time_to_wait_s)
             # Flush so the producer drives every pending delivery to completion,
             # then yield until the delivery callbacks (which record
             # latency/metrics) have all fired.
@@ -1050,7 +1060,9 @@ async def async_main():
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            check_completion(completed_messages, messages_sent, capped)
+            # measured_sent, not messages_sent: a QUEUE_FULL record never
+            # completes (see check_completion).
+            check_completion(completed_messages, measured_sent, capped)
             print_measurement_summary(
                 completed_messages, total_latency_ns, min_latency_ns,
                 max_latency_ns, before_ms, after_ms, after_ns, first_message_time)
