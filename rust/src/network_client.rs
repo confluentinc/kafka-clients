@@ -614,8 +614,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Visible for testing.
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#nextCorrelationId")]
     fn next_correlation_id(&mut self) -> i32 {
+        if SaslClientAuthenticator::is_reserved(self.correlation) {
+            // the numeric overflow is fine as negative values is acceptable
+            self.correlation =
+                SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID.wrapping_add(1);
+        }
         let id = self.correlation;
-        self.correlation += 1;
+        self.correlation = self.correlation.wrapping_add(1);
         id
     }
 
@@ -3530,6 +3535,28 @@ mod tests {
             ids.insert(client.next_correlation_id());
         }
         assert_eq!(count, ids.len(), "All correlation IDs should be unique");
+        for id in &ids {
+            assert!(
+                *id < SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                "correlation id {id} is in the range reserved for SASL"
+            );
+        }
+    }
+
+    /// Regression test: ids must skip the SASL-reserved range `[i32::MAX-7, i32::MAX]` and wrap to
+    /// `i32::MIN` like Java's `nextCorrelationId`, instead of issuing reserved ids and then
+    /// overflowing.
+    #[tokio::test]
+    async fn test_correlation_id_skips_sasl_reserved_range_and_wraps() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.correlation = i32::MAX - 9;
+        let ids: Vec<i32> = (0..4).map(|_| client.next_correlation_id()).collect();
+        assert_eq!(vec![i32::MAX - 9, i32::MAX - 8, i32::MIN, i32::MIN + 1], ids);
+
+        // Starting inside the reserved range must not overflow either.
+        client.correlation = i32::MAX;
+        assert_eq!(i32::MIN, client.next_correlation_id());
+        assert_eq!(i32::MIN + 1, client.next_correlation_id());
     }
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`.
@@ -4170,6 +4197,52 @@ mod tests {
             version_after_second_rebootstrap > version_after_request,
             "Expected second rebootstrap to increment update_version"
         );
+    }
+
+    /// `ready()` on a node whose address silently drops connection attempts returns `false`
+    /// at once (Java: after 6 ms) and the connection setup timeout fails the node while the client
+    /// stays usable. Awaiting the TCP handshake in `ready()` parked the single network task for the
+    /// kernel's connect timeout (75 s on macOS) and the setup timeout never applied to it.
+    #[tokio::test]
+    async fn ready_on_an_unreachable_address_returns_immediately_and_times_out_the_setup() {
+        let node = Node::new(0, "10.255.255.1".to_string(), 9092);
+        let selector = crate::common::network::Selector::with_defaults(
+            crate::common::network::Selector::NO_IDLE_TIMEOUT_MS,
+            Box::new(crate::common::network::PlaintextChannelBuilder::new(None)),
+        );
+        let mut client = NetworkClient::with_metadata_updater(
+            selector,
+            Box::new(TestMetadataUpdater::new(vec![node.clone()])),
+            "r1-01",
+            1,
+            0,
+            0,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            500, // socket.connection.setup.timeout.ms
+            500,
+            false,
+            Arc::new(ApiVersions::new()),
+            crate::DefaultHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+            LogContext::empty(),
+        );
+        let now = || crate::common::utils::SystemTime.milliseconds();
+
+        let started = std::time::Instant::now();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(3), client.ready(&node, now()))
+            .await
+            .expect("ready() waited for the TCP handshake");
+        assert!(!ready);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+
+        // The setup timeout (500 ms) now bounds the connect.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !client.connection_failed(&node) {
+            assert!(std::time::Instant::now() < deadline, "the setup timeout never failed the node");
+            client.poll(50, now()).await;
+        }
     }
 
     /// Translated from `NetworkClientTest.testInflightRequestsDuringRebootstrap`.

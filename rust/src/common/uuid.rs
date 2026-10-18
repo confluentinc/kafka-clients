@@ -120,19 +120,27 @@ impl Uuid {
     ///
     /// Java throws `IllegalArgumentException` for a string that is not a
     /// base64 UUID; this returns the corresponding `LocalIllegalArgument`
-    /// error.
+    /// error, with Java's messages.
+    ///
+    /// As in Java, the length is counted in UTF-16 units and the prefix in the
+    /// "too long" message is its first 24 of them. One deviation: when that cut
+    /// splits a surrogate pair Java's message ends in a lone surrogate, which a
+    /// Rust `String` cannot hold, so it ends in U+FFFD.
     #[doc(alias = "org.apache.kafka.common.Uuid#fromString")]
     pub fn from_string(s: &str) -> Result<Self, Error> {
-        if s.len() > 24 {
+        // Java's `str.length()` counts UTF-16 units, not the UTF-8 bytes `str::len` counts.
+        if s.encode_utf16().count() > 24 {
+            // `str.substring(0, 24)` takes 24 UTF-16 units, which can cut a surrogate pair in
+            // two; a lone surrogate cannot be held by a Rust `String`, so it becomes U+FFFD.
+            let prefix: Vec<u16> = s.encode_utf16().take(24).collect();
             return Err(Error::local_illegal_argument(format!(
                 "Input string with prefix `{}` is too long to be decoded as a base64 UUID",
-                &s[..24.min(s.len())]
+                String::from_utf16_lossy(&prefix)
             )));
         }
 
         // Decode base64 URL without padding
-        let decoded = base64_url_decode(s)
-            .map_err(|e| Error::local_illegal_argument(format!("Failed to decode base64 string: {}", e)))?;
+        let decoded = base64_url_decode(s).map_err(Error::local_illegal_argument)?;
 
         if decoded.len() != 16 {
             return Err(Error::local_illegal_argument(format!(
@@ -195,7 +203,9 @@ fn base64_url_encode(data: &[u8]) -> String {
 /// Base64 URL decode (matches Java's Base64.getUrlDecoder())
 fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
     let mut result = Vec::new();
-    let bytes = s.as_bytes();
+    // `Base64.Decoder.decode(String)` reads the string as ISO-8859-1 (`src.getBytes(ISO_8859_1)`):
+    // a char it cannot encode, above U+00FF, becomes `?`.
+    let bytes: Vec<u8> = s.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect();
     let mut i = 0;
 
     while i < bytes.len() {
@@ -214,7 +224,16 @@ fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
                 b'-' => 62,
                 b'_' => 63,
                 b'=' => break, // Padding character (though we don't use it)
-                _ => return Err(format!("Invalid base64 character: {}", c as char)),
+                // Java: `"Illegal base64 character " + Integer.toString(src[sp - 1], 16)`, where
+                // `src[sp - 1]` is a signed `byte`.
+                _ => {
+                    let signed = c as i8;
+                    return Err(if signed < 0 {
+                        format!("Illegal base64 character -{:x}", -i32::from(signed))
+                    } else {
+                        format!("Illegal base64 character {signed:x}")
+                    });
+                },
             };
 
             buf[buf_len] = val;
@@ -478,5 +497,62 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.is_local_illegal_argument_error());
         assert!(error.to_string().contains("not equal to the expected 16 bytes"));
+    }
+
+    /// The expected messages below are what Java's `Uuid.fromString` throws, observed by
+    /// running it (`Base64.getUrlDecoder().decode(String)` reads the string as ISO-8859-1,
+    /// so a char above U+00FF is `?`, 0x3f, and a Latin-1 char is its *signed* byte).
+    fn from_string_message(s: &str) -> String {
+        let error = Uuid::from_string(s).expect_err("not a base64 UUID");
+        assert!(
+            error.is_local_illegal_argument_error(),
+            "Java throws IllegalArgumentException: {error}"
+        );
+        error.message().to_string()
+    }
+
+    /// The length check counted UTF-8 bytes where Java's `String.length()` counts
+    /// UTF-16 units, and `&s[..24]` is a byte slice, so a multi-byte character straddling
+    /// byte 24 panicked instead of throwing `IllegalArgumentException`:
+    /// `Uuid.fromString("a€€€€€€€€")` is 9 chars to Java, which fails to decode them.
+    #[test]
+    fn test_from_string_multibyte_input_is_an_error_not_a_panic() {
+        assert_eq!(
+            "Illegal base64 character 3f",
+            from_string_message("a\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}")
+        );
+    }
+
+    /// 8 chars in 24 bytes, and 13 chars in 26 bytes: Java measures chars, so neither is too long.
+    #[test]
+    fn test_from_string_length_is_counted_in_utf16_units_not_bytes() {
+        assert_eq!("Illegal base64 character 3f", from_string_message(&"\u{20ac}".repeat(8)));
+        assert_eq!("Illegal base64 character -17", from_string_message(&"\u{e9}".repeat(13)));
+    }
+
+    /// 25 UTF-16 units are too long, and the prefix of the message is the first 24 of them
+    /// (`str.substring(0, 24)`), here ending in a whole `€`.
+    #[test]
+    fn test_from_string_too_long_prefix_is_24_utf16_units() {
+        assert_eq!(
+            "Input string with prefix `AAAAAAAAAAAAAAAAAAAAAAA\u{20ac}` is too long to be decoded as a base64 UUID",
+            from_string_message(&format!("{}\u{20ac}\u{20ac}", "A".repeat(23)))
+        );
+    }
+
+    /// `substring(0, 24)` can cut a surrogate pair in two, leaving a lone surrogate in the
+    /// message, which a Rust `String` cannot hold: it becomes U+FFFD.
+    #[test]
+    fn test_from_string_too_long_prefix_cutting_a_surrogate_pair() {
+        assert_eq!(
+            "Input string with prefix `AAAAAAAAAAAAAAAAAAAAAAA\u{fffd}` is too long to be decoded as a base64 UUID",
+            from_string_message(&format!("{}\u{1f600}", "A".repeat(23)))
+        );
+    }
+
+    /// An ASCII character that is not in the URL-safe alphabet is reported as Java reports it.
+    #[test]
+    fn test_from_string_illegal_base64_character() {
+        assert_eq!("Illegal base64 character 2b", from_string_message("+AAAAAAAAAAAAAAAAAAAAA"));
     }
 }
