@@ -19,20 +19,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Managed unit tests for <see cref="Utf8Marshal"/> — the hand-rolled UTF-8
-/// marshalling helpers (ffi §A3/§B3). These exercise the encode/decode codec in
-/// isolation with no native call; the cross-ABI round-trip lives in
-/// <c>NativeLoadProbeTests</c>.
+/// Tests the <see cref="Utf8Marshal"/> UTF-8 encode and NUL-terminated decode in isolation, with no native call.
 /// </summary>
 public sealed class Utf8MarshalTests
 {
-    /// <summary>
-    /// <see cref="Utf8Marshal.Pin"/> a non-ASCII string, then
-    /// <see cref="Utf8Marshal.PtrToString"/> it back and assert equality (a 4-byte
-    /// char sits at the buffer boundary, right before the NUL). Also asserts
-    /// <see cref="Utf8Marshal.PtrToString"/> maps <see cref="IntPtr.Zero"/> to
-    /// <see langword="null"/> (ffi §A3 obligation).
-    /// </summary>
     [Fact]
     public void PinThenPtrToString_RoundTripsAndHandlesNull()
     {

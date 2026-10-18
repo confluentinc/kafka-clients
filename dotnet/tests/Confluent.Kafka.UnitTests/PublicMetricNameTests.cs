@@ -20,11 +20,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public <see cref="MetricName"/> value-type contract (M9/P2) — pure managed, no
-/// consumer needed. Mirrors Java <c>MetricName.equals</c> / <c>hashCode</c>: value identity
-/// over <c>(name, group, tags)</c> with <b>description excluded</b> and <b>tag order
-/// irrelevant</b>, hand-implemented (not <see cref="IReadOnlyDictionary{TKey, TValue}"/>
-/// reference equality), with a consistent <see cref="MetricName.GetHashCode"/>.
+/// Tests the public <see cref="MetricName"/> value type: Java's value equality over name, group and tags, with the
+/// description excluded and tag order irrelevant, and a consistent hash.
 /// </summary>
 public sealed class PublicMetricNameTests
 {
@@ -45,7 +42,6 @@ public sealed class PublicMetricNameTests
         Dictionary<string, string> tags = Tags();
         Assert.Throws<ArgumentNullException>(() => new MetricName(null!, "g", "d", tags));
         Assert.Throws<ArgumentNullException>(() => new MetricName("n", null!, "d", tags));
-        // Java requires a non-null description too (Objects.requireNonNull).
         Assert.Throws<ArgumentNullException>(() => new MetricName("n", "g", null!, tags));
         Assert.Throws<ArgumentNullException>(() => new MetricName("n", "g", "d", null!));
     }
@@ -78,8 +74,6 @@ public sealed class PublicMetricNameTests
     [Fact]
     public void Equality_DifferentDescription_StillEqual()
     {
-        // Description is EXCLUDED from equality and the hash (Java parity) — this is what lets
-        // a caller re-key a metrics dictionary with a MetricName carrying a different description.
         MetricName a = new MetricName("n", "g", "description one", Tags(("k", "v")));
         MetricName b = new MetricName("n", "g", "a totally different description", Tags(("k", "v")));
 
@@ -90,8 +84,6 @@ public sealed class PublicMetricNameTests
     [Fact]
     public void Equality_TagOrderIndependent()
     {
-        // Tag enumeration order must not affect equality or the hash (Java Map.equals /
-        // Map.hashCode are order-independent). Build the two tag sets in opposite insertion order.
         MetricName a = new MetricName("n", "g", "d", Tags(("client-id", "c1"), ("topic", "t"), ("partition", "3")));
         MetricName b = new MetricName("n", "g", "d", Tags(("partition", "3"), ("topic", "t"), ("client-id", "c1")));
 
@@ -164,9 +156,6 @@ public sealed class PublicMetricNameTests
     [Fact]
     public void UsableAsDictionaryKey_ByValueIdentity()
     {
-        // The load-bearing property for Metrics(): value identity makes a re-constructed
-        // MetricName (same name/group/tags, DIFFERENT description, DIFFERENT tag order) index
-        // the same entry.
         Dictionary<MetricName, string> map = new Dictionary<MetricName, string>
         {
             [new MetricName("n", "g", "original", Tags(("a", "1"), ("b", "2")))] = "value",
@@ -180,9 +169,6 @@ public sealed class PublicMetricNameTests
     [Fact]
     public void NonAscii_StringFields_RoundTripAndEquate()
     {
-        // Non-ASCII round-trip through a MetricName string field (name/group/tag) — the managed
-        // side of the §B3 UTF-8 contract (the native marshalling of an owned string is exercised
-        // by the ClientId non-ASCII round-trip, which shares Utf8Marshal.PtrToString).
         const string name = "café-Ω-日本語-😀";
         MetricName a = new MetricName(name, "gruppe-Ω", "描述", Tags(("clé-Ω", "valeur-😀")));
         MetricName b = new MetricName(name, "gruppe-Ω", "another", Tags(("clé-Ω", "valeur-😀")));
@@ -198,7 +184,6 @@ public sealed class PublicMetricNameTests
     [Fact]
     public void Tags_AreDefensivelyCopied()
     {
-        // Mutating the caller's dictionary after construction must not change the MetricName.
         Dictionary<string, string> source = Tags(("k", "v"));
         MetricName name = new MetricName("n", "g", "d", source);
         source["k"] = "mutated";

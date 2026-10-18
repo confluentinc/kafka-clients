@@ -54,7 +54,7 @@ namespace Confluent.Kafka;
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> mirrors
 /// Java's <c>send(ProducerRecord, Callback)</c> (<c>Producer.java:86</c>): the callback is an
 /// <b>additional</b> parameter — the overload still yields the record's
-/// <see cref="AsyncKafkaFuture{T}"/> (whose <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery
+/// <see cref="AsyncKafkaFuture{T}"/> (whose <see cref="AsyncKafkaFuture{T}.Get()"/> is the delivery
 /// <see cref="Task{TResult}"/>) from the same <see cref="ValueTask{TResult}"/> first stage. See
 /// <see cref="IDeliveryCallback"/> and the §4 <b>delivery-callback divergence</b> for the thread,
 /// ordering, non-null-metadata and throw-policy contracts.
@@ -64,7 +64,7 @@ namespace Confluent.Kafka;
 /// <c>Send</c> appends the record to the producer's batch chain and returns a <see cref="ValueTask{TResult}"/>
 /// that completes when the record is <b>accepted</b> under the producer's bound on records not yet handed to its
 /// send-batch thread. Its result is the record's <see cref="AsyncKafkaFuture{T}"/> — Java's
-/// <c>Future&lt;RecordMetadata&gt;</c>; its <see cref="AsyncKafkaFuture{T}.Get"/> is the <b>delivery</b>
+/// <c>Future&lt;RecordMetadata&gt;</c>; its <see cref="AsyncKafkaFuture{T}.Get()"/> is the <b>delivery</b>
 /// <see cref="Task{TResult}"/>. That result is deliberately a named struct over the delivery
 /// <see cref="Task{TResult}"/>, not a plain <see cref="Task{TResult}"/>, so that the two stages of <c>Send</c> are
 /// distinguishable (M11/P3.6 decision D7); the async admin Results hold the same type for Java's
@@ -138,19 +138,19 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <c>Producer.send(record)</c>, which may block and returns a
     /// <c>Future&lt;RecordMetadata&gt;</c> — so a <see cref="ValueTask{TResult}"/> yielding an
     /// <see cref="AsyncKafkaFuture{T}"/> here, CLAUDE.md §4). Awaiting the call once yields the record's
-    /// <see cref="AsyncKafkaFuture{T}"/>; awaiting its <see cref="AsyncKafkaFuture{T}.Get"/> yields the
+    /// <see cref="AsyncKafkaFuture{T}"/>; awaiting its <see cref="AsyncKafkaFuture{T}.Get()"/> yields the
     /// <see cref="RecordMetadata"/> once the cluster
     /// acknowledges the record. The key / value are serialized on the caller's thread
     /// <b>before</b> the send is enqueued.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>Do not mutate the key / value buffers until the delivery <see cref="Task{TResult}"/>
-    /// (<see cref="AsyncKafkaFuture{T}.Get"/>) completes without being canceled.</b> The first stage
+    /// (<see cref="AsyncKafkaFuture{T}.Get()"/>) completes without being canceled.</b> The first stage
     /// completing does <b>not</b> end the borrow: an accepted record may not have reached the core yet.
     /// The send is deferred — the binding <b>borrows</b> the serialized
     /// bytes, it does not copy them, until a background batch thread hands the record to the core —
     /// so a mutation in that window <b>is</b> visible on the wire. If you need to reuse a buffer,
-    /// either await the delivery task (<see cref="AsyncKafkaFuture{T}.Get"/>) first and see it complete
+    /// either await the delivery task (<see cref="AsyncKafkaFuture{T}.Get()"/>) first and see it complete
     /// without being canceled, or hand each
     /// send its own array.
     /// <para>
@@ -210,7 +210,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// </param>
     /// <returns>
     /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding the
-    /// record's <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get"/> for
+    /// record's <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for
     /// the <see cref="RecordMetadata"/>, or for a <see cref="KafkaException"/> carrying the delivery
     /// failure. Await the <see cref="ValueTask{TResult}"/> once; call
     /// <see cref="ValueTask{TResult}.AsTask"/> to store it.
@@ -249,7 +249,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// </para>
     /// <para>
     /// ⚠ <b>Do not mutate the key / value buffers until the delivery <see cref="Task{TResult}"/>
-    /// (<see cref="AsyncKafkaFuture{T}.Get"/>) completes without being canceled</b> — the first stage
+    /// (<see cref="AsyncKafkaFuture{T}.Get()"/>) completes without being canceled</b> — the first stage
     /// completing does <b>not</b> end the borrow (an accepted record may not have reached the core yet),
     /// and neither does a cancellation: after an
     /// <see cref="OperationCanceledException"/> from either stage, or a canceled delivery task, the
@@ -287,7 +287,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// </param>
     /// <returns>
     /// A <see cref="ValueTask{TResult}"/> that completes once the record is accepted, yielding the
-    /// record's <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get"/> for
+    /// record's <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for
     /// the <see cref="RecordMetadata"/>, or for a <see cref="KafkaException"/> carrying the delivery
     /// failure. Await the <see cref="ValueTask{TResult}"/> once; call
     /// <see cref="ValueTask{TResult}.AsTask"/> to store it.

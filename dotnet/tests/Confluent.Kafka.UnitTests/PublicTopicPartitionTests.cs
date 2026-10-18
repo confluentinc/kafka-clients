@@ -22,29 +22,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public <see cref="TopicPartition"/> value type (M7/P2a; relaxed in M15/P13.2 G3-4) — a
-/// pure value-type check with <b>no consumer or admin interaction</b>. Its constructor, like
-/// Java's (<c>TopicPartition.java:32-35</c>), stores whatever it is given: a negative partition
-/// and a <see langword="null"/> topic are both representable, and nothing here throws.
+/// Tests the public <see cref="TopicPartition"/> value type, whose constructor stores whatever it is given, as Java's
+/// does: a negative partition and a <see langword="null"/> topic in equality, hash and string form.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Until G3-4 this class held the single authoritative test for the constructor's
-/// negative-partition rejection. That guard is gone, so the checks that <em>reject</em> such a
-/// value now live where the value is used, each with its own test: the consumer's own
-/// stricter-than-Java "Partition must not be negative." preconditions (M15/P13.2 D11 —
-/// <c>ConsumerNegativePartitionGuardTests</c>), the admin RPCs' null-topic guards (D1), and the
-/// core's own per-key / whole-request answer for the reassignment RPCs
-/// (<c>PublicAdminNegativePartitionTests</c>).
-/// </para>
-/// <para>
-/// A null topic (from the constructor, or from <c>default(TopicPartition)</c>) must behave as
-/// Java's <c>Objects.equals</c> / <c>Objects.hashCode</c> / string concatenation make it: equal
-/// to the other null-topic value with the same partition, hashable without a throw, and printed
-/// as <c>"null-{partition}"</c> (D13) — yet <em>not</em> equal to a topic literally named
-/// <c>"null"</c>, which prints the same.
-/// </para>
-/// </remarks>
 public sealed class PublicTopicPartitionTests
 {
     [Theory]
@@ -57,7 +37,6 @@ public sealed class PublicTopicPartitionTests
         Assert.Equal("t", tp.Topic);
         Assert.Equal(partition, tp.Partition);
 
-        // Java: topic + "-" + partition — the sign is kept, so -1 prints "t--1".
         Assert.Equal("t-" + partition.ToString(CultureInfo.InvariantCulture), tp.ToString());
     }
 
@@ -79,7 +58,6 @@ public sealed class PublicTopicPartitionTests
         Assert.True(constructed.Equals((object)default(TopicPartition)));
         Assert.Equal(default(TopicPartition).GetHashCode(), constructed.GetHashCode());
 
-        // Usable as a set key without a throw — the dictionary/set use the type promises.
         HashSet<TopicPartition> set = new HashSet<TopicPartition> { constructed };
         Assert.Contains(default(TopicPartition), set);
     }
@@ -89,7 +67,6 @@ public sealed class PublicTopicPartitionTests
     {
         TopicPartition nullTopic = new TopicPartition(null!, 5);
 
-        // Objects.equals(null, "null") is false in Java: the same printed form, not equal.
         Assert.NotEqual(new TopicPartition("null", 5), nullTopic);
         Assert.NotEqual(nullTopic, new TopicPartition("null", 5));
         Assert.NotEqual(new TopicPartition(null!, 6), nullTopic);
@@ -105,12 +82,6 @@ public sealed class PublicTopicPartitionTests
         Assert.Equal("orders-3", new TopicPartition("orders", 3).ToString());
     }
 
-    /// <summary>
-    /// D10: the annotation stays <c>string</c> on both the constructor's <c>topic</c> parameter
-    /// and the <see cref="TopicPartition.Topic"/> property, although the constructor now accepts
-    /// <see langword="null"/> at run time — every value the binding hands back has a non-null
-    /// topic, because a null one cannot cross the C ABI (D1).
-    /// </summary>
     [Fact]
     public void TheTopicAnnotation_StaysNonNullable()
     {

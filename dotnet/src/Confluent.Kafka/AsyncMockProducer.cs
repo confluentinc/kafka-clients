@@ -44,7 +44,7 @@ namespace Confluent.Kafka;
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount()"/> /
 /// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
 /// precedent. With <c>autoComplete: false</c> a send's delivery task (its
-/// <see cref="AsyncKafkaFuture{T}.Get"/>) stays pending until <see cref="CompleteNext"/> /
+/// <see cref="AsyncKafkaFuture{T}.Get()"/>) stays pending until <see cref="CompleteNext"/> /
 /// <see cref="ErrorNext"/> resolves it; its first stage (acceptance) does not wait for that.
 /// </para>
 /// <para>
@@ -69,7 +69,7 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// ⚠ <b>Do not mutate a record's key / value buffers until its delivery <see cref="Task{TResult}"/>
-/// (<see cref="AsyncKafkaFuture{T}.Get"/>) completes without being canceled</b> (M11/P3.1 decision
+/// (<see cref="AsyncKafkaFuture{T}.Get()"/>) completes without being canceled</b> (M11/P3.1 decision
 /// D6). The async send is deferred — the binding borrows the serialized bytes until a background batch
 /// thread hands the
 /// record to the core — so a mutation in that window is visible on the wire. A cancellation does
@@ -107,7 +107,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <param name="autoComplete">
     /// When <see langword="true"/> (the default), the mock resolves each <c>Send</c>
     /// automatically. When <see langword="false"/>, a send's delivery task (its
-    /// <see cref="AsyncKafkaFuture{T}.Get"/>) stays pending until <see cref="CompleteNext"/> /
+    /// <see cref="AsyncKafkaFuture{T}.Get()"/>) stays pending until <see cref="CompleteNext"/> /
     /// <see cref="ErrorNext"/> resolves it. Flush / close on a mock
     /// resolve broker-free regardless of this flag.
     /// </param>

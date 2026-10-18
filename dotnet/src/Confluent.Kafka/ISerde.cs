@@ -15,22 +15,10 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A bidirectional serde — both an <see cref="ISerializer{T}"/> and an
-/// <see cref="IDeserializer{T}"/> for the same type — the .NET realization of Java's
-/// <c>org.apache.kafka.common.serialization.Serde&lt;T&gt;</c> (what the
-/// <see cref="Serdes"/> factory returns; Java's <c>Serdes.String()</c> →
-/// <c>Serde&lt;String&gt;</c>).
+/// A serializer and a deserializer for one type: Java's <c>Serde&lt;T&gt;</c>, but extending both interfaces
+/// instead of exposing <c>serializer()</c> and <c>deserializer()</c>, and without <c>close</c>.
 /// </summary>
-/// <remarks>
-/// Java's <c>Serde&lt;T&gt;</c> exposes the two directions via
-/// <c>serializer()</c> / <c>deserializer()</c> accessors and extends
-/// <c>Closeable</c>. Here the serde <em>is</em> both interfaces directly — a serde
-/// object can serialize and deserialize with no accessor hop — and there is no
-/// <c>Closeable</c>: the built-in serdes are stateless and hold no resources. This
-/// composes the two directional interfaces (which are the shipped, individually usable
-/// contracts) into the single type callers name when they want both directions.
-/// </remarks>
-/// <typeparam name="T">The value type this serde encodes and decodes.</typeparam>
+/// <typeparam name="T">The type encoded and decoded.</typeparam>
 public interface ISerde<T> : ISerializer<T>, IDeserializer<T>
 {
 }

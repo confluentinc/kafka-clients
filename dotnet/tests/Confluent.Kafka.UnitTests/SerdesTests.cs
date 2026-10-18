@@ -20,23 +20,18 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The built-in <see cref="Serdes"/>: bidirectional round-trips, <b>byte-level
-/// Java-wire-parity vectors</b> (DoD §3 — the guard a wrong endianness or a raw-bytes
-/// UUID would slip past a round-trip-only test), and malformed-input mapping to
-/// <see cref="SerializationException"/> with Java's exact messages. Wire formats are
-/// verified against <c>org.apache.kafka.common.serialization.*</c> (Apache Kafka 4.2).
+/// Tests the built-in <see cref="Serdes"/>: round trips, Java's byte-level wire vectors, and malformed input mapped to
+/// <see cref="SerializationException"/> with Java's messages.
 /// </summary>
 public sealed class SerdesTests
 {
     private const string Topic = "topic";
 
-    // ---- String (UTF-8) ---------------------------------------------------------
-
     [Theory]
     [InlineData("")]
     [InlineData("hello")]
-    [InlineData("café")]            // non-ASCII (Latin-1 supplement)
-    [InlineData("日本語 🎉")]        // multi-byte + surrogate pair
+    [InlineData("café")]
+    [InlineData("日本語 🎉")]
     public void String_RoundTrips(string value)
     {
         byte[]? bytes = Serdes.String.Serialize(Topic, value);
@@ -48,7 +43,6 @@ public sealed class SerdesTests
     [Fact]
     public void String_WireFormat_IsUtf8()
     {
-        // Java StringSerializer: data.getBytes(UTF_8).
         byte[]? bytes = Serdes.String.Serialize(Topic, "café");
         Assert.Equal(new byte[] { 0x63, 0x61, 0x66, 0xC3, 0xA9 }, bytes);
     }
@@ -56,12 +50,9 @@ public sealed class SerdesTests
     [Fact]
     public void String_SerializeNull_ReturnsNull()
     {
-        // Java StringSerializer returns null for null input (nullable-return parity).
         string? nil = null;
         Assert.Null(Serdes.String.Serialize(Topic, nil!));
     }
-
-    // ---- ByteArray (identity) ---------------------------------------------------
 
     [Fact]
     public void ByteArray_RoundTrips_AndDeserializeCopiesOut()
@@ -69,11 +60,11 @@ public sealed class SerdesTests
         byte[] value = { 0x00, 0x01, 0xFE, 0xFF };
 
         byte[]? serialized = Serdes.ByteArray.Serialize(Topic, value);
-        Assert.Same(value, serialized); // identity — same reference (Java parity)
+        Assert.Same(value, serialized);
 
         byte[] decoded = Serdes.ByteArray.Deserialize(Topic, value);
         Assert.Equal(value, decoded);
-        Assert.NotSame(value, decoded); // deserialize copies the borrowed span out
+        Assert.NotSame(value, decoded);
     }
 
     [Fact]
@@ -89,8 +80,6 @@ public sealed class SerdesTests
         byte[]? nil = null;
         Assert.Null(Serdes.ByteArray.Serialize(Topic, nil!));
     }
-
-    // ---- Int32 (4 bytes big-endian) ---------------------------------------------
 
     [Theory]
     [InlineData(0)]
@@ -109,15 +98,11 @@ public sealed class SerdesTests
     [Fact]
     public void Int32_WireFormat_IsBigEndian()
     {
-        // Java IntegerSerializer: 1 -> {0x00,0x00,0x00,0x01}. Little-endian would be
-        // {0x01,0x00,0x00,0x00}; 256 -> {0x00,0x00,0x01,0x00} pins the byte order.
         Assert.Equal(new byte[] { 0x00, 0x00, 0x00, 0x01 }, Serdes.Int32.Serialize(Topic, 1));
         Assert.Equal(new byte[] { 0x00, 0x00, 0x01, 0x00 }, Serdes.Int32.Serialize(Topic, 256));
         Assert.Equal(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, Serdes.Int32.Serialize(Topic, -1));
         Assert.Equal(new byte[] { 0x7F, 0xFF, 0xFF, 0xFF }, Serdes.Int32.Serialize(Topic, int.MaxValue));
     }
-
-    // ---- Int64 (8 bytes big-endian) ---------------------------------------------
 
     [Theory]
     [InlineData(0L)]
@@ -135,7 +120,6 @@ public sealed class SerdesTests
     [Fact]
     public void Int64_WireFormat_IsBigEndian()
     {
-        // Java LongSerializer: 1L -> {0,0,0,0,0,0,0,1}.
         Assert.Equal(
             new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
             Serdes.Int64.Serialize(Topic, 1L));
@@ -143,8 +127,6 @@ public sealed class SerdesTests
             new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 },
             Serdes.Int64.Serialize(Topic, 0x0102030405060708L));
     }
-
-    // ---- Double (8 bytes big-endian IEEE-754) -----------------------------------
 
     [Theory]
     [InlineData(0.0)]
@@ -172,18 +154,14 @@ public sealed class SerdesTests
     [Fact]
     public void Double_WireFormat_IsBigEndianDoubleToLongBits()
     {
-        // Java DoubleSerializer: doubleToLongBits(1.0) = 0x3FF0000000000000, big-endian.
         Assert.Equal(
             new byte[] { 0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
             Serdes.Double.Serialize(Topic, 1.0));
 
-        // NaN canonicalizes to 0x7ff8000000000000L (Java doubleToLongBits).
         Assert.Equal(
             new byte[] { 0x7F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
             Serdes.Double.Serialize(Topic, double.NaN));
     }
-
-    // ---- Guid (UUID.toString() -> UTF-8) ----------------------------------------
 
     [Fact]
     public void Guid_RoundTrips()
@@ -197,16 +175,13 @@ public sealed class SerdesTests
     [Fact]
     public void Guid_WireFormat_IsCanonicalLowercaseStringUtf8_NotRawBytes()
     {
-        // ⚠ Java UUIDSerializer serializes UUID.toString() as UTF-8 — the 36-char
-        // canonical lowercase form — NOT the 16 raw bytes. Constructed from UPPERCASE
-        // to prove the wire form is lowercased (Guid.ToString("D") == UUID.toString()).
         var value = new Guid("A1B2C3D4-E5F6-7788-99AA-BBCCDDEEFF00");
         const string canonical = "a1b2c3d4-e5f6-7788-99aa-bbccddeeff00";
 
         byte[]? bytes = Serdes.Guid.Serialize(Topic, value);
 
         Assert.Equal(Encoding.UTF8.GetBytes(canonical), bytes);
-        Assert.Equal(36, bytes!.Length);   // string form, not 16 raw bytes
+        Assert.Equal(36, bytes!.Length);
         Assert.NotEqual(16, bytes.Length);
     }
 
@@ -218,19 +193,14 @@ public sealed class SerdesTests
         Assert.Equal(new Guid("12345678-9abc-def0-1234-56789abcdef0"), decoded);
     }
 
-    // ---- Null (VoidSerializer) --------------------------------------------------
-
     [Fact]
     public void Null_SerializeReturnsNull_DeserializeReturnsDefault()
     {
-        // Java VoidSerializer always returns null; VoidDeserializer yields null.
         Assert.Null(Serdes.Null.Serialize(Topic, null));
         Assert.Null(Serdes.Null.Serialize(Topic, new object()));
         Assert.Null(Serdes.Null.Deserialize(Topic, ReadOnlySpan<byte>.Empty));
         Assert.Null(Serdes.Null.Deserialize(Topic, new byte[] { 1, 2, 3 }));
     }
-
-    // ---- Malformed input -> SerializationException (Java's exact messages) -------
 
     [Fact]
     public void Int32_WrongLength_ThrowsSerializationException()
@@ -251,7 +221,6 @@ public sealed class SerdesTests
     [Fact]
     public void Double_WrongLength_ThrowsSerializationException()
     {
-        // Java's byte[] overload message says "Deserializer", not "DoubleDeserializer".
         var ex = Assert.Throws<SerializationException>(
             () => Serdes.Double.Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
         Assert.Equal("Size of data received by Deserializer is not 8", ex.Message);
@@ -263,23 +232,17 @@ public sealed class SerdesTests
         var ex = Assert.Throws<SerializationException>(
             () => Serdes.Guid.Deserialize(Topic, Encoding.UTF8.GetBytes("not-a-uuid")));
         Assert.Equal("Error parsing data into UUID", ex.Message);
-        Assert.NotNull(ex.InnerException); // the underlying parse failure is preserved
+        Assert.NotNull(ex.InnerException);
     }
-
-    // ---- SerializationException is a KafkaException -----------------------------
 
     [Fact]
     public void SerializationException_IsCatchableAsKafkaException()
     {
-        // Base-type catch: SerializationException derives from KafkaException, so an
-        // existing catch (KafkaException) sees it (ThrowsAny allows the subclass).
         KafkaException ex = Assert.ThrowsAny<KafkaException>(
             () => Serdes.Int32.Deserialize(Topic, new byte[] { 0x00 }));
         Assert.IsType<SerializationException>(ex);
         Assert.IsAssignableFrom<KafkaException>(ex);
 
-        // A serde error originates in the binding, not the core: no error code, and the
-        // retriable flag stays at its default.
         Assert.Equal(0, ex.Code);
         Assert.False(ex.IsRetriable);
     }

@@ -59,7 +59,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>The sync latch runs no continuation on the pump.</b> Completing a single's
 /// <see cref="SyncCompletion{T}"/> pulses whichever thread is blocked in
-/// <see cref="KafkaFuture{T}.Get"/> and runs nothing else on this thread, so the
+/// <see cref="KafkaFuture{T}.Get()"/> and runs nothing else on this thread, so the
 /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> reasoning below applies to the
 /// async groups' TCSes only.
 /// </para>
@@ -67,7 +67,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>D9 — the current-pump guard (M11/P4.2).</b> <see cref="RunLoop"/> marks its own dedicated
 /// thread in a <see cref="ThreadStaticAttribute"/> field (<c>s_currentPump</c>, read through
 /// <see cref="IsCurrentThread"/>). A <see cref="SyncCompletion{T}"/> owned by this pump reads it
-/// before it blocks, so a <see cref="KafkaFuture{T}.Get"/> called on this thread — from inside a
+/// before it blocks, so a <see cref="KafkaFuture{T}.Get()"/> called on this thread — from inside a
 /// delivery callback — for a send that has not completed throws
 /// <see cref="InvalidOperationException"/> instead of deadlocking: on this thread the latch's
 /// completer is this very loop. A <c>Get</c> on a completed send, and a <c>Get</c> on another

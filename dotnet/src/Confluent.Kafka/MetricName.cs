@@ -19,64 +19,24 @@ using System.Text;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The name of a metric — the .NET realization of Java's
-/// <c>org.apache.kafka.common.MetricName</c>. It carries a <see cref="Name"/>,
-/// <see cref="Group"/>, <see cref="Description"/>, and a set of <see cref="Tags"/>, and it
-/// is the key type of the <see cref="IReadOnlyDictionary{TKey, TValue}"/> returned by
-/// <see cref="IConsumerCommon.Metrics"/> (Java <c>Map&lt;MetricName, ? extends Metric&gt;
-/// metrics()</c>).
+/// The name of a metric, Java's <c>MetricName</c>, and the key type of the
+/// <see cref="IReadOnlyDictionary{TKey, TValue}"/> a client's <c>Metrics()</c> returns: two are equal when their
+/// <see cref="Name"/>, <see cref="Group"/> and <see cref="Tags"/> match, as in Java, which ignores
+/// <see cref="Description"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Value identity over <c>(Name, Group, Tags)</c> — Description excluded.</b> Two
-/// <see cref="MetricName"/>s are equal when their <see cref="Name"/>, <see cref="Group"/>,
-/// and <see cref="Tags"/> match; <see cref="Description"/> is deliberately <b>not</b> part
-/// of equality or the hash, mirroring Java's <c>MetricName.equals</c> /
-/// <c>hashCode</c> exactly (Java compares <c>group</c>, <c>name</c>, <c>tags</c>). This is
-/// what makes per-partition metrics — which share a name and group and differ only by a
-/// tag such as <c>topic</c> / <c>partition</c> — distinct dictionary keys.
-/// </para>
-/// <para>
-/// <b>Tag comparison is order-independent and hand-implemented</b> (it does <b>not</b> rely
-/// on <see cref="IReadOnlyDictionary{TKey, TValue}"/>'s own <c>Equals</c>, which is
-/// reference equality): two tag sets are equal when they hold the same key/value pairs
-/// regardless of enumeration order, matching Java's <c>Map.equals</c> (a set-of-entries
-/// comparison). <see cref="GetHashCode"/> is computed order-independently over the same
-/// three fields so it stays consistent with <see cref="Equals(MetricName)"/>.
-/// </para>
-/// <para>
-/// <b>Defensive tag copy (deviation from Java, recorded).</b> The constructor copies the
-/// incoming <c>tags</c> into an internal ordinal-keyed snapshot, so a
-/// <see cref="MetricName"/> is immutable and its equality is independent of the caller's
-/// dictionary comparer (Java stores the reference; the observable content-equality contract
-/// is unchanged). All string comparisons are ordinal (Java's <see cref="string"/> /
-/// <c>HashMap</c> semantics).
-/// </para>
-/// </remarks>
+/// <remarks>The constructor copies <c>tags</c> into an ordinal-keyed dictionary, where Java keeps the caller's map.</remarks>
 public sealed class MetricName : IEquatable<MetricName>
 {
     private readonly Dictionary<string, string> _tags;
 
-    // Java caches its hash (MetricName.hash); the same lazy cache here. 0 = not yet
-    // computed. A genuine hash of 0 recomputes each call — harmless and rare.
     private int _hash;
 
     /// <summary>
-    /// Initializes a new <see cref="MetricName"/> (Java
-    /// <c>MetricName(String, String, String, Map&lt;String, String&gt;)</c>).
+    /// Initializes a metric name; throws <see cref="ArgumentNullException"/> if any argument is
+    /// <see langword="null"/>.
     /// </summary>
-    /// <param name="name">The metric name.</param>
-    /// <param name="group">The logical group the metric belongs to.</param>
-    /// <param name="description">A human-readable description (excluded from equality).</param>
-    /// <param name="tags">The metric's key/value tag attributes (copied).</param>
-    /// <exception cref="ArgumentNullException">
-    /// Any of <paramref name="name"/>, <paramref name="group"/>,
-    /// <paramref name="description"/>, or <paramref name="tags"/> is null (Java requires all
-    /// four non-null).
-    /// </exception>
     public MetricName(string name, string group, string description, IReadOnlyDictionary<string, string> tags)
     {
-        // Java: Objects.requireNonNull on all four (description included).
         Name = name ?? throw new ArgumentNullException(nameof(name));
         Group = group ?? throw new ArgumentNullException(nameof(group));
         Description = description ?? throw new ArgumentNullException(nameof(description));
@@ -85,7 +45,6 @@ public sealed class MetricName : IEquatable<MetricName>
             throw new ArgumentNullException(nameof(tags));
         }
 
-        // Defensive, ordinal-keyed copy: immutable snapshot, comparer-independent equality.
         _tags = new Dictionary<string, string>(tags.Count, StringComparer.Ordinal);
         foreach (KeyValuePair<string, string> tag in tags)
         {
@@ -93,36 +52,26 @@ public sealed class MetricName : IEquatable<MetricName>
         }
     }
 
-    /// <summary>The metric name (Java <c>name()</c>).</summary>
+    /// <summary>The metric's name.</summary>
     public string Name { get; }
 
-    /// <summary>The logical group the metric belongs to (Java <c>group()</c>).</summary>
+    /// <summary>The group the metric belongs to.</summary>
     public string Group { get; }
 
-    /// <summary>
-    /// A human-readable description (Java <c>description()</c>). <b>Not</b> part of
-    /// <see cref="Equals(MetricName)"/> / <see cref="GetHashCode"/>.
-    /// </summary>
+    /// <summary>A description of the metric, which equality ignores.</summary>
     public string Description { get; }
 
-    /// <summary>
-    /// The metric's key/value tag attributes (Java <c>tags()</c>) — an immutable,
-    /// ordinal-keyed snapshot.
-    /// </summary>
+    /// <summary>The metric's tags.</summary>
     public IReadOnlyDictionary<string, string> Tags => _tags;
 
     /// <summary>Determines whether two <see cref="MetricName"/> values are equal.</summary>
     public static bool operator ==(MetricName? left, MetricName? right) =>
         left is null ? right is null : left.Equals(right);
 
-    /// <summary>Determines whether two <see cref="MetricName"/> values are not equal.</summary>
+    /// <summary>Determines whether two <see cref="MetricName"/> values differ.</summary>
     public static bool operator !=(MetricName? left, MetricName? right) => !(left == right);
 
-    /// <summary>
-    /// Determines whether this equals <paramref name="other"/> — <see cref="Name"/>,
-    /// <see cref="Group"/>, and <see cref="Tags"/> all match (order-independent tags,
-    /// ordinal strings). <see cref="Description"/> is excluded, mirroring Java.
-    /// </summary>
+    /// <inheritdoc/>
     public bool Equals(MetricName? other)
     {
         if (other is null)
@@ -151,9 +100,6 @@ public sealed class MetricName : IEquatable<MetricName>
             return _hash;
         }
 
-        // Mirror Java's structure (prime 31, over group, name, tags — description
-        // excluded). The tag term is an order-independent aggregate so the hash stays
-        // consistent with the order-independent Equals.
         unchecked
         {
             const int prime = 31;
@@ -166,7 +112,7 @@ public sealed class MetricName : IEquatable<MetricName>
         }
     }
 
-    /// <summary>Returns the Java-style diagnostic string.</summary>
+    /// <inheritdoc/>
     public override string ToString()
     {
         StringBuilder builder = new StringBuilder();
@@ -190,8 +136,6 @@ public sealed class MetricName : IEquatable<MetricName>
         return builder.ToString();
     }
 
-    // Order-independent set-of-entries comparison (Java Map.equals). Both maps are ordinal-
-    // keyed, so TryGetValue lookups are ordinal; values are compared ordinally.
     private static bool TagsEqual(Dictionary<string, string> a, Dictionary<string, string> b)
     {
         if (ReferenceEquals(a, b))
@@ -216,9 +160,6 @@ public sealed class MetricName : IEquatable<MetricName>
         return true;
     }
 
-    // Order-independent aggregate (Java Map.hashCode = sum of entry hashes, an entry hash
-    // being key.hashCode() ^ value.hashCode()). Summation is commutative, so enumeration
-    // order does not affect the result.
     private static int TagsHashCode(Dictionary<string, string> tags)
     {
         int hash = 0;

@@ -15,43 +15,25 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// One record header — the .NET realization of Java's
-/// <c>org.apache.kafka.common.header.Header</c> — carrying a <see cref="Key"/> and an
-/// optional <see cref="Value"/>. Read-only: headers on a
-/// <see cref="ConsumerRecord{TKey, TValue}"/> are owned copies produced by the receive-path copy-out
-/// (ffi-marshalling.md §B3/§B4), so nothing native-backed escapes.
+/// A record header, Java's <c>Header</c>: a key and an optional value. The headers of a
+/// <see cref="ConsumerRecord{TKey, TValue}"/> are owned copies.
 /// </summary>
 /// <remarks>
-/// <b>Why <c>byte[]?</c> for <see cref="Value"/> (deviation from the CLAUDE.md §3
-/// <see cref="System.ReadOnlyMemory{T}"/> sketch, PLAN micro-decision A).</b> Java's
-/// <c>Header.value()</c> is a raw <c>byte[]</c>, and confluent-kafka-dotnet's message
-/// bytes are <c>byte[]</c> — so <c>byte[]?</c> is the Java-faithful shape and unifies
-/// the raw-byte surface with <see cref="ConsumerRecord{TKey, TValue}.Key"/> / <c>.Value</c>. It adds
-/// no cost: the copy-out already allocates an owned array, and returning it directly
-/// <em>removes</em> the <see cref="System.ReadOnlyMemory{T}"/> wrap the internal type
-/// used — a net simplification, not a new copy.
+/// <see cref="Value"/> is a <c>byte[]</c>, as Java's <c>Header.value()</c> is, not a
+/// <see cref="System.ReadOnlyMemory{T}"/>.
 /// </remarks>
 public sealed class Header
 {
-    /// <summary>
-    /// Initializes a new <see cref="Header"/> with the given key and value.
-    /// </summary>
-    /// <param name="key">The header key.</param>
-    /// <param name="value">
-    /// The header value, or <see langword="null"/> when the header has a null value.
-    /// </param>
+    /// <summary>Initializes a header with a key and a value, which may be <see langword="null"/>.</summary>
     public Header(string key, byte[]? value)
     {
         Key = key;
         Value = value;
     }
 
-    /// <summary>The header key (an owned copy of the length-delimited slice, §B3).</summary>
+    /// <summary>The header key.</summary>
     public string Key { get; }
 
-    /// <summary>
-    /// The header value as an owned <c>byte[]</c>, or <see langword="null"/> when the
-    /// header value is null.
-    /// </summary>
+    /// <summary>The header value, or <see langword="null"/> for a null value.</summary>
     public byte[]? Value { get; }
 }

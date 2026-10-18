@@ -382,7 +382,7 @@ internal sealed class SendAccumulator
     /// <returns>
     /// The send's first stage: completed if a permit was free, otherwise pending until one is (or
     /// until teardown, which also completes it successfully). Its result is the record's
-    /// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is
+    /// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get()"/> is
     /// <paramref name="completion"/>'s <see cref="TaskCompletionSource{TResult}.Task"/>. It ends
     /// <see cref="TaskStatus.Canceled"/> only when <paramref name="cancellationToken"/> fires while it
     /// is pending — and then the record is still sent.

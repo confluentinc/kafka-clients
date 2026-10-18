@@ -396,7 +396,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>Producer.send(record)</c>, which may block and then returns a <c>Future</c> — M11/P3.5
     /// decision D1): the returned <see cref="ValueTask{TResult}"/> completes when the record is
     /// admitted, and yields the record's <see cref="AsyncKafkaFuture{T}"/>, whose
-    /// <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery <see cref="Task{TResult}"/>. Named
+    /// <see cref="AsyncKafkaFuture{T}.Get()"/> is the delivery <see cref="Task{TResult}"/>. Named
     /// <c>SendViaPump</c>, <b>not</b> <c>SendWithCallback</c> like the peripherals: there is no native
     /// <c>Producer_send_async</c>
     /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
@@ -450,7 +450,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <para>
     /// <b>M11/P3.5 — the two stages.</b> The outer <see cref="ValueTask{TResult}"/> is the "accepted"
     /// stage and its result is the record's <see cref="AsyncKafkaFuture{T}"/>, whose
-    /// <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery <see cref="Task{TResult}"/>. With a permit
+    /// <see cref="AsyncKafkaFuture{T}.Get()"/> is the delivery <see cref="Task{TResult}"/>. With a permit
     /// free it is already complete on return — a struct over an <see cref="AsyncKafkaFuture{T}"/>
     /// struct over <c>completion.Task</c>, so the send path allocates
     /// nothing for it (DoD §10); with the bound saturated it is pending
@@ -661,7 +661,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// reads the completion with the singular <c>get</c>, fires the delivery callback, completes
     /// the latch and destroys the future.</item>
     /// <item>A <see cref="KafkaFuture{T}"/> over the latch is returned: <c>Send</c> returns on
-    /// acceptance, and its <see cref="KafkaFuture{T}.Get"/> is Java's <c>future.get()</c>.</item>
+    /// acceptance, and its <see cref="KafkaFuture{T}.Get()"/> is Java's <c>future.get()</c>.</item>
     /// </list>
     /// <para>
     /// <b>A throw out of the enqueue</b> leaves the future with this method: it is destroyed here,
@@ -1204,7 +1204,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// surface — which then never started a pump, yet could have a concurrently blocked
     /// <see cref="Send"/>. Since M11/P4.2 (D4) the sync surface starts the pump on its first
     /// <see cref="Send"/>, and the thread a flush releases is one blocked in
-    /// <see cref="KafkaFuture{T}.Get"/>: the flush resolves that send's future, so the pump's read
+    /// <see cref="KafkaFuture{T}.Get()"/>: the flush resolves that send's future, so the pump's read
     /// returns and completes the latch. Only the <em>join</em> has anything to do with the pump's
     /// existence; the flush does not. Real-producer cost: one redundant <c>Producer_flush</c> before
     /// <c>Producer_close</c> (which already drains) — Java's <c>close()</c> flushes too, so this is
@@ -1518,7 +1518,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// which is a different question). Since M11/P4.2 the sync <see cref="Send"/> starts the pump
     /// lazily on its first call (D4), so a sync producer that has sent stops its pump exactly as the
     /// async paths do; only a producer that never sent skips the join. The flush always runs, so a
-    /// thread concurrently blocked in <see cref="KafkaFuture{T}.Get"/> is released on the sync
+    /// thread concurrently blocked in <see cref="KafkaFuture{T}.Get()"/> is released on the sync
     /// teardown path exactly as it is on the async one. Unlike <see cref="Dispose"/> (which swallows
     /// the close error, best-effort), this <b>throws</b> it — <c>close()</c> reports failures.
     /// </remarks>

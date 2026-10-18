@@ -18,139 +18,114 @@ using System.Runtime.InteropServices;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The single P/Invoke boundary over the Rust core's C ABI
-/// (<c>confluent_kafka.h</c>). Classic <c>[DllImport]</c> declarations, uniform
-/// across every TFM (netstandard2.0 is the floor, so no <c>[LibraryImport]</c> /
-/// <c>LPUTF8Str</c> / <c>Marshal.PtrToStringUTF8</c> — ffi-marshalling.md §0.1).
-///
-/// Type map (ffi §0.1, verbatim): opaque <c>*_t</c> → <see cref="IntPtr"/> for
-/// transient / borrowed handles, wrapped in a <c>SafeHandle</c> one layer up
-/// (§A2/§B2); <c>const char*</c> (in and out) → <see cref="IntPtr"/> (hand-marshalled
-/// via <see cref="Utf8Marshal"/>, §A3/§B3); <c>int32_t</c> → <see cref="int"/>;
-/// <c>bool</c> → <c>[MarshalAs(UnmanagedType.I1)]</c> (C <c>bool</c> is 1 byte, not a
-/// 4-byte Win32 <c>BOOL</c>).
-///
-/// <b>The <c>SafeHandle</c>-as-parameter convention (ffi §A2; M9/P4 H1).</b> Every
-/// <b>synchronous</b> consumer function declares its handle parameter as
-/// <see cref="SafeConsumerHandle"/> rather than a raw <see cref="IntPtr"/> — the one
-/// sanctioned exception to "opaque <c>*_t</c> → <see cref="IntPtr"/>", precedented
-/// in-branch by <see cref="KafkaConsumerNew"/>'s <c>props</c> parameter. The interop
-/// marshaller then does the <c>DangerousAddRef</c> before the native call and the
-/// <c>DangerousRelease</c> in a <c>finally</c> after it, so the consumer cannot be
-/// destroyed out from under a call in progress — including a
-/// <see cref="ConsumerPoll"/> that blocks for a caller-supplied timeout, which
-/// previously handed native a raw pointer that a concurrent <c>Dispose</c> could free
-/// mid-call (a use-after-free with no managed exception). <c>ThrowIfClosed()</c> still
-/// runs first at every call site, so for an already-closed consumer the observable
-/// exception type and message are unchanged; the marshaller's
-/// <see cref="ObjectDisposedException"/> is observable only in the narrow race that was
-/// previously the use-after-free. The convention extends to the M9/P8
-/// <see cref="SafeConsumerReentrancyHandle"/> family: all 21 non-destroy
-/// <c>ConsumerHandle_*</c> declarations are synchronous and take that
-/// <c>SafeHandle</c> as their parameter. Some declarations deliberately keep
-/// <see cref="IntPtr"/> — see <see cref="ConsumerClose"/>, <see cref="ConsumerDestroy"/> and
-/// <see cref="ConsumerHandleDestroy"/> (the last two structurally: each is called
-/// from its own <c>SafeHandle</c>'s <c>ReleaseHandle</c>, where passing <c>this</c>
-/// would AddRef a handle already mid-release). The 18
-/// <c>_async</c> declarations also keep <see cref="IntPtr"/>: they need a
-/// <b>span-the-op</b> reference (taken explicitly at submit, released in
-/// <c>FreeGcHandle</c>), and a call-scoped marshaller AddRef would be the wrong
-/// lifetime — it would release when submit returns, long before the callback fires.
-/// <c>SafeHandle</c>-as-parameter marshalling is a classic <c>[DllImport]</c> feature
-/// supported on the netstandard2.0 floor (incl. net462), so this is floor-safe.
-///
-/// Constructors of <b>owned</b> handles (<see cref="ConsumerPropertiesNew"/>,
-/// <see cref="KafkaConsumerNew"/>, <see cref="MockConsumerNew"/>) are declared to
-/// return their <c>SafeHandle</c> subtype <b>directly</b> rather than a raw
-/// <see cref="IntPtr"/>: the interop marshaller invokes the (private) parameterless
-/// ctor and sets the handle inside a constrained region, so there is no
-/// allocation-gap window in which the native pointer could leak on an async abort /
-/// OOM before a managed <c>SetHandle</c> runs (M2/P2 hardening). SafeHandle-return is
-/// a classic <c>[DllImport]</c> feature, fully supported on the netstandard2.0 floor
-/// (incl. net462) — no <c>[LibraryImport]</c> needed.
-///
-/// The C# method names drop the <c>kafka_&lt;pkg&gt;_</c> prefix (CLAUDE.md §6.3),
-/// so each declaration carries the full ABI symbol as its <c>EntryPoint</c> —
-/// otherwise the marshaller probes the short name and throws
-/// <see cref="EntryPointNotFoundException"/> at runtime.
-///
-/// The shared <c>Error</c> foundation (declared in M1/P1) is now live:
-/// <see cref="KafkaException.FromHandle(IntPtr)"/> reads the three accessors and
-/// frees the handle (ffi §A5/§B5) — the first runtime validation of their
-/// <c>EntryPoint</c>s and the <c>I1</c> bool. M2/P1 adds the consumer client
-/// lifecycle (<c>KafkaConsumer_new</c> / <c>MockConsumer_new</c> / <c>close</c> /
-/// <c>destroy</c>, ffi §B2) plus the group-metadata
-/// getter trio used to round-trip a UTF-8 config value (ffi §B3).
-///
-/// <b><c>partial</c> (M15/P1).</b> CA1060 requires the P/Invoke declarations to live
-/// in <em>one</em> class, but this file already holds 218 of them; the admin family
-/// therefore lands in <c>NativeMethods.Admin.cs</c> as another part of this same
-/// class, keeping both files navigable without splitting the boundary type.
+/// The P/Invoke boundary over the Rust core's C ABI: classic Cdecl <c>[DllImport]</c> declarations, as the
+/// netstandard2.0 floor requires, each naming its full ABI symbol as its <c>EntryPoint</c>, together with a callback
+/// delegate, the metric value-kind constants and small wrappers over the error accessors. A string crosses as an
+/// <see cref="IntPtr"/> to UTF-8 bytes, a C <c>bool</c> as <c>[MarshalAs(UnmanagedType.I1)]</c>, and a handle as an
+/// <see cref="IntPtr"/>, or as its <see cref="SafeHandle"/> where the marshaller should hold a reference for the call
+/// or own a returned handle. The admin declarations are in the other part of the class, <c>NativeMethods.Admin.cs</c>.
 /// </summary>
 internal static partial class NativeMethods
 {
-    /// <summary>
-    /// The bare DLL name. The runtime maps it per-OS to
-    /// <c>confluent_kafka.dll</c> / <c>libconfluent_kafka.so</c> /
-    /// <c>libconfluent_kafka.dylib</c> (ffi §0.2). Never a hardcoded filename or
-    /// absolute path — the MSBuild native-copy target places the matching binary
-    /// in the output dir where default probing resolves it.
-    /// </summary>
     private const string DllName = "confluent_kafka";
 
-    // ---- kafka_common_Error_t — the shared error handle (ffi §A5/§B5) ----
+    [DllImport(DllName, EntryPoint = "kafka_common_Error__enum_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ErrorEnum(IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_code", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int Code(IntPtr error);
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_message_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorMessage(IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_message", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Message(IntPtr error);
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_source_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorSource(IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_retriable_error", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool IsRetriable(IntPtr error);
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_retriable_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte ErrorIsRetriableError(IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_destroy", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ErrorDestroy(IntPtr error);
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_api_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte ErrorIsApiError(IntPtr error, ref IntPtr outErr);
 
-    /// <summary>
-    /// <c>kafka_common_Error_cause</c> — the error that caused <paramref name="error"/>, or
-    /// <see cref="IntPtr.Zero"/> when there is none: Java's <c>Throwable.getCause()</c>.
-    /// <para>
-    /// ⚠ <b>OWNED, even when <paramref name="error"/> is borrowed.</b> The header: "an
-    /// independent copy of the cause (variant, code, message, payload and its own cause
-    /// chain), not a view into <c>error</c>. Free it with <c>kafka_common_Error_destroy</c>.
-    /// It stays valid after <c>error</c> is destroyed". So the result always goes through
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, never <c>FromBorrowedHandle</c>
-    /// (which would leak one handle per cause), and a chain is walked by calling this again
-    /// on the returned handle. <paramref name="error"/> must be non-null.
-    /// </para>
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_cause", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ErrorCause(IntPtr error);
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ErrorDestroy(IntPtr error, ref IntPtr outErr);
 
-    /// <summary>
-    /// <c>kafka_common_Error_new</c> — the <b>inverse</b> of the accessors above:
-    /// builds an error handle a managed callback can <b>return</b> to the Rust core. The
-    /// rebalance-listener trampolines are the motivating (and only) caller: a listener that
-    /// throws must hand the core an error rather than unwind into native (ffi §B6), and the
-    /// core turns the returned handle back into the <c>Result::Err</c> that propagates out
-    /// of the operation which triggered the rebalance.
-    /// <para>
-    /// <paramref name="message"/> is a pinned NUL-terminated UTF-8 buffer, or
-    /// <see cref="IntPtr.Zero"/> for an empty message. <paramref name="code"/> is looked up
-    /// as a Kafka protocol error code; anything unknown (including <c>-1</c>) maps to
-    /// <c>UnknownServerError</c>, mirroring Java's <c>Errors.forCode</c>.
-    /// </para>
-    /// <para>
-    /// <b>Ownership.</b> The returned handle is owned by the caller — but a handle
-    /// <em>returned to a listener callback</em> transfers to the core, so the trampoline
-    /// must <b>not</b> destroy it (header,
-    /// <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>). This is
-    /// the one declaration here whose result is deliberately never passed to
-    /// <see cref="ErrorDestroy"/>.
-    /// </para>
-    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorKafka(ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_message_source_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorKafkaMessageSource(IntPtr message, IntPtr source, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_illegal_argument_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalIllegalArgument(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_illegal_state_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalIllegalState(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_concurrent_modification_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalConcurrentModification(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_timeout_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalTimeout(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_timeout_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorTimeout(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_callback_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalCallback(
+        IntPtr message, IntPtr opaque, ManagedExceptionCarrier.ReleaseCallback release, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_callback_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalCallbackError(IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_LocalCallbackError_opaque_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr LocalCallbackErrorOpaque(IntPtr self, ref IntPtr outErr);
+
+    // A panic while freeing an error leaks the error that reports it, as Python's binding does:
+    // freeing that one could panic the same way.
+    internal static void ErrorDestroy(IntPtr error)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        ErrorDestroy(error, ref outErr);
+    }
+
+    internal static int Code(IntPtr error)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int code = ErrorEnum(error, ref outErr);
+        KafkaException.ThrowIfFailed(ref outErr);
+        return code;
+    }
+
+    internal static IntPtr Message(IntPtr error)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr message = ErrorMessage(error, ref outErr);
+        KafkaException.ThrowIfFailed(ref outErr);
+        return message;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void KafkaFutureGetCallback(IntPtr value, IntPtr error, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_string_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void StringDestroy(IntPtr s, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Map_size_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MapSize(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Map_key_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MapKey(IntPtr self, int index, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Map_value_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MapValue(IntPtr self, int index, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Map_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MapDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_get_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void KafkaFutureGetCb(IntPtr self, KafkaFutureGetCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void KafkaFutureDestroy(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_Error_new", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr KafkaErrorNew(int code, IntPtr message);
 
@@ -2694,7 +2669,7 @@ internal static partial class NativeMethods
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
     /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
-    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// send's <see cref="KafkaFuture{T}.Get()"/>, another driving the mock — M11/P4.2; under its
     /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
@@ -2717,7 +2692,7 @@ internal static partial class NativeMethods
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
     /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
-    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// send's <see cref="KafkaFuture{T}.Get()"/>, another driving the mock — M11/P4.2; under its
     /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
@@ -2737,7 +2712,7 @@ internal static partial class NativeMethods
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
     /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
-    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// send's <see cref="KafkaFuture{T}.Get()"/>, another driving the mock — M11/P4.2; under its
     /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
@@ -2756,7 +2731,7 @@ internal static partial class NativeMethods
     /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
     /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
     /// reachable from public API on the cross-thread mock pattern (one thread blocked in a sync
-    /// send's <see cref="KafkaFuture{T}.Get"/>, another driving the mock — M11/P4.2; under its
+    /// send's <see cref="KafkaFuture{T}.Get()"/>, another driving the mock — M11/P4.2; under its
     /// decision D13 the sending thread can also drive the mock itself). A closed
     /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
     /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.

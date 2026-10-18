@@ -16,22 +16,18 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public <see cref="KafkaException"/> error model: operational errors from
-/// the core map to a flat <see cref="KafkaException"/> (code + retriable + fatal +
-/// message) via <c>KafkaException.FromHandle</c>, freeing the error handle exactly
-/// once (ffi §A5/§B5). The broker-free operational error source is
-/// <c>KafkaConsumer_new</c> with <c>group.protocol=classic</c> (PLAN D1).
+/// Tests the flat <see cref="KafkaException"/> error model: a core error becomes a <see cref="KafkaException"/> with its
+/// code, retriable flag and message, and its handle is freed exactly once.
 /// </summary>
 public sealed class KafkaExceptionTests
 {
-    // The Kafka protocol code for UNSUPPORTED_VERSION (org.apache.kafka Errors),
-    // which the core's `unsupported_version` error carries.
     private const int UnsupportedVersionCode = 35;
 
     private static Dictionary<string, string> BaseConfig() => new()
@@ -49,9 +45,6 @@ public sealed class KafkaExceptionTests
 
         Assert.Equal(UnsupportedVersionCode, ex.Code);
 
-        // The I1-guard FALSE case: unsupported_version is not retriable. A missing
-        // [MarshalAs(I1)] would read a 4-byte BOOL and could flip this — asserting
-        // false pins the bool marshalling.
         Assert.False(ex.IsRetriable);
 
         Assert.Contains("Classic group protocol", ex.Message, StringComparison.Ordinal);
@@ -60,7 +53,6 @@ public sealed class KafkaExceptionTests
     [Fact]
     public void DefaultGroupProtocol_IsClassic_ThrowsUnsupportedVersion()
     {
-        // No group.protocol set → the core defaults to "classic" (PLAN D1).
         KafkaException ex = Assert.Throws<KafkaException>(() => NativeConsumer.Create(BaseConfig()));
 
         Assert.Equal(UnsupportedVersionCode, ex.Code);
@@ -70,9 +62,6 @@ public sealed class KafkaExceptionTests
     [Fact]
     public void NonAsciiInvalidConfigValue_ErrorMessageEchoesValue()
     {
-        // An invalid group.protocol value fails config validation, and the message
-        // echoes the value — round-tripping non-ASCII through the error message
-        // (the NUL-terminated output form, ffi §A3/§B3).
         Dictionary<string, string> config = BaseConfig();
         config["group.protocol"] = "café";
 
@@ -84,22 +73,18 @@ public sealed class KafkaExceptionTests
     [Fact]
     public void FromHandle_NullHandle_ReturnsNull()
     {
-        // A null (IntPtr.Zero) error handle means success — no throw, null result.
         Assert.Null(KafkaException.FromHandle(IntPtr.Zero));
     }
 
     [Fact]
     public void ErrorPath_RepeatedManyTimes_NoDoubleFreeCorruption()
     {
-        // FromHandle frees the error handle in a finally, exactly once. A double
-        // free would corrupt the native allocator and crash under repetition, so
-        // driving the error path many times is the practical single-free guard.
-        Dictionary<string, string> config = BaseConfig();
-        config["group.protocol"] = "classic";
-
         for (int i = 0; i < 200; i++)
         {
-            Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr error = NativeMethods.ErrorKafka(ref outErr);
+            Assert.Equal(IntPtr.Zero, outErr);
+            Assert.IsType<KafkaException>(KafkaException.FromFfiError(error, owned: true));
         }
     }
 }

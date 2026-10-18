@@ -17,17 +17,12 @@ using System;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// Identity byte-array serde — mirrors Java's <c>ByteArraySerializer</c> /
-/// <c>ByteArrayDeserializer</c> (both return the array unchanged). Backs
-/// <see cref="Serdes.ByteArray"/>, and is the bytes bridge P1b's
-/// <c>&lt;byte[], byte[]&gt;</c> consumer uses.
+/// The serde behind <see cref="Serdes.ByteArray"/>: byte arrays unchanged, as Java's <c>ByteArraySerializer</c> and
+/// <c>ByteArrayDeserializer</c>; deserializing copies the span into a new array.
 /// </summary>
 internal sealed class ByteArraySerde : ISerde<byte[]>
 {
-    // Java ByteArraySerializer.serialize: return data (identity, null passes through).
     public byte[]? Serialize(string topic, byte[] data) => data;
 
-    // Java ByteArrayDeserializer.deserialize returns the array as-is; the span here
-    // borrows the native batch, so copy it out to an owned array (ffi §B4, PLAN §4).
     public byte[] Deserialize(string topic, ReadOnlySpan<byte> data) => data.ToArray();
 }

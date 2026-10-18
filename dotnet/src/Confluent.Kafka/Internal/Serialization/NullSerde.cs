@@ -17,17 +17,13 @@ using System;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The "no value" serde — mirrors Java's <c>VoidSerializer</c> / <c>VoidDeserializer</c>.
-/// Backs <see cref="Serdes.Null"/>. Typed over <see cref="object"/> because C# has no
-/// usable <c>Void</c> type argument (Java's is <c>Serde&lt;Void&gt;</c>).
+/// The serde behind <see cref="Serdes.Null"/>, Java's <c>VoidSerializer</c> and <c>VoidDeserializer</c> over
+/// <see cref="object"/>: it serializes to <see langword="null"/> and deserializes any data to <see langword="null"/>,
+/// where Java's <c>VoidDeserializer</c> rejects non-null data.
 /// </summary>
 internal sealed class NullSerde : ISerde<object?>
 {
-    // Java VoidSerializer.serialize: always returns null.
     public byte[]? Serialize(string topic, object? data) => null;
 
-    // Java VoidDeserializer yields null. The borrowed span cannot express Java's
-    // "data must be null" precondition (there is no null span, only an empty one), so
-    // per PLAN §4 this deserializes to default (null) unconditionally.
     public object? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 }

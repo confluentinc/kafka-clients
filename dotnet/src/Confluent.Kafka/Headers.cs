@@ -18,41 +18,27 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The read-only, ordered collection of <see cref="Header"/> on a
-/// <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.common.header.Headers</c>, clipped to today's ABI (a read-only
-/// view of the copied-out headers). An empty record yields a shared empty instance
-/// (<see cref="Count"/> <c>== 0</c>).
+/// The headers of a <see cref="ConsumerRecord{TKey, TValue}"/>, in record order: Java's <c>Headers</c>, read-only
+/// and without its mutating and lookup members. Empty, not null, when the record has none.
 /// </summary>
-/// <remarks>
-/// Clipped to today's ABI: Java's mutating / lookup members (<c>add</c>,
-/// <c>remove</c>, <c>lastHeader</c>, <c>headers(key)</c>) are not exposed this phase —
-/// the receive-path surface is read-only. Headers are owned copies (§B3/§B4), so
-/// nothing native-backed escapes.
-/// </remarks>
 public sealed class Headers : IReadOnlyList<Header>
 {
-    /// <summary>A shared empty instance for records with no headers (no allocation).</summary>
     internal static readonly Headers Empty = new Headers(System.Array.Empty<Header>());
 
     private readonly IReadOnlyList<Header> _headers;
 
-    /// <summary>
-    /// Initializes the collection from the owned headers produced by the copy-out.
-    /// </summary>
     internal Headers(IReadOnlyList<Header> headers)
     {
         _headers = headers;
     }
 
-    /// <summary>The number of headers (<c>0</c> when the record has none).</summary>
+    /// <inheritdoc/>
     public int Count => _headers.Count;
 
-    /// <summary>The header at <paramref name="index"/>, in record order.</summary>
-    /// <param name="index">The zero-based index.</param>
+    /// <inheritdoc/>
     public Header this[int index] => _headers[index];
 
-    /// <summary>Enumerates the headers in record order.</summary>
+    /// <inheritdoc/>
     public IEnumerator<Header> GetEnumerator() => _headers.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();

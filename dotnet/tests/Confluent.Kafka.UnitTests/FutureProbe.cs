@@ -20,10 +20,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// One future of either flavour, observed without an unbounded wait: <see cref="IsDone"/>, a "still waiting" check
-/// and its outcome — the value, <see cref="BlockingCall.Returned"/> for a void future that completed, or the exception
-/// it threw. A sync future's <c>Get()</c> runs on a dedicated thread (<see cref="BlockingCall"/>); an async one's
-/// <see cref="Task"/> is awaited under <see cref="TestTimeout"/>.
+/// Observes one sync or async future without an unbounded wait: whether it is done, whether it is still pending, and
+/// its outcome.
 /// </summary>
 internal abstract class FutureProbe
 {
@@ -49,12 +47,11 @@ internal abstract class FutureProbe
     internal static FutureProbe Of<T>(AsyncKafkaFuture<T> future) => new AsyncProbe(future.Get(), static async task =>
         await ((Task<T>)task).ConfigureAwait(false));
 
-    /// <summary>Asserts the future's <c>Get()</c> would still be waiting.</summary>
     internal abstract void AssertPending();
 
-    /// <summary>The future's outcome, within the deadline; each call observes the same future again.</summary>
     internal abstract Task<object?> Outcome();
 
+    /// <summary>Probes a sync future, running its <c>Get()</c> as a <see cref="BlockingCall"/>.</summary>
     private sealed class SyncProbe : FutureProbe
     {
         private readonly Func<bool> _isDone;
@@ -83,6 +80,7 @@ internal abstract class FutureProbe
         }
     }
 
+    /// <summary>Probes an async future, awaiting its task under <see cref="TestTimeout"/>.</summary>
     private sealed class AsyncProbe : FutureProbe
     {
         private readonly Task _task;

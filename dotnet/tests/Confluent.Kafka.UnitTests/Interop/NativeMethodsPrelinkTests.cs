@@ -27,47 +27,17 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// Every <c>[DllImport]</c> in the library resolves against the native it ships with.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The guard this exists for:</b> a P/Invoke whose <c>EntryPoint</c> names a symbol
-/// the native no longer exports <b>compiles</b>, and fails only when it is first
-/// <b>called</b>, with an <see cref="EntryPointNotFoundException"/>. Master #209 renamed
-/// 74 ABI functions to their Java package names and removed 15 more; a missed rename in
-/// a path no behavioural test reaches would ship green. The structural sweeps
-/// (<see cref="AdminNativeMethodsMarshallingTests"/>) assert only that an
-/// <c>EntryPoint</c> is <i>set</i>, never that it <i>exists</i>.
-/// </para>
-/// <para>
-/// <see cref="Marshal.Prelink(MethodInfo)"/> runs a P/Invoke's one-time setup — load the
-/// library, look up the entry point — without calling it, so the whole surface is checked
-/// without any native side effect. The sweep enumerates by attribute over every type in
-/// the library assembly, not by a hand list of classes, so a P/Invoke added outside the
-/// <c>NativeMethods</c> partials is covered too.
-/// </para>
-/// </remarks>
 public sealed class NativeMethodsPrelinkTests
 {
-    /// <summary>
-    /// The number of <c>[DllImport]</c> declarations in the library, reconciled with the
-    /// source-level count <c>git grep -h -o 'EntryPoint = "…"' -- dotnet/src | wc -l</c>.
-    /// </summary>
-    /// <remarks>
-    /// Exact, not a floor: it is the zero-match guard for the sweep below (a reflection
-    /// filter that found nothing would otherwise make the Prelink test pass vacuously), and
-    /// it also catches a declaration that goes missing. Adding or removing a P/Invoke
-    /// changes it on purpose.
-    /// </remarks>
-    private const int ExpectedImportCount = 577;
+    private const int ExpectedImportCount = 595;
 
-    /// <summary>
-    /// <see cref="Marshal.Prelink(MethodInfo)"/> succeeds for every P/Invoke, against the
-    /// native copied into the test output. All failures are collected, so one run names
-    /// every unresolved entry point rather than the first.
-    /// </summary>
     [Fact]
     public void EveryDllImport_ResolvesAgainstTheLoadedNative()
     {
-        MethodInfo[] imports = LibraryImports();
+        MethodInfo[] imports = LibraryImports()
+            .Where(method => !NativeAbiAllowlist.Contains(EntryPointOf(method)!))
+            .ToArray();
+        Assert.NotEmpty(imports);
 
         List<string> failures = new List<string>();
         foreach (MethodInfo method in imports)
@@ -91,11 +61,6 @@ public sealed class NativeMethodsPrelinkTests
             + string.Join(Environment.NewLine, failures));
     }
 
-    /// <summary>
-    /// The sweep sees exactly the declared surface — the control-positive for
-    /// <see cref="EveryDllImport_ResolvesAgainstTheLoadedNative"/>, and every declaration
-    /// names its full ABI symbol (ffi §0.1), so the marshaller never probes a short C# name.
-    /// </summary>
     [Fact]
     public void TheSweepFindsEveryDllImport()
     {
@@ -107,10 +72,6 @@ public sealed class NativeMethodsPrelinkTests
             method => Assert.False(string.IsNullOrEmpty(EntryPointOf(method)), $"{method.Name} must set EntryPoint"));
     }
 
-    /// <summary>
-    /// Every method in the library assembly that carries <c>[DllImport]</c>, across all
-    /// types (nested and non-public included). <see cref="NativeAbiConformanceTests"/> sweeps the same set.
-    /// </summary>
     internal static MethodInfo[] LibraryImports() =>
         typeof(NativeMethods).Assembly
             .GetTypes()

@@ -17,7 +17,7 @@ You own **C# only**: the `NativeMethods` `[DllImport]`s (declared against the ge
 ## Execute (the rulebook)
 - **Pre-implementation:** while the binding is pre-implementation, the interop scaffolding (`NativeMethods` → `SafeHandle` → completion bridge → `Utf8Marshal`) comes first, followed up by the actual public APIs; thereafter, work is incremental Mode A / Mode B ports.
 - Follow `bindings/dotnet/CLAUDE.md` — §6 workflow (Mode A), §3 API shape, §4 decisions — and `.claude/rules/ffi-marshalling.md` (Parts 0/A/B); honor §2's layer split (`src/` public, `src/Internal/`, `src/Internal/Interop/`; everything under `Internal/` is `internal`). Until the binding exists, the ffi-marshalling.md sketches + the C ABI (`src/ffi/*.rs` — `producer.rs` / `consumer.rs`, read as a *contract*) + the Python binding (a working sibling) are the shape.
-- For §4 **decision points** (namespace, disposal, cancellation, serializers, …), take the recommended default or deviate **with a recorded rationale** (PLAN / `COMMENTS.DONE` / code comment).
+- For §4 **decision points** (namespace, disposal, cancellation, serializers, …), take the recommended default or deviate **with a recorded rationale** (PLAN / `COMMENTS.DONE`, plus one concise code comment where it is needed, `dotnet/CLAUDE.md` §4 Comments).
 - **Shape only, no Kafka logic** (CLAUDE.md §1). No `TODO`/`FIXME`; Apache-2.0 header on new files.
 
 ## Verify (DoD — CLAUDE.md §7)

@@ -21,17 +21,9 @@ using System.Text.RegularExpressions;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The parts of the generated C header (<c>confluent_kafka.h</c>) a P/Invoke has to agree with:
-/// the function prototypes, the callback typedefs, the enums and the structs.
+/// Parses a generated C header into the function prototypes, callback typedefs, enums and structs a P/Invoke has to
+/// agree with, throwing on any statement or declaration it cannot read.
 /// </summary>
-/// <remarks>
-/// The header is cbindgen output (<c>rust/cbindgen.toml</c>, <c>style = "Type"</c>), so it has
-/// four statement shapes: <c>typedef struct { … } name;</c> (opaque when the body is only
-/// <c>uint8_t _private[0]</c>), <c>typedef enum { … } name;</c>, <c>typedef ret (*name)(…);</c>
-/// and a function prototype. The parser is strict: a statement or declaration it cannot read
-/// throws <see cref="FormatException"/> instead of being skipped, so a new header shape cannot
-/// hide a function from <see cref="NativeAbiConformanceTests"/>.
-/// </remarks>
 internal sealed class CHeader
 {
     private static readonly Regex s_struct = new Regex(@"^typedef struct \{(?<body>.*)\} (?<name>\w+)$", RegexOptions.Singleline);
@@ -55,23 +47,16 @@ internal sealed class CHeader
         Enums = enums;
     }
 
-    /// <summary>Every function prototype, by name.</summary>
     internal IReadOnlyDictionary<string, CSignature> Functions { get; }
 
-    /// <summary>Every <c>typedef ret (*name)(…)</c>, by typedef name.</summary>
     internal IReadOnlyDictionary<string, CSignature> Callbacks { get; }
 
-    /// <summary>Every struct with fields (a transparent, by-value ABI struct), by typedef name.</summary>
     internal IReadOnlyDictionary<string, IReadOnlyList<CField>> Structs { get; }
 
-    /// <summary>Every opaque struct (<c>uint8_t _private[0]</c>), by typedef name.</summary>
     internal HashSet<string> OpaqueStructs { get; }
 
-    /// <summary>Every enum typedef name. A C enum is <c>int</c>-sized.</summary>
     internal HashSet<string> Enums { get; }
 
-    /// <summary>Parses the header text.</summary>
-    /// <exception cref="FormatException">A statement or declaration has a shape the parser does not know.</exception>
     internal static CHeader Parse(string text)
     {
         Dictionary<string, CSignature> functions = new Dictionary<string, CSignature>(StringComparer.Ordinal);
@@ -119,11 +104,6 @@ internal sealed class CHeader
         return new CHeader(functions, callbacks, structs, opaqueStructs, enums);
     }
 
-    /// <summary>
-    /// The header with its comments and preprocessor lines removed: what <see cref="Parse"/> reads.
-    /// A test that edits the header text edits this form, so a prototype quoted in a doc comment
-    /// cannot be matched instead of the real one.
-    /// </summary>
     internal static string StripComments(string text)
     {
         string code = Regex.Replace(text, @"/\*.*?\*/", " ", RegexOptions.Singleline);
@@ -131,7 +111,6 @@ internal sealed class CHeader
         return Regex.Replace(code, @"^[ \t]*#[^\n]*", string.Empty, RegexOptions.Multiline);
     }
 
-    /// <summary>The top-level statements: split at every <c>;</c> outside braces, whitespace collapsed.</summary>
     private static IEnumerable<string> Statements(string code)
     {
         StringBuilder current = new StringBuilder();
@@ -192,7 +171,6 @@ internal sealed class CHeader
             return parameters;
         }
 
-        // Split at the commas outside parentheses: an inline function-pointer parameter has its own list.
         int depth = 0;
         int start = 0;
         for (int i = 0; i < trimmed.Length; i++)
@@ -228,10 +206,6 @@ internal sealed class CHeader
         return new CField(field.Name, field.Type);
     }
 
-    /// <summary>
-    /// One declaration, with or without a name: <c>const char *const *topics</c>, <c>void*</c>,
-    /// or an inline function pointer such as <c>void (*user_data_destroy)(void*)</c>.
-    /// </summary>
     private static CParam ParseDeclaration(string text)
     {
         string declaration = text.Trim();
@@ -266,20 +240,16 @@ internal sealed class CType
         Function = function;
     }
 
-    /// <summary>The named type under the pointers; <c>"(*)"</c> for an inline function pointer.</summary>
     internal string Base { get; }
 
-    /// <summary>The number of <c>*</c>s.</summary>
     internal int Depth { get; }
 
-    /// <summary>The signature of an inline function-pointer declaration; <see langword="null"/> otherwise.</summary>
     internal CSignature? Function { get; }
 
     internal bool IsVoid => Depth == 0 && Function is null && Base == "void";
 
     internal static CType FunctionPointer(CSignature signature) => new CType("(*)", 0, signature);
 
-    /// <summary>The type one <c>*</c> down.</summary>
     internal CType Pointee() => new CType(Base, Depth - 1, Function);
 
     public override string ToString() =>

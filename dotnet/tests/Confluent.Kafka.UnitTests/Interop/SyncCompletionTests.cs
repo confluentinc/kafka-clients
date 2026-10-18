@@ -23,21 +23,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The latch behind the sync send's <see cref="KafkaFuture{T}"/>, <see cref="SyncCompletion{T}"/> (M11/P4.2 S1,
-/// PLAN §7 N4–N6): <see cref="SyncCompletion{T}.Get"/> blocks every waiter until the first completion and then
-/// releases all of them with the same outcome, the first completion wins in either order, and a completion racing a
-/// <see cref="SyncCompletion{T}.Get"/> is never lost. Waiters run on dedicated threads (they block by design, so a
-/// thread-pool thread would only add injection delay), and every wait is bounded by the suite's 30 s deadline, so a
-/// lost wakeup fails the run instead of hanging it.
+/// Tests <see cref="SyncCompletion{T}"/>: <see cref="SyncCompletion{T}.Get"/> releases every waiter with the first
+/// completion's outcome, and no completion racing it is lost.
 /// </summary>
 public sealed class SyncCompletionTests
 {
-    // How many misses a hot spin takes in a row before it yields once (see OnMiss).
     private const int HotSpins = 1 << 16;
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    // How long a blocked waiter must stay blocked before the latch is completed.
     private static readonly TimeSpan s_stillBlocked = TimeSpan.FromMilliseconds(100);
 
     [Theory]
@@ -69,8 +63,6 @@ public sealed class SyncCompletionTests
             }))
             .ToArray();
 
-        // Every waiter reaches the blocking wait before the latch completes, so this exercises the slow path, not
-        // the already-done fast path.
         Assert.True(
             SpinWait.SpinUntil(() => waiters.All(IsBlocked), s_deadline),
             "The waiters did not all block in Get().");
@@ -94,7 +86,6 @@ public sealed class SyncCompletionTests
         KafkaException cause = new KafkaException(7, "The first failure.", isRetriable: false);
         KafkaException late = new KafkaException(8, "A later failure.", isRetriable: false);
 
-        // A result first: a later exception and a later result are both refused.
         SyncCompletion<RecordMetadata> resultFirst = new SyncCompletion<RecordMetadata>();
         Assert.True(resultFirst.TrySetResult(first));
         Assert.False(resultFirst.TrySetException(late));
@@ -102,7 +93,6 @@ public sealed class SyncCompletionTests
         Assert.Same(first, resultFirst.Get());
         Assert.Same(first, resultFirst.Get());
 
-        // An exception first: a later result and a later exception are both refused.
         SyncCompletion<RecordMetadata> exceptionFirst = new SyncCompletion<RecordMetadata>();
         Assert.True(exceptionFirst.TrySetException(cause));
         Assert.False(exceptionFirst.TrySetResult(first));
@@ -110,7 +100,6 @@ public sealed class SyncCompletionTests
         Assert.Same(cause, Assert.Throws<KafkaException>(() => exceptionFirst.Get()));
         Assert.Same(cause, Assert.Throws<KafkaException>(() => exceptionFirst.Get()));
 
-        // Concurrent completers, results and exceptions mixed: exactly one wins, and Get() reports that one.
         const int Rounds = 100;
         const int Completers = 4;
         for (int round = 0; round < Rounds; round++)
@@ -160,7 +149,6 @@ public sealed class SyncCompletionTests
             object? observed = null;
             using Barrier start = new Barrier(2);
 
-            // Get() on one thread, the completion on this one, released together so the two race.
             Thread getter = StartThread(() =>
             {
                 if (start.SignalAndWait(s_deadline))
@@ -179,19 +167,10 @@ public sealed class SyncCompletionTests
             Assert.Same(offered, observed);
         }
 
-        // The other half of the race: a completion against Get()'s lock-free fast path. A completer that published
-        // `_done` before the value or the error (mutation M2′) mostly survived the loop above, which seldom lands a
-        // getter's read BETWEEN the completer's two stores: a fresh thread and a barrier per iteration leave the two
-        // far apart. Which release shape lands in that window more often differs by runtime, so both run.
         AssertTheFastPathNeverSeesDoneWithoutTheOutcome(getterSpinsOnIsDone: false);
         AssertTheFastPathNeverSeesDoneWithoutTheOutcome(getterSpinsOnIsDone: true);
     }
 
-    // One long-lived getter thread and this completer thread, in lockstep over fresh latches: the completer publishes a
-    // latch, waits for the getter to finish the previous round, releases it and completes the latch at once. The getter
-    // then calls Get() straight away or, with getterSpinsOnIsDone, first spins on IsDone — the volatile read Get()'s
-    // fast path makes. A read that lands between a reordered completer's two stores sees the latch done with its
-    // outcome still missing (null). Results and exceptions alternate.
     private static void AssertTheFastPathNeverSeesDoneWithoutTheOutcome(bool getterSpinsOnIsDone)
     {
         const int Rounds = 20_000;
@@ -220,7 +199,6 @@ public sealed class SyncCompletionTests
                         OnMiss(ref misses, elapsed, "the completer to release a round");
                     }
 
-                    // Published before the release, so the acquiring read above makes it visible.
                     SyncCompletion<RecordMetadata> latch = latches[round]!;
                     if (getterSpinsOnIsDone)
                     {
@@ -266,8 +244,6 @@ public sealed class SyncCompletionTests
             "without its outcome.");
     }
 
-    // A miss of a hot spin: after HotSpins misses in a row, yield once — so a single-core machine still makes
-    // progress — and fail past the deadline instead of spinning forever.
     private static void OnMiss(ref int misses, System.Diagnostics.Stopwatch elapsed, string waitingFor)
     {
         if (++misses < HotSpins)
@@ -284,7 +260,6 @@ public sealed class SyncCompletionTests
         Thread.Yield();
     }
 
-    // Get()'s outcome as an object: the value, or the exception it rethrew.
     private static object Outcome(SyncCompletion<RecordMetadata> completion)
     {
         try

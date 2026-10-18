@@ -17,15 +17,11 @@ using System;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// 64-bit integer serde — mirrors Java's <c>LongSerializer</c> /
-/// <c>LongDeserializer</c>: 8 bytes, <b>big-endian</b>. Backs
-/// <see cref="Serdes.Int64"/>.
+/// The serde behind <see cref="Serdes.Int64"/>: 8 big-endian bytes, as Java's <c>LongSerializer</c> and
+/// <c>LongDeserializer</c>.
 /// </summary>
 internal sealed class Int64Serde : ISerde<long>
 {
-    // Java LongSerializer.serialize: 8 bytes big-endian ((byte)(data>>>56) ...
-    // data.byteValue()). The (byte) cast keeps the low 8 bits, so arithmetic `>>` is
-    // byte-identical to Java's logical `>>>`.
     public byte[]? Serialize(string topic, long data) =>
         new[]
         {
@@ -39,8 +35,6 @@ internal sealed class Int64Serde : ISerde<long>
             (byte)data,
         };
 
-    // Java LongDeserializer.deserialize: length must be exactly 8, else
-    // SerializationException with this exact message; accumulate big-endian.
     public long Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         if (data.Length != 8)

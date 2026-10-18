@@ -15,28 +15,17 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The kind of timestamp carried by a <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET
-/// realization of Java's <c>org.apache.kafka.common.record.TimestampType</c>. The
-/// numeric values map directly onto the <c>int</c> the C ABI's
-/// <c>ConsumerRecord_timestamp_type</c> returns.
+/// The kind of a <see cref="ConsumerRecord{TKey, TValue}"/>'s timestamp, Java's <c>TimestampType</c>, each
+/// value its Java id.
 /// </summary>
 public enum TimestampType
 {
-    /// <summary>
-    /// The record carries no timestamp (the ABI sentinel <c>-1</c>);
-    /// <see cref="ConsumerRecord{TKey, TValue}.Timestamp"/> is <c>-1</c> (<c>NO_TIMESTAMP</c>).
-    /// </summary>
+    /// <summary>No timestamp: Java's <c>NO_TIMESTAMP_TYPE</c>.</summary>
     NoTimestampType = -1,
 
-    /// <summary>
-    /// The timestamp is the time the record was produced (Kafka <c>CreateTime</c>,
-    /// the ABI value <c>0</c>).
-    /// </summary>
+    /// <summary>The time the record was produced: Java's <c>CREATE_TIME</c>.</summary>
     CreateTime = 0,
 
-    /// <summary>
-    /// The timestamp is the time the broker appended the record to the log (Kafka
-    /// <c>LogAppendTime</c>, the ABI value <c>1</c>).
-    /// </summary>
+    /// <summary>The time the broker appended the record to the log: Java's <c>LOG_APPEND_TIME</c>.</summary>
     LogAppendTime = 1,
 }

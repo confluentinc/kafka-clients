@@ -17,20 +17,13 @@ using System;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// IEEE-754 double serde — mirrors Java's <c>DoubleSerializer</c> /
-/// <c>DoubleDeserializer</c>: the 8 raw <c>Double.doubleToLongBits</c> bytes,
-/// <b>big-endian</b>. Backs <see cref="Serdes.Double"/>.
+/// The serde behind <see cref="Serdes.Double"/>: the 8 big-endian bytes of Java's <c>Double.doubleToLongBits</c>
+/// (NaN canonicalized), as Java's <c>DoubleSerializer</c> and <c>DoubleDeserializer</c>.
 /// </summary>
 internal sealed class DoubleSerde : ISerde<double>
 {
-    // Java's canonical NaN from Double.doubleToLongBits (0x7ff8000000000000L).
-    // BitConverter.DoubleToInt64Bits is the raw-bits form (like doubleToRawLongBits)
-    // and does NOT canonicalize, so canonicalize here to stay wire-identical to Java
-    // for NaN payloads.
     private const long CanonicalNaNBits = 0x7ff8000000000000L;
 
-    // Java DoubleSerializer.serialize: bits = Double.doubleToLongBits(data), then 8
-    // bytes big-endian.
     public byte[]? Serialize(string topic, double data)
     {
         long bits = double.IsNaN(data) ? CanonicalNaNBits : BitConverter.DoubleToInt64Bits(data);
@@ -47,10 +40,6 @@ internal sealed class DoubleSerde : ISerde<double>
         };
     }
 
-    // Java DoubleDeserializer.deserialize(byte[]): length must be exactly 8, else
-    // SerializationException. NOTE the message says "Deserializer", not
-    // "DoubleDeserializer" — a Java quirk on the byte[] overload (which this
-    // span-based method mirrors); matched verbatim for wire/behaviour parity.
     public double Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         if (data.Length != 8)

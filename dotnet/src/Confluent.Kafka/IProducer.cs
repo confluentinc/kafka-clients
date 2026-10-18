@@ -47,7 +47,7 @@ namespace Confluent.Kafka;
 /// the async binding API. It is the sync-consumer precedent (<c>consumer-threading.md §1.1</c>) applied
 /// to the producer. A sync producer starts exactly one background thread, its send-completion pump,
 /// on its first <c>Send</c>, and joins it at teardown (M11/P4.2 decision D4). The pump reads each
-/// send's outcome, and <see cref="KafkaFuture{T}.Get"/> waits on a managed latch that the pump
+/// send's outcome, and <see cref="KafkaFuture{T}.Get()"/> waits on a managed latch that the pump
 /// completes, not on a <see cref="System.Threading.Tasks.Task"/>.
 /// </para>
 /// <para>
@@ -57,14 +57,14 @@ namespace Confluent.Kafka;
 /// throw surfaces synchronously as a <see cref="SerializationException"/>), hands the record to the
 /// core, and returns once the core has accepted it. It blocks only while the core waits for metadata
 /// or for <c>buffer.memory</c>, up to <c>max.block.ms</c> (Java's <c>send</c> blocking), and the key /
-/// value buffers are reusable when it returns. <see cref="KafkaFuture{T}.Get"/> then blocks until the record is
+/// value buffers are reusable when it returns. <see cref="KafkaFuture{T}.Get()"/> then blocks until the record is
 /// acknowledged or fails (Java's <c>future.get()</c>), and rethrows a failure unwrapped. This
 /// supersedes M11/P4 decision #1, under which <c>Send</c> blocked and returned the
 /// <see cref="RecordMetadata"/> directly. That decision's premise — a future-returning sync
 /// <c>Send</c> would clone the async surface, "forced by .NET's single Task type" — has been false
 /// since M11/P3.5/P3.6 gave <see cref="IAsyncProducer{TKey, TValue}"/> its own two-stage shape: a
 /// <see cref="System.Threading.Tasks.ValueTask{TResult}"/> admission yielding an
-/// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is a
+/// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get()"/> is a
 /// <see cref="System.Threading.Tasks.Task{TResult}"/>.
 /// </para>
 /// <para>
@@ -107,7 +107,9 @@ namespace Confluent.Kafka;
 /// <b>No <see cref="System.Threading.CancellationToken"/> anywhere</b> (decision #4): the producer
 /// has no <c>wakeup()</c>, so there is no interruption primitive to expose — a blocked operation
 /// runs to completion, the single-owner model of the sync consumer. That includes
-/// <see cref="KafkaFuture{T}.Get"/>, which has no timed or cancellable form (M11/P4.2 decision D7).
+/// <see cref="KafkaFuture{T}.Get()"/>. The future's <see cref="KafkaFuture{T}.Get(System.TimeSpan)"/> and
+/// <see cref="KafkaFuture{T}.Get(System.Threading.CancellationToken)"/> end only the caller's wait, never the send;
+/// on a send's future they throw <see cref="System.NotSupportedException"/> until the send has completed.
 /// </para>
 /// <para>
 /// <b>Concurrent <c>Send</c> is supported — do NOT add your own lock.</b> The Rust core
@@ -159,7 +161,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <summary>
     /// Serializes and publishes <paramref name="record"/> to its topic, returning once the core has
     /// accepted it (Java <c>Producer.send(record)</c> — M11/P4.2) with a <see cref="KafkaFuture{T}"/>
-    /// whose <see cref="KafkaFuture{T}.Get"/> blocks until the cluster acknowledges the record and
+    /// whose <see cref="KafkaFuture{T}.Get()"/> blocks until the cluster acknowledges the record and
     /// returns its <see cref="RecordMetadata"/> (Java <c>future.get()</c>). This call blocks only while
     /// the core waits for metadata or for <c>buffer.memory</c>, up to <c>max.block.ms</c>. The key /
     /// value are serialized on the caller's thread before the send; the serialized bytes are copied
@@ -167,13 +169,13 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// returns (ffi §A4).
     /// </summary>
     /// <param name="record">The record to publish.</param>
-    /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get"/> returns the published
+    /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
     /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
-    /// surfaces from <see cref="KafkaFuture{T}.Get"/> instead).</exception>
+    /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record);
 
     /// <summary>
@@ -195,7 +197,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </para>
     /// <para>
     /// <b>On this synchronous surface the callback runs on the producer's send-completion pump
-    /// thread</b>, <b>before</b> the returned future's <see cref="KafkaFuture{T}.Get"/> returns or
+    /// thread</b>, <b>before</b> the returned future's <see cref="KafkaFuture{T}.Get()"/> returns or
     /// throws (M11/P4.2 decision D3, superseding M14/P1 decision D3, under which it ran inline on the
     /// calling thread before <c>Send</c> returned). <see cref="IDeliveryCallback"/> documents the full
     /// contract: non-null metadata on every path, which outcomes fire it (a throw out of <c>Send</c>
@@ -235,7 +237,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
-    /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get"/> returns the published
+    /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
     /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
@@ -243,7 +245,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
-    /// surfaces from <see cref="KafkaFuture{T}.Get"/> instead).</exception>
+    /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback);
 
     /// <summary>

@@ -49,7 +49,7 @@ namespace Confluent.Kafka;
 /// <b>Both of Java's <c>send</c> signatures (M14/P1).</b>
 /// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback)"/> adds Java's
 /// <c>send(record, Callback)</c>; the callback runs on the producer's send-completion pump thread,
-/// before the returned future's <see cref="KafkaFuture{T}.Get"/> returns or throws (M11/P4.2 decision
+/// before the returned future's <see cref="KafkaFuture{T}.Get()"/> returns or throws (M11/P4.2 decision
 /// D3). See <see cref="IDeliveryCallback"/>.
 /// </para>
 /// <para>

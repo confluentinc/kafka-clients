@@ -259,6 +259,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
     /// A <c>name != "GetEnumerator"</c> filter would have been the easy way to green, and it
     /// would also hide a genuine bean accessor that happened to be called that.
     /// </para>
+    /// <para>
+    /// A bean accessor takes no parameters and returns a value, so only that shape is
+    /// counted: Java's own <c>getNow(valueIfAbsent)</c> (<c>KafkaFuture.GetNow</c>) is a
+    /// Java method name, not an accessor.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheBeanAccessorStyle_IsConfinedToReplicaLogDirInfo()
@@ -279,6 +284,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
                 }
 
                 if (method.Name.Length > 3
+                    && method.GetParameters().Length == 0
+                    && method.ReturnType != typeof(void)
                     && method.Name.StartsWith("Get", StringComparison.Ordinal)
                     && char.IsUpper(method.Name[3]))
                 {

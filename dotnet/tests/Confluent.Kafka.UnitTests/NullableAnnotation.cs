@@ -19,61 +19,20 @@ using System.Reflection;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Decodes the C# compiler's nullable-annotation metadata for a member or parameter, so a
-/// shape test can assert <c>T</c> vs <c>T?</c> — a distinction that is <b>erased from the
-/// CLR type</b>, so <see cref="PropertyInfo.PropertyType"/> /
-/// <see cref="ParameterInfo.ParameterType"/> cannot see it at all.
+/// Decodes the compiler's nullable-annotation metadata for a member or parameter, which the CLR type erases, so a shape
+/// test can assert <c>T</c> vs <c>T?</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <see cref="System.Reflection.NullabilityInfoContext"/> would do this for us, but it
-/// post-dates the net462 leg of the TFM matrix, so the flags are decoded by hand.
-/// </para>
-/// <para>
-/// ⚠ <b>The enclosing-context walk is the load-bearing part, and omitting it leaves an
-/// assertion's falsifiability up to a compiler heuristic the test does not control.</b> The
-/// compiler does not annotate every member: it emits <c>NullableContextAttribute</c>
-/// <em>per declaration</em>, picking whichever value lets it omit the most per-member
-/// <c>NullableAttribute</c>s, and members agreeing with that context carry <b>no attribute
-/// of their own</b>. So when nullable positions come to dominate a type the compiler picks
-/// context <c>2</c>, and it is then the <em>nullable</em> members that are bare. A decoder
-/// reading only a member's own attribute and defaulting to <see cref="NotAnnotated"/>
-/// reports those as non-nullable, so the <c>Assert.Equal(1, …)</c> written against it passes
-/// however the member is widened.
-/// </para>
-/// <para>
-/// M15/P2a and P2b shipped exactly that decoder (Critic 68, finding 1). Measured against
-/// their <b>10</b> non-nullable assertions: in the baseline build <b>none</b> of the 10
-/// asserted members carries a <c>NullableAttribute</c>, so all 10 resolved through the
-/// fallback without reading any metadata. Widening each one in turn then showed the split
-/// the heuristic produces — <b>9</b> acquire an own <c>NullableAttribute([2,…])</c> and so
-/// would have been caught anyway, while <b>1</b> (<c>TopicListing.Name</c>) does not,
-/// because its declaring type flips to context <c>2</c> instead: that widening built clean
-/// and left the suite fully green. So the member-only form was <em>accidentally</em>
-/// sensitive 9 times and unfalsifiable once — and which bucket a member lands in is decided
-/// by attribute-minimisation, not by the test. With the context walk all 10 fail when
-/// widened.
-/// </para>
-/// <para>
-/// Hence the fallback here is <see cref="Oblivious"/>, matching the compiler's own default
-/// for "no context in scope", rather than <see cref="NotAnnotated"/>. An assertion against
-/// a member carrying no nullability metadata at all then <b>fails loudly</b> instead of
-/// quietly agreeing with whatever it was asked.
-/// </para>
-/// <para>
-/// This is the single decoder for the whole test project — the three copies that preceded
-/// it are what let one unsound fallback spread across two files.
-/// </para>
+/// Decoded by hand, since <c>NullabilityInfoContext</c> is not on net462; a member without its own attribute takes the
+/// nearest enclosing context, and with none in scope reads <see cref="Oblivious"/>, so an assertion on it fails instead
+/// of passing.
 /// </remarks>
 internal static class NullableAnnotation
 {
-    /// <summary>No nullability metadata in scope — the annotation is unknown.</summary>
     internal const byte Oblivious = 0;
 
-    /// <summary>Not annotated nullable, i.e. <c>T</c> under <c>#nullable enable</c>.</summary>
     internal const byte NotAnnotated = 1;
 
-    /// <summary>Annotated nullable, i.e. <c>T?</c>.</summary>
     internal const byte Annotated = 2;
 
     private const string NullableAttributeName = "System.Runtime.CompilerServices.NullableAttribute";
@@ -81,36 +40,6 @@ internal static class NullableAnnotation
     private const string NullableContextAttributeName =
         "System.Runtime.CompilerServices.NullableContextAttribute";
 
-    /// <summary>
-    /// The flag for a property's or method's own type, i.e. its return type for a method.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <b>Both special cases below are handled here rather than documented, because a
-    /// <see cref="MethodInfo"/> and a <see cref="System.Type"/> each bind to this overload
-    /// silently.</b> A wrong-overload warning nobody sees is exactly the unfalsifiable-assertion
-    /// class the rest of this file exists to close, so the guards are code.
-    /// </para>
-    /// <para>
-    /// A <see cref="MethodInfo"/> is routed to its <see cref="MethodInfo.ReturnParameter"/>,
-    /// which is where the compiler puts a return's flag. Reading the method's own attributes
-    /// instead would find none (so <see cref="Own"/> is always null) and fall through to
-    /// <see cref="MemberInfo.DeclaringType"/>, <b>skipping the method's own
-    /// <c>NullableContextAttribute</c> scope</b> — measured (M15, while it returned a
-    /// <c>Task&lt;T&gt;</c>) on <c>ListTopicsResult.NamesToListings()</c>: widening its return to nullable moves
-    /// <c>Flag(ReturnParameter)</c> to <see cref="Annotated"/> while the unrouted
-    /// <c>MemberInfo</c> form stayed at <see cref="NotAnnotated"/>, i.e. green however the
-    /// return is widened. (The sibling <see cref="Flag(ParameterInfo)"/> has always been
-    /// correct here — it starts its walk at <see cref="ParameterInfo.Member"/>, not at the
-    /// declaring type.)
-    /// </para>
-    /// <para>
-    /// A <see cref="System.Type"/> is <b>rejected</b>: a type's own <c>NullableAttribute</c>
-    /// describes its base type, not a member, and would be misread as the member flag. There
-    /// is no correct answer to route it to, so the only way it cannot be asked silently is
-    /// for asking to throw.
-    /// </para>
-    /// </remarks>
     internal static byte Flag(MemberInfo member) => member switch
     {
         MethodInfo method => Flag(method.ReturnParameter),
@@ -121,44 +50,11 @@ internal static class NullableAnnotation
         _ => Own(member.GetCustomAttributesData()) ?? Context(member.DeclaringType),
     };
 
-    /// <summary>The flag for a parameter, including a <c>ReturnParameter</c>.</summary>
     internal static byte Flag(ParameterInfo parameter) => Flag(parameter, 0);
 
-    /// <summary>
-    /// The flag at one <b>position</b> of a parameter's flattened type — position 0 is the
-    /// outermost type, 1 its first type argument, and so on.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>Position 0 cannot see a nullable type ARGUMENT, and that is the whole reason
-    /// this overload exists (M15/P3).</b> <c>Task&lt;Node&gt;</c> and
-    /// <c>Task&lt;Node?&gt;</c> both emit <see cref="NotAnnotated"/> at position 0 — the
-    /// <see cref="System.Threading.Tasks.Task"/> itself is never null — and differ only at
-    /// position 1. Every M15 result accessor returned a <c>Task&lt;T&gt;</c>, so an
-    /// assertion written against position 0 is unfalsifiable for exactly the nullability
-    /// the accessor is about. The earlier phases' assertions pinned the <em>Task</em>'s own
-    /// nullability (<c>DescribeTopicsResult</c>'s aggregates returned
-    /// <c>Task&lt;…&gt;?</c>), which is a different claim. Since M15/P14 the sync Results
-    /// return a <see cref="KafkaFuture{T}"/>, a struct: position 0 of a generic struct is
-    /// <see cref="Oblivious"/>, and its <c>?</c> is <see cref="Nullable{T}"/> in the CLR
-    /// type, which the compiler encodes by the type argument alone — so a struct future's
-    /// nullability is asserted on the type, and only its value's at a position here.
-    /// <para>
-    /// A single-byte attribute means every position agrees, so it answers for any position;
-    /// a member with no attribute of its own resolves against the enclosing context, which
-    /// is likewise one value for all positions.
-    /// </para>
-    /// </remarks>
-    /// <param name="parameter">The parameter, or a <c>ReturnParameter</c>.</param>
-    /// <param name="position">The position in the flattened type.</param>
-    /// <returns>The flag byte.</returns>
     internal static byte Flag(ParameterInfo parameter, int position) =>
         Own(parameter.GetCustomAttributesData(), position) ?? Context(parameter.Member);
 
-    /// <summary>
-    /// Walks outward — declaring method, then each enclosing type — for the nearest
-    /// <c>NullableContextAttribute</c>, which is what a member with no attribute of its own
-    /// inherits.
-    /// </summary>
     private static byte Context(MemberInfo? scope)
     {
         for (; scope is not null; scope = scope.DeclaringType)
@@ -176,11 +72,6 @@ internal static class NullableAnnotation
     private static byte? Own(IList<CustomAttributeData> attributes, int position = 0) =>
         Read(attributes, NullableAttributeName, position);
 
-    /// <summary>
-    /// Reads one flag byte out of a compiler-emitted nullability attribute, which carries
-    /// either a single <see cref="byte"/> (every position agrees) or a <see cref="byte"/>
-    /// array indexed by position in the flattened type — position 0 being the outermost.
-    /// </summary>
     private static byte? Read(IList<CustomAttributeData> attributes, string attributeFullName, int position = 0)
     {
         foreach (CustomAttributeData attribute in attributes)
@@ -193,7 +84,6 @@ internal static class NullableAnnotation
             object? argument = attribute.ConstructorArguments[0].Value;
             if (argument is byte flag)
             {
-                // One byte means every position agrees, so it answers for any position.
                 return flag;
             }
 

@@ -15,44 +15,15 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// Converts a value of type <typeparamref name="T"/> to its Kafka wire bytes — the
-/// .NET realization of Java's <c>org.apache.kafka.common.serialization.Serializer&lt;T&gt;</c>
-/// (<c>serialize(String topic, T data)</c>). A pure managed, binding-/user-layer
-/// concern: the C ABI is bytes-only (CLAUDE.md §4), so (de)serialization lives here,
-/// not in the Rust core.
+/// Converts a <typeparamref name="T"/> to the bytes of a record key or value: Java's
+/// <c>Serializer&lt;T&gt;</c>, without its headers overload and its <c>configure</c> and <c>close</c>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// This is the send-side half of a serde. It is shipped in this milestone
-/// <em>ready for</em> the typed producer (<c>Producer&lt;TKey, TValue&gt;</c>, deferred)
-/// and is exercised directly by the built-in <see cref="Serdes"/> round-trip tests so
-/// it is not dead code; the <em>consumed</em> half this milestone is
-/// <see cref="IDeserializer{T}"/>.
-/// </para>
-/// <para>
-/// The <c>configure</c> / <c>close</c> lifecycle hooks on Java's interface are not
-/// modeled: the built-in serdes are stateless and hold no resources, and no
-/// configuration-driven serde is in scope. They can be added later
-/// non-breakingly (a C# default-interface-method) if a configurable serde is needed.
-/// </para>
-/// </remarks>
-/// <typeparam name="T">The value type this serializer encodes.</typeparam>
+/// <typeparam name="T">The type encoded.</typeparam>
 public interface ISerializer<T>
 {
-    /// <summary>
-    /// Encodes <paramref name="data"/> to its Kafka wire bytes.
-    /// </summary>
-    /// <param name="topic">
-    /// The topic the value is being produced to. Passed through for parity with
-    /// Java (topic-aware serializers); the built-in serdes ignore it.
-    /// </param>
+    /// <summary>Encodes <paramref name="data"/>, which may be <see langword="null"/>.</summary>
+    /// <param name="topic">The topic the record is sent to.</param>
     /// <param name="data">The value to encode.</param>
-    /// <returns>
-    /// The encoded bytes. May be <see langword="null"/> — Java's serializers return
-    /// <c>null</c> for <c>null</c> input and Java's <c>VoidSerializer</c> always
-    /// returns <c>null</c>; a <c>null</c> value maps to a Kafka tombstone on the
-    /// produce path (<c>ProducerRecord.Value</c> is nullable), so the nullable return
-    /// preserves that distinction.
-    /// </returns>
+    /// <returns>The bytes, or <see langword="null"/>, which is sent as a null key or value.</returns>
     byte[]? Serialize(string topic, T data);
 }

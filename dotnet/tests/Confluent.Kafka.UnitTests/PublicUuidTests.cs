@@ -22,16 +22,13 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="Uuid"/>'s text form is the identity Kafka prints: the URL-safe, unpadded
-/// base64 encoding of 16 big-endian bytes (Java's <c>Uuid.toString()</c>), and the exact
-/// form the C ABI exchanges topic ids in. Getting the byte order or the alphabet wrong
-/// would still round-trip through itself, so these tests pin it against <b>known
-/// vectors</b> rather than against a round trip alone.
+/// Tests the public <see cref="Uuid"/> against known vectors: its text form, Java's <c>Uuid.toString()</c> (URL-safe,
+/// unpadded base64 of 16 big-endian bytes), Java's <c>fromString</c> rejections, the reserved constants, the signed
+/// comparison, and <c>RandomUuid</c>.
 /// </summary>
 public sealed class PublicUuidTests
 {
     [Theory]
-    // Two big-endian longs → 16 bytes → base64url without padding, 22 chars.
     [InlineData(0L, 0L, "AAAAAAAAAAAAAAAAAAAAAA")]
     [InlineData(1L, 2L, "AAAAAAAAAAEAAAAAAAAAAg")]
     [InlineData(-1L, -1L, "_____________________w")]
@@ -58,14 +55,9 @@ public sealed class PublicUuidTests
         Assert.Equal(leastSignificant, parsed.LeastSignificantBits);
     }
 
-    /// <summary>
-    /// The URL-safe alphabet is load-bearing: standard base64 would emit <c>+</c> and
-    /// <c>/</c>, which are not what a broker or another Kafka client prints.
-    /// </summary>
     [Fact]
     public void ToString_UsesTheUrlSafeAlphabet_AndNoPadding()
     {
-        // -1/-1 is all ones, which standard base64 renders with '+' and '/'.
         string text = new Uuid(-1L, -1L).ToString();
 
         Assert.Equal(22, text.Length);
@@ -97,20 +89,11 @@ public sealed class PublicUuidTests
         Assert.False(a.Equals("not a uuid"));
     }
 
-    /// <summary>
-    /// The three conditions Java's <c>fromString</c> rejects. The two length conditions
-    /// carry Java's own messages verbatim, <b>including Java's bound of 24</b>
-    /// (<c>Uuid.java:135</c>) rather than the canonical 22 — see
-    /// <see cref="Parse_AcceptsThePaddedFormJavaAccepts"/> for why the two extra
-    /// characters are not slack.
-    /// </summary>
     [Fact]
     public void Parse_RejectsWhatJavaRejects()
     {
         Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => Uuid.Parse(null!)).ParamName);
 
-        // 25 characters — past Java's own bound, so Java reports it as too long, quoting
-        // the first 24 (Uuid.java:136-137).
         string twentyFive = new string('A', 25);
         ArgumentException tooLong = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyFive));
         Assert.StartsWith(
@@ -118,8 +101,6 @@ public sealed class PublicUuidTests
             tooLong.Message,
             StringComparison.Ordinal);
 
-        // 23 characters is NOT "too long" to Java: it decodes — to 17 bytes — so Java
-        // reports the byte count instead. Gating at 22 would report the wrong condition.
         string twentyThree = new string('A', 23);
         ArgumentException wrongCount = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyThree));
         Assert.StartsWith(
@@ -127,7 +108,6 @@ public sealed class PublicUuidTests
             wrongCount.Message,
             StringComparison.Ordinal);
 
-        // Well-formed base64, but only 3 bytes.
         ArgumentException wrongLength = Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAA"));
         Assert.StartsWith(
             "Input string `AAAA` decoded as 3 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
@@ -141,20 +121,9 @@ public sealed class PublicUuidTests
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// <b>The alphabet is not a formality.</b> Java decodes with
-    /// <c>Base64.getUrlDecoder()</c>, which <b>rejects</b> the standard alphabet's
-    /// <c>+</c> and <c>/</c>; <c>Convert.FromBase64String</c> accepts them. Left
-    /// unscreened, <c>Parse</c> would admit an id Java rejects — and, worse, one whose
-    /// <c>ToString()</c> prints a <em>different</em> string from the text it was parsed
-    /// from, since <c>ToString</c> always emits the URL-safe alphabet.
-    /// </summary>
     [Fact]
     public void Parse_RejectsTheStandardBase64Alphabet()
     {
-        // Derived from a canonical form so the two spellings provably encode the SAME 16
-        // bytes and differ in nothing but the alphabet: -1/-1 is all ones, whose
-        // URL-safe form is all '_', and whose standard form is all '/'.
         string urlSafe = new Uuid(-1L, -1L).ToString();
         string standard = urlSafe.Replace('_', '/');
         Assert.NotEqual(urlSafe, standard);
@@ -169,21 +138,12 @@ public sealed class PublicUuidTests
         Assert.False(Uuid.TryParse(standard, out Uuid rejected));
         Assert.Equal(Uuid.Zero, rejected);
 
-        // '+' is rejected for the same reason. This one has 16 decodable bytes and a
-        // canonical URL-safe twin, so the alphabet is the ONLY thing wrong with it.
         Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
         Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.Parse("AAAAAAAAAAAAAAAAAAAA-A").ToString());
 
-        // …while the URL-safe spelling of the rejected value parses and round-trips.
         Assert.Equal(new Uuid(-1L, -1L), Uuid.Parse(urlSafe));
     }
 
-    /// <summary>
-    /// Java's bound is <c>length() &gt; 24</c>, not 22, because
-    /// <c>Base64.getUrlDecoder()</c> accepts the <b>padded</b> 24-character form and
-    /// decodes it to exactly 16 bytes — so <c>fromString</c> accepts it too. Gating at 22
-    /// would reject an input Java parses.
-    /// </summary>
     [Fact]
     public void Parse_AcceptsThePaddedFormJavaAccepts()
     {
@@ -193,28 +153,12 @@ public sealed class PublicUuidTests
         Assert.True(Uuid.TryParse("AAAAAAAAAAEAAAAAAAAAAg==", out Uuid parsed));
         Assert.Equal(expected, parsed);
 
-        // ToString still emits the canonical unpadded form.
         Assert.Equal("AAAAAAAAAAEAAAAAAAAAAg", parsed.ToString());
     }
 
-    /// <summary>
-    /// <b>Padding that is present but incomplete is a rejection, not something to
-    /// repair.</b> Accepting the padded 24-character form (above) means tolerating an
-    /// <c>=</c>, and the way <c>Parse</c> reaches
-    /// <c>Convert.FromBase64String</c> is by padding to a multiple of four — which would
-    /// just as happily <em>complete</em> a terminal unit that is short of its own padding.
-    /// <c>"…Ag="</c> is two data characters and a single <c>=</c> where two are required;
-    /// Java's <c>Base64.Decoder.decode0</c> labels that case
-    /// <c>xx= shiftto==6&amp;&amp;sp==sl missing last =</c> and throws
-    /// <c>"Input byte array has wrong 4-byte ending unit"</c>. Repaired instead of
-    /// rejected, it yields an id that prints a <em>different</em> string from the text it
-    /// was parsed from — the same symptom that makes the alphabet screen worth having.
-    /// </summary>
     [Fact]
     public void Parse_RejectsPaddingJavaRejects()
     {
-        // Derived from a value Parse accepts, by deleting one '=', so the padding shape is
-        // provably the ONLY thing wrong with it.
         string padded = new Uuid(1L, 2L) + "==";
         Assert.Equal(24, padded.Length);
         Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded));
@@ -233,7 +177,6 @@ public sealed class PublicUuidTests
         Assert.False(Uuid.TryParse(shortOfPadding, out Uuid fromTryParse));
         Assert.Equal(Uuid.Zero, fromTryParse);
 
-        // …and the screen is narrow: unpadded text still gets its padding synthesized.
         Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded.Substring(0, 22)));
     }
 
@@ -252,12 +195,6 @@ public sealed class PublicUuidTests
         Assert.Equal(new Uuid(1L, 2L), parsed);
     }
 
-    /// <summary>
-    /// Java's reserved constants (<c>Uuid.java:41-56</c>): <c>ONE_UUID</c> is
-    /// <c>(0, 1)</c>, <c>METADATA_TOPIC_ID</c> <b>is</b> <c>ONE_UUID</c>, and
-    /// <c>RESERVED</c> holds exactly <c>ZERO_UUID</c> and <c>ONE_UUID</c> — read-only, so a
-    /// caller cannot un-reserve one by casting.
-    /// </summary>
     [Fact]
     public void ReservedConstants_MirrorJava()
     {
@@ -278,13 +215,6 @@ public sealed class PublicUuidTests
         Assert.Throws<NotSupportedException>(() => asCollection.Add(new Uuid(0L, 2L)));
     }
 
-    /// <summary>
-    /// The public shape of the members G1-7 adds: Java's three constants as static
-    /// read-only properties of Java's types, <c>randomUuid()</c> as one public
-    /// parameterless static (the source-taking overload is the <b>internal</b> test seam,
-    /// not surface), and exactly Java's interface list — <c>Comparable&lt;Uuid&gt;</c> is
-    /// the only one Java implements, so no non-generic <see cref="IComparable"/> either.
-    /// </summary>
     [Fact]
     public void Shape_AddsJavasConstants_RandomUuid_AndComparable()
     {
@@ -315,13 +245,6 @@ public sealed class PublicUuidTests
         Assert.Equal(typeof(int), compareTo.ReturnType);
     }
 
-    /// <summary>
-    /// ⚠ <b>Signed, as Java compares</b> (<c>Uuid.java:158-171</c>): a <c>long</c> with the
-    /// high bit set is <em>negative</em>, so it sorts before <see cref="Uuid.Zero"/>. An
-    /// unsigned comparison — the natural reading of "128-bit value" — would put
-    /// <c>long.MinValue</c> last instead. The return values are Java's exact
-    /// <c>1</c> / <c>-1</c> / <c>0</c>, not merely their signs.
-    /// </summary>
     [Fact]
     public void CompareTo_IsJavasSignedOrder_MostSignificantFirst()
     {
@@ -346,16 +269,13 @@ public sealed class PublicUuidTests
                 int expected = i < j ? -1 : i > j ? 1 : 0;
                 Assert.Equal(expected, ascending[i].CompareTo(ascending[j]));
 
-                // CompareTo == 0 exactly when Equals — Java's consistent-with-equals.
                 Assert.Equal(expected == 0, ascending[i].Equals(ascending[j]));
             }
         }
 
-        // The most significant half decides before the least significant one is read.
         Assert.Equal(-1, new Uuid(0L, long.MaxValue).CompareTo(new Uuid(1L, long.MinValue)));
         Assert.Equal(1, new Uuid(long.MaxValue, long.MinValue).CompareTo(new Uuid(long.MinValue, long.MaxValue)));
 
-        // And a sort uses it: a scrambled copy sorts back into Java's order.
         List<Uuid> scrambled = new List<Uuid>
         {
             ascending[4], ascending[9], ascending[0], ascending[6], ascending[2],
@@ -365,20 +285,6 @@ public sealed class PublicUuidTests
         Assert.Equal(ascending, scrambled);
     }
 
-    /// <summary>
-    /// <see cref="Uuid.RandomUuid()"/> over many draws: never reserved, never containing
-    /// <c>'-'</c> (Java's <c>toString().contains("-")</c>, KAFKA-20072, Kafka 4.4), and
-    /// always Java's <c>UUID.randomUUID()</c> layout — version nibble <c>4</c> and the IETF
-    /// variant bits <c>10</c>.
-    /// </summary>
-    /// <remarks>
-    /// This also discriminates the <em>wiring</em> between the public method and the seam,
-    /// and the pre-4.4 leading-only rule: a raw version-4 draw contains a <c>'-'</c> about
-    /// 30% of the time (19 of its 22 characters are fully random, one more is <c>'-'</c> one
-    /// time in 16, and the version and padding characters never are), so a public method
-    /// that bypassed the loop, or kept the leading-only check, would fail the assertion
-    /// within 1000 draws all but certainly (the chance of passing is below 10^-150).
-    /// </remarks>
     [Fact]
     public void RandomUuid_IsVersion4_NeverReserved_AndNeverContainsADash()
     {
@@ -395,13 +301,6 @@ public sealed class PublicUuidTests
         }
     }
 
-    /// <summary>
-    /// Java's loop, through the seam the public method uses: the source is drawn until a
-    /// candidate is neither reserved nor contains <c>'-'</c>. <c>0xF8…</c> encodes to a
-    /// leading <c>'-'</c> (its first six bits are <c>111110</c>, index 62 of the URL-safe
-    /// alphabet), and <c>0x03E0…</c> to a <c>'-'</c> in second place, which only Kafka 4.4's
-    /// rule rejects (KAFKA-20072). All five candidates are consumed, and the fifth is returned.
-    /// </summary>
     [Fact]
     public void RandomUuid_Seam_SkipsReservedAndDashContainingCandidates()
     {
@@ -420,7 +319,6 @@ public sealed class PublicUuidTests
         Assert.Equal(valid, chosen);
         Assert.Empty(candidates);
 
-        // Only '-' is rejected — '_' (index 63, 0xFC…) is Java-legal and returned at once.
         Uuid underscoreLeading = new Uuid(unchecked((long)0xFC00000000000000UL), 1L);
         Assert.Equal('_', underscoreLeading.ToString()[0]);
         Queue<Uuid> single = new Queue<Uuid>(new[] { underscoreLeading, valid });
@@ -428,12 +326,6 @@ public sealed class PublicUuidTests
         Assert.Single(single);
     }
 
-    /// <summary>
-    /// The bit layout <c>java.util.UUID.randomUUID()</c> stamps onto its 16 random bytes —
-    /// <c>bytes[6]</c> version <c>0100</c>, <c>bytes[8]</c> variant <c>10</c>, everything
-    /// else untouched — checked at both extremes so a wrong mask cannot hide behind random
-    /// input: all-ones keeps every other bit set, all-zeros keeps every other bit clear.
-    /// </summary>
     [Fact]
     public void FromVersion4Bytes_StampsJavasVersionAndVariantBits()
     {

@@ -71,7 +71,7 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// ⚠ <b>Do not mutate a record's key / value buffers until its delivery <see cref="Task{TResult}"/>
-/// (<see cref="AsyncKafkaFuture{T}.Get"/>) completes without being canceled</b> (M11/P3.1 decision
+/// (<see cref="AsyncKafkaFuture{T}.Get()"/>) completes without being canceled</b> (M11/P3.1 decision
 /// D6). The async send is deferred — the binding borrows the serialized bytes until a background batch
 /// thread hands the
 /// record to the core — so a mutation in that window is visible on the wire. A cancellation does

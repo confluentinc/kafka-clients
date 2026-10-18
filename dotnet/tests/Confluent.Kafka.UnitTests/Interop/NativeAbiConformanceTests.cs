@@ -28,167 +28,305 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Every <c>[DllImport]</c> agrees with its prototype in the generated <c>confluent_kafka.h</c>:
-/// the parameter count, each parameter's and the return's C type, the callback delegates it
-/// passes, and the layout of the structs it passes.
+/// Every <c>[DllImport]</c> agrees with its prototype in the generated
+/// <c>confluent_kafka_bindings.h</c>: the parameter count, each parameter's and the return's C
+/// type, the callback delegates it passes, and the layout of the structs it passes.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The guard this exists for:</b> a P/Invoke whose signature no longer matches the native
-/// function <b>still resolves</b>, so <see cref="NativeMethodsPrelinkTests"/> passes, and the
-/// mismatch shows only as a wrong value, a crash or memory corruption at call time. Master
-/// #187 made two such changes without a text conflict: <c>kafka_consumer_MockConsumer_set_poll_error</c>
-/// went from 2 parameters to 4, and <c>kafka_producer_ProducerRecord_t</c> grew from 56 to 72
-/// bytes, so the core read every record after the first of a <c>send_batch</c> array at the
-/// wrong offset. <see cref="AParameterCountChange_IsReported"/> and
-/// <see cref="AStructLayoutChange_IsReported"/> reproduce both against the checker.
-/// </para>
-/// <para>
-/// What is compared, per <c>ffi-marshalling.md</c> §0.1's type map: <c>int32_t</c>/<c>int64_t</c>/
-/// <c>int16_t</c>/<c>double</c>/<c>bool</c> scalars (a <c>bool</c> must carry
-/// <c>MarshalAs(I1)</c>; a C enum is <c>int</c>); any pointer as <see cref="IntPtr"/>; a pointer
-/// to an opaque struct as a <see cref="SafeHandle"/> (and one <see cref="SafeHandle"/> type
-/// always stands for the same opaque struct); <c>out</c>/<c>ref</c>, arrays and C# pointers as
-/// one level of C pointer over the element; a delegate as a C function pointer, its
-/// <c>Invoke</c> compared the same way; a C# struct by its fields, offsets and size against the
-/// C struct, laid out with natural alignment. A <see cref="string"/> anywhere is a failure:
-/// strings are hand-marshalled UTF-8 (§0.1).
-/// </para>
-/// <para>
-/// The header is copied next to the tests from <c>rust/target/include/</c>, where the same
-/// <c>cargo build --features ffi</c> that builds the native writes it (<c>rust/build.rs</c>).
-/// </para>
-/// </remarks>
 public sealed class NativeAbiConformanceTests
 {
-    private const string SetPollError = "kafka_consumer_MockConsumer_set_poll_error";
-    private const string SendBatch = "kafka_producer_Producer_send_batch";
+    private const string HeaderFile = "confluent_kafka_bindings.h";
+    private const string MapKey = "kafka_Map_key_err";
+    private const string MapValue = "kafka_Map_value_err";
+    private const string FutureGetCb = "kafka_common_KafkaFuture_get_cb";
+    private const string BytesDestroy = "kafka_Bytes_destroy_err";
+    private const string MapSize = "kafka_Map_size_err";
+    private const string ErrorType = "kafka_common_Error_t";
 
     private static readonly Lazy<string> s_headerText = new Lazy<string>(ReadHeader);
 
-    /// <summary>
-    /// The whole surface against the header. All mismatches are collected, so one run names
-    /// every one of them rather than the first.
-    /// </summary>
     [Fact]
     public void EveryDllImport_MatchesTheGeneratedHeader()
     {
-        AbiCheck check = AbiCheck.Run(CHeader.Parse(s_headerText.Value), NativeMethodsPrelinkTests.LibraryImports());
+        MethodInfo[] imports = NativeMethodsPrelinkTests.LibraryImports();
+        CHeader header = CHeader.Parse(s_headerText.Value);
+        AbiCheck check = AbiCheck.Run(header, Checked(imports));
+
+        List<string> failures = new List<string>(check.Failures);
+        failures.AddRange(AllowlistFailures(header, NativeAbiAllowlist.Missing, NativeAbiAllowlist.Differing, imports));
 
         Assert.True(
-            check.Failures.Count == 0,
-            $"{check.Failures.Count} mismatches between the P/Invokes and confluent_kafka.h:"
+            failures.Count == 0,
+            $"{failures.Count} mismatches between the P/Invokes and {HeaderFile}:"
             + Environment.NewLine
-            + string.Join(Environment.NewLine, check.Failures));
+            + string.Join(Environment.NewLine, failures));
     }
 
-    /// <summary>
-    /// The control-positive for <see cref="EveryDllImport_MatchesTheGeneratedHeader"/>: the sweep
-    /// checks every import, reaches every delegate type an import passes through its C function
-    /// pointer, and reaches the producer-record struct. A sweep that silently skipped them would
-    /// otherwise pass.
-    /// </summary>
     [Fact]
-    public void TheCheckReachesEveryImport_EveryDelegate_AndTheRecordStruct()
+    public void NoDllImport_NamesAPlainFunctionThatHasAnErrTwin()
     {
-        MethodInfo[] imports = NativeMethodsPrelinkTests.LibraryImports();
+        IReadOnlyList<string> failures = ErrTwinFailures(
+            CHeader.Parse(s_headerText.Value),
+            Checked(NativeMethodsPrelinkTests.LibraryImports()));
+
+        Assert.True(
+            failures.Count == 0,
+            $"{failures.Count} imports name a function {HeaderFile} declares only as its _err twin:"
+            + Environment.NewLine
+            + string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public void TheCheckReachesTheBindingsHeader_EveryImport_EveryDelegate_AndEveryStruct()
+    {
+        MethodInfo[] all = NativeMethodsPrelinkTests.LibraryImports();
+        MethodInfo[] imports = Checked(all);
         CHeader header = CHeader.Parse(s_headerText.Value);
         AbiCheck check = AbiCheck.Run(header, imports);
 
+        Assert.Contains(header.Functions.Keys, name => name.EndsWith("_err", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            header.Functions.Keys,
+            name => name.EndsWith("_err", StringComparison.Ordinal)
+                && header.Functions.ContainsKey(name.Substring(0, name.Length - "_err".Length)));
+
+        Assert.NotEmpty(imports);
+        Assert.Equal(all.Count(import => !NativeAbiAllowlist.Contains(EntryPointOf(import))), imports.Length);
         Assert.Equal(imports.Length, check.ImportCount);
         Assert.True(header.Functions.Count >= imports.Length, $"the header parsed to {header.Functions.Count} functions");
 
-        HashSet<Type> delegateParameters = new HashSet<Type>(imports
+        Type[] parameterTypes = imports
             .SelectMany(import => import.GetParameters())
-            .Select(parameter => parameter.ParameterType)
-            .Where(type => typeof(Delegate).IsAssignableFrom(type)));
+            .Select(parameter => Element(parameter.ParameterType))
+            .ToArray();
+        HashSet<Type> delegateParameters = new HashSet<Type>(parameterTypes.Where(type => typeof(Delegate).IsAssignableFrom(type)));
         Assert.NotEmpty(delegateParameters);
         Assert.True(
             delegateParameters.SetEquals(check.Delegates),
             "delegates not reached: " + string.Join(", ", delegateParameters.Except(check.Delegates).Select(AbiCheck.Name)));
 
-        Assert.Contains(typeof(ProducerRecordNative), check.Structs);
+        HashSet<Type> structParameters = new HashSet<Type>(parameterTypes.Where(type => type.IsValueType && !type.IsPrimitive && !type.IsEnum));
+        Assert.True(
+            structParameters.SetEquals(check.Structs),
+            "structs not reached: " + string.Join(", ", structParameters.Except(check.Structs).Select(AbiCheck.Name)));
     }
 
-    /// <summary>
-    /// #187's <c>set_poll_error</c> break: the binding's 4-parameter import against the old
-    /// 2-parameter prototype.
-    /// </summary>
+    [Fact]
+    public void AnUnlistedMissingImport_IsReported()
+    {
+        MethodInfo import = Assert.Single(Imports(MapKey));
+        string header = ReplaceOnce(Code(), @"\b" + Regex.Escape(MapKey) + @"\s*\(", "kafka_Map_key_renamed_err(");
+
+        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), new[] { import });
+
+        string failure = Assert.Single(check.Failures);
+        Assert.Equal($"NativeMethods.MapKey -> {MapKey}: {HeaderFile} declares no such function", failure);
+    }
+
+    [Fact]
+    public void AStaleMissingEntry_IsReported()
+    {
+        Dictionary<string, string> missing = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [MapKey] = "P1.2",
+            ["kafka_no_such_import"] = "P1.4",
+        };
+
+        IReadOnlyList<string> failures = AllowlistFailures(
+            CHeader.Parse(s_headerText.Value),
+            missing,
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            Imports(MapKey));
+
+        Assert.Equal(
+            new[]
+            {
+                $"{MapKey} is listed as missing (P1.2), but {HeaderFile} declares it",
+                "kafka_no_such_import is listed as missing (P1.4), but no import uses it",
+            },
+            failures);
+    }
+
+    [Fact]
+    public void AStaleDifferingEntry_IsReported()
+    {
+        Dictionary<string, string> differing = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [MapKey] = "P1.3",
+            [MapValue] = "P1.3",
+            ["kafka_no_such_import"] = "P1.2",
+        };
+
+        IReadOnlyList<string> failures = AllowlistFailures(
+            CHeader.Parse(s_headerText.Value),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            differing,
+            Imports(MapKey));
+
+        Assert.Equal(
+            new[]
+            {
+                $"{MapKey} is listed as differing (P1.3), but every import of it matches {HeaderFile}",
+                $"{MapValue} is listed as differing (P1.3), but no import uses it",
+                $"kafka_no_such_import is listed as differing (P1.2), but {HeaderFile} does not declare it",
+                "kafka_no_such_import is listed as differing (P1.2), but no import uses it",
+            },
+            failures);
+    }
+
+    [Fact]
+    public void ADifferingEntryWhoseImportStillDiffers_IsNotReported()
+    {
+        string header = ReplaceFunction(
+            MapKey,
+            "void *kafka_Map_key_err(const kafka_Map_t *self_, int64_t index, kafka_common_Error_t **out_err)");
+        Dictionary<string, string> differing = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [MapKey] = "P1.3",
+        };
+
+        IReadOnlyList<string> failures = AllowlistFailures(
+            CHeader.Parse(header),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            differing,
+            Imports(MapKey));
+
+        Assert.Empty(failures);
+    }
+
+    [Fact]
+    public void ANameListedAsBothMissingAndDiffering_IsReported()
+    {
+        Dictionary<string, string> listed = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["kafka_no_such_import"] = "P1.3",
+        };
+
+        IReadOnlyList<string> failures = AllowlistFailures(
+            CHeader.Parse(s_headerText.Value),
+            listed,
+            listed,
+            Imports(MapKey));
+
+        Assert.Equal(
+            new[]
+            {
+                "kafka_no_such_import is listed as both missing and differing",
+                "kafka_no_such_import is listed as missing (P1.3), but no import uses it",
+                $"kafka_no_such_import is listed as differing (P1.3), but {HeaderFile} does not declare it",
+                "kafka_no_such_import is listed as differing (P1.3), but no import uses it",
+            },
+            failures);
+    }
+
+    [Fact]
+    public void AnImportOfAPlainFunctionWithAnErrTwin_IsReported()
+    {
+        MethodInfo import = Assert.Single(Imports(MapKey));
+        string header = ReplaceOnce(Code(), @"\b" + Regex.Escape(MapKey) + @"\s*\(", "kafka_Map_key_err_err(");
+
+        IReadOnlyList<string> failures = ErrTwinFailures(CHeader.Parse(header), new[] { import });
+
+        string failure = Assert.Single(failures);
+        Assert.Equal($"NativeMethods.MapKey -> {MapKey}: {HeaderFile} declares only {MapKey}_err", failure);
+    }
+
     [Fact]
     public void AParameterCountChange_IsReported()
     {
         string header = ReplaceFunction(
-            SetPollError,
-            "kafka_common_Error_t *kafka_consumer_MockConsumer_set_poll_error(const kafka_consumer_Consumer_t *consumer, const char *message)");
+            MapValue,
+            "void *kafka_Map_value_err(const kafka_Map_t *self_, kafka_common_Error_t **out_err)");
 
-        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), Imports(SetPollError));
+        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), Imports(MapValue));
 
         string failure = Assert.Single(check.Failures);
         Assert.Equal(
-            "NativeMethods.MockConsumerSetPollError -> kafka_consumer_MockConsumer_set_poll_error: "
-            + "4 parameters, the header declares 2: "
-            + "kafka_common_Error_t * (kafka_consumer_Consumer_t * consumer, char * message)",
+            "NativeMethods.MapValue -> kafka_Map_value_err: 3 parameters, the header declares 2: "
+            + "void * (kafka_Map_t * self_, kafka_common_Error_t ** out_err)",
             failure);
     }
 
-    /// <summary>
-    /// #187's <c>ProducerRecord_t</c> break, seen from the other side: the binding's 9-field,
-    /// 72-byte mirror against the 7-field, 56-byte struct.
-    /// </summary>
     [Fact]
     public void AStructLayoutChange_IsReported()
     {
-        string header = ReplaceOnce(
-            Code(),
-            @"const kafka_common_header_Header_t \*headers;\s*int32_t header_count;",
-            string.Empty);
+        string header = ReplaceOnce(Code(), @"int32_t len;\s*\}\s*kafka_Bytes_t;", "} kafka_Bytes_t;");
 
-        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), Imports(SendBatch));
+        AbiCheck real = AbiCheck.Run(CHeader.Parse(s_headerText.Value), new[] { BytesVehicle.Import });
+        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), new[] { BytesVehicle.Import });
 
-        const string Where = "struct ProducerRecordNative (mirrors kafka_producer_ProducerRecord_t)";
-        Assert.Contains(
-            $"{Where}: 9 fields, the header declares 7 (topic, partition, timestamp, key, key_len, value, value_len)",
-            check.Failures);
+        Assert.Empty(real.Failures);
+        Assert.Contains(typeof(BytesVehicle), real.Structs);
+        const string Where = "struct NativeAbiConformanceTests.BytesVehicle (mirrors kafka_Bytes_t)";
+        Assert.Contains($"{Where}: 2 fields, the header declares 1 (data)", check.Failures);
         if (IntPtr.Size == 8)
         {
-            Assert.Contains($"{Where}: 72 bytes, the header lays out 56", check.Failures);
+            Assert.Contains($"{Where}: 16 bytes, the header lays out 8", check.Failures);
         }
     }
 
-    /// <summary>A parameter whose C type changes width is reported against the C# type.</summary>
     [Fact]
     public void AScalarTypeChange_IsReported()
     {
         string header = ReplaceFunction(
-            SetPollError,
-            "kafka_common_Error_t *kafka_consumer_MockConsumer_set_poll_error(const kafka_consumer_Consumer_t *consumer, bool clear, int64_t code, const char *message)");
+            MapKey,
+            "void *kafka_Map_key_err(const kafka_Map_t *self_, int64_t index, kafka_common_Error_t **out_err)");
 
-        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), Imports(SetPollError));
+        AbiCheck check = AbiCheck.Run(CHeader.Parse(header), Imports(MapKey));
 
         string failure = Assert.Single(check.Failures);
         Assert.Equal(
-            "NativeMethods.MockConsumerSetPollError -> kafka_consumer_MockConsumer_set_poll_error parameter 2 'code' (C 'code'): "
+            "NativeMethods.MapKey -> kafka_Map_key_err parameter 1 'index' (C 'index'): "
             + "C 'int64_t' vs C# 'Int32': expected Int64",
             failure);
     }
 
-    /// <summary>
-    /// A callback typedef that gains a parameter is reported against the delegate the import
-    /// passes for it.
-    /// </summary>
+    [Fact]
+    public void AnErrorSlotThatIsNotARefIntPtr_IsReported()
+    {
+        AbiCheck check = AbiCheck.Run(
+            CHeader.Parse(s_headerText.Value),
+            new[]
+            {
+                ErrorSlotVehicles.ByValueSlot,
+                ErrorSlotVehicles.OutSlot,
+                ErrorSlotVehicles.InSlot,
+                ErrorSlotVehicles.InRefSlot,
+                ErrorSlotVehicles.InOutRefSlot,
+                ErrorSlotVehicles.RefLongSlot,
+            });
+
+        const string Where = "NativeAbiConformanceTests.ErrorSlotVehicles";
+        const string Slot = $"{MapSize} parameter 1 'outErr' (C 'out_err'): C 'kafka_common_Error_t **'";
+        Assert.Equal(
+            new[]
+            {
+                $"{Where}.ByValueSlotImport -> {Slot} vs C# 'IntPtr': expected ref IntPtr",
+                $"{Where}.InOutRefSlotImport -> {Slot} vs C# '[In, Out] ref IntPtr': expected ref IntPtr",
+                $"{Where}.InRefSlotImport -> {Slot} vs C# '[In] ref IntPtr': expected ref IntPtr",
+                $"{Where}.InSlotImport -> {Slot} vs C# 'in IntPtr': expected ref IntPtr",
+                $"{Where}.OutSlotImport -> {Slot} vs C# 'out IntPtr': expected ref IntPtr",
+                $"{Where}.RefLongSlotImport -> {Slot} vs C# 'ref Int64': expected ref IntPtr",
+            },
+            check.Failures);
+    }
+
+    [Fact]
+    public void ARefIntPtrErrorSlot_Matches()
+    {
+        AbiCheck check = AbiCheck.Run(
+            CHeader.Parse(s_headerText.Value),
+            Imports(MapSize).Concat(new[] { ErrorSlotVehicles.RefSlot }));
+
+        Assert.Empty(check.Failures);
+        Assert.Equal(2, check.ImportCount);
+    }
+
     [Fact]
     public void ACallbackTypedefChange_IsReported()
     {
-        CHeader real = CHeader.Parse(s_headerText.Value);
-        (MethodInfo import, string typedef) = NativeMethodsPrelinkTests.LibraryImports()
-            .Where(method => method.GetParameters().Any(p => p.ParameterType == typeof(ProducerCallbacks.OperationCallback)))
-            .OrderBy(EntryPointOf, StringComparer.Ordinal)
-            .Select(method =>
-            {
-                int index = Array.FindIndex(method.GetParameters(), p => p.ParameterType == typeof(ProducerCallbacks.OperationCallback));
-                return (method, real.Functions[EntryPointOf(method)].Parameters[index].Type.Base);
-            })
-            .First(pair => real.Callbacks.ContainsKey(pair.Base));
+        MethodInfo import = Assert.Single(Imports(FutureGetCb));
+        string typedef = CHeader.Parse(s_headerText.Value).Functions[FutureGetCb].Parameters[1].Type.Base;
+        Assert.Equal("kafka_common_KafkaFuture_get_cb_t", typedef);
 
         string header = ReplaceOnce(
             Code(),
@@ -198,17 +336,19 @@ public sealed class NativeAbiConformanceTests
         AbiCheck check = AbiCheck.Run(CHeader.Parse(header), new[] { import });
 
         string failure = Assert.Single(check.Failures);
-        Assert.StartsWith($"delegate ProducerCallbacks.OperationCallback (passed by NativeMethods.{import.Name} -> {EntryPointOf(import)} parameter ", failure);
-        Assert.EndsWith("): 2 parameters, the header declares 3: void (int32_t, kafka_common_Error_t *, void *)", failure);
+        Assert.Equal(
+            $"delegate NativeMethods.KafkaFutureGetCallback (passed by NativeMethods.KafkaFutureGetCb -> {FutureGetCb} parameter 1 'cb' (C 'cb')): "
+            + "3 parameters, the header declares 4: void (int32_t, void * value, kafka_common_Error_t * error, void * opaque)",
+            failure);
     }
 
     private static string ReadHeader()
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "confluent_kafka.h");
+        string path = Path.Combine(AppContext.BaseDirectory, HeaderFile);
         if (!File.Exists(path))
         {
             throw new FileNotFoundException(
-                $"confluent_kafka.h is not next to the tests ({path}). The test project copies it from "
+                $"{HeaderFile} is not next to the tests ({path}). The test project copies it from "
                 + "rust/target/include/, which `cargo build --features ffi` writes; build the native first.",
                 path);
         }
@@ -216,14 +356,72 @@ public sealed class NativeAbiConformanceTests
         return File.ReadAllText(path);
     }
 
-    /// <summary>The header without comments, the form the edits below apply to.</summary>
+    private static MethodInfo[] Checked(IEnumerable<MethodInfo> imports) =>
+        imports.Where(import => !NativeAbiAllowlist.Contains(EntryPointOf(import))).ToArray();
+
+    private static IReadOnlyList<string> AllowlistFailures(
+        CHeader header,
+        IReadOnlyDictionary<string, string> missing,
+        IReadOnlyDictionary<string, string> differing,
+        IEnumerable<MethodInfo> imports)
+    {
+        ILookup<string, MethodInfo> users = imports.ToLookup(EntryPointOf, StringComparer.Ordinal);
+        List<string> failures = new List<string>();
+        foreach (KeyValuePair<string, string> entry in missing.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (differing.ContainsKey(entry.Key))
+            {
+                failures.Add($"{entry.Key} is listed as both missing and differing");
+            }
+
+            if (header.Functions.ContainsKey(entry.Key))
+            {
+                failures.Add($"{entry.Key} is listed as missing ({entry.Value}), but {HeaderFile} declares it");
+            }
+
+            if (!users.Contains(entry.Key))
+            {
+                failures.Add($"{entry.Key} is listed as missing ({entry.Value}), but no import uses it");
+            }
+        }
+
+        foreach (KeyValuePair<string, string> entry in differing.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            MethodInfo[] entryUsers = users[entry.Key].ToArray();
+            if (!header.Functions.ContainsKey(entry.Key))
+            {
+                failures.Add($"{entry.Key} is listed as differing ({entry.Value}), but {HeaderFile} does not declare it");
+            }
+            else if (entryUsers.Length > 0 && AbiCheck.Run(header, entryUsers).Failures.Count == 0)
+            {
+                failures.Add($"{entry.Key} is listed as differing ({entry.Value}), but every import of it matches {HeaderFile}");
+            }
+
+            if (entryUsers.Length == 0)
+            {
+                failures.Add($"{entry.Key} is listed as differing ({entry.Value}), but no import uses it");
+            }
+        }
+
+        return failures;
+    }
+
+    private static IReadOnlyList<string> ErrTwinFailures(CHeader header, IEnumerable<MethodInfo> imports) =>
+        imports
+            .Where(import => header.Functions.ContainsKey(EntryPointOf(import) + "_err"))
+            .OrderBy(EntryPointOf, StringComparer.Ordinal)
+            .Select(import => $"{AbiCheck.Name(import.DeclaringType!)}.{import.Name} -> {EntryPointOf(import)}: "
+                + $"{HeaderFile} declares only {EntryPointOf(import)}_err")
+            .ToList();
+
+    private static Type Element(Type type) =>
+        type.IsByRef || type.IsPointer || type.IsArray ? Element(type.GetElementType()!) : type;
+
     private static string Code() => CHeader.StripComments(s_headerText.Value);
 
-    /// <summary>The header with one function's prototype replaced by <paramref name="prototype"/>.</summary>
     private static string ReplaceFunction(string name, string prototype) =>
         ReplaceOnce(Code(), @"[^;{}]*\b" + Regex.Escape(name) + @"\s*\([^;]*;", Environment.NewLine + prototype + ";");
 
-    /// <summary>Replaces the one match of <paramref name="pattern"/>; any other count fails the test.</summary>
     private static string ReplaceOnce(string text, string pattern, string replacement)
     {
         Regex regex = new Regex(pattern);
@@ -243,6 +441,57 @@ public sealed class NativeAbiConformanceTests
 
     private static string EntryPointOf(MethodInfo method) =>
         method.GetCustomAttribute<DllImportAttribute>()!.EntryPoint ?? method.Name;
+
+    /// <summary>A C# mirror of <c>kafka_Bytes_t</c>, for the struct-layout check.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BytesVehicle
+    {
+        internal static readonly MethodInfo Import = typeof(BytesVehicle).GetMethod(
+            nameof(Destroy),
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        public IntPtr Data;
+        public int Len;
+
+        [DllImport("confluent_kafka", EntryPoint = BytesDestroy, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void Destroy(ref BytesVehicle bytes, ref IntPtr outErr);
+    }
+
+    /// <summary>Imports of <c>kafka_Map_size_err</c>, one per C# shape of its error slot, for the error-slot check.</summary>
+    private static class ErrorSlotVehicles
+    {
+        internal static readonly MethodInfo RefSlot = Of(nameof(RefSlotImport));
+        internal static readonly MethodInfo ByValueSlot = Of(nameof(ByValueSlotImport));
+        internal static readonly MethodInfo OutSlot = Of(nameof(OutSlotImport));
+        internal static readonly MethodInfo InSlot = Of(nameof(InSlotImport));
+        internal static readonly MethodInfo InRefSlot = Of(nameof(InRefSlotImport));
+        internal static readonly MethodInfo InOutRefSlot = Of(nameof(InOutRefSlotImport));
+        internal static readonly MethodInfo RefLongSlot = Of(nameof(RefLongSlotImport));
+
+        private static MethodInfo Of(string import) =>
+            typeof(ErrorSlotVehicles).GetMethod(import, BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RefSlotImport(IntPtr self, ref IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int ByValueSlotImport(IntPtr self, IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int OutSlotImport(IntPtr self, out IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int InSlotImport(IntPtr self, in IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int InRefSlotImport(IntPtr self, [In] ref IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int InOutRefSlotImport(IntPtr self, [In, Out] ref IntPtr outErr);
+
+        [DllImport("confluent_kafka", EntryPoint = MapSize, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RefLongSlotImport(IntPtr self, ref long outErr);
+    }
 
     /// <summary>
     /// One pass of the comparison over a set of imports, collecting every mismatch as a line.
@@ -317,7 +566,6 @@ public sealed class NativeAbiConformanceTests
             return check;
         }
 
-        /// <summary>A readable C# type name for the messages: nested types dotted, no namespace.</summary>
         internal static string Name(Type type)
         {
             if (type.IsByRef)
@@ -352,7 +600,7 @@ public sealed class NativeAbiConformanceTests
 
             if (!_header.Functions.TryGetValue(entryPoint, out CSignature? prototype))
             {
-                _failures.Add($"{where}: confluent_kafka.h declares no such function");
+                _failures.Add($"{where}: {HeaderFile} declares no such function");
                 return;
             }
 
@@ -371,15 +619,50 @@ public sealed class NativeAbiConformanceTests
             {
                 CParam c = expected.Parameters[i];
                 string at = $"{where} parameter {i} '{parameters[i].Name}'" + (c.Name is null ? string.Empty : $" (C '{c.Name}')");
+                if (IsErrorSlot(c.Type))
+                {
+                    CheckErrorSlot(at, c.Type, parameters[i]);
+                    continue;
+                }
+
                 CheckValue(at, c.Type, parameters[i].ParameterType, MarshalAsOf(parameters[i].GetCustomAttributes(typeof(MarshalAsAttribute), inherit: false)));
             }
 
             CheckValue($"{where} return", expected.Return, returnParameter.ParameterType, MarshalAsOf(returnParameter.GetCustomAttributes(typeof(MarshalAsAttribute), inherit: false)));
         }
 
+        private static bool IsErrorSlot(CType c) => c.Function is null && c.Depth == 2 && c.Base == ErrorType;
+
+        // Only a plain `ref IntPtr`: `out` does not make the caller null the slot, `in` lets the compiler
+        // pass a temporary the error is lost in, and a by-value IntPtr is a NULL slot.
+        private void CheckErrorSlot(string where, CType c, ParameterInfo parameter)
+        {
+            if (parameter.ParameterType != typeof(IntPtr).MakeByRefType() || parameter.IsIn || parameter.IsOut)
+            {
+                _failures.Add($"{where}: C '{c}' vs C# '{Shape(parameter)}': expected ref IntPtr");
+            }
+        }
+
+        private static string Shape(ParameterInfo parameter)
+        {
+            Type type = parameter.ParameterType;
+            if (!type.IsByRef)
+            {
+                return Name(type);
+            }
+
+            string modifier = parameter.IsOut ? (parameter.IsIn ? "[In, Out] ref" : "out")
+                : parameter.IsIn ? (IsReadOnly(parameter) ? "in" : "[In] ref")
+                : "ref";
+            return $"{modifier} {Name(type.GetElementType()!)}";
+        }
+
+        private static bool IsReadOnly(ParameterInfo parameter) =>
+            parameter.GetCustomAttributes(inherit: false)
+                .Any(attribute => attribute.GetType().FullName == "System.Runtime.CompilerServices.IsReadOnlyAttribute");
+
         private void CheckValue(string where, CType c, Type cs, MarshalAsAttribute? marshalAs)
         {
-            // A bool array's elements are marshalled by ArraySubType; any other bool by Value.
             UnmanagedType? boolAs = marshalAs is null ? null
                 : cs.IsArray ? (marshalAs.Value == UnmanagedType.LPArray ? marshalAs.ArraySubType : null)
                 : marshalAs.Value;
@@ -390,10 +673,6 @@ public sealed class NativeAbiConformanceTests
             }
         }
 
-        /// <summary>
-        /// <see langword="null"/> when <paramref name="cs"/> can carry <paramref name="c"/>, else the
-        /// reason it cannot. Delegates and structs are checked in depth, reporting under their own name.
-        /// </summary>
         private string? Match(CType c, Type cs, UnmanagedType? boolAs, string where)
         {
             if (cs == typeof(void))
@@ -413,7 +692,6 @@ public sealed class NativeAbiConformanceTests
                     return "an out/ref, a pointer or an array needs a C pointer";
                 }
 
-                // The element of a C# bool* is the 1-byte bool itself.
                 return Match(c.Pointee(), cs.GetElementType()!, cs.IsPointer ? UnmanagedType.I1 : boolAs, where);
             }
 
@@ -477,7 +755,6 @@ public sealed class NativeAbiConformanceTests
                 return "a scalar needs a C scalar";
             }
 
-            // A C enum is int-sized.
             string cBase = _header.Enums.Contains(c.Base) ? "int32_t" : c.Base;
             if (!s_scalars.TryGetValue(cBase, out Type? expected))
             {
@@ -578,11 +855,6 @@ public sealed class NativeAbiConformanceTests
             }
         }
 
-        /// <summary>
-        /// The C layout of a struct's fields, with natural alignment: each field at the next
-        /// multiple of its own alignment, the size rounded up to the largest one. (32-bit x86
-        /// Linux aligns 8-byte fields to 4; no supported target is that.)
-        /// </summary>
         private (long[] Offsets, long Size, long Align) LayOut(IReadOnlyList<CField> fields)
         {
             long[] offsets = new long[fields.Count];

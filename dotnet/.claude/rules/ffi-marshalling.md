@@ -1,7 +1,7 @@
 # .NET binding — FFI marshalling & ownership
 
-Deep-dive rules for marshalling across the C ABI (`confluent_kafka.h`,
-`kafka_producer_*` / `kafka_common_KafkaError_*`) from .NET via P/Invoke.
+Deep-dive rules for marshalling across the C ABI (`confluent_kafka_bindings.h`,
+`kafka_producer_*` / `kafka_common_Error_*`) from .NET via P/Invoke.
 Supplements `bindings/dotnet/CLAUDE.md`. Review ground truth is the **C ABI
 header** and the **Kafka Java public API**.
 
@@ -66,11 +66,12 @@ only if that friction bites — cheap and non-breaking.
 | `int32_t` | `int` | **Never `UIntPtr`/`nint`** — our ABI has no `size_t`. |
 | `int64_t` | `long` | |
 | `bool` | `[MarshalAs(UnmanagedType.I1)] bool` | C `bool` is 1 byte; default marshals a 4-byte Win32 `BOOL`. |
+| `int8_t` (an `is_*` predicate) | `sbyte`, tested `!= 0` | Not `bool`. |
 | opaque `*_t *` | `IntPtr` → `SafeHandle` above (§A2/§B2) | Never a C# struct mirroring `_private[0]`. |
 | `const char *` in | `IntPtr` to a pinned NUL-terminated UTF-8 buffer (§A3/§B3) | No `LPStr` (ANSI), no `LPUTF8Str`. |
 | `const char *` out (callee-owned) | `IntPtr` → `Utf8Marshal.PtrToString` (§A3/§B3) | Never a `string` return — the marshaller would free it. |
 | `const uint8_t *` + `int32_t len` | `IntPtr` (pinned `byte[]`) + `int` (§A4/§B4) | Zero-copy, call-scoped pin (send) or borrow (receive). |
-| `T **` out-param / array | `out IntPtr` / `IntPtr[]` | e.g. `out_error`; `get_all` arrays. |
+| `T **` out-param / array | `ref IntPtr` set to `IntPtr.Zero` / `IntPtr[]` | e.g. `out_err`; `get_all` arrays. |
 | `ProducerRecord_t` | `[StructLayout(LayoutKind.Sequential)] struct`, array `[]` | Fixed-width ⇒ identical layout. |
 | `void (*cb)(...)` / `void *` | Cdecl delegate, kept alive (§A6/§B6) / `IntPtr` (`GCHandle`) | |
 
@@ -88,6 +89,13 @@ only if that friction bites — cheap and non-breaking.
   - Follow the type map verbatim: sizes are `int`/`long`, `bool` is `I1`, opaque
     handles stay `IntPtr` here (wrapped in a `SafeHandle` one layer up, §A2/§B2),
     UTF-8 strings and key/value bytes are marshalled by hand (§A3/§B3, §A4/§B4).
+  - Bindings use `confluent_kafka_bindings.h` only. Every function that reports an error on return
+    takes a trailing `kafka_common_Error_t **out_err`, passed as `ref IntPtr` set to `IntPtr.Zero`;
+    a `_cb` form takes none and delivers its error to its callback. Where the plain header's
+    function had no such slot, BH names it `<name>_err`; never import the plain name.
+    `kafka_common_Error_source_err` is borrowed and never destroyed. `int8_t` returns marshal as
+    `sbyte`. A managed exception crosses the core only as a `local_callback` error whose opaque is
+    a `GCHandle`, freed by the release callback.
   - Prefer `ProducerProperties_put` / `ConsumerProperties_put` over `_from_configs`
     (avoids marshalling a `const char *const *`).
 
@@ -112,8 +120,8 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 **Tests required:**
 
   - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
-  - Each `bool`-returning fn (`is_done`/`is_retriable`/`is_fatal`) is correct
-    (guards a missing `I1`).
+  - Each `int8_t` predicate (`is_done`, `is_retriable_error`) reads correctly as
+    `sbyte`.
   - `NativeMethods` loads on net462, net8.0, net10.0 (TFM smoke test).
 
 ---
@@ -203,20 +211,32 @@ loading code is phase-independent.
 
 ## 0.3 Thread topology & thread-safety (shared framing)
 
-The whole-system picture every section assumes. The C ABI hides all Kafka I/O on
-native threads **owned by the Rust core**, and **both clients expose a pull *and*
-a push completion surface** — each with its own native dispatcher thread — so the
-thread layout is a **binding choice**, not ABI-fixed. As currently sketched: the
-**consumer** uses push → **no** .NET thread (§B1); the **producer**'s completion
-model is **open** (§A7) — the pull-pump option adds one .NET pump thread, while
-the push option would use the producer's already-present native dispatcher. The
-per-client thread diagrams and rules are in **§A1** (producer) and **§B1**
-(consumer).
+The whole-system picture every section assumes. The C ABI runs all Kafka I/O on native threads
+owned by the Rust core. Since M19/P1 (the `0035d9ff` ABI) every client has one completion model:
+each blocking operation has a blocking form and a `_cb` twin, and the `_cb` completions and the
+user callbacks (delivery, rebalance listener, offset commit) are queued for the client's
+`__execute_callbacks`. No callback fires on a native thread of its own; the binding chooses the
+thread that drains. When the queue goes from empty to non-empty, the core calls the hook set with
+`__set_callbacks_notify`. The hook only signals; it runs while the core holds its notify lock
+(`rust/src/ffi/callback_queue.rs:248-255` at `0035d9ff`).
+
+| Client | .NET thread | Who drains `__execute_callbacks` |
+|---|---|---|
+| `KafkaProducer` | one `CompletionThread`, `confluent-kafka-producer-completion` | that thread, woken by the hook |
+| `AsyncKafkaProducer` | one `CompletionThread`, `confluent-kafka-producer-pump` | that thread |
+| `KafkaAdminClient` | `kafka-admin-client-thread` | that thread |
+| `AsyncKafkaAdminClient` | `confluent-kafka-admin-pump` | that thread |
+| `KafkaConsumer` | none | the caller: each blocking call drains once at the top; the blocking forms run listener and commit callbacks inline on the caller |
+| `AsyncKafkaConsumer` | `confluent-kafka-consumer-pump` | that thread |
+
+The names match Python's (decision 26). The per-client rules are in §A1/§A7 (producer) and
+§B1/§B7 (consumer). Teardown is in `dotnet/CLAUDE.md` §4 (**Close/Dispose**); the consumer's
+routes are in §B2's path list.
 
 **Why:** Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
 librdkafka (a thread per broker + a mandatory `rd_kafka_poll` loop, which
 confluent-kafka-dotnet services with a `LongRunning` `callbackTask`). So our
-native thread count is independent of cluster size, there is no poll loop, and
+native thread count is independent of cluster size, there is no poll loop (a drain thread sleeps until the notify hook signals it), and
 the multi-thread runtime is what makes `block_on` from .NET deadlock-free. This
 applies to both clients.
 
@@ -224,12 +244,18 @@ applies to both clients.
 
   - A `callbackTask`-style poll-loop thread — nothing to poll here.
   - Assuming thread-per-broker / native threads scaling with cluster size.
+  - A notify hook that does more than signal: running `__execute_callbacks`, taking a lock the
+    client's callers may hold, or calling into the client. It runs under the core's notify lock
+    (BH:3846-3851; `rust/src/ffi/callback_queue.rs:248-255` at `0035d9ff`).
+  - A client `_destroy` inside `__execute_callbacks`. A nested drain returns 0
+    (`callback_queue.rs:277-280` at `0035d9ff`), so the destroy cannot run the callbacks it
+    must run.
 
-**Tests required (both clients):** `Dispose` returns without hanging before
-destroying the handle — the producer joins the pump (§A1/§A7); the consumer closes
-gracefully, with **no separate-op drain** (single-owner: the awaiter of an op is its
-disposer, §B1/§B7). ⚠ For the consumer's teardown routes see **§B2's authoritative
-`Consumer_destroy` path list** — do not restate them here.
+**Tests required (all clients):** `Dispose` returns without hanging, after the client's drain
+thread is joined and its in-flight uses reach 0, and destroys on the closing thread. A close
+called from inside a callback is deferred until the drain returns; it never destroys inside
+`__execute_callbacks`. For the consumer's routes see **§B2's path list**; do not restate them
+here.
 
 ---
 
@@ -734,22 +760,16 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 ## A5 Error model (operational vs. precondition)
 
 **Decision:** Two surfaces. **Core (operational) errors** cross as a
-`kafka_common_KafkaError_t` handle → one flat `KafkaException` (code + retriable +
-fatal + message), mirroring the Python sibling. **Precondition errors** (bad
+`kafka_common_Error_t` handle → the error table's type (decision 14): `KafkaException`
+(code, retriable, message) or a .NET built-in, mirroring the Python sibling. **Precondition errors** (bad
 argument / state) are validated in the binding *before* the FFI call and raise
 standard .NET exceptions — never `KafkaException`.
 
-| `KafkaError_*` accessor | → C# |
-|---|---|
-| `_code` (i32) | `int Code` |
-| `_message` (UTF-8, handle-owned) | `Message` via `Utf8Marshal.PtrToString` (§A3) |
-| `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
-| `_destroy` | free after reading |
-
 **Rule:**
 
-  - **Operational:** the error handle arrives via the `out_error` param (fns that
-    also return a value — `send`, `_new`); **null = success**, non-null = error.
+  - **Operational:** The error arrives in `out_err` (§0.1) and is read once by the
+    error-table helper; an owned handle is freed after the read;
+    `kafka_common_Error_source_err` is borrowed.
     `KafkaException.FromHandle` reads the accessors (message **before** free),
     then `_destroy` in a `finally` — freed exactly once even if construction
     throws (§A2, §A3); the exception holds copied values, not the handle. Sync
@@ -929,13 +949,9 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
         unavailable for it. Neither half is a teardown path, so a residual clause that
         says "teardown" misses them — and a clause scoped to "AFTER the completion
         arrives" misses the *before* half, which was one of this rule's own misses.
-    Document each on the public surface, and put a note at **each** faulting site so
-    the sites and the public statement cannot drift apart — a faulting site with no
-    note is exactly how the pre-read window stayed off the public list while the
-    other sites carried one. But note the converse trap this rule also hit: a site
-    that already carries a note can still acquire an **uncovered condition**, so
-    verify each note's *distinguishing clause* against the code every round, not just
-    the presence of a note.
+    Document each on the public surface, and state the residuals once, in `IDeliveryCallback`'s remarks, and put
+    no note at the faulting sites (`dotnet/CLAUDE.md` §4 Comments). The Critic checks
+    each faulting site against that list in review instead.
 
     **State each comparative axis ONCE, on the public surface, and have every other
     site point at it.** This is the M14/P1 round-4 lesson, and it is a *structural*
@@ -946,27 +962,12 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
     kind. Every one of those lived in a *paraphrase* of an axis the paraphrasing site
     does not own. So: the comparisons between residuals (teardown or not, completion
     arrived or not, throw versus faulted `Task`, which surface) belong in exactly one
-    place — the public interface's remarks — and each faulting site's note carries only
-    its own residual number, the local reason no core completion exists there, and a
-    pointer to that one place. When a repair *is* made to a comparative clause, grep
+    place — the public interface's remarks. When a repair *is* made to a comparative clause, grep
     the clause's distinctive words across **every** document before calling it done; a
     fix applied to one copy of a duplicated sentence is not a fix.
 
-    **Round-5 amendment — outside that one place, do NOT re-scope a comparative;
-    DELETE it.** Rounds 2–5 each *re-worded* a comparative clause, and each re-wording
-    produced the next round's false clause — including one written while fixing exactly
-    this class of defect. Re-scoping keeps the claim alive, and a live claim about the
-    *other* residuals goes stale the next time the set is re-partitioned. So the rule is
-    stronger than "state it once": every site other than the canonical enumeration
-    states its **own** local fact — what happens on *this* path and why no core
-    completion exists here — points at the enumeration for how it relates to the
-    others, and carries **no** uniqueness quantifier (*the one* / *the only* /
-    *every other*), **no** count of residuals, sites or throw sources, and no
-    definite-article exclusivity ("*the* residual reachable through …", where "the"
-    silently asserts uniqueness). A claim that is not made cannot go stale, and the
-    property is grep-verifiable: outside the canonical enumeration **and this rule's own
-    walk narrative above**, zero uniqueness or count claims about residuals /
-    no-callback throws / throw sources. The walk narrative is carved out because a
+    Outside the canonical enumeration there are no notes about residuals at all, so
+    nothing there can go stale. The walk narrative is carved out because a
     *derivation* must be able to state its own arithmetic — a walk forbidden from saying
     how many sites it yielded cannot be checked against the code, which is the entire
     reason this rule prefers a walk to a recollection. Its counts live here, next to the
@@ -1792,25 +1793,17 @@ deferred (CLAUDE.md §6.4).
 ## B5 Error model (operational vs. precondition)
 
 **Decision:** Two surfaces. **Core (operational) errors** cross as a
-`kafka_common_KafkaError_t` handle → one flat `KafkaException` (code + retriable +
-fatal + message), mirroring the Python sibling. **Precondition errors** (bad
+`kafka_common_Error_t` handle → the error table's type (decision 14): `KafkaException`
+(code, retriable, message) or a .NET built-in, mirroring the Python sibling. **Precondition errors** (bad
 argument / state) are validated in the binding *before* the FFI call and raise
 standard .NET exceptions — never `KafkaException`. The consumer adds two more
 shapes: **wakeup** and **concurrent use**.
 
-| `KafkaError_*` accessor | → C# |
-|---|---|
-| `_code` (i32) | `int Code` |
-| `_message` (UTF-8, handle-owned) | `Message` via `Utf8Marshal.PtrToString` (§B3) |
-| `_is_retriable` / `_is_fatal` | `IsRetriable` / `IsFatal` |
-| `_destroy` | free after reading |
-
 **Rule:**
 
-  - **Operational:** the error handle arrives via the `out_error` param (fns that
-    also return a value — `poll`, `_new`) **or as the return value** (fns that are
-    `void` in Java — `assign` / `subscribe` / `seek` / `unsubscribe`); **null =
-    success** in both, non-null = error. `KafkaException.FromHandle` reads the
+  - **Operational:** The error arrives in `out_err` (§0.1) and is read once by the
+    error-table helper; an owned handle is freed after the read;
+    `kafka_common_Error_source_err` is borrowed. `KafkaException.FromHandle` reads the
     accessors (message **before** free), then `_destroy` in a `finally` — freed
     exactly once even if construction throws (§B2, §B3); the exception holds copied
     values, not the handle. Sync failures `throw`; async op failures fault the
@@ -1877,46 +1870,13 @@ shapes: **wakeup** and **concurrent use**.
         (`src/ffi/consumer_handle.rs:49-57`). It is delivered as an ordinary error
         **handle** and surfaces as a flat `KafkaException`, like every other
         operational error.
-  - ⚠ **Do NOT map the core's `illegal_state` to `InvalidOperationException`, and do
-    not read CLAUDE.md §3's idiom map as asking for it.** An earlier draft of this
-    section (M9/P8) added exactly that mapping and it was wrong on three counts, each
-    independently sufficient:
-      1. **The idiom map has a different scope.** Its row reads
-         "`IllegalArgumentException` / `IllegalStateException` → `ArgumentException`
-         (family) / `InvalidOperationException` — **validate before the FFI call**".
-         It governs *managed-side precondition validation*, i.e. Java exceptions the
-         binding raises itself before calling native. The in-runtime rejection has no
-         Java counterpart at all (Java has no tokio runtime) and arrives *from* the
-         core on the operational channel, so the row does not reach it.
-      2. **It would split one condition across two exception types.** The core's
-         `illegal_state` is not handle-specific. `handle.Position(unassignedTp)` and
-         `consumer.Position(unassignedTp)` return the **identical** error — measured
-         at runtime against a real consumer: code `-1`, *"You can only check the
-         position for partitions assigned to this consumer."* Mapping only the handle
-         side would make the reentrancy twin throw a different type than the consumer
-         it mirrors, for the same call.
-         ⚠ **That identity is duplicated-literal, not structural — do not describe it
-         as a shared implementation.** `ConsumerHandle::position`
-         (`async_kafka_consumer.rs:316-320`) delegates to
-         `AsyncConsumerHandleState::position` (`:582-593`), while
-         `AsyncKafkaConsumer::position_timeout` (`:4516-4527`) has its **own** body in
-         a different impl; the two duplicate the assignment check and the message
-         **literal**. Nothing in the compiler keeps them equal — someone can reword one
-         and not the other. **The only thing holding this property is
-         `HandleAndConsumer_ReportTheSameCoreError_Identically`**, which asserts `Code`
-         and `Message` equality at runtime. If that test is ever deleted, this reason
-         loses its evidence. (An earlier draft of this bullet also cited `ensure_open`'s
-         *"This consumer has already been closed."* as a second shared instance; it is
-         **not** — all 24 `ensure_open()` call sites are on `AsyncKafkaConsumer`, none
-         on the handle state, so the handle surface never emits it.)
-      3. **It is not implementable as stated.** `illegal_state` carries the generic
-         code `-1`, shared with other errors — there is no distinguishable
-         `IllegalState` code to branch on, so "map the in-runtime one only" reduces to
-         matching on message text.
-    **The only sanctioned non-`KafkaException` mapping on this surface remains the
-    concurrent-state-read *null return*** — a structurally different channel (no error
-    handle exists, so the binding must synthesize something), which is why it is an
-    exception and a returned code is not.
+  - **The core's local codes map by the error table (decision 14, M19/P1).** -2 and -4 →
+    `InvalidOperationException`, -3 → `ArgumentException`, -5 → `System.TimeoutException`,
+    each with the core's message; a `local_callback` error → the carried instance; every
+    other code → `KafkaException`. This holds on every surface, the `ConsumerHandle`
+    included, so a handle op and the same consumer op throw the same type
+    (`HandleAndConsumer_ReportTheSameCoreError_Identically` keeps asserting it). It
+    replaces the M9/P8 rule that kept `illegal_state` a `KafkaException`.
   - **The guard-bypass contrast is itself a contract, and it is testable.** The same
     logical call has two different surfaces depending on which handle it goes
     through, and the header states both: `Consumer_assignment` returns **null** *"on
@@ -1957,17 +1917,14 @@ the precondition exceptions are unchanged.
   - Making `wakeup()` a distinct exception subclass now (the ABI + Python keep it
     flat); conflating a `wakeup()` (`KafkaException`/Wakeup) with a
     `CancellationToken` cancel (`OperationCanceledException`).
-  - Throwing `KafkaException` for a concurrent **state read** (it's
-    `InvalidOperationException`), or `InvalidOperationException` for a concurrent
-    **async op** (it's `KafkaException`).
+  - Any type other than `InvalidOperationException` for a concurrent call (-2), a state
+    read or an op, sync or async (decision 17).
   - Treating `UnsupportedVersionError` on a mock-derived `ConsumerHandle` as a bug to
     route around (a managed pre-check, a silent no-op, an invented "mock
     unsupported" exception) — it is documented core behavior, and the binding's job
     is to surface it unchanged.
-  - Branching on an error **code** to pick a managed exception type — the binding does
-    this **nowhere**, deliberately (§B5's flat-`KafkaException` rule). In particular do
-    not "fix" a handle's `illegal_state` into an `InvalidOperationException`: see the
-    three reasons above.
+  - Branching on an error code outside the one error-table helper, or mapping a code the
+    table does not list.
   - Adding an `InvalidOperationException` concurrent-rejection mapping to a
     **handle** getter. It has none to map: the ABI documents the return as non-null
     precisely because no guard is taken.

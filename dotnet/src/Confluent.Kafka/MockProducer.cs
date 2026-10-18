@@ -52,7 +52,7 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Manual (<c>autoComplete: false</c>) sends take one thread (M11/P4.2 decision D13).</b>
 /// <c>Send</c> returns once the mock has accepted the record, and the returned future's
-/// <see cref="KafkaFuture{T}.Get"/> blocks until <see cref="CompleteNext"/> / <see cref="ErrorNext"/>
+/// <see cref="KafkaFuture{T}.Get()"/> blocks until <see cref="CompleteNext"/> / <see cref="ErrorNext"/>
 /// resolves the send, so <c>var f = mock.Send(r); mock.CompleteNext(); f.Get();</c> works on one
 /// thread. ⚠ Recorded deviation: Java's <c>completeNext</c> fires the callback and completes the
 /// future before it returns; here both follow on the producer's send-completion pump a moment after
@@ -85,7 +85,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <param name="autoComplete">
     /// When <see langword="true"/> (the default), the mock resolves each send automatically. When
     /// <see langword="false"/>, <c>Send</c> still returns at once, and the returned future's
-    /// <see cref="KafkaFuture{T}.Get"/> blocks until <see cref="CompleteNext"/> /
+    /// <see cref="KafkaFuture{T}.Get()"/> blocks until <see cref="CompleteNext"/> /
     /// <see cref="ErrorNext"/> resolves the send — which the sending thread may itself call first
     /// (M11/P4.2 decision D13). Flush / close on a mock resolve broker-free regardless of this flag.
     /// </param>
@@ -188,7 +188,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. The send's
     /// callback and its future's completion follow on the producer's send-completion pump a moment
     /// after this returns, whereas Java's <c>completeNext</c> does both before returning (M11/P4.2
-    /// decision D13), so call the future's <see cref="KafkaFuture{T}.Get"/> before asserting on a
+    /// decision D13), so call the future's <see cref="KafkaFuture{T}.Get()"/> before asserting on a
     /// callback. The thread that sent may call this itself. Inherent on the concrete mock (not on
     /// <see cref="IProducer{TKey, TValue}"/>), mirroring the consumer's mock-only helpers.
     /// </summary>
@@ -199,7 +199,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <summary>
     /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
     /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
-    /// The send's future's <see cref="KafkaFuture{T}.Get"/> then throws a <see cref="KafkaException"/>
+    /// The send's future's <see cref="KafkaFuture{T}.Get()"/> then throws a <see cref="KafkaException"/>
     /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for the
     /// code when <paramref name="message"/> is <see langword="null"/>). As with
     /// <see cref="CompleteNext"/>, the callback and the future's completion follow on the pump a

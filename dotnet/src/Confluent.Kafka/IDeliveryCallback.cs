@@ -23,7 +23,7 @@ namespace Confluent.Kafka;
 /// (<c>Future&lt;RecordMetadata&gt; send(ProducerRecord, Callback)</c>,
 /// <c>Producer.java:86</c>) — the callback is an <b>additional</b> parameter, not an alternative:
 /// the overload still returns the record's <see cref="KafkaFuture{T}"/> (sync) / yields the record's
-/// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery
+/// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get()"/> is the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> (async), exactly as the plain overload does.
 /// </summary>
 /// <remarks>
@@ -50,7 +50,7 @@ namespace Confluent.Kafka;
 /// handed over is delivered from the producer's <b>send-batch thread</b>.</item>
 /// <item><b>Sync</b> (<see cref="IProducer{TKey, TValue}"/>) — on the same <b>send-completion pump
 /// thread</b>, which the sync producer starts on its first <c>Send</c> (M11/P4.2 decisions D3/D4),
-/// before the returned future's <see cref="KafkaFuture{T}.Get"/> returns or throws. Every sync
+/// before the returned future's <see cref="KafkaFuture{T}.Get()"/> returns or throws. Every sync
 /// invocation runs there, so one producer's sync callbacks are serialized with respect to one
 /// another, and a slow callback delays every later send's <c>Get</c> and callback. ⚠ Until
 /// M11/P4.2 the sync callback ran inline on each calling thread, so one instance passed to
@@ -74,7 +74,7 @@ namespace Confluent.Kafka;
 /// (finding 72.17). The obligation above stands on its own; it needs no claim about Java.
 /// Do not block on producer progress from inside it while it is running on the pump thread: that is
 /// the same thread that must resolve every other in-flight send. On the synchronous surface,
-/// calling <see cref="KafkaFuture{T}.Get"/> there on a not-yet-completed future of the same producer
+/// calling <see cref="KafkaFuture{T}.Get()"/> there on a not-yet-completed future of the same producer
 /// throws <see cref="System.InvalidOperationException"/> instead of deadlocking (M11/P4.2 decision
 /// D9); wait for it from another thread.
 /// </para>
@@ -103,7 +103,7 @@ namespace Confluent.Kafka;
 /// (<c>ProducerBatch.java:303-323</c> — <c>produceFuture.done()</c> is last). This binding
 /// reproduces that exactly: the callback is invoked immediately before the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> is completed (async) and before the returned
-/// future's <see cref="KafkaFuture{T}.Get"/> returns or throws (sync). Note this is <b>stricter</b>
+/// future's <see cref="KafkaFuture{T}.Get()"/> returns or throws (sync). Note this is <b>stricter</b>
 /// than the Python sibling, which resolves
 /// its future first and then invokes <c>on_delivery</c> (<c>producer.py:322-327</c>), so a Python
 /// awaiter can be released before the callback has run. ⚠ On the async surface the callback and
@@ -158,7 +158,7 @@ namespace Confluent.Kafka;
 /// metadata and a <see langword="null"/> exception;</item>
 /// <item>the record was accepted and the core later reported a delivery failure → <b>fires</b>
 /// with the placeholder metadata and the <see cref="KafkaException"/>, and the future's
-/// <see cref="KafkaFuture{T}.Get"/> still throws (sync) / the
+/// <see cref="KafkaFuture{T}.Get()"/> still throws (sync) / the
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> still faults (async) with the same error.</item>
 /// </list>
 /// It also fires for an async send whose delivery
@@ -173,7 +173,7 @@ namespace Confluent.Kafka;
 /// <c>Send</c>, WITHOUT notifying you.</b> The callback reports a <em>core</em> completion, so
 /// wherever the binding faults a send <em>itself</em> instead of reading one, the notification is
 /// dropped: the send fails — its delivery <see cref="System.Threading.Tasks.Task{TResult}"/> faults
-/// (async), its future's <see cref="KafkaFuture{T}.Get"/> throws (sync), or <c>Send</c> throws — and
+/// (async), its future's <see cref="KafkaFuture{T}.Get()"/> throws (sync), or <c>Send</c> throws — and
 /// the callback does not fire. The set below is not a remembered list — it is obtained by walking
 /// <em>every</em> site between the core's acceptance of the record (a live future and no
 /// synchronous error) and the callback's invocation that can fault the send or throw out of
@@ -274,7 +274,7 @@ namespace Confluent.Kafka;
 /// surfaces the failure</em>: on the <b>async</b> surface all four fault the send's
 /// <see cref="System.Threading.Tasks.Task{TResult}"/>, because none of their sites is on the
 /// caller's thread; on the <b>synchronous</b> surface residuals 1, 2 and 3 fault the send's future,
-/// so its <see cref="KafkaFuture{T}.Get"/> throws, while residual 4's site is inside <c>Send</c> and
+/// so its <see cref="KafkaFuture{T}.Get()"/> throws, while residual 4's site is inside <c>Send</c> and
 /// throws out of it, for a record the core had accepted. By <em>which thread the site is on</em>:
 /// residual 1 is the send-batch thread (async) or the caller's thread inside <c>Send</c> (sync);
 /// residual 2 is the thread tearing the producer down, after the pump thread has exited; residual 3
@@ -298,7 +298,7 @@ namespace Confluent.Kafka;
 /// shared, because the synchronous send read its own record's completion inline on the caller's
 /// thread. Residuals 1 and 2 match Python, whose <c>close()</c> likewise cancels the pending futures
 /// without invoking <c>on_delivery</c>. Wait for your sends — await the delivery
-/// <see cref="System.Threading.Tasks.Task{TResult}"/>, or call <see cref="KafkaFuture{T}.Get"/> —
+/// <see cref="System.Threading.Tasks.Task{TResult}"/>, or call <see cref="KafkaFuture{T}.Get()"/> —
 /// before closing if you need the notification.
 /// </para>
 /// <para>
@@ -308,13 +308,13 @@ namespace Confluent.Kafka;
 /// <see cref="System.Diagnostics.Trace"/> so the failure is not silent, and then <b>swallowed</b>.
 /// It does not fail the send, it does not surface on the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> (async) or from the future's
-/// <see cref="KafkaFuture{T}.Get"/> (sync), and it does not stop the pump from completing the other
+/// <see cref="KafkaFuture{T}.Get()"/> (sync), and it does not stop the pump from completing the other
 /// records — those in the same completion batch, or queued behind it.
 /// </para>
 /// <para>
 /// <b>Two distinct error surfaces.</b> An exception faulting the delivery
 /// <see cref="System.Threading.Tasks.Task{TResult}"/> (async), or thrown by the future's
-/// <see cref="KafkaFuture{T}.Get"/> (sync), is the send's own outcome as the caller sees it; the
+/// <see cref="KafkaFuture{T}.Get()"/> (sync), is the send's own outcome as the caller sees it; the
 /// <c>exception</c> delivered here is that same
 /// outcome delivered to the callback — one completion driving both, exactly as in Java, where one
 /// <c>completeFutureAndFireCallbacks</c> both resolves the future and fires the callbacks. The two
@@ -323,7 +323,7 @@ namespace Confluent.Kafka;
 /// They differ in exactly one case — <em>not</em> one of the recorded residuals above, since the
 /// callback does fire there: on the path where the send succeeded but its metadata
 /// could not be marshalled (an <see cref="System.OutOfMemoryException"/> decoding the topic), the
-/// awaiter, or the caller of <see cref="KafkaFuture{T}.Get"/>, receives that exception raw, while
+/// awaiter, or the caller of <see cref="KafkaFuture{T}.Get()"/>, receives that exception raw, while
 /// this parameter is typed
 /// <see cref="KafkaException"/> and therefore receives it wrapped — the original survives as the
 /// <see cref="System.Exception.InnerException"/>, so the type and <see cref="System.Exception.Message"/>

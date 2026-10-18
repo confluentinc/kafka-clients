@@ -23,16 +23,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// D5 — round-trips a non-ASCII <c>group.id</c> config value out through
-/// <c>Consumer_group_metadata</c> → <c>ConsumerGroupMetadata_group_id</c> →
-/// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> (the NUL-terminated output form,
-/// ffi §B3). This proves a configured UTF-8 value survives the in → out boundary
-/// intact and exercises an owned Category-3 handle (get → read → destroy, ffi §B2).
-///
-/// The configured <c>group.id</c> surfaces broker-free / pre-join because the
-/// core's <c>group_metadata()</c> falls back to a stub built from the configured
-/// group id when no membership metadata exists yet (verified in
-/// <c>async_kafka_consumer.rs::group_metadata_after_creation_with_group_id</c>).
+/// Round-trips a non-ASCII <c>group.id</c> config value through the consumer's group metadata and the NUL-terminated
+/// <see cref="Utf8Marshal.PtrToString(IntPtr)"/>.
 /// </summary>
 public sealed class Utf8RoundTripTests
 {
@@ -50,10 +42,6 @@ public sealed class Utf8RoundTripTests
 
         using NativeConsumer consumer = NativeConsumer.Create(config);
 
-        // Pass the SafeHandle itself, not DangerousGetHandle(): every synchronous consumer
-        // declaration now takes SafeConsumerHandle so the marshaller holds a reference for
-        // the whole call (ffi §A2; M9/P4 H1c). NativeConsumer.Handle already calls
-        // ThrowIfClosed() on read.
         IntPtr meta = NativeMethods.ConsumerGroupMetadata(consumer.Handle);
         Assert.NotEqual(IntPtr.Zero, meta);
         try
@@ -63,7 +51,6 @@ public sealed class Utf8RoundTripTests
         }
         finally
         {
-            // Owned Category-3 handle — free it exactly once after reading (ffi §B2).
             NativeMethods.ConsumerGroupMetadataDestroy(meta);
         }
     }

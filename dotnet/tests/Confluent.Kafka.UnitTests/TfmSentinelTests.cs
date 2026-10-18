@@ -19,11 +19,7 @@ using Xunit.Abstractions;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// TFM-sentinel smoke test. Proves the xUnit harness runs and that the test
-/// assembly is correctly wired to the library (ProjectReference +
-/// InternalsVisibleTo). It intentionally references no library type yet — the
-/// M0/P0 skeleton has none (design/history/M0) — but the assembly wiring and
-/// build across the TFM matrix (net8.0, net10.0) must be sound.
+/// Smoke test that the xUnit harness runs on each target framework of the test matrix.
 /// </summary>
 public sealed class TfmSentinelTests
 {
@@ -49,10 +45,8 @@ public sealed class TfmSentinelTests
         _output.WriteLine($"Target framework: {targetFramework}");
         _output.WriteLine($"Runtime: {RuntimeInformation.FrameworkDescription}");
 
-        // The build compiled under a TFM we recognize (proves the matrix wiring).
         Assert.NotEqual("unknown", targetFramework);
 
-        // The harness is really executing on a runtime (proves the test runs).
         Assert.NotEmpty(RuntimeInformation.FrameworkDescription);
     }
 }

@@ -20,18 +20,14 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// UTF-8 string serde — mirrors Java's <c>StringSerializer</c> /
-/// <c>StringDeserializer</c> (both default to <c>StandardCharsets.UTF_8</c>). Backs
-/// <see cref="Serdes.String"/>.
+/// The serde behind <see cref="Serdes.String"/>: UTF-8 strings, as Java's <c>StringSerializer</c> and
+/// <c>StringDeserializer</c>.
 /// </summary>
 internal sealed class StringSerde : ISerde<string>
 {
-    // Java StringSerializer.serialize: data.getBytes(UTF_8); null -> null.
     public byte[]? Serialize(string topic, string data) =>
         data is null ? null : Encoding.UTF8.GetBytes(data);
 
-    // Java StringDeserializer.deserialize: new String(data, UTF_8). The span borrows
-    // the native batch; GetString copies into the owned string in place (ffi §B4).
     public string Deserialize(string topic, ReadOnlySpan<byte> data) =>
         Utf8Marshal.GetString(data);
 }

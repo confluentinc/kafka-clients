@@ -17,48 +17,23 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A single metric reading — the .NET realization of Java's
-/// <c>org.apache.kafka.common.Metric</c> (Java <c>MetricName metricName()</c> +
-/// <c>Object metricValue()</c>). It is the value type of the
-/// <see cref="IReadOnlyDictionary{TKey, TValue}"/> returned by
-/// <see cref="IConsumerCommon.Metrics"/>.
+/// A metric and its value, Java's <c>Metric</c>: the value type of the
+/// <see cref="IReadOnlyDictionary{TKey, TValue}"/> a client's <c>Metrics()</c> returns. The value was measured
+/// once, when <c>Metrics()</c> was called, where Java measures on each read.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Snapshot, not a live handle.</b> Java's <c>Metric.metricValue()</c> re-measures on
-/// each read; the value here was measured once, when <see cref="IConsumerCommon.Metrics"/>
-/// was called (the only shape that can cross the C ABI without an upcall per read). Both
-/// members are cheap cached reads of the already-marshalled snapshot, so they are
-/// <b>properties</b> (not methods).
-/// </para>
-/// <para>
-/// <b>No <c>Kind</c> member (recorded decision).</b> <see cref="Value"/> is a boxed CLR
-/// value whose runtime type conveys the kind: a <see cref="double"/>, a <see cref="string"/>,
-/// an <see cref="long"/> (<c>Int64</c>), or an <see cref="int"/> (<c>Int32</c>). The core
-/// distinguishes <c>Long</c> from <c>Int</c>, and .NET preserves that distinction through
-/// the boxed type — so no separate discriminator is exposed (unlike the Python sibling,
-/// whose single <c>int</c> forces an explicit <c>kind</c>).
-/// </para>
-/// </remarks>
 public interface IMetric
 {
-    /// <summary>The metric's name (Java <c>metricName()</c>).</summary>
+    /// <summary>The metric's name.</summary>
     MetricName Name { get; }
 
     /// <summary>
-    /// The measured value (Java <c>metricValue()</c>) — a boxed <see cref="double"/>,
-    /// <see cref="string"/>, <see cref="long"/>, or <see cref="int"/> (the boxed type is
-    /// the kind).
+    /// The measured value: a boxed <see cref="double"/>, <see cref="string"/>, <see cref="long"/> or
+    /// <see cref="int"/>, whose type is the metric's kind.
     /// </summary>
     object Value { get; }
 }
 
-/// <summary>
-/// The internal snapshot implementation of <see cref="IMetric"/> — an immutable
-/// <c>(Name, Value)</c> pair built by the metric-map marshaller (ffi-marshalling.md §B2/§B3).
-/// Internal because a binding produces metrics; users only consume the <see cref="IMetric"/>
-/// interface.
-/// </summary>
+/// <summary>The <see cref="IMetric"/> a client's metric map holds: an immutable name and value.</summary>
 internal sealed class Metric : IMetric
 {
     internal Metric(MetricName name, object value)
