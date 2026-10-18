@@ -33,7 +33,7 @@ VENV = . venv/bin/activate
 	transactional-producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint doc-check package-check check-api-compat install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -317,6 +317,10 @@ package-check:
 
 check-api-compat:
 	$(MAKE) -C rust check-api-compat
+
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...]`: see rust/Makefile.
+bump-version:
+	$(MAKE) -C rust bump-version VERSION=$(VERSION) PYTHON_VERSION=$(PYTHON_VERSION)
 
 # Static checks of the Python binding (see python/Makefile's `check-static`).
 # Needs no build artifacts, so it is cheap to run.
