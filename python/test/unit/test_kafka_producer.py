@@ -97,11 +97,14 @@ from __future__ import annotations
 
 import os
 import signal
+import asyncio
+import logging
 import threading
 import time
 from types import FrameType
 from typing import Any
 
+import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
@@ -111,7 +114,7 @@ from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
 from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
-from confluent_kafka.producer import KafkaProducer, ProducerRecord, RecordMetadata
+from confluent_kafka.producer import AsyncKafkaProducer, KafkaProducer, ProducerRecord, RecordMetadata
 
 from .producer_futures import failure
 
@@ -558,3 +561,190 @@ def test_producer_constructor_fails_with_config_error_on_unresolvable_bootstrap_
     assert str(err.value) == "Failed to construct kafka producer"
     assert type(err.value.__cause__) is ConfigError
     assert str(err.value.__cause__) == "No resolvable bootstrap urls given in bootstrap.servers"
+
+
+# ---------------------------------------------------------------------------
+# The serializers' lifecycle, the producer's twin of the consumer's deserializer
+# tests (test_kafka_consumer.py): Java's KafkaProducer builds and configures both
+# serializers before the Sender exists, closes them at close(), and on a failed
+# construction closes what it built (its catch block's close(0, true)).
+# ---------------------------------------------------------------------------
+class RecordingSerializer:
+    """A serializer the config route builds: records configure and close."""
+
+    instances: list[RecordingSerializer] = []
+
+    def __init__(self) -> None:
+        self.configured: tuple[dict[str, Any], bool] | None = None
+        self.closed = 0
+        RecordingSerializer.instances.append(self)
+
+    def configure(self, configs: dict[str, Any], is_key: bool) -> None:
+        self.configured = (dict(configs), is_key)
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def __call__(self, topic: str, value: Any, headers: Any = None) -> bytes | None:
+        return None if value is None else str(value).encode()
+
+
+SERDE_PROPS = {"bootstrap.servers": "localhost:9999"}
+# A host that does not resolve: the core producer fails to construct.
+UNRESOLVABLE_PROPS = {"bootstrap.servers": "some.invalid.hostname.foo.bar.local:9999"}
+
+
+def test_the_config_route_builds_and_configures_the_serializers() -> None:
+    RecordingSerializer.instances.clear()
+    path = f"{__name__}.RecordingSerializer"
+    producer: KafkaProducer[Any, Any] = KafkaProducer(configs={
+        **SERDE_PROPS, "key.serializer": path, "value.serializer": RecordingSerializer})
+    key, value = RecordingSerializer.instances
+    assert key.configured is not None and key.configured[1] is True
+    assert value.configured is not None and value.configured[1] is False
+    assert key.configured[0]["key.serializer"] == path
+    producer.close()
+    # Java closes the serializers at producer close.
+    assert (key.closed, value.closed) == (1, 1)
+
+
+def test_given_serializers_are_closed_at_close_but_not_configured() -> None:
+    key, value = RecordingSerializer(), RecordingSerializer()
+    producer = KafkaProducer(configs=SERDE_PROPS, key_serializer=key, value_serializer=value)
+    assert key.configured is None and value.configured is None
+    producer.close()
+    producer.close()
+    assert (key.closed, value.closed) == (1, 1)
+
+
+def test_a_failed_construction_closes_the_serializers_built() -> None:
+    # Both serializers exist when the core producer fails: both are closed, a
+    # given one included.
+    RecordingSerializer.instances.clear()
+    with pytest.raises(KafkaError):
+        KafkaProducer(configs={**UNRESOLVABLE_PROPS, "key.serializer": RecordingSerializer,
+                               "value.serializer": RecordingSerializer})
+    key, value = RecordingSerializer.instances
+    assert (key.closed, value.closed) == (1, 1)
+    given = RecordingSerializer()
+    with pytest.raises(KafkaError):
+        KafkaProducer(configs={**UNRESOLVABLE_PROPS, "key.serializer": RecordingSerializer},
+                      value_serializer=given)
+    built = RecordingSerializer.instances[-1]
+    assert built is not given and (built.closed, given.closed) == (1, 1)
+
+
+class ExplodingSerializer(RecordingSerializer):
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+def test_a_serializer_whose_constructor_raises_fails_as_java_s_chain() -> None:
+    # KafkaException("Failed to construct kafka producer", KafkaException("Could not
+    # instantiate class <name>", RuntimeException("boom"))).
+    with pytest.raises(KafkaError) as failed:
+        KafkaProducer(configs={**SERDE_PROPS, "value.serializer": ExplodingSerializer})
+    assert str(failed.value) == "Failed to construct kafka producer"
+    middle = failed.value.__cause__
+    assert isinstance(middle, KafkaError)
+    assert str(middle) == f"Could not instantiate class {__name__}.ExplodingSerializer"
+    assert isinstance(middle.__cause__, RuntimeError) and str(middle.__cause__) == "boom"
+
+
+class FailingConfigureSerializer(RecordingSerializer):
+    def configure(self, configs: dict[str, Any], is_key: bool) -> None:
+        raise ValueError("cannot configure")
+
+
+def test_a_failing_configure_closes_the_key_serializer_and_builds_no_core_producer(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The value serializer is built after the key one and before the core
+    # producer: its configure fails, the key serializer is closed, the value one
+    # was never assigned (Java's field stays null) and the core is never built.
+    built: list[Any] = []
+    real_new = _lib.KafkaProducer_new
+
+    def new(native: Any, hook: Any) -> Any:
+        built.append(native)
+        return real_new(native, hook)
+
+    monkeypatch.setattr(_lib, "KafkaProducer_new", new)
+    RecordingSerializer.instances.clear()
+    with pytest.raises(KafkaError) as failed:
+        KafkaProducer(configs={**SERDE_PROPS, "key.serializer": RecordingSerializer,
+                               "value.serializer": FailingConfigureSerializer})
+    # Java's constructor wraps it: KafkaException("Failed to construct kafka producer", t).
+    assert str(failed.value) == "Failed to construct kafka producer"
+    assert isinstance(failed.value.__cause__, ValueError)
+    assert str(failed.value.__cause__) == "cannot configure"
+    key, value = RecordingSerializer.instances
+    assert (key.closed, value.closed) == (1, 0)
+    assert built == []
+
+
+@pytest.mark.parametrize("key, value, message", [
+    ("key.serializer", "no.such.Serializer", "Class no.such.Serializer could not be found."),
+    ("value.serializer", RecordingSerializer(), "Expected a Class instance or class name."),
+])
+def test_a_config_route_class_is_parsed_before_the_core_producer(
+        key: str, value: Any, message: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's ConfigDef parses a CLASS key with the other configs, before the
+    # producer is built; the core is not called.
+    def unexpected(native: Any, hook: Any) -> Any:
+        raise AssertionError("the core producer was built")
+
+    monkeypatch.setattr(_lib, "KafkaProducer_new", unexpected)
+    with pytest.raises(ConfigError) as e:
+        KafkaProducer(configs={**SERDE_PROPS, key: value})
+    assert str(e.value) == f"Invalid value {value} for configuration {key}: {message}"
+
+
+def test_async_producer_closes_its_serializers() -> None:
+    async def main() -> None:
+        key, value = RecordingSerializer(), RecordingSerializer()
+        producer = AsyncKafkaProducer(configs=SERDE_PROPS, key_serializer=key,
+                                      value_serializer=value)
+        await producer.close()
+        assert (key.closed, value.closed) == (1, 1)
+
+    asyncio.run(main())
+
+
+class RaisingCloseSerializer(RecordingSerializer):
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("close failed")
+
+
+def _closing_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith("Exception while closing serde")]
+
+
+def test_a_serializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # Java's Utils.closeQuietly: the exception is logged, the other serializer
+    # is still closed, close() returns normally.
+    key, value = RaisingCloseSerializer(), RecordingSerializer()
+    producer = KafkaProducer(configs=SERDE_PROPS, key_serializer=key, value_serializer=value)
+    with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+        producer.close()
+    assert (key.closed, value.closed) == (1, 1)
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)
+
+
+def test_an_async_producer_serializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async def main() -> None:
+        key, value = RecordingSerializer(), RaisingCloseSerializer()
+        producer = AsyncKafkaProducer(configs=SERDE_PROPS, key_serializer=key,
+                                      value_serializer=value)
+        with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+            await producer.close()
+        assert (key.closed, value.closed) == (1, 1)
+
+    asyncio.run(main())
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)

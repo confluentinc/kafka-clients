@@ -137,6 +137,7 @@ for both group protocols; the translations run the consumer protocol's arm.
 from __future__ import annotations
 
 import asyncio
+import logging
 import gc
 import inspect
 import math
@@ -2051,9 +2052,13 @@ def test_a_failing_configure_closes_the_key_deserializer_and_the_core_consumer(
 
     monkeypatch.setattr(_lib, "Consumer_destroy", destroy)
     RecordingDeserializer.instances.clear()
-    with pytest.raises(ValueError, match="cannot configure"):
+    with pytest.raises(KafkaError) as failed:
         KafkaConsumer(configs=configs(**{"key.deserializer": RecordingDeserializer,
                                          "value.deserializer": FailingConfigureDeserializer}))
+    # Java's constructor wraps it: KafkaException("Failed to construct kafka consumer", t).
+    assert str(failed.value) == "Failed to construct kafka consumer"
+    assert isinstance(failed.value.__cause__, ValueError)
+    assert str(failed.value.__cause__) == "cannot configure"
     key, value = RecordingDeserializer.instances
     assert (key.closed, value.closed) == (1, 0)
     assert len(destroyed) == 1
@@ -2122,6 +2127,46 @@ def test_no_deserializer_means_bytes() -> None:
         from confluent_kafka.common.serialization import bytes_deserializer
         assert type(consumer._key_deserializer) is type(bytes_deserializer())
         assert type(consumer._value_deserializer) is type(bytes_deserializer())
+
+
+class RaisingCloseDeserializer(RecordingDeserializer):
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("close failed")
+
+
+def _closing_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith("Exception while closing serde")]
+
+
+def test_a_deserializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # Java's Utils.closeQuietly: the exception is logged, the other deserializer
+    # is still closed, close() returns normally.
+    key, value = RaisingCloseDeserializer(), RecordingDeserializer()
+    consumer = KafkaConsumer(configs=configs(), key_deserializer=key, value_deserializer=value)
+    with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+        consumer.close(option=CloseOptions.timeout(timeout=0))
+    assert (key.closed, value.closed) == (1, 1)
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)
+
+
+def test_an_async_consumer_deserializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async def main() -> None:
+        key, value = RecordingDeserializer(), RaisingCloseDeserializer()
+        consumer = AsyncKafkaConsumer(configs=configs(), key_deserializer=key,
+                                      value_deserializer=value)
+        with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
+        assert (key.closed, value.closed) == (1, 1)
+
+    asyncio.run(main())
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)
 
 
 def test_async_consumer_closes_its_deserializers() -> None:

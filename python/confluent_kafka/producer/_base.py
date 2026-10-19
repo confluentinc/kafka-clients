@@ -102,6 +102,14 @@ FLUSH_IN_CALLBACK_MESSAGE = ("KafkaProducer.flush() invocation inside a callback
 # the core cannot receive a null, so the binding checks it.
 NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be None"
 
+
+def _construct_failure(exc: Exception) -> BaseException:
+    """Java's ``KafkaException("Failed to construct kafka producer", t)`` for a
+    serializer the config route fails to build or configure."""
+    from confluent_kafka.common.kafka_error import KafkaError
+
+    return KafkaError(message="Failed to construct kafka producer", cause=exc)
+
 # A ConsumerGroupMetadata without the core's handle (a mock consumer's): the
 # FFI takes only the handle, so the binding cannot send it.
 NO_GROUP_METADATA_HANDLE_MESSAGE = ("Only a KafkaConsumer's group_metadata() can be sent to "
@@ -439,12 +447,13 @@ class _ProducerState:
                  if argument is not None]
         originals, native = prepare(configs, client="producer", given_serdes=given)
         key = cast("Serializer[Any]", resolve_serde(
-            key_serializer, originals, _KEY_SERIALIZER, is_key=True, default=bytes_serializer()))
+            key_serializer, originals, _KEY_SERIALIZER, is_key=True, default=bytes_serializer(),
+            construct_failure=_construct_failure))
         value: Serializer[Any] | None = None
         try:
             value = cast("Serializer[Any]", resolve_serde(
                 value_serializer, originals, _VALUE_SERIALIZER, is_key=False,
-                default=bytes_serializer()))
+                default=bytes_serializer(), construct_failure=_construct_failure))
             handle, error = _lib.KafkaProducer_new(native, self._notify_hook())
         except BaseException:
             close_if_defined(key)

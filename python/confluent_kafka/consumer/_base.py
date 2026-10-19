@@ -120,14 +120,21 @@ _LONG_MAX = (1 << 63) - 1
 
 # Java's AsyncKafkaConsumer.acquireAndEnsureOpen() / acquire() messages.
 CLOSED_MESSAGE = "This consumer has already been closed."
+
+
+def _construct_failure(exc: Exception) -> BaseException:
+    """Java's ``KafkaException("Failed to construct kafka consumer", t)`` for a
+    deserializer the config route fails to build or configure."""
+    return KafkaError(message="Failed to construct kafka consumer", cause=exc)
 CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
 
 # The null checks of AsyncKafkaConsumer on an argument the FFI takes as a list
 # or a map, so a None cannot cross it (CLAUDE.md, Python Binding Conventions,
 # Implementation over the FFI, exception 4): pause / resume
 # (Objects.requireNonNull), offsetsForTimes, the private
-# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, and
-# the private beginningOrEndOffset; with whether Java checks before acquire()
+# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, the
+# private beginningOrEndOffset, and the nulls committed and partitionsFor
+# dereference without a check; with whether Java checks before acquire()
 # (only the private seek does). assign's is _assign_partitions. Java's
 # NullPointerException is Python's TypeError naming the parameter, and Java's
 # "null" reads "None" (CLAUDE.md, Python Binding Conventions, Types).
@@ -571,10 +578,10 @@ class _ConsumerState:
             serde_configs[_CLIENT_ID] = _lib.Consumer_client_id(handle)
             key = cast("Deserializer[Any]", resolve_serde(
                 key_deserializer, serde_configs, _KEY_DESERIALIZER, is_key=True,
-                default=bytes_deserializer()))
+                default=bytes_deserializer(), construct_failure=_construct_failure))
             value = cast("Deserializer[Any]", resolve_serde(
                 value_deserializer, serde_configs, _VALUE_DESERIALIZER, is_key=False,
-                default=bytes_deserializer()))
+                default=bytes_deserializer(), construct_failure=_construct_failure))
         except BaseException:
             # The key deserializer built or given, and a given value one (one
             # the config route builds is built last, so nothing fails after it).
