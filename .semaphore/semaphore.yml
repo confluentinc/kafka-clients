@@ -93,17 +93,15 @@ name: build-test-release
 # A release tag pushed by other means follows the same path from step 3. The
 # release blocks are skipped on every other build, including -dev tags used to
 # test the release process, so "Publish to PyPI" is the only publish to start
-# by hand. The one exception is the Python wheel and wheel verification blocks,
-# which also build and test the wheels, without publishing them, on a pull
-# request that changes how they are built.
+# by hand.
 #
 # Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of the two "Release (Rust):
-# pre-publish" blocks and of "Release (Python): packaging".
+# block must also be added to the dependencies of "Release (Rust): pre-publish
+# package check" and "Release (Python): packaging".
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -425,26 +423,23 @@ blocks:
   # skipped on every other build. The tag pattern in their `run` conditions
   # must stay identical in all of them and in create-release-tag.yml.
   #
-  # The blocks run in this order: CI, then "Release (Rust): pre-publish package
-  # check" and "Release (Rust): pre-publish smoke test", which depend on every
-  # CI block, then "Release (Rust): publish to crates.io", which depends on
-  # both pre-publish blocks, so each starts only when the blocks before it
-  # have passed. The pre-publish blocks build and test the crate on VMs that
-  # hold no secrets, and each records the SHA-256 of the .crate it tested. The
-  # publish block runs on a separate VM and compiles nothing (`--no-verify`),
-  # so no build script or procedural macro executes while the token is loaded.
-  # It uploads a
-  # .crate only if it is byte-identical to the tested ones, which is possible
-  # because `cargo package` output is reproducible for a given commit and
-  # toolchain. The "post-publish" blocks then verify the crate as users receive
-  # it from crates.io.
+  # The blocks run one after another: CI, then "Release (Rust): pre-publish
+  # package check", then "Release (Rust): pre-publish smoke test", then
+  # "Release (Rust): publish to crates.io", each starting only when the block
+  # before it has passed. The pre-publish blocks build and test the crate on
+  # VMs that hold no secrets, and each records the SHA-256 of the .crate it
+  # tested. The publish block runs on a separate VM and compiles nothing
+  # (`--no-verify`), so no build script or procedural macro executes while the
+  # token is loaded. It uploads a .crate only if it is byte-identical to the
+  # tested ones, which is possible because `cargo package` output is
+  # reproducible for a given commit and toolchain. The "post-publish" blocks
+  # then verify the crate as users receive it from crates.io.
   #
   # Semaphore runs the pipelines of one git ref one at a time, so two runs for
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # A new CI block must be added to this list, and to the one of
-    # "Release (Rust): pre-publish smoke test".
+    # A new CI block must be added to this list.
     dependencies:
       - "Verify Rust (Linux amd64)"
       - "Verify language bindings (Linux amd64)"
@@ -521,15 +516,8 @@ blocks:
     # Tests the packaged crate against a real broker before anything is
     # uploaded. Each job starts a temporary apache/kafka container (Docker is
     # available on the Ubuntu image) and runs xtask/smoke/main.rs in a new
-    # project.
-    dependencies:
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Check Rust docs (Linux amd64)"
-      - "Check crate package (Linux amd64)"
-      - "Check API compatibility (Linux amd64)"
+    # project. It starts after the package check, which starts after CI.
+    dependencies: ["Release (Rust): pre-publish package check"]
     run:
       when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -585,12 +573,10 @@ blocks:
     #   - the version is not yet on crates.io and is higher than every
     #     published version. The only exception is completing an interrupted
     #     publish of the same version from this workflow (see the job below).
-    # The dependencies guarantee that every CI job passed: Semaphore starts this
-    # block only when both pre-publish blocks have passed, and they start only
-    # when every CI block has.
-    dependencies:
-      - "Release (Rust): pre-publish package check"
-      - "Release (Rust): pre-publish smoke test"
+    # The dependency guarantees that every CI job passed: Semaphore starts this
+    # block only when the smoke test has passed, which starts only after the
+    # package check, which starts only when every CI block has passed.
+    dependencies: ["Release (Rust): pre-publish smoke test"]
     run:
       when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -903,14 +889,10 @@ blocks:
   # Python release blocks. They run only on the build of a Python release tag,
   # python/<version> where <version> is <major>.<minor>.<patch> with an
   # optional aN, bN or rcN suffix (PEP 440, in its normalized form), and are
-  # skipped on every other build. The exception is the wheel and wheel
-  # verification blocks, which also run, without publishing anything, on a
-  # pull request that changes how the wheels are built (the build scripts, the
-  # extension's setup.py, pyproject.toml and C sources, the Rust toolchain) or
-  # this file, so that a change to the build is tested before a release depends
-  # on it. The tag pattern in their `run` conditions must stay identical in all
-  # of them, in publish-wheels.sh and in create-release-tag.yml; the blocks of
-  # publish-pypi.yml use the same pattern without the pre-release suffix.
+  # skipped on every other build. The tag pattern in their `run` conditions
+  # must stay identical in all of them, in publish-wheels.sh and in
+  # create-release-tag.yml; the blocks of publish-pypi.yml use the same pattern
+  # without the pre-release suffix.
   #
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (Python): wheels (<platform>)" builds the wheels for one
@@ -946,7 +928,7 @@ blocks:
   - name: "Release (Python): wheels (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -967,7 +949,7 @@ blocks:
   - name: "Release (Python): wheels (Linux arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -988,7 +970,7 @@ blocks:
   - name: "Release (Python): wheels (macOS amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1013,7 +995,7 @@ blocks:
   - name: "Release (Python): wheels (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1038,7 +1020,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux amd64)"
     dependencies: ["Release (Python): wheels (Linux amd64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1063,7 +1045,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux arm64)"
     dependencies: ["Release (Python): wheels (Linux arm64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1088,7 +1070,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS amd64)"
     dependencies: ["Release (Python): wheels (macOS amd64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1113,7 +1095,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS arm64)"
     dependencies: ["Release (Python): wheels (macOS arm64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml', '/python/_confluentkafka.c', '/python/tinycthread.c', '/python/tinycthread.h', '/python/c11threads_compat.h', '/rust/rust-toolchain.toml']))"
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
