@@ -47,6 +47,7 @@ from confluent_kafka import _errors as errmod
 from confluent_kafka._error_registry import ERRORS
 from confluent_kafka._errors import class_for_ffi_id, error_classes, from_ffi_error, to_ffi_id
 from confluent_kafka.common import (
+    Headers,
     InvalidRecordError,
     KafkaError,
     KafkaMetric,
@@ -512,7 +513,7 @@ def test_record_deserialization_constructors() -> None:
     assert e.topic_partition() == _TP and e.offset() == 7 and e.timestamp() == 10
     assert bytes(e.key_buffer() or b"") == b"k"
     assert bytes(e.value_buffer() or b"") == b"v"
-    assert [(k, bytes(v or b"")) for k, v in e.headers()] == [("h", b"1")]
+    assert [(h.key(), bytes(h.value() or b"")) for h in e.headers()] == [("h", b"1")]
     assert e.__cause__ is cause
     # Java's null buffers and origin are values of the full constructor.
     # Every Java constructor takes the cause, so a null one is cause=None.
@@ -520,7 +521,8 @@ def test_record_deserialization_constructors() -> None:
         origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
         timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
         headers=(), message="m", cause=None)
-    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (
+        None, None, None, Headers())
     # A record without a key (CompletedFetch passes record.key(), null) or a
     # tombstone keeps the other buffer.
     k = RecordDeserializationError(

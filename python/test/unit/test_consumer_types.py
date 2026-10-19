@@ -36,7 +36,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common import TimestampType, TopicPartition
+from confluent_kafka.common import Headers, TimestampType, TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
     ConsumerGroupMetadata,
@@ -289,7 +289,7 @@ def test_short_constructor() -> None:
     assert record.serialized_value_size() == ConsumerRecord.NULL_SIZE
     assert record.leader_epoch() is None
     assert record.delivery_count() is None
-    assert record.headers() == ()
+    assert record.headers() == Headers() and record.headers().to_array() == ()
 
 
 def test_long_constructor() -> None:
@@ -304,8 +304,15 @@ def test_long_constructor() -> None:
     assert record.timestamp() == 23434217432432
     assert (record.serialized_key_size(), record.serialized_value_size()) == (100, 1142)
     assert record.leader_epoch() is None and record.delivery_count() is None
-    assert [(k, bytes(v or b"")) for k, v in record.headers()] == [
+    assert [(h.key(), bytes(h.value() or b"")) for h in record.headers()] == [
         ("header key", b"header value")]
+    # A Headers argument is kept as it is, as Java's ConsumerRecord keeps it.
+    given = Headers(headers=headers)
+    kept = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
+                          timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
+                          serialized_value_size=1142, key="key", value="value",
+                          headers=given, leader_epoch=None)
+    assert kept.headers() is given
     record = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
                             timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
                             serialized_value_size=1142, key="key", value="value",

@@ -518,8 +518,9 @@ def test_the_send_path_copies_no_topic_key_value_or_header_bytes() -> None:
     assert native.topic is record.topic()
     assert topic_address == _utf8_address(record.topic())
     assert (key_address, value_address) == (_bytes_address(key), _bytes_address(value))
-    expected = [(_utf8_address(k), 0 if v is None else _bytes_address(original))
-                for (k, v), original in zip(record.headers(), [*header_values, None])]
+    expected = [(_utf8_address(k), 0 if original is None else _bytes_address(original))
+                for k, original in zip([h.key() for h in record.headers()],
+                                       [*header_values, None])]
     assert headers == expected
 
 

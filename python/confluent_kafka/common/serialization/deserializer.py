@@ -44,7 +44,9 @@ class Deserializer(Protocol[T_co]):
                  headers: Headers | None = None) -> T_co | None:
         """Deserialize a record value from a ``memoryview`` into a value or
         object: ``topic`` is the topic associated with the data, ``headers``
-        the headers associated with the record, and ``data`` the serialized
+        the headers associated with the record (its own ``Headers``, which
+        stay writable, as Java's ``CompletedFetch`` leaves them), and ``data``
+        the serialized
         bytes, a view into the fetch batch. Returns the deserialized typed
         data; may be ``None``."""
         ...

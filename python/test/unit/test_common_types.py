@@ -53,7 +53,6 @@ from confluent_kafka.common import (
     TopicPartition,
     Uuid,
 )
-from confluent_kafka.common.headers import _hand_out, _headers_to_string, _read_headers
 
 # --------------------------------------------------------------------------- #
 # Uuid: UuidTest
@@ -483,17 +482,8 @@ def test_timestamp_type() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Headers and Java's string conversion
+# Java's string conversion (the headers' tests are in test_headers.py)
 # --------------------------------------------------------------------------- #
-
-
-def test_no_headers_read_and_hand_out_as_the_empty_tuple() -> None:
-    # A record built without headers is given (); it reads, and hands out, as
-    # the empty tuple at once.
-    assert _read_headers(()) == () and type(_read_headers(())) is tuple
-    assert _read_headers(None) == ()
-    assert _read_headers([]) == ()
-    assert _hand_out(()) == () and type(_hand_out(())) is tuple
 
 
 def test_topic_partition_of_is_what_the_constructor_builds() -> None:
@@ -503,36 +493,6 @@ def test_topic_partition_of_is_what_the_constructor_builds() -> None:
     assert (built.topic(), built.partition()) == ("t", 3)
     assert built == expected and hash(built) == hash(expected)
     assert str(built) == str(expected) == "t-3"
-
-
-def test_read_headers_views_the_values_without_copying() -> None:
-    raw = bytearray(b"v2")
-    out = _read_headers([("k1", b"v1"), ("k2", raw), ("k3", None)])
-    assert [(k, None if v is None else v.tobytes()) for k, v in out] == [
-        ("k1", b"v1"), ("k2", b"v2"), ("k3", None)]
-    assert all(v is None or isinstance(v, memoryview) for _, v in out)
-    raw[0] = ord("V")  # a view, not a copy (CLAUDE.md §12)
-    assert out[1][1] is not None and out[1][1].tobytes() == b"V2"
-    assert _read_headers(None) == ()
-
-
-def test_read_headers_rejects_a_bad_value_or_shape() -> None:
-    with pytest.raises(TypeError):
-        _read_headers([("k", "not-bytes")])  # type: ignore[list-item]
-    with pytest.raises(TypeError):
-        _read_headers([("k",)])  # type: ignore[list-item]
-
-
-def test_read_headers_rejects_a_null_key_with_javas_message() -> None:
-    with pytest.raises(TypeError) as exc:
-        _read_headers([(None, b"v")])  # type: ignore[list-item]
-    assert str(exc.value) == "a header key must not be None"
-
-
-def test_headers_to_string_is_record_headers_to_string() -> None:
-    assert _headers_to_string(_read_headers([("k", b"\x01\xff"), ("n", None)])) == (
-        "RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), "
-        "RecordHeader(key = n, value = None)], isReadOnly = False)")
 
 
 @pytest.mark.parametrize("value,text", [

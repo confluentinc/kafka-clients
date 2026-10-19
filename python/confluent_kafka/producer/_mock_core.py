@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from confluent_kafka._args import MISSING
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
+from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -428,8 +429,9 @@ class MockProducerCore(Generic[K, V]):
             else:
                 # just to raise the serializer's error if the serializers are not
                 # the proper ones to serialize the key / value
-                self._key_serializer(record.topic(), record.key(), ())
-                self._value_serializer(record.topic(), record.value(), ())
+                # (each with `new RecordHeaders()`, MockProducer.java:316-317).
+                self._key_serializer(record.topic(), record.key(), Headers())
+                self._value_serializer(record.topic(), record.value(), Headers())
             topic_partition = TopicPartition(topic=record.topic(), partition=partition)
             offset = self._next_offset(topic_partition)
             base_offset = max(0, offset - _INT_MAX)

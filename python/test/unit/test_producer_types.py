@@ -26,7 +26,7 @@ import threading
 import pytest
 
 from confluent_kafka import ExecutionError, IllegalArgumentError, TimeoutError
-from confluent_kafka.common import TopicPartition
+from confluent_kafka.common import Headers, TopicPartition
 from confluent_kafka.common.errors import CorruptRecordError
 from confluent_kafka.producer import AsyncMockProducer, MockProducer, ProducerRecord, RecordMetadata
 
@@ -71,12 +71,13 @@ def test_producer_record_forms_and_headers() -> None:
     r = ProducerRecord(topic="t", value=b"v")
     assert (r.topic(), r.partition(), r.timestamp(), r.key(), r.value()) == (
         "t", None, None, None, b"v")
-    assert r.headers() == ()
+    assert r.headers() == Headers() and r.headers().to_array() == ()
     raw = bytearray(b"h")
     tombstone = ProducerRecord(topic="t", partition=None, key=b"k", value=None,
                                headers=[("a", raw), ("b", None)])
     assert tombstone.value() is None
-    (a, va), (b, vb) = tombstone.headers()
+    ha, hb = tombstone.headers()
+    a, va, b, vb = ha.key(), ha.value(), hb.key(), hb.value()
     assert (a, b, vb) == ("a", "b", None)
     assert isinstance(va, memoryview) and va.tobytes() == b"h"
     raw[0] = ord("H")  # the header value is viewed, not copied
@@ -94,9 +95,9 @@ def test_producer_record_forms_and_headers() -> None:
     # timestamp, key, value), an empty header list (topic, partition, key,
     # value, headers).
     null_timestamp = ProducerRecord(topic="t", partition=0, timestamp=None, key=b"k", value=b"v")
-    assert (null_timestamp.timestamp(), null_timestamp.headers()) == (None, ())
+    assert (null_timestamp.timestamp(), null_timestamp.headers()) == (None, Headers())
     empty_headers = ProducerRecord(topic="t", partition=None, key=None, value=b"v", headers=())
-    assert (empty_headers.timestamp(), empty_headers.headers()) == (None, ())
+    assert (empty_headers.timestamp(), empty_headers.headers()) == (None, Headers())
     # Only Java's six constructors are accepted (CLAUDE.md, Signatures).
     forms = ("ProducerRecord() takes one of (topic, partition, timestamp, key, value, headers), "
              "(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), "
@@ -115,7 +116,7 @@ def test_producer_record_forms_and_headers() -> None:
     with pytest.raises(TypeError) as npe:
         ProducerRecord(topic="t", partition=None, key=None, value=1,
                        headers=[(None, b"x")])  # type: ignore[list-item]
-    assert str(npe.value) == "a header key must not be None"
+    assert str(npe.value) == "headers must not contain a None key"
     with pytest.raises(TypeError):
         ProducerRecord("t", None, None, None, 1)  # type: ignore[call-overload]
 
@@ -171,12 +172,13 @@ def test_header_value_survives_the_caller_releasing_its_view() -> None:
     with memoryview(bytearray(b"hdr")) as mv:
         record = ProducerRecord(topic="t", partition=None, key=None, value=b"v",
                                 headers=[("h", mv)])
-    ((_, value),) = record.headers()
+    (header,) = record.headers()
+    value = header.value()
     assert value is not None and value.tobytes() == b"hdr"
     # A caller releasing a handed-out view leaves the record's own intact.
-    with record.headers()[0][1] as handed_out:  # type: ignore[union-attr]
+    with record.headers().to_array()[0].value() as handed_out:  # type: ignore[union-attr]
         assert handed_out.tobytes() == b"hdr"
-    assert record.headers()[0][1].tobytes() == b"hdr"  # type: ignore[union-attr]
+    assert record.headers().to_array()[0].value().tobytes() == b"hdr"  # type: ignore[union-attr]
 
 
 def test_released_or_non_contiguous_header_value_is_rejected() -> None:
@@ -189,13 +191,13 @@ def test_released_or_non_contiguous_header_value_is_rejected() -> None:
     with pytest.raises(TypeError) as type_exc:
         ProducerRecord(topic="t", partition=None, key=None, value=b"v",
                        headers=[("h", memoryview(b"abcdef")[::2])])
-    assert str(type_exc.value) == "header[0] value must be a C-contiguous buffer"
+    assert str(type_exc.value) == "headers[0] value must be a C-contiguous buffer"
     # A non-byte format is carried as its bytes.
     import array
 
     record = ProducerRecord(topic="t", partition=None, key=None, value=b"v",
                             headers=[("h", memoryview(array.array("H", [1])))])
-    assert record.headers()[0][1].tobytes() == array.array("H", [1]).tobytes()  # type: ignore[union-attr]
+    assert record.headers().to_array()[0].value().tobytes() == array.array("H", [1]).tobytes()  # type: ignore[union-attr]
 
 
 def test_native_record_holds_an_export_of_each_header_value() -> None:
@@ -238,7 +240,7 @@ def test_send_path_record_from_a_released_caller_view() -> None:
         record = ProducerRecord(topic="t", partition=None, key=None, value=b"v",
                                 headers=[("h", mv)])
     junk = [bytes(bytearray(b"Q" * 4096)) for _ in range(50)]
-    native = lib.ProducerRecord("t", b"v", None, -1, -1, tuple(record.headers()))
+    native = lib.ProducerRecord("t", b"v", None, -1, -1, record.headers()._pairs())  # noqa: SLF001
     assert native.headers == [("h", b"A" * 4096)]
     del junk
 

@@ -553,10 +553,13 @@ class _ProducerState:
         value = serialize(self._value_serializer, topic, record.value(), headers)
         partition = record.partition()
         timestamp = record.timestamp()
+        # KafkaProducer.doSend: `setReadOnly(record.headers())` once the
+        # serializers ran, then `record.headers().toArray()`.
+        headers._read_only = True  # RecordHeaders.setReadOnly()
         native = _lib.ProducerRecord(topic, value, key,
                                      -1 if partition is None else partition,
                                      -1 if timestamp is None else timestamp,
-                                     headers)
+                                     headers._pairs())
         return native, topic, partition
 
     def _track(self, future: _FutureState[Any]) -> None:

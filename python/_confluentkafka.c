@@ -3560,13 +3560,106 @@ static PyObject* ConsumerRecord_get_delivery_count(ConsumerRecordObject* self, v
     return PyLong_FromLong(count);
 }
 
-// headers -> list[(key: str, value: memoryview | None)], in insertion order
-// (bytes for a mock batch, see `record_bytes_to_py`).
+// The Python classes a fetched record's headers are built as --
+// `confluent_kafka.common.header.Header` and `confluent_kafka.common.headers.
+// Headers` -- and the slot descriptors of their fields, looked up once. The
+// objects are allocated without running the classes' keyword constructors and
+// their slots set directly: the values are already in the form the
+// constructors would make (a str key, a read-only byte view).
+static PyTypeObject* py_header_type = NULL;
+static PyTypeObject* py_headers_type = NULL;
+static PyObject* header_key_slot = NULL;      // Header._key
+static PyObject* header_value_slot = NULL;    // Header._value
+static PyObject* headers_list_slot = NULL;    // Headers._headers
+static PyObject* headers_read_only_slot = NULL;  // Headers._read_only
+
+static PyObject* slot_descriptor(PyTypeObject* type, const char* name) {
+    PyObject* d = PyObject_GetAttrString((PyObject*)type, name);
+    if (d != NULL && Py_TYPE(d)->tp_descr_set == NULL) {
+        Py_DECREF(d);
+        PyErr_Format(PyExc_TypeError, "%s.%s is not a slot", type->tp_name, name);
+        return NULL;
+    }
+    return d;
+}
+
+static int load_header_types(void) {
+    if (py_headers_type != NULL) return 0;
+    PyObject* module = PyImport_ImportModule("confluent_kafka.common.headers");
+    if (module == NULL) return -1;
+    PyObject* header = PyObject_GetAttrString(module, "Header");
+    PyObject* headers = header ? PyObject_GetAttrString(module, "Headers") : NULL;
+    Py_DECREF(module);
+    if (headers == NULL) { Py_XDECREF(header); return -1; }
+    if (!PyType_Check(header) || !PyType_Check(headers)) {
+        Py_DECREF(header); Py_DECREF(headers);
+        PyErr_SetString(PyExc_TypeError, "Header and Headers must be classes");
+        return -1;
+    }
+    PyObject* k = slot_descriptor((PyTypeObject*)header, "_key");
+    PyObject* v = k ? slot_descriptor((PyTypeObject*)header, "_value") : NULL;
+    PyObject* l = v ? slot_descriptor((PyTypeObject*)headers, "_headers") : NULL;
+    PyObject* r = l ? slot_descriptor((PyTypeObject*)headers, "_read_only") : NULL;
+    if (r == NULL) {
+        Py_XDECREF(k); Py_XDECREF(v); Py_XDECREF(l);
+        Py_DECREF(header); Py_DECREF(headers);
+        return -1;
+    }
+    header_key_slot = k;
+    header_value_slot = v;
+    headers_list_slot = l;
+    headers_read_only_slot = r;
+    py_header_type = (PyTypeObject*)header;
+    py_headers_type = (PyTypeObject*)headers;  // set last: the "loaded" flag
+    return 0;
+}
+
+static int set_slot(PyObject* descr, PyObject* obj, PyObject* value) {
+    return Py_TYPE(descr)->tp_descr_set(descr, obj, value);
+}
+
+// A `Header` with the given key and value (both borrowed); NULL on failure.
+static PyObject* new_header(PyObject* key, PyObject* value) {
+    PyObject* h = py_header_type->tp_alloc(py_header_type, 0);
+    if (h == NULL) return NULL;
+    if (set_slot(header_key_slot, h, key) < 0 || set_slot(header_value_slot, h, value) < 0) {
+        Py_DECREF(h);
+        return NULL;
+    }
+    return h;
+}
+
+// A writable `Headers` holding the tuple `items` of `Header`s (borrowed);
+// NULL on failure. It stays writable, as Java's CompletedFetch leaves it.
+static PyObject* new_headers(PyObject* items) {
+    PyObject* hs = py_headers_type->tp_alloc(py_headers_type, 0);
+    if (hs == NULL) return NULL;
+    if (set_slot(headers_list_slot, hs, items) < 0
+        || set_slot(headers_read_only_slot, hs, Py_False) < 0) {
+        Py_DECREF(hs);
+        return NULL;
+    }
+    return hs;
+}
+
+// headers -> a `confluent_kafka.common.Headers` of `Header`s, in insertion
+// order (CLAUDE.md, Python Binding Conventions, Behaviour with no other home):
+// each key a str, each value a memoryview into the batch, never copied
+// (CLAUDE.md §14), or None for a null value. A mock batch's values are bytes
+// copies (see `record_bytes_to_py`), viewed as memoryviews too.
 static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* closure) {
     kafka_common_Error_t *ffi_err = NULL;
+    if (load_header_types() < 0) return NULL;
     const kafka_common_header_internals_RecordHeaders_t* rh = NULL;
     if (ffi_raise((rh = kafka_consumer_ConsumerRecord_headers_err(self->rec, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (rh == NULL) return PyList_New(0);
+    PyObject* items = NULL;
+    if (rh == NULL) {
+        items = PyTuple_New(0);
+        if (items == NULL) return NULL;
+        PyObject* out = new_headers(items);
+        Py_DECREF(items);
+        return out;
+    }
     // The interface view is borrowed from the class handle (never destroyed);
     // the `__as_` conversion takes the handle non-const.
     kafka_common_header_Headers_t* headers = NULL;
@@ -3574,11 +3667,17 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
     if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(
             (kafka_common_header_internals_RecordHeaders_t*)rh, &ffi_err), ffi_take(&ffi_err)))
         || ffi_raise((arr = kafka_common_header_Headers_to_array_err(headers, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (arr == NULL) return PyList_New(0);
     int32_t n = 0;
-    if (ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) { ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    PyObject* list = PyList_New(n);
-    if (list == NULL) { ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
+    if (arr != NULL
+        && ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) {
+        ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
+    items = PyTuple_New(n);  // the empty tuple is a shared singleton
+    if (items == NULL) {
+        if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
     for (int32_t i = 0; i < n; i++) {
         void* rec_header = NULL;
         const kafka_common_header_Header_t* h = NULL;
@@ -3589,21 +3688,29 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
                    (const kafka_common_header_internals_RecordHeader_t*)rec_header, &ffi_err), ffi_take(&ffi_err)))
             || ffi_raise((hkey = kafka_common_header_Header_key_err(h, &ffi_err), ffi_take(&ffi_err)))
             || ffi_raise((hval = kafka_common_header_Header_value_err(h, &ffi_err), ffi_take(&ffi_err)))) {
-            Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+            Py_DECREF(items); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
             return NULL;
         }
         PyObject* pykey = PyUnicode_FromString(hkey ? hkey : "");
         PyObject* pyval = record_bytes_to_py(self->batch, &hval);
-        if (pykey == NULL || pyval == NULL) {
-            Py_XDECREF(pykey); Py_XDECREF(pyval); Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        if (pyval != NULL && PyBytes_Check(pyval)) {
+            PyObject* view = PyMemoryView_FromObject(pyval);  // a view of the copy
+            Py_DECREF(pyval);
+            pyval = view;
+        }
+        PyObject* header = (pykey != NULL && pyval != NULL) ? new_header(pykey, pyval) : NULL;
+        Py_XDECREF(pykey);
+        Py_XDECREF(pyval);
+        if (header == NULL) {
+            Py_DECREF(items); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
             return NULL;
         }
-        PyObject* tuple = Py_BuildValue("(NN)", pykey, pyval);  // steals both
-        if (tuple == NULL) { Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        PyList_SET_ITEM(list, i, tuple);  // steals ref
+        PyTuple_SET_ITEM(items, i, header);  // steals ref
     }
-    ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
-    return list;
+    if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+    PyObject* out = new_headers(items);
+    Py_DECREF(items);
+    return out;
 }
 
 static PyObject* ConsumerRecord_repr(ConsumerRecordObject* self) {
@@ -3628,7 +3735,7 @@ static PyGetSetDef ConsumerRecord_getsetters[] = {
     {"serialized_value_size", (getter)ConsumerRecord_get_serialized_value_size, NULL, "Serialized value size", NULL},
     {"leader_epoch", (getter)ConsumerRecord_get_leader_epoch, NULL, "Leader epoch or None", NULL},
     {"delivery_count", (getter)ConsumerRecord_get_delivery_count, NULL, "Delivery count or None", NULL},
-    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers list of (key, value)", NULL},
+    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.Headers of Header objects", NULL},
     {NULL}
 };
 

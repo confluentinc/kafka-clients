@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka.common import TimestampType
+from confluent_kafka.common import Header, TimestampType
 from confluent_kafka.producer import ProducerRecord
 
 from .broker_helpers import (
@@ -135,6 +135,13 @@ def test_compressed_bytes_and_memoryview_round_trip(kafka_broker: Any, mode: str
     assert [r.value() for r in records] == [bytes(v) for v in values]
     for record in records:
         assert record.key() == b"key"
-        headers = list(record.headers())
+        headers = [(h.key(), h.value()) for h in record.headers()]
+        assert all(isinstance(h, Header) for h in record.headers())
         assert all(v is None or isinstance(v, memoryview) for _, v in headers)
+        # Each value views the fetch batch (CLAUDE.md §14), never a copy.
+        assert all(v is None or type(v.obj).__name__ == "_BorrowedBytes" for _, v in headers)
         assert [(k, None if v is None else bytes(v)) for k, v in headers] == HEADERS_OUT
+        # A polled record's headers stay writable, as Java's CompletedFetch
+        # leaves them.
+        record.headers().add(key="k", value=None)
+        assert record.headers().last_header(key="k") is not None

@@ -475,12 +475,13 @@ def _record_to_proto(r):
 
     ``key()`` / ``value()`` are ``bytes`` deserializer output (the gRPC servers
     build byte-typed consumers), or ``None`` for a tombstone; ``headers()``
-    yields ``(str, memoryview)`` pairs; ``timestamp_type()`` is a
+    is a ``Headers`` of ``Header`` objects (``key()`` a ``str``, ``value()`` a
+    ``memoryview`` or ``None``); ``timestamp_type()`` is a
     ``TimestampType`` int-enum whose value is the proto's ``int32``."""
     key = bytes(r.key()) if r.key() is not None else None
     value = bytes(r.value()) if r.value() is not None else None
-    headers = [pb.Header(key=k, value=bytes(v) if v is not None else b"")
-               for (k, v) in r.headers()]
+    headers = [pb.Header(key=h.key(), value=bytes(v) if (v := h.value()) is not None else b"")
+               for h in r.headers()]
     leader_epoch = r.leader_epoch()
     return cpb.ConsumerRecord(
         topic=r.topic(),
