@@ -1259,7 +1259,7 @@ impl<K, V> KafkaProducer<K, V> {
             let accumulator = ChunkedRecordAccumulator::new(
                 batch_size,
                 compression,
-                config.linger_ms as i32,
+                Self::linger_ms(config),
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
                 delivery_timeout_ms,
@@ -1284,7 +1284,7 @@ impl<K, V> KafkaProducer<K, V> {
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
-            config.linger_ms as i32,
+            Self::linger_ms(config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
@@ -1499,6 +1499,17 @@ impl<K, V> KafkaProducer<K, V> {
         (metrics, producer_metrics)
     }
 
+    /// Returns `linger.ms` as the `i32` the accumulator works with.
+    ///
+    /// `linger.ms` is a long-typed config, so values above `i32::MAX` are clamped
+    /// to `i32::MAX` rather than cast with `as i32`, which keeps only the low 32
+    /// bits and can yield zero or a negative linger, making every batch ready
+    /// immediately.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#lingerMs")]
+    fn linger_ms(config: &ProducerConfig) -> i32 {
+        config.linger_ms.min(i32::MAX as i64) as i32
+    }
+
     /// Validate and optionally adjust `delivery.timeout.ms` against
     /// `linger.ms + request.timeout.ms`.
     ///
@@ -1518,7 +1529,7 @@ impl<K, V> KafkaProducer<K, V> {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#configureDeliveryTimeout")]
     fn configure_delivery_timeout(config: &ProducerConfig, log_context: &LogContext) -> Result<i32, Error> {
         let mut delivery_timeout_ms = config.delivery_timeout_ms;
-        let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
+        let linger_ms = Self::linger_ms(config);
         let request_timeout_ms = config.request_timeout_ms;
         let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
 
@@ -2251,6 +2262,8 @@ impl<K, V> KafkaProducer<K, V> {
         // `None` typed) is the faithful call there.
         let partition = self.compute_partition(topic, partition, None, key, None, value, cluster)?;
 
+        // An `i64`: unlike a Java `byte[]`, a key or value slice can be longer than
+        // `i32::MAX`, and such a record must still be rejected below.
         let serialized_size = AbstractRecords::estimate_size_in_bytes_upper_bound(
             RecordBatch::CURRENT_MAGIC_VALUE,
             self.compression_type,
@@ -2661,9 +2674,13 @@ impl<K, V> KafkaProducer<K, V> {
     /// Validate that the record size isn't too large.
     ///
     /// Translated from `KafkaProducer.ensureValidRecordSize()`.
+    ///
+    /// Takes an `i64` so that a size above `i32::MAX`, which
+    /// `AbstractRecords::estimate_size_in_bytes_upper_bound` can return, is rejected
+    /// and reported exactly.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#ensureValidRecordSize")]
-    fn ensure_valid_record_size(&self, size: i32) -> Result<(), Error> {
-        if size > self.max_request_size {
+    fn ensure_valid_record_size(&self, size: i64) -> Result<(), Error> {
+        if size > self.max_request_size as i64 {
             return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than {}, which is the value of the {} configuration.",
                 size,
@@ -2671,7 +2688,7 @@ impl<K, V> KafkaProducer<K, V> {
                 ProducerConfig::MAX_REQUEST_SIZE_CONFIG
             )));
         }
-        if size as i64 > self.total_memory_size {
+        if size > self.total_memory_size {
             return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than the total memory buffer you have configured with the {} configuration.",
                 size,
@@ -3006,9 +3023,24 @@ where
     ///
     /// If `timeout == 0`: force-closes immediately without draining.
     ///
+    /// A timeout whose length in milliseconds exceeds `i64::MAX`, such as
+    /// `Duration::MAX`, is clamped to `i64::MAX` ms, the value passed by `close()`.
+    /// The producer then closes gracefully and waits for the sender task to finish.
+    ///
     /// Note: Rust's `Duration` is unsigned, so the negative-timeout check from
     /// Java is omitted (impossible to construct a negative `Duration`).
     async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error> {
+        // Java: `long timeoutMs = timeout.toMillis()`. The millisecond count is
+        // clamped rather than cast with `as i64`, which truncates it to the low 64
+        // bits and can produce a negative or zero value that neither branch below
+        // handles as intended. Java's `toMillis()` throws `ArithmeticException` on
+        // overflow; clamping is preferred here because `Duration::MAX` is the
+        // conventional way to express an unbounded timeout in Rust.
+        // `AsyncKafkaConsumer` applies the same clamp on close. The `Duration` is
+        // normalized to the same whole-millisecond value, so the sender wait below
+        // uses the timeout that is logged and checked, as Java joins the I/O thread
+        // for `timeoutMs`.
+        let timeout = Duration::from_millis(timeout.as_millis().min(i64::MAX as u128) as u64);
         let timeout_ms = timeout.as_millis() as i64;
         kafka_info!(
             self.log_context,
@@ -3720,6 +3752,61 @@ mod tests {
             },
             other => panic!("Expected RecordTooLarge error, got: {:?}", other),
         }
+    }
+
+    /// A size above `i32::MAX` is rejected with the `max.request.size` message.
+    #[tokio::test]
+    async fn test_ensure_valid_record_size_rejects_size_beyond_i32_max() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let producer = create_producer_with_config(ProducerConfig::default(), metadata, create_accumulator());
+
+        let size = (1i64 << 32) + 98;
+        let err = producer.ensure_valid_record_size(size).expect_err("too large");
+        assert!(matches!(err, Error::RecordTooLarge(_)), "Expected RecordTooLarge, got: {err:?}");
+        assert_eq!(
+            err.message(),
+            "The message is 4294967394 bytes when serialized which is larger than 1048576, which is the value of \
+             the max.request.size configuration."
+        );
+    }
+
+    /// With `max.request.size` at `i32::MAX`, a size of exactly `i32::MAX` is valid and
+    /// `i32::MAX + 1` is not: the size does not wrap to a negative `i32` and pass.
+    #[tokio::test]
+    async fn test_ensure_valid_record_size_at_i32_max() {
+        let config = ProducerConfig { max_request_size: i32::MAX, buffer_memory: i64::MAX, ..Default::default() };
+        let producer = create_producer_with_config(config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+
+        producer
+            .ensure_valid_record_size(i32::MAX as i64)
+            .expect("exactly max.request.size is valid");
+        let err = producer
+            .ensure_valid_record_size(i32::MAX as i64 + 1)
+            .expect_err("one byte too large");
+        assert!(matches!(err, Error::RecordTooLarge(_)), "Expected RecordTooLarge, got: {err:?}");
+        assert_eq!(
+            err.message(),
+            "The message is 2147483648 bytes when serialized which is larger than 2147483647, which is the value of \
+             the max.request.size configuration."
+        );
+    }
+
+    /// A size the estimate saturated at `i64::MAX` is rejected and reported as is.
+    #[tokio::test]
+    async fn test_ensure_valid_record_size_rejects_saturated_size() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+
+        let err = producer.ensure_valid_record_size(i64::MAX).expect_err("too large");
+        assert!(matches!(err, Error::RecordTooLarge(_)), "Expected RecordTooLarge, got: {err:?}");
+        assert_eq!(
+            err.message(),
+            "The message is 9223372036854775807 bytes when serialized which is larger than 1048576, which is the \
+             value of the max.request.size configuration."
+        );
     }
 
     /// `doSend`'s `catch (ApiException e)` block invokes the user `Callback` exactly
@@ -4867,6 +4954,55 @@ mod tests {
         assert_eq!(result.unwrap(), 30_010);
     }
 
+    /// `linger.ms` values above `i32::MAX` are clamped to `i32::MAX`, as Java's
+    /// `KafkaProducer.lingerMs` does, instead of being truncated to their low 32
+    /// bits. The clamped value also bounds `linger.ms + request.timeout.ms` in
+    /// `configure_delivery_timeout`.
+    #[test]
+    fn test_linger_ms_beyond_i32_max_is_clamped() {
+        let log_context = LogContext::new("[test] ".to_string());
+        let max = i32::MAX.to_string();
+        let i64_max = i64::MAX.to_string();
+        for (linger_ms, expected) in [
+            ("0", 0),
+            ("5", 5),
+            (max.as_str(), i32::MAX),
+            ("2147483648", i32::MAX),
+            ("3000000000", i32::MAX),
+            ("4294967296", i32::MAX),
+            (i64_max.as_str(), i32::MAX),
+        ] {
+            let config = ProducerConfig::new(&guard_props(&[("linger.ms", linger_ms)])).expect("valid config");
+            assert_eq!(
+                KafkaProducer::<String, String>::linger_ms(&config),
+                expected,
+                "linger.ms={linger_ms}"
+            );
+            if expected == i32::MAX {
+                assert_eq!(
+                    KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context).unwrap(),
+                    i32::MAX,
+                    "the default delivery.timeout.ms is raised to the clamped sum (linger.ms={linger_ms})"
+                );
+            }
+        }
+    }
+
+    /// The producer passes the clamped `linger.ms` to its accumulator, so a value
+    /// above `i32::MAX` keeps batches lingering instead of making them ready at once.
+    /// `#[tokio::test]`: `new` spawns the Sender task, which fails to reach
+    /// localhost:9999 harmlessly and is dropped with the test.
+    #[tokio::test]
+    async fn test_linger_ms_beyond_i32_max_reaches_accumulator_clamped() {
+        for linger_ms in ["3000000000", "4294967296"] {
+            let config = ProducerConfig::new(&guard_props(&[("linger.ms", linger_ms)])).expect("valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("a large linger.ms is a valid configuration");
+            assert_eq!(producer.accumulator.linger_ms_for_test(), i32::MAX, "linger.ms={linger_ms}");
+        }
+    }
+
     /// Tests that `negativePartitionShouldThrow` from Java is already handled
     /// by `ProducerRecord` validation. Negative partition is rejected at record
     /// construction time.
@@ -5423,6 +5559,51 @@ mod tests {
         assert!(producer.send(record2).await.is_err());
     }
 
+    /// Regression test with no Java counterpart: a timeout whose length in
+    /// milliseconds exceeds `i64::MAX` must result in a graceful close, as `close()`
+    /// does.
+    ///
+    /// Truncating these values with `as i64` yields -1 ms for `Duration::MAX` and
+    /// `Duration::from_millis(u64::MAX)`, -1000 ms for `Duration::from_secs(u64::MAX)`,
+    /// and 0 ms for `Duration::from_secs(1 << 61)` (125 × 2^64 ms). A negative value
+    /// matches neither branch of `close_with_timeout` and leaves the producer running;
+    /// 0 forces the close instead of waiting. Java cannot reach either state:
+    /// `Duration.toMillis()` throws on overflow and `close` rejects a negative timeout
+    /// (`KafkaProducer.java:1398-1400`).
+    #[tokio::test]
+    async fn test_close_with_timeout_beyond_i64_millis_closes_gracefully() {
+        for timeout in [
+            Duration::MAX,
+            Duration::from_millis(u64::MAX),
+            Duration::from_secs(u64::MAX),
+            Duration::from_secs(1 << 61),
+        ] {
+            let metadata = create_metadata_with_topic(TOPIC, 1);
+            let producer = create_producer(metadata, create_accumulator());
+
+            producer.close_with_timeout(timeout).await.expect("close");
+
+            assert!(
+                !producer.running.load(Ordering::Acquire),
+                "{:?}: close must stop the producer",
+                timeout
+            );
+            assert!(
+                !producer.force_close.load(Ordering::Acquire),
+                "{:?}: close must be graceful, not forced",
+                timeout
+            );
+            let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
+            let error = producer.send(record).await.expect_err("a closed producer rejects sends");
+            assert_eq!(
+                error.message(),
+                "Cannot perform operation after producer has been closed",
+                "{:?}",
+                timeout
+            );
+        }
+    }
+
     /// Tests that the callback is invoked with error on invalid topic.
     ///
     /// Translated from `KafkaProducerTest.testCallbackAndInterceptorHandleError`
@@ -5947,7 +6128,7 @@ mod tests {
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
                 Compression::of(config.compression_type).build(),
-                config.linger_ms as i32,
+                KafkaProducer::<String, String>::linger_ms(&config),
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
                 config.delivery_timeout_ms,
@@ -7802,7 +7983,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             Compression::of(config.compression_type).build(),
-            config.linger_ms as i32,
+            KafkaProducer::<String, String>::linger_ms(&config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             config.delivery_timeout_ms,
@@ -8038,6 +8219,59 @@ mod tests {
         );
 
         init.abort();
+    }
+
+    /// Regression test with no Java counterpart: `close_with_timeout(Duration::MAX)`
+    /// must deliver the records buffered in the accumulator before returning, as Java's
+    /// `close(Duration.ofMillis(Long.MAX_VALUE))` does (`KafkaProducer.java:1370`).
+    ///
+    /// A 30 s `linger.ms` with a frozen clock keeps the record buffered, so only a
+    /// graceful close can release it: `initiate_close` closes the accumulator, which
+    /// makes the batch ready, and the Sender's shutdown loop drains it before exiting
+    /// (`Sender.java:258`).
+    ///
+    /// The Sender runs on a dedicated thread and runtime, for the reason given in
+    /// [`spawned_transactional_producer_with_exit_hook`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_with_duration_max_delivers_buffered_records() {
+        // Idempotent (the default) rather than transactional: the Sender requires only
+        // a producer id before draining the batch.
+        let mut ctx = TxnProducerContext::new(&[("linger.ms", "30000")], 1);
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, EPOCH));
+        ctx.sender
+            .client_mut()
+            .prepare_response(produce_response(0, 1, Errors::None, 0));
+
+        let record = ProducerRecord::with_partition_key(
+            TOPIC.to_string(),
+            Some(0),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .expect("a valid partition");
+        let future = ctx.producer.send(record).await.expect("send");
+        assert!(!future.is_done(), "linger.ms keeps the record buffered until close");
+
+        let TxnProducerContext { producer, mut sender, .. } = ctx;
+        let sender_handle = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime for the Sender")
+                .block_on(sender.run());
+        });
+        *producer.sender_handle.lock().unwrap() = Some(sender_handle);
+
+        tokio::time::timeout(Duration::from_secs(10), producer.close_with_timeout(Duration::MAX))
+            .await
+            .expect("close returns once the buffered record is delivered")
+            .expect("close");
+
+        assert!(future.is_done(), "close returned before the buffered record completed");
+        let metadata = future.get().await.expect("the record is delivered, not aborted");
+        assert_eq!(metadata.offset(), 1);
     }
 
     /// Translated from `KafkaProducerTest.testTransactionalMethodThrowsWhenSenderClosed`
