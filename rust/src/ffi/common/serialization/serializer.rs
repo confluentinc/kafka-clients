@@ -244,6 +244,14 @@ impl SerializerInner {
         &self.imp
     }
 
+    /// Whether this is a C implementation, synchronous or asynchronous, as
+    /// opposed to a built-in class: a producer whose serializers include one
+    /// waits for them on its runtime, never on the thread of a `_cb` call
+    /// (see `ffi::producer`, "`send_cb` tries the producer first").
+    pub(crate) fn is_c(&self) -> bool {
+        matches!(*self.imp, FfiSerializer::C(_))
+    }
+
     /// A borrowed handle on `self`, valid as long as `self`.
     pub(crate) fn as_ptr(&self) -> *const kafka_common_serialization_Serializer_t {
         (self as *const Self).cast()
@@ -532,7 +540,10 @@ pub extern "C" fn kafka_common_serialization_Serializer_new(
 /// report before then. The caller owns `self_` and keeps it alive until every
 /// call made through the handle has reported. The functions may be called
 /// from any thread, concurrently, so the C caller is responsible for their
-/// thread-safety on `self_`.
+/// thread-safety on `self_`. A producer's `send_cb` never calls them, or
+/// waits for their report, on the thread calling `send_cb`, so they may
+/// report from that thread once it returned (a single-threaded event loop);
+/// a blocking `send` waits for the report on its calling thread.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_Serializer_new_async(

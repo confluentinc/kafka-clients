@@ -45,8 +45,9 @@
 //! background task and are therefore always queued, whichever `send` form
 //! registered them. A blocking entry point invokes interface methods
 //! (serializers, partitioner) directly on the calling thread; a `_cb` entry
-//! point invokes them on a runtime worker, so C implementations must be
-//! thread-safe.
+//! point invokes C serializers on the runtime, never on the calling thread
+//! (see "`send_cb` tries the producer first" for the partitioner and the
+//! built-in serializers), so C implementations must be thread-safe.
 //!
 //! The blocking forms drive the runtime from the calling thread with
 //! `block_on`; a C interface method (a serializer, the partitioner) that is
@@ -132,9 +133,11 @@
 //!
 //! Java's `send` blocks for up to `max.block.ms` on metadata and on buffer
 //! memory. `send_cb` and `send_with_callback_cb` spare the caller that wait
-//! without a thread hop and a queued completion for every record: they run
-//! the producer's non-blocking `try_send` (crate-internal, with no Java
-//! counterpart) on the calling thread, and
+//! without a thread hop and a queued completion for every record: when both
+//! of the producer's serializers are built-in (a `NULL` handle or a built-in
+//! class, which never wait), they run the producer's non-blocking `try_send`
+//! (crate-internal, with no Java counterpart) on the calling thread, invoking
+//! the partitioner there, and
 //!
 //!   - fire `cb` inside the call, with the owned future, when the producer
 //!     took the record at once (`TrySendOutcome::Accepted`);
@@ -153,6 +156,16 @@
 //! when the record is taken or refused at once, and stay borrowed until `cb`
 //! fires when it is queued. A caught panic in the body is reported through
 //! `cb` too, queued, as by every `_cb` entry point.
+//!
+//! When either serializer is a C implementation, the calling thread does not
+//! try the producer: a serializer registered with
+//! `kafka_common_serialization_Serializer_new_async` may report from the very
+//! thread that called `send_cb` (a single-threaded event loop), and one
+//! registered with `_new` runs on the blocking pool, so `try_send`, which
+//! awaits both serializers, would block the caller until they are done, or
+//! forever. Every record then goes to the submission task, which awaits the
+//! serializers on the runtime, and `cb` fires later, through the callback
+//! vector. The choice is made once, when the producer is built.
 //!
 //! The producer is tried first whatever the queue holds, so a record taken at
 //! once can reach the producer before one queued earlier, by this caller or
@@ -313,6 +326,13 @@ pub(crate) struct Client {
     /// never reads the timeout (`MockProducer.java:436-442`), so the mock's
     /// view passes a negative one on as zero and never overrides it.
     follows_kafka_producer_close: bool,
+    /// Whether `send_cb` tries the producer on the calling thread before
+    /// queueing the record: true when both serializers are built-in (a
+    /// `NULL` handle, a built-in class), which complete at once; false when
+    /// either is a C implementation, which `send_cb` must not wait for on the
+    /// calling thread (see the module docs, "`send_cb` tries the producer
+    /// first"). Fixed when the producer is built, so no record pays the check.
+    tries_send_inline: bool,
 }
 
 impl Client {
@@ -704,9 +724,13 @@ where
     /// callback, overrides a positive one to zero, and whose `flush()` fails
     /// from a delivery callback; false for the mock, which does neither (see
     /// [`Client::follows_kafka_producer_close`]).
+    ///
+    /// `tries_send_inline` is false when a serializer of the producer is a C
+    /// implementation (see [`Client::tries_send_inline`]).
     pub(crate) fn new(
         make: impl FnOnce() -> Result<P, Error>,
         follows_kafka_producer_close: bool,
+        tries_send_inline: bool,
     ) -> Result<Box<Self>, Error> {
         init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -731,6 +755,7 @@ where
             txn_control_busy: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             follows_kafka_producer_close,
+            tries_send_inline,
         });
         let submission = spawn_callback_task(runtime.handle(), submission_loop(Arc::clone(&client), submit_rx));
         Ok(Box::new(Self { producer, client, runtime, submission }))
@@ -1521,13 +1546,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 }
 
 /// `Producer.send(ProducerRecord)`, completed through `cb` with the owned
-/// future, or the error: the producer is tried on the calling thread first,
-/// and `cb` fires inside this call when it takes or refuses the record at
-/// once; a record it would have to wait for is copied and queued for the
-/// submission task, and `cb` fires later, through the callback vector, once
-/// the record was handed to the producer (see
-/// [`kafka_producer_Producer_send_with_callback_cb`] and the module docs).
-/// The record's key and value `void *` are read during the call in the first
+/// future, or the error: when both serializers are built-in, the producer is
+/// tried on the calling thread first, and `cb` fires inside this call when it
+/// takes or refuses the record at once; a record it would have to wait for,
+/// and every record of a producer with a C serializer, is copied and queued
+/// for the submission task, and `cb` fires later, through the callback
+/// vector, once the record was handed to the producer (see
+/// [`kafka_producer_Producer_send_with_callback_cb`] and the module docs). A
+/// C serializer is thus never invoked on the calling thread, and an
+/// asynchronous one may report from it once this call returned. The
+/// record's key and value `void *` are read during the call in the first
 /// case and stay borrowed until `cb` fires in the second.
 ///
 /// # Safety
@@ -1614,14 +1642,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 }
 
 /// `Producer.send(ProducerRecord, Callback)`, completed through `cb` as
-/// [`kafka_producer_Producer_send_cb`]: the producer is tried on the calling
-/// thread first, without waiting, and `cb` fires inside this call, on the
-/// calling thread, with the future when the producer takes the record at
-/// once and with the error when it refuses it (a closed producer among the
-/// refusals); a record the producer would have to wait for is queued, and
-/// `cb` fires later, through the callback vector, once the submission task
-/// handed it over (see the module docs, "`send_cb` tries the producer
-/// first").
+/// [`kafka_producer_Producer_send_cb`]: when both serializers are built-in,
+/// the producer is tried on the calling thread first, without waiting, and
+/// `cb` fires inside this call, on the calling thread, with the future when
+/// the producer takes the record at once and with the error when it refuses
+/// it (a closed producer among the refusals); a record the producer would
+/// have to wait for is queued, and `cb` fires later, through the callback
+/// vector, once the submission task handed it over. When either serializer
+/// is a C implementation, every record is queued that way, so a C serializer
+/// is never invoked or waited for on the calling thread: an asynchronous one
+/// may report from it after this call returned (see the module docs,
+/// "`send_cb` tries the producer first").
 ///
 /// When `cb` receives an error, `callback` may still fire later, exactly
 /// once, if the record had reached the accumulator, as for
@@ -1670,6 +1701,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
         // over yet, as `complete_send_now` requires.
         Err(error) => return unsafe { complete_send_now(cb, opaque, Err(error)) },
     };
+    if !client.tries_send_inline {
+        // A C serializer is waited for on the runtime, by the submission task,
+        // never on this thread (see the module docs, "`send_cb` tries the
+        // producer first").
+        return queue_send(client, record.clone(), callback, completion, cb, opaque);
+    }
     // Tried first whatever the queue holds: a queued record does not hold this
     // one back (see the module docs, "`send_cb` tries the producer first").
     let taken = record.clone();
