@@ -159,10 +159,11 @@ where
     ///
     /// # Panics
     ///
-    /// Panics with `"This consumer has already been closed."` when the
-    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
-    /// `IllegalStateException`: calling it after `close()` is a programming
-    /// error.
+    /// On [`KafkaConsumer`], panics with `"This consumer has already been
+    /// closed."` when the consumer is closed, where Java's
+    /// `acquireAndEnsureOpen()` throws `IllegalStateException`: calling it
+    /// after `close()` is a programming error. [`MockConsumer`] follows Java's
+    /// `MockConsumer`, which does not check.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assignment")]
     fn assignment(&mut self) -> HashSet<TopicPartition>;
 
@@ -180,10 +181,11 @@ where
     ///
     /// # Panics
     ///
-    /// Panics with `"This consumer has already been closed."` when the
-    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
-    /// `IllegalStateException`: calling it after `close()` is a programming
-    /// error.
+    /// On [`KafkaConsumer`], panics with `"This consumer has already been
+    /// closed."` when the consumer is closed, where Java's
+    /// `acquireAndEnsureOpen()` throws `IllegalStateException`: calling it
+    /// after `close()` is a programming error. [`MockConsumer`] follows Java's
+    /// `MockConsumer`, which does not check.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscription")]
     fn subscription(&mut self) -> HashSet<String>;
 
@@ -191,10 +193,11 @@ where
     ///
     /// # Panics
     ///
-    /// Panics with `"This consumer has already been closed."` when the
-    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
-    /// `IllegalStateException`: calling it after `close()` is a programming
-    /// error.
+    /// On [`KafkaConsumer`], panics with `"This consumer has already been
+    /// closed."` when the consumer is closed, where Java's
+    /// `acquireAndEnsureOpen()` throws `IllegalStateException`: calling it
+    /// after `close()` is a programming error. [`MockConsumer`] follows Java's
+    /// `MockConsumer`, which does not check.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#paused")]
     fn paused(&mut self) -> HashSet<TopicPartition>;
 
@@ -206,7 +209,9 @@ where
     ///
     /// # Panics
     ///
-    /// Where Java throws, because calling it there is a programming error:
+    /// On [`KafkaConsumer`], where Java throws, because calling it there is a
+    /// programming error ([`MockConsumer`] follows Java's `MockConsumer`,
+    /// which returns a dummy group's metadata and does not check):
     ///
     /// - with `"This consumer has already been closed."` when the consumer is
     ///   closed (Java's `IllegalStateException` from `acquireAndEnsureOpen()`);
