@@ -24,7 +24,7 @@ app: "App task — poll(timeout)" {
   style.fill: "#eef6ff"
 
   fc: "FetchCollector::collect_fetch(&FetchBuffer)"
-  cursor: "BatchCursor — lazy, one record at a time\nbuffer is MOVED into MemoryRecords, never cloned\ncompressed batch decompressed ONCE into an owned buffer"
+  cursor: "BatchCursor — lazy, one record at a time\nbuffer is MOVED into MemoryRecords, never cloned\neach compressed record decompressed into its own buffer"
   des: "Deserializer<T>::deserialize(topic, &[u8])\nsync trait, no #[async_trait]" {
     style.fill: "#e8f5e9"
   }
