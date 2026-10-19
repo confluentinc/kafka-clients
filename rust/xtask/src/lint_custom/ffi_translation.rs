@@ -122,7 +122,8 @@
 //!     underscore on all three: derived by convention, no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
-//!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
+//!     `*mut` on both sides when a trait method takes `&mut self` (a view
+//!     listed in [`CONST_SELF_VIEWS`] takes the handle `const`); a blanket
 //!     `impl<T: A + B> Trait for T` counts for every struct implementing `A`
 //!     and `B`;
 //!   - an `Error` variant's payload struct with a handle:
@@ -284,6 +285,14 @@ const C_RELEASE_HOOKS: &[(&str, &str)] = &[(
     "kafka_common_Error_local_callback",
     "kafka_common_LocalCallbackError_release_fn_t",
 )];
+
+/// `__as_<Trait>` views of a mutable trait that take the handle `const` and
+/// still return the mutable view, as C's `strchr` does: C receives these
+/// handles read-only (a deserializer's headers, a record's `headers()`) and
+/// only the reading methods may be called on the view then, while a handle
+/// received non-`const` (a serializer's headers) may be changed through the
+/// same view. One function serves both, with no cast on the read-only side.
+const CONST_SELF_VIEWS: &[&str] = &["kafka_common_header_internals_RecordHeaders__as_Headers"];
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
@@ -1818,12 +1827,14 @@ impl FfiTranslation {
                 continue;
             }
             let Kind::Trait { mutable } = t.kind else { continue };
+            let name = format!("{}__as_{trait_name}", s.prefix);
+            let self_mutable = mutable && !CONST_SELF_VIEWS.contains(&name.as_str());
             out.add(
-                format!("{}__as_{trait_name}", s.prefix),
+                name,
                 Shape::Fn(Sig {
                     params: vec![Param::new(
                         "self",
-                        CType::Handle { prefix: s.prefix.clone(), mutable }.render(),
+                        CType::Handle { prefix: s.prefix.clone(), mutable: self_mutable }.render(),
                     )],
                     ret: Some(CType::Handle { prefix: t.prefix.clone(), mutable }.render()),
                 }),
@@ -2960,6 +2971,9 @@ mod tests {
                 ),
                 class("common.serialization", &["Serializer"]),
                 class("common.serialization", &["StringSerializer"]),
+                class("common.header", &["Headers"]),
+                class("common.header.internals", &["RecordHeaders"]),
+                class("common.header.internals", &["OtherHeaders"]),
                 class("common.metrics", &["Stat"]),
                 class("common.metrics", &["Measurable"]),
                 class("common.metrics", &["MeasurableStat"]),
@@ -3794,6 +3808,57 @@ mod tests {
     fn test_as_view_once_per_struct_trait_pair() {
         let findings = run("as-ok", AS_RUST, AS_FFI);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A view of a mutable trait returns the mutable view and takes the
+    /// handle `*mut`, unless it is listed in `CONST_SELF_VIEWS`, which takes
+    /// it `*const`.
+    #[test]
+    fn test_const_self_view_of_a_mutable_trait() {
+        let rust = r#"
+            pub mod common {
+                pub mod header {
+                    #[doc(alias = "org.apache.kafka.common.header.Headers")]
+                    pub trait Headers {
+                        fn remove(&mut self, key: &str);
+                    }
+                    pub mod internals {
+                        #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders")]
+                        pub struct RecordHeaders;
+                        impl RecordHeaders { pub fn new() -> Self { RecordHeaders } }
+                        impl super::Headers for RecordHeaders { fn remove(&mut self, key: &str) {} }
+                        #[doc(alias = "org.apache.kafka.common.header.internals.OtherHeaders")]
+                        pub struct OtherHeaders;
+                        impl OtherHeaders { pub fn new() -> Self { OtherHeaders } }
+                        impl super::Headers for OtherHeaders { fn remove(&mut self, key: &str) {} }
+                    }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_header_Headers_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_Headers_remove(this: *mut kafka_common_header_Headers_t, key: *const c_char) {}
+            #[repr(C)] pub struct kafka_common_header_internals_RecordHeaders_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafka_common_header_internals_RecordHeaders_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_destroy(this: *mut kafka_common_header_internals_RecordHeaders_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers(this: *const kafka_common_header_internals_RecordHeaders_t) -> *mut kafka_common_header_Headers_t { std::ptr::null_mut() }
+            #[repr(C)] pub struct kafka_common_header_internals_OtherHeaders_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders_new() -> *mut kafka_common_header_internals_OtherHeaders_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders_destroy(this: *mut kafka_common_header_internals_OtherHeaders_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders__as_Headers(this: *const kafka_common_header_internals_OtherHeaders_t) -> *mut kafka_common_header_Headers_t { std::ptr::null_mut() }
+        "#;
+        let findings = run("const-self-view", rust, ffi);
+        assert_eq!(
+            keys(&findings),
+            ["shape kafka_common_header_internals_OtherHeaders__as_Headers"],
+            "{findings:#?}"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_common_header_internals_OtherHeaders__as_Headers"),
+            "expected `fn(self: *mut kafka_common_header_internals_OtherHeaders_t) \
+             -> *mut kafka_common_header_Headers_t`, found `fn(this: *const \
+             kafka_common_header_internals_OtherHeaders_t) -> *mut kafka_common_header_Headers_t`"
+        );
     }
 
     #[test]

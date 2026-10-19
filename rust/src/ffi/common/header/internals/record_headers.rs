@@ -43,7 +43,7 @@ pub struct kafka_common_header_internals_RecordHeaders_t {
 /// What a [`kafka_common_header_internals_RecordHeaders_t`] points at: the
 /// headers plus the lazily built `Headers` view.
 pub(crate) struct RecordHeadersInner {
-    headers: RecordHeaders,
+    headers: HeadersStorage,
     /// The `Headers` view, a `Box::into_raw`'d `HeadersInner` freed by `Drop`.
     /// It is a separate allocation, never reborrowed by the handle, so a
     /// later `headers_view` call (which only reads this cell) leaves every
@@ -52,9 +52,43 @@ pub(crate) struct RecordHeadersInner {
     view: OnceLock<SendPtr>,
 }
 
+/// Where a [`RecordHeadersInner`]'s headers live.
+///
+/// Has no Java counterpart (`definition-of-done.md` §7): Java passes the
+/// record's `Headers` object itself to a serde; here a handle either owns its
+/// headers or, for a serde call, points at the record's own (see
+/// [`RecordHeadersInner::borrowed`]), so that C reads and changes those
+/// rather than a copy.
+enum HeadersStorage {
+    Owned(RecordHeaders),
+    /// Headers owned by the caller, which outlive the handle.
+    Borrowed(*mut RecordHeaders),
+}
+
+// SAFETY: `Borrowed` points at a `RecordHeaders` (`Send + Sync`) that, per
+// `RecordHeadersInner::borrowed`'s `# Safety`, outlives the handle and is reached only through it
+// while it exists, so moving the handle to another thread moves the only access to it.
+unsafe impl Send for HeadersStorage {}
+// SAFETY: As for `Send`: through a shared handle the headers are only read, and they are
+// `Sync`.
+unsafe impl Sync for HeadersStorage {}
+
 impl RecordHeadersInner {
     pub(crate) fn new(headers: RecordHeaders) -> Self {
-        Self { headers, view: OnceLock::new() }
+        Self { headers: HeadersStorage::Owned(headers), view: OnceLock::new() }
+    }
+
+    /// A handle on the caller's `headers`, for the length of a serde call: C
+    /// reads (and, through a `*mut` handle, changes) them in place, with no
+    /// copy.
+    ///
+    /// # Safety
+    ///
+    /// `headers` must point at live headers that outlive the handle and are
+    /// reached only through it while it exists; they may be written through
+    /// it only if `headers` was derived from exclusive access.
+    pub(crate) unsafe fn borrowed(headers: *mut RecordHeaders) -> Self {
+        Self { headers: HeadersStorage::Borrowed(headers), view: OnceLock::new() }
     }
 
     /// A handle at a stable address, as the `Headers` view requires.
@@ -63,7 +97,42 @@ impl RecordHeadersInner {
     }
 
     pub(crate) fn headers(&self) -> &RecordHeaders {
-        &self.headers
+        match &self.headers {
+            HeadersStorage::Owned(headers) => headers,
+            // SAFETY: Per `borrowed`'s `# Safety`, the headers outlive the handle and are reached
+            // only through it, so the shared reference, bounded by `&self`, aliases no exclusive
+            // one.
+            HeadersStorage::Borrowed(headers) => unsafe { &**headers },
+        }
+    }
+
+    /// Takes the owned headers out, leaving the handle empty; for a handle
+    /// built by [`borrowed`](Self::borrowed), nothing to take, `None`. The
+    /// `Headers` view, if any, then sees empty headers.
+    pub(crate) fn take_headers(&mut self) -> Option<RecordHeaders> {
+        match &mut self.headers {
+            HeadersStorage::Owned(headers) => Some(std::mem::take(headers)),
+            HeadersStorage::Borrowed(_) => None,
+        }
+    }
+
+    /// The headers at `this`, as a raw pointer with `this`'s provenance.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point at a live handle.
+    unsafe fn headers_ptr(this: *mut Self) -> *mut RecordHeaders {
+        // SAFETY: Per this function's `# Safety`, `this` points at a live `RecordHeadersInner`;
+        // `&raw mut` takes the address of its `headers` field without creating a reference, and
+        // reading the discriminant and the `Borrowed` pointer is a read through it, so no
+        // reference to the field outlives this call.
+        unsafe {
+            let storage = &raw mut (*this).headers;
+            match *storage {
+                HeadersStorage::Owned(ref mut headers) => headers as *mut RecordHeaders,
+                HeadersStorage::Borrowed(headers) => headers,
+            }
+        }
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
@@ -86,11 +155,10 @@ impl RecordHeadersInner {
     /// `this` must point at a live handle that does not move afterwards, and no
     /// other reference to its `view` field may be in use during the call.
     pub(crate) unsafe fn headers_view(this: *mut Self) -> *mut kafka_common_header_Headers_t {
-        // SAFETY: Per this function's `# Safety`, `this` points at a live `RecordHeadersInner`, so
-        // the place is in bounds; `&raw mut` takes the address of its `headers` field without
-        // creating a reference, so the pointer keeps `this`'s provenance and the view built from it
-        // may later write through it.
-        let headers = unsafe { &raw mut (*this).headers } as *mut dyn Headers;
+        // SAFETY: Per this function's `# Safety`, `this` points at a live `RecordHeadersInner`, as
+        // `headers_ptr` requires; the pointer keeps `this`'s provenance (or, for a borrowed handle,
+        // the caller's), so the view built from it may later write through it.
+        let headers = unsafe { Self::headers_ptr(this) } as *mut dyn Headers;
         // SAFETY: As above, `this` points at a live `RecordHeadersInner`, and per this function's
         // `# Safety` no other reference to its `view` field is in use during the call, so the shared
         // reference to that `OnceLock` (all `get_or_init` needs: its interior mutability) aliases no
@@ -152,9 +220,10 @@ pub(crate) unsafe fn record_headers_mut<'a>(
     headers: *mut kafka_common_header_internals_RecordHeaders_t,
 ) -> &'a mut RecordHeaders {
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, so it
-    // points at a live `RecordHeadersInner` (see `record_headers_ref`), and no other reference to
-    // it is in use for `'a`, so the exclusive reference to its `headers` field aliases nothing.
-    unsafe { &mut (*(headers as *mut RecordHeadersInner)).headers }
+    // points at a live `RecordHeadersInner` (see `record_headers_ref`), as `headers_ptr` requires,
+    // and no other reference to it is in use for `'a`, so the exclusive reference to its headers
+    // aliases nothing.
+    unsafe { &mut *RecordHeadersInner::headers_ptr(headers as *mut RecordHeadersInner) }
 }
 
 /// `new RecordHeaders()`: empty, mutable. Owned, freed with
@@ -235,7 +304,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_set_read_on
     // the length of this call. The reference covers only `headers`, through a place projection, so
     // the `Headers` view that earlier `__as_Headers` calls handed out, held in the `view` field,
     // stays valid.
-    unsafe { &mut (*(self_ as *mut RecordHeadersInner)).headers }.set_read_only();
+    unsafe { &mut *RecordHeadersInner::headers_ptr(self_ as *mut RecordHeadersInner) }.set_read_only();
 }
 
 /// `isReadOnly()`, as `0` / `1`.
@@ -271,7 +340,11 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 
 /// The handle as the `Headers` interface it implements: a borrowed view
 /// valid until the handle is destroyed, never passed to a `_destroy`
-/// (`Headers_t` has none). Mutable, as `Headers` mutates.
+/// (`Headers_t` has none). It takes a `const` handle, so the read-only
+/// handles (a deserializer's `headers`, a record's `headers()` getter) need no
+/// cast; the view is non-`const` because `Headers` mutates, and the mutating
+/// `Headers_*` functions may be called on it only when the handle was
+/// received non-`const`.
 ///
 /// # Safety
 ///
@@ -280,16 +353,15 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers(
-    self_: *mut kafka_common_header_internals_RecordHeaders_t,
+    self_: *const kafka_common_header_internals_RecordHeaders_t,
 ) -> *mut kafka_common_header_Headers_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-headers handle that no
     // other call uses at the same time, so it points at a live `RecordHeadersInner` that does not
-    // move (every owner keeps it boxed, except the serializer and deserializer invokers, whose
-    // local lives unmoved for the one call that uses it) and no other reference to its `view` is
-    // in use, as `headers_view`
-    // requires. The view returned points into the handle, so it lives until the handle is
+    // move (every owner keeps it boxed: a handle C owns, the box a serde invoker hands C for one
+    // call, or the `CallArgs` an asynchronous serde call keeps in its boxed registry slot until
+    // the report) and no other reference to its `view` is in use, as `headers_view` requires. The view returned points into the handle, so it lives until the handle is
     // destroyed, as the rustdoc states.
-    unsafe { RecordHeadersInner::headers_view(self_ as *mut RecordHeadersInner) }
+    unsafe { RecordHeadersInner::headers_view(self_.cast_mut() as *mut RecordHeadersInner) }
 }
 
 /// Frees an owned record-headers handle; null is a no-op. The view a

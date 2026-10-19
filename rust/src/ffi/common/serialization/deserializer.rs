@@ -194,7 +194,8 @@ pub type kafka_common_serialization_Deserializer_deserialize_fn_t = unsafe exter
 ) -> *mut c_void;
 
 /// `T deserialize(String topic, Headers headers, byte[] data)` of a
-/// synchronous C implementation; `headers` is a copy borrowed for the call.
+/// synchronous C implementation; `headers` are the record's own headers,
+/// read-only and borrowed for the call.
 /// `NULL` is the Java default: `deserialize(topic, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_fn_t = Option<
     unsafe extern "C" fn(
@@ -208,8 +209,8 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_fn_t =
 
 /// `T deserialize(String topic, Headers headers, ByteBuffer data)` of a
 /// synchronous C implementation (KIP-863), the overload a consumer calls for
-/// every fetched key and value; `headers` is a copy and `data` the record's
-/// bytes, both borrowed for the call. `NULL` is the Java default:
+/// every fetched key and value; `headers` are the record's own headers,
+/// read-only, and `data` the record's bytes, both borrowed for the call. `NULL` is the Java default:
 /// `deserialize(topic, headers, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_fn_t = Option<
     unsafe extern "C" fn(
@@ -244,7 +245,8 @@ pub type kafka_common_serialization_Deserializer_deserialize_async_fn_t =
 /// `T deserialize(String topic, Headers headers, byte[] data)` of an
 /// asynchronous C implementation, reporting as
 /// [`kafka_common_serialization_Deserializer_deserialize_async_fn_t`];
-/// `headers` is a copy, valid like the other arguments until it reports.
+/// `headers` are the record's own headers, shared and read-only, valid like
+/// the other arguments until it reports.
 /// `NULL` is the Java default: `deserialize(topic, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_async_fn_t = Option<
     unsafe extern "C" fn(
@@ -555,7 +557,7 @@ impl CDeserializer {
                 let with_headers = matches!(target, Target::Headers(_));
                 let (id, (topic, headers, data)) = results.register_waiting(no_convert, |args| {
                     let headers = if with_headers {
-                        args.set_headers(headers)
+                        args.share_headers(headers)
                     } else {
                         ptr::null()
                     };
@@ -663,6 +665,7 @@ impl CDeserializer {
         deliver: impl FnOnce(Result<*mut c_void, Error>) + Send + 'static,
     ) {
         let topic = owned_c_string(topic);
+        // The record's headers, shared (a refcount, no copy) for as long as C reads them.
         let headers = Box::new(RecordHeadersInner::new(headers.clone()));
         let data = Bytes::copy_from_slice(data);
         let (topic_ptr, headers_ptr, bytes) = (topic.as_ptr(), headers.as_ptr(), kafka_Bytes_t::from_slice(&data));
@@ -1446,7 +1449,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::common::header::Headers;
+    use crate::common::header::{Header, Headers};
     use crate::ffi::common::header::internals::record_headers::{
         box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
@@ -1749,6 +1752,9 @@ mod tests {
         inline: bool,
         pending: Mutex<Vec<AsyncCall>>,
         calls: Mutex<Vec<String>>,
+        /// The address of each header `k` value read through the C
+        /// `Headers` functions.
+        seen: Mutex<Vec<usize>>,
     }
 
     impl AsyncUpper {
@@ -1758,6 +1764,7 @@ mod tests {
                 inline,
                 pending: Mutex::default(),
                 calls: Mutex::default(),
+                seen: Mutex::default(),
             }
         }
 
@@ -1850,8 +1857,25 @@ mod tests {
         data: kafka_Bytes_t,
         id: i64,
     ) {
-        // SAFETY: Test code: `headers` is the copy the handle keeps until the report.
-        let has_k = unsafe { record_headers_ref(headers) }.last_header("k").is_some();
+        use crate::ffi::common::header::internals::record_header::kafka_common_header_internals_RecordHeader__as_Header;
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
+        use crate::ffi::common::header::{kafka_common_header_Header_value, kafka_common_header_Headers_last_header};
+        // SAFETY: Test code: `headers` are shared with the record and kept by the slot until the
+        // report; the read-only handle's view is only read, and the header handle `last_header`
+        // returns is read at once.
+        let k = unsafe {
+            kafka_common_header_Headers_last_header(
+                kafka_common_header_internals_RecordHeaders__as_Headers(headers),
+                c"k".as_ptr(),
+            )
+        };
+        let has_k = !k.is_null();
+        if has_k {
+            // SAFETY: As above.
+            let value =
+                unsafe { kafka_common_header_Header_value(kafka_common_header_internals_RecordHeader__as_Header(k)) };
+            async_upper(self_).seen.lock().unwrap().push(value.data as usize);
+        }
         async_upper(self_)
             .calls
             .lock()
@@ -2026,6 +2050,93 @@ mod tests {
                 "close",
             ]
         );
+    }
+
+    /// A C deserializer reads the record's own header buffers, shared with
+    /// the record and not copied, through the trait's future (the consumer's
+    /// path), the blocking invoker and the `_cb` twin, whether it reports
+    /// during the call or later from another thread.
+    #[test]
+    fn a_c_deserializer_reads_the_records_own_headers() {
+        for inline in [true, false] {
+            let imp = AsyncUpper::new(inline);
+            let handle = SendPtr(imp.register().cast());
+            let reporter = || {
+                if !inline {
+                    let call = imp.next_call();
+                    // SAFETY: Test code: the call was just taken, unreported.
+                    unsafe { report(&imp, &call) };
+                }
+            };
+            let mut record_headers = RecordHeaders::new();
+            record_headers.add_with_key_value("k", Some(b"v")).unwrap();
+            let address = record_headers.last_header("k").unwrap().value().unwrap().as_ptr() as usize;
+            std::thread::scope(|scope| {
+                let thread = scope.spawn(reporter);
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                let value = runtime.block_on(async {
+                    // SAFETY: Test code: the handle is valid until destroyed below.
+                    let inner = unsafe { deserializer_ref(handle.get().cast()) };
+                    let guard = inner.imp().lock().await;
+                    let data = Bytes::from_static(b"trait");
+                    Deserializer::deserialize_with_headers_bytes(&*guard, "t", &record_headers, &data).await
+                });
+                thread.join().unwrap();
+                // SAFETY: Test code: an owned string the implementation reported, freed once.
+                assert_eq!(unsafe { take_string(value.unwrap().as_ptr()) }, "TRAIT");
+                assert_eq!(
+                    imp.seen.lock().unwrap().pop(),
+                    Some(address),
+                    "inline={inline}: the record's buffer"
+                );
+
+                let headers = box_record_headers(record_headers.clone());
+                let topic = CString::new("t").unwrap();
+                let completions = Completions::default();
+                // SAFETY: Test code: the handles are valid until destroyed, once, below; `err` is a
+                // valid slot pointing at null; `topic`, the arrays, `headers` and `completions`
+                // outlive each call and its completion, which fires before the join that follows
+                // it; the values returned are owned strings freed once.
+                unsafe {
+                    let thread = scope.spawn(reporter);
+                    let mut err = ptr::null_mut();
+                    let out = kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
+                        handle.get().cast(),
+                        topic.as_ptr(),
+                        headers,
+                        kafka_Bytes_t::from_slice(b"invoker"),
+                        &raw mut err,
+                    );
+                    thread.join().unwrap();
+                    assert!(err.is_null());
+                    assert_eq!(take_string(out), "INVOKER");
+                    assert_eq!(
+                        imp.seen.lock().unwrap().pop(),
+                        Some(address),
+                        "inline={inline}: shared, not copied"
+                    );
+
+                    kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb(
+                        handle.get().cast(),
+                        topic.as_ptr(),
+                        headers,
+                        kafka_Bytes_t::from_slice(b"cb"),
+                        record_completion,
+                        &completions as *const Completions as *mut c_void,
+                    );
+                    scope.spawn(reporter).join().unwrap();
+                    assert_eq!(completions.lock().unwrap().pop().unwrap().0, Ok("CB".to_string()));
+                    assert_eq!(
+                        imp.seen.lock().unwrap().pop(),
+                        Some(address),
+                        "inline={inline}: shared, not copied"
+                    );
+                    kafka_common_header_internals_RecordHeaders_destroy(headers);
+                }
+            });
+            // SAFETY: Test code: every call reported; the handle is destroyed once.
+            unsafe { kafka_common_serialization_Deserializer_destroy(handle.get().cast()) };
+        }
     }
 
     #[test]

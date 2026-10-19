@@ -70,9 +70,12 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 
 use crate::common::Error;
+use crate::common::header::RecordHeaders;
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{CallbackResults, KeepAlive, ResultSink, WaitReport};
-use crate::ffi::common::header::internals::record_headers::RecordHeadersInner;
+use crate::ffi::common::header::internals::record_headers::{
+    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t,
+};
 use crate::ffi::common::panic_error;
 use crate::ffi::common::serialization::deserializer::{
     DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_t,
@@ -287,8 +290,14 @@ pub(crate) enum Dispatch {
 pub(crate) struct CallArgs {
     /// The topic, NUL-terminated, truncated at an interior NUL.
     topic: Vec<u8>,
-    /// A copy of the record's headers, for the methods that take them.
+    /// The record's headers, for the methods that take them: a shared
+    /// reference to a deserializer's (a refcount, no copy), or a serializer's
+    /// moved here for the call and moved back by [`Self::restore_headers`].
     headers: Option<RecordHeadersInner>,
+    /// Where a serializer's headers came from and go back to when it
+    /// reports; valid while the call's future lives, which is the only time
+    /// the report is read (see [`Self::take_headers`]).
+    headers_home: Option<SendPtr>,
     /// The record's bytes, for a deserializer: a refcounted slice of the
     /// fetch buffer, or `copy` when the method received a plain slice.
     data: Bytes,
@@ -311,13 +320,49 @@ impl CallArgs {
         self.topic.as_ptr().cast()
     }
 
-    /// Stores a copy of `headers` and returns the handle C reads (and, for a
-    /// serializer, may modify), at the stable address of the boxed `CallArgs`.
-    pub(crate) fn set_headers(
+    /// Shares a deserializer's `headers` (a refcount, no copy) and returns the
+    /// read-only handle C reads, at the stable address of the boxed
+    /// `CallArgs`, valid until the report even if the future is dropped first.
+    pub(crate) fn share_headers(
         &mut self,
-        headers: &crate::common::header::RecordHeaders,
-    ) -> *mut crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t {
-        self.headers.insert(RecordHeadersInner::new(headers.clone())).as_mut_ptr()
+        headers: &RecordHeaders,
+    ) -> *const kafka_common_header_internals_RecordHeaders_t {
+        self.headers.insert(RecordHeadersInner::new(headers.clone())).as_ptr()
+    }
+
+    /// Moves a serializer's `headers` here for the call (a move, no copy),
+    /// leaving them empty, and returns the handle C reads and changes, at the
+    /// stable address of the boxed `CallArgs`. [`Self::restore_headers`] moves
+    /// them back, with C's changes, when the report is read; if the future is
+    /// dropped first, the slot keeps them until C reports and then drops
+    /// them.
+    ///
+    /// # Safety
+    ///
+    /// `headers` must stay valid, and reached by nothing else, for as long
+    /// as the future of the call lives.
+    pub(crate) unsafe fn take_headers(
+        &mut self,
+        headers: *mut RecordHeaders,
+    ) -> *mut kafka_common_header_internals_RecordHeaders_t {
+        self.headers_home = Some(SendPtr(headers.cast()));
+        // SAFETY: Per this function's `# Safety`, `headers` is valid and reached by nothing else.
+        let taken = std::mem::take(unsafe { &mut *headers });
+        self.headers.insert(RecordHeadersInner::new(taken)).as_mut_ptr()
+    }
+
+    /// Moves the headers [`Self::take_headers`] took back where they came
+    /// from, with what C changed; nothing for any other call. Called only
+    /// while the future of the call lives, when it reads the report.
+    pub(crate) fn restore_headers(&mut self) {
+        if let Some(home) = self.headers_home.take()
+            && let Some(headers) = self.headers.as_mut().and_then(RecordHeadersInner::take_headers)
+        {
+            // SAFETY: `home` is the pointer `take_headers` was given, valid and reached by nothing
+            // else while the call's future lives (its `# Safety`), and this runs only then: from
+            // the `finish` of the `WaitReport` that future polls.
+            unsafe { *home.get().cast::<RecordHeaders>() = headers };
+        }
     }
 
     /// Stores `data` and returns the view C reads.
@@ -354,6 +399,7 @@ impl CallArgs {
 impl KeepAlive for CallArgs {
     fn clear(&mut self) {
         self.headers = None;
+        self.headers_home = None;
         self.data = Bytes::new();
         self.output = None;
         self.destroy_configs();

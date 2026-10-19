@@ -3082,8 +3082,9 @@ mod tests {
     //     the `Vec<u8>` it owns came from `to_vec` above; counted)
     //   - 1 × `Vec<u8>::to_vec` for value
     //   - 1 × `String::from_utf8` for value
-    //   - 1 × `RecordHeaders::with_header_iter` (Vec backing the headers list,
-    //     which may or may not allocate depending on input size)
+    //   - for a record that has headers only, 1 × `Vec` backing the headers
+    //     list and 1 × the `Arc` that shares it (`RecordHeaders::with_header_iter`
+    //     stores no headers, and allocates nothing, for a record without any)
     //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
     //     (amortized; only counts on grow)
     //

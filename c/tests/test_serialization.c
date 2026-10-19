@@ -176,10 +176,9 @@ static void *upper_deserialize_with_headers(void *self, const char *topic,
     upper_deserializer_t *imp = self;
     imp->with_headers_calls++;
     // The `Headers` methods are reached through the class handle's interface
-    // view; the copy is the implementation's for the call, so the cast is
-    // the one `__as_Headers` asks for.
-    kafka_common_header_Headers_t *view =
-        kafka_common_header_internals_RecordHeaders__as_Headers((kafka_common_header_internals_RecordHeaders_t *)headers);
+    // view; `__as_Headers` takes the read-only handle as it is, and only the
+    // reading methods are called on its view.
+    kafka_common_header_Headers_t *view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
     imp->saw_header_k = kafka_common_header_Headers_last_header(view, "k") != NULL;
     return upper_deserialize(self, topic, data, out_err);
 }

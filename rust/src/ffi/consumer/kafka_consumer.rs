@@ -310,14 +310,15 @@ mod tests {
     /// An asynchronous C deserializer costs no allocation per record on the
     /// consumer's path: through `dyn DynDeserializer`, the `ArcDeserializer`
     /// future stays inline, the Tokio lock is uncontended, the registry slot
-    /// and its arguments are reused, and the empty headers and the shared
-    /// fetch buffer are not copied.
+    /// and its arguments are reused, and the headers (empty or not, shared
+    /// with the record) and the fetch buffer are not copied.
     #[test]
     fn async_c_deserializer_through_dyn_allocates_nothing_per_record() {
         use std::ffi::{c_char, c_void};
         use std::sync::atomic::{AtomicPtr, Ordering};
 
         use crate::AllocTrackingGuard;
+        use crate::common::header::Headers;
         use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t;
         use crate::ffi::common::serialization::deserializer::{
             kafka_common_serialization_Deserializer__set_callback_result,
@@ -367,26 +368,34 @@ mod tests {
         // `Arc` keeps it valid for the reports, and `slot` outlives the deserializer.
         let deserializer: Box<dyn DynDeserializer<GenericValue>> =
             Box::new(ArcDeserializer(unsafe { take_deserializer(handle) }));
-        let headers = RecordHeaders::new();
-        let data = Bytes::from_static(b"value");
-        let record = || {
-            let value = ready(DynDeserializer::deserialize_with_headers_bytes(
-                &*deserializer,
-                "topic",
-                &headers,
-                &data,
-            ))
-            .expect("an inline report completes the first poll")
-            .unwrap();
-            assert_eq!(value.as_ptr(), &VALUE as *const u8 as *mut c_void);
-        };
-        // Warm up: the registry's slab and the slot's arguments are allocated once.
-        record();
-        let _guard = AllocTrackingGuard::new();
-        for _ in 0..100 {
+        let mut with_k = RecordHeaders::new();
+        with_k.add_with_key_value("k", Some(b"v")).unwrap();
+        for headers in [RecordHeaders::new(), with_k] {
+            let data = Bytes::from_static(b"value");
+            let record = || {
+                let value = ready(DynDeserializer::deserialize_with_headers_bytes(
+                    &*deserializer,
+                    "topic",
+                    &headers,
+                    &data,
+                ))
+                .expect("an inline report completes the first poll")
+                .unwrap();
+                assert_eq!(value.as_ptr(), &VALUE as *const u8 as *mut c_void);
+            };
+            // Warm up: the registry's slab and the slot's arguments are allocated once.
             record();
+            let _guard = AllocTrackingGuard::new();
+            for _ in 0..100 {
+                record();
+            }
+            assert_eq!(
+                AllocTrackingGuard::count(),
+                0,
+                "allocations per 100 records with {} headers",
+                headers.to_array().len()
+            );
         }
-        assert_eq!(AllocTrackingGuard::count(), 0, "allocations per 100 records");
     }
 
     #[test]

@@ -3568,11 +3568,11 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
     if (ffi_raise((rh = kafka_consumer_ConsumerRecord_headers_err(self->rec, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     if (rh == NULL) return PyList_New(0);
     // The interface view is borrowed from the class handle (never destroyed);
-    // the `__as_` conversion takes the handle non-const.
+    // the `__as_` conversion takes the read-only handle, and only the reading
+    // `to_array` is called on its view.
     kafka_common_header_Headers_t* headers = NULL;
     kafka_List_t* arr = NULL;  // owned list of borrowed headers
-    if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(
-            (kafka_common_header_internals_RecordHeaders_t*)rh, &ffi_err), ffi_take(&ffi_err)))
+    if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(rh, &ffi_err), ffi_take(&ffi_err)))
         || ffi_raise((arr = kafka_common_header_Headers_to_array_err(headers, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     if (arr == NULL) return PyList_New(0);
     int32_t n = 0;

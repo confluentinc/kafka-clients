@@ -173,7 +173,7 @@ impl FfiSerializer {
         data: Option<&GenericValue>,
     ) -> Result<Option<Vec<u8>>, Error> {
         match self {
-            Self::C(serializer) => block_on_thread(serializer.start(Dispatch::Inline, topic, headers.as_deref(), data)),
+            Self::C(serializer) => block_on_thread(serializer.start(Dispatch::Inline, topic, headers, data)),
             other => {
                 let output = match headers {
                     Some(headers) => ready(other.serialize_with_headers(topic, headers, data))?,
@@ -232,9 +232,11 @@ pub type kafka_common_serialization_Serializer_serialize_async_fn_t =
 /// `byte[] serialize(String topic, Headers headers, T data)` of an
 /// asynchronous C implementation, reporting as
 /// [`kafka_common_serialization_Serializer_serialize_async_fn_t`]; `headers`
-/// is a copy, valid like the other arguments until it reports, which the
-/// implementation may modify, though changes to the copy do not reach the
-/// record yet. `NULL` is the Java default: `serialize(topic, data)`.
+/// are the record's own headers, not a copy, valid like the other arguments
+/// until it reports. The implementation may add to or remove from them
+/// (Java lets a serializer change the record's headers), and the produced
+/// record carries what they hold when it reports. `NULL` is the Java default:
+/// `serialize(topic, data)`.
 pub type kafka_common_serialization_Serializer_serialize_with_headers_async_fn_t = Option<
     unsafe extern "C" fn(
         self_: *mut c_void,
@@ -447,6 +449,9 @@ fn copy_output(args: &mut CallArgs, result: *mut c_void) {
 
 /// The bytes of a report, copied by [`copy_output`].
 fn finish_output(args: &mut CallArgs, result: Result<*mut c_void, Error>) -> Result<Option<Vec<u8>>, Error> {
+    // The record's headers go back to it whatever the outcome, as Java's
+    // serializer changes the record's `Headers` in place.
+    args.restore_headers();
     result.map(|_| args.output.take())
 }
 
@@ -534,14 +539,17 @@ impl CSerializer {
     /// Starts `serialize` (`headers` is `None`) or
     /// `serialize_with_headers`. A synchronous implementation runs where
     /// `dispatch` says; an asynchronous one is called at once, its arguments
-    /// kept in the registry slot until it reports.
-    fn start(
-        &self,
+    /// kept in the registry slot until it reports. Its `headers` are the
+    /// record's own, moved into the slot for the call and moved back, with
+    /// what the implementation added or removed, when the returned future
+    /// reads the report; the future holds the borrow until then.
+    fn start<'a>(
+        &'a self,
         dispatch_to: Dispatch,
         topic: &str,
-        headers: Option<&RecordHeaders>,
+        headers: Option<&'a mut RecordHeaders>,
         data: Option<&GenericValue>,
-    ) -> Call<'_, Option<Vec<u8>>> {
+    ) -> Call<'a, Option<Vec<u8>>> {
         let self_ = SendPtr(self.self_);
         let data = send_ptr(data_ptr(data));
         match &self.mode {
@@ -549,7 +557,7 @@ impl CSerializer {
                 let topic = owned_c_string(topic);
                 match (headers, *serialize_with_headers) {
                     (Some(headers), Some(function)) => {
-                        // A copy: the class handle owns its headers.
+                        // Shared (a refcount): the closure must own what it reads.
                         let mut headers = RecordHeadersInner::new(headers.clone());
                         dispatch(dispatch_to, move || {
                             let mut error = ptr::null_mut();
@@ -592,7 +600,13 @@ impl CSerializer {
             Mode::Async { serialize, serialize_with_headers, results, .. } => {
                 let with_headers = headers.filter(|_| serialize_with_headers.is_some());
                 let (id, (topic, headers)) = results.register_waiting(copy_output, |args| {
-                    (args.set_topic(topic), with_headers.map(|headers| args.set_headers(headers)))
+                    let headers = with_headers.map(|headers| {
+                        // SAFETY: `headers` is borrowed for `'a`, the lifetime of the `Call`
+                        // returned, so it stays valid and reached by nothing else while that
+                        // future lives, as `take_headers` requires.
+                        unsafe { args.take_headers(headers) }
+                    });
+                    (args.set_topic(topic), headers)
                 });
                 // SAFETY: The function and `self_` are the pair the C caller registered together
                 // through `kafka_common_serialization_Serializer_new_async`, whose rustdoc has the
@@ -637,7 +651,7 @@ impl Serializer<GenericValue> for CSerializer {
     where
         'a: 'h,
     {
-        self.start(Dispatch::Blocking, topic, Some(&*headers), data)
+        self.start(Dispatch::Blocking, topic, Some(headers), data)
             .map(|result| result.map(|bytes| bytes.map(Cow::Owned)))
     }
 
@@ -819,13 +833,14 @@ type BytesCompletion =
 ///
 /// # Safety
 ///
-/// `self_` must be a valid serializer handle, `data` null or the
+/// `self_` must be a valid serializer handle, `headers` null or valid
+/// headers reached by nothing else until `cb` fires, `data` null or the
 /// representation the implementation reads, valid until `cb` fires, and
 /// `cb` a valid completion.
 unsafe fn invoke_cb(
     self_: *const kafka_common_serialization_Serializer_t,
     topic: &str,
-    headers: Option<&mut RecordHeaders>,
+    headers: Option<*mut RecordHeaders>,
     data: *const c_void,
     cb: BytesCompletion,
     opaque: *mut c_void,
@@ -839,9 +854,13 @@ unsafe fn invoke_cb(
     }) = serializer
     {
         let topic = owned_c_string(topic);
+        // A handle on the caller's own headers, which it keeps valid and unused until `cb`
+        // fires: the implementation changes them in place, as Java's does.
         let mut headers = headers
             .filter(|_| serialize_with_headers.is_some())
-            .map(|headers| Box::new(RecordHeadersInner::new(headers.clone())));
+            // SAFETY: Per this function's `# Safety`, the headers stay valid and reached by
+            // nothing else until `cb` fires, which is when the sink drops this handle.
+            .map(|headers| Box::new(unsafe { RecordHeadersInner::borrowed(headers) }));
         let (topic_ptr, headers_ptr) = (topic.as_ptr(), headers.as_deref_mut().map(RecordHeadersInner::as_mut_ptr));
         let opaque = SendPtr(opaque);
         let sink: ResultSink = Box::new(move |result| {
@@ -868,6 +887,9 @@ unsafe fn invoke_cb(
         }
         return;
     }
+    // SAFETY: Per this function's `# Safety`, the headers are valid and reached by nothing else
+    // for this call, which returns only once the implementation did.
+    let headers = headers.map(|headers| unsafe { &mut *headers });
     let output = serializer.invoke(topic, headers, generic(data).as_ref());
     // SAFETY: Per this function's `# Safety`, `cb` is a valid completion, not yet fired; the bytes
     // it receives are `output`'s, alive for the call.
@@ -953,8 +975,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_cb(
 
 /// `byte[] serialize(String topic, Headers headers, T data)`; the bytes
 /// are delivered as for [`kafka_common_serialization_Serializer_serialize`].
-/// The implementation may add to `headers` (a C implementation receives a
-/// copy, whose changes do not reach `headers` yet).
+/// The implementation may add to or remove from `headers`, in place: its
+/// changes are in `headers` when this returns.
 ///
 /// # Safety
 ///
@@ -992,13 +1014,16 @@ pub type kafka_common_serialization_Serializer_serialize_with_headers_cb_t =
 /// Non-blocking
 /// [`kafka_common_serialization_Serializer_serialize_with_headers`]; `cb`
 /// fires as for [`kafka_common_serialization_Serializer_serialize_cb`].
-/// `topic` and `headers` are copied; `data` must stay valid until `cb`
-/// fires.
+/// `topic` is copied; `headers` and `data` must stay valid until `cb`
+/// fires, and `headers` unused otherwise until then: the implementation
+/// reads and changes them in place, so what it adds or removes is in
+/// `headers` when `cb` fires.
 ///
 /// # Safety
 ///
-/// As the blocking form, without `out_err`, with `data` valid until `cb`
-/// fires; `cb` must stay valid until it fires.
+/// As the blocking form, without `out_err`, with `headers` and `data` valid
+/// until `cb` fires and `headers` unused otherwise until then; `cb` must
+/// stay valid until it fires.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: As for `kafka_common_serialization_Serializer_serialize_cb`: `cb` has not fired for
     // this `opaque`, as `fire` requires.
@@ -1016,10 +1041,10 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // not used otherwise for this call; an asynchronous implementation receives a copy.
-    let headers = unsafe { record_headers_mut(headers) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, `data` valid
-    // until `cb` fires and `cb` a valid completion.
+    // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
+    let headers = ptr::from_mut(unsafe { record_headers_mut(headers) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, `headers` valid
+    // and unused otherwise and `data` valid until `cb` fires, and `cb` a valid completion.
     unsafe { invoke_cb(self_, &topic, Some(headers), data, cb, opaque) }
 }
 
@@ -1210,7 +1235,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::common::header::Headers;
+    use crate::common::header::{Header, Headers};
     use crate::ffi::common::header::internals::record_headers::{
         box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
         kafka_common_header_internals_RecordHeaders_to_string, record_headers_ref,
@@ -1575,7 +1600,7 @@ mod tests {
         data: *const c_void,
         id: i64,
     ) {
-        // SAFETY: Test code: `headers` is the copy the handle keeps until the report.
+        // SAFETY: Test code: `headers` are the record's, which the slot keeps until the report.
         let has_k = unsafe { record_headers_ref(headers) }.last_header("k").is_some();
         async_upper(self_).calls.lock().unwrap().push(format!("with_headers k={has_k}"));
         take_call(self_, AsyncCall { id, topic: topic as usize, data: data as usize });
@@ -2153,5 +2178,316 @@ mod tests {
             kafka_common_serialization_StringSerializer_destroy(built_in);
         }
         assert_eq!(*imp.calls.lock().unwrap(), ["serialize"]);
+    }
+
+    /// An asynchronous C serializer for the header tests: through the C
+    /// `Headers` functions it records where the value of header `k` lives and
+    /// adds header `added` (unless `quiet`), then reports Java's null, during
+    /// the call (`inline`) or from the test.
+    struct HeaderAdder {
+        handle: std::sync::atomic::AtomicPtr<kafka_common_serialization_Serializer_t>,
+        inline: bool,
+        /// Reports without reaching the headers.
+        quiet: bool,
+        /// The address of each `k` value the implementation read.
+        seen: Mutex<Vec<usize>>,
+        pending: Mutex<Vec<i64>>,
+    }
+
+    impl HeaderAdder {
+        fn new(inline: bool) -> Self {
+            Self {
+                handle: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
+                inline,
+                quiet: false,
+                seen: Mutex::default(),
+                pending: Mutex::default(),
+            }
+        }
+
+        /// Reports during the call without reaching the headers.
+        fn quiet() -> Self {
+            Self { quiet: true, ..Self::new(true) }
+        }
+
+        fn register(&self) -> *mut kafka_common_serialization_Serializer_t {
+            unsafe extern "C" fn unused(_: *mut c_void, _: *const c_char, _: *const c_void, _: i64) {
+                unreachable!("every call passes the headers")
+            }
+            let handle = kafka_common_serialization_Serializer_new_async(
+                self as *const Self as *mut c_void,
+                unused,
+                Some(add_header),
+                None,
+                None,
+            );
+            self.handle.store(handle, std::sync::atomic::Ordering::SeqCst);
+            handle
+        }
+
+        /// Reports Java's null for `id`.
+        fn report(&self, id: i64) {
+            // SAFETY: Test code: the handle is alive until the test destroys it, after every report.
+            unsafe {
+                kafka_common_serialization_Serializer__set_callback_result(
+                    self.handle.load(std::sync::atomic::Ordering::SeqCst),
+                    id,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+
+        /// Reports the next pending call, waiting for it up to 10 s.
+        fn report_next(&self) {
+            for _ in 0..10_000 {
+                let id = self.pending.lock().unwrap().pop();
+                if let Some(id) = id {
+                    return self.report(id);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("no asynchronous call arrived");
+        }
+    }
+
+    unsafe extern "C" fn add_header(
+        self_: *mut c_void,
+        _topic: *const c_char,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
+        _data: *const c_void,
+        id: i64,
+    ) {
+        use crate::ffi::common::header::internals::record_header::kafka_common_header_internals_RecordHeader__as_Header;
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
+        use crate::ffi::common::header::{
+            kafka_common_header_Header_value, kafka_common_header_Headers_add_with_key_value,
+            kafka_common_header_Headers_last_header,
+        };
+        // SAFETY: Test code: `self_` is the `&HeaderAdder` the test registered, which outlives every
+        // call.
+        let imp = unsafe { &*(self_ as *const HeaderAdder) };
+        if imp.quiet {
+            return imp.report(id);
+        }
+        // SAFETY: Test code: `headers` is the non-`const` handle of a serializer call, valid and
+        // used by nothing else until the report below, so its view may be read and changed; the
+        // header handle `last_header` returns is read before the change.
+        unsafe {
+            let view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
+            let k = kafka_common_header_Headers_last_header(view, c"k".as_ptr());
+            assert!(!k.is_null(), "the record's header k");
+            let value = kafka_common_header_Header_value(kafka_common_header_internals_RecordHeader__as_Header(k));
+            imp.seen.lock().unwrap().push(value.data as usize);
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_add_with_key_value(
+                view,
+                c"added".as_ptr(),
+                kafka_Bytes_t::from_slice(b"by C"),
+                &raw mut err,
+            );
+            assert!(err.is_null());
+        }
+        if imp.inline {
+            imp.report(id);
+        } else {
+            imp.pending.lock().unwrap().push(id);
+        }
+    }
+
+    /// Headers holding `k` = `v`, and the address of that value.
+    fn record_headers_with_k() -> (RecordHeaders, usize) {
+        let mut headers = RecordHeaders::new();
+        headers.add_with_key_value("k", Some(b"v")).unwrap();
+        let address = headers.last_header("k").unwrap().value().unwrap().as_ptr() as usize;
+        (headers, address)
+    }
+
+    fn keys(headers: &RecordHeaders) -> Vec<String> {
+        headers.to_array().iter().map(|header| header.key().to_string()).collect()
+    }
+
+    /// A C serializer reads the record's own header buffers, not copies, and
+    /// a header it adds reaches the caller's headers, through the trait's
+    /// future (the producer's path), the blocking invoker and the `_cb`
+    /// twin, whether it reports during the call or later from another
+    /// thread (Java's `serialize(String, Headers, T)` may add headers).
+    #[test]
+    fn a_c_serializer_reads_and_changes_the_records_own_headers() {
+        let data = c"x";
+        for inline in [true, false] {
+            let imp = HeaderAdder::new(inline);
+            let handle = SendPtr(imp.register().cast());
+            let reporter = || {
+                if !inline {
+                    imp.report_next();
+                }
+            };
+            std::thread::scope(|scope| {
+                // The trait's future, as a producer awaits it.
+                let (mut headers, address) = record_headers_with_k();
+                let thread = scope.spawn(reporter);
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                let value = runtime.block_on(async {
+                    // SAFETY: Test code: the handle is valid until destroyed below.
+                    let serializer = unsafe { serializer_ref(handle.get().cast()) }.get();
+                    let data = GenericValue::new(data.as_ptr().cast_mut().cast());
+                    Serializer::serialize_with_headers(serializer, "t", &mut headers, Some(&data))
+                        .await
+                        .map(|bytes| bytes.map(Cow::into_owned))
+                });
+                thread.join().unwrap();
+                assert_eq!(value.unwrap(), None);
+                assert_eq!(
+                    imp.seen.lock().unwrap().pop(),
+                    Some(address),
+                    "inline={inline}: the record's buffer"
+                );
+                assert_eq!(keys(&headers), ["k", "added"], "inline={inline}");
+                assert_eq!(
+                    headers.last_header("added").unwrap().value(),
+                    Some(&b"by C"[..]),
+                    "inline={inline}"
+                );
+                assert_eq!(
+                    headers.last_header("k").unwrap().value().unwrap().as_ptr() as usize,
+                    address,
+                    "inline={inline}: moved back, not copied"
+                );
+
+                // The blocking invoker and the `_cb` twin, on a C handle.
+                let (record_headers, address) = record_headers_with_k();
+                let headers = box_record_headers(record_headers);
+                let completions = Completions::default();
+                let topic = CString::new("t").unwrap();
+                // SAFETY: Test code: the handles are valid until destroyed, once, below; `err` is a
+                // valid slot pointing at null; `topic`, `data`, `headers` and `completions` outlive
+                // each call and its completion, which fires before the join that follows it.
+                unsafe {
+                    let thread = scope.spawn(reporter);
+                    let mut err = ptr::null_mut();
+                    let out = kafka_common_serialization_Serializer_serialize_with_headers(
+                        handle.get().cast(),
+                        topic.as_ptr(),
+                        headers,
+                        data.as_ptr().cast(),
+                        &raw mut err,
+                    );
+                    thread.join().unwrap();
+                    assert!(err.is_null());
+                    assert_eq!(bytes_of(out), None);
+                    assert_eq!(imp.seen.lock().unwrap().pop(), Some(address), "inline={inline}");
+                    assert_eq!(keys(record_headers_ref(headers)), ["k", "added"], "inline={inline}");
+
+                    kafka_common_serialization_Serializer_serialize_with_headers_cb(
+                        handle.get().cast(),
+                        topic.as_ptr(),
+                        headers,
+                        data.as_ptr().cast(),
+                        record_completion,
+                        &completions as *const Completions as *mut c_void,
+                    );
+                    scope.spawn(reporter).join().unwrap();
+                    assert_eq!(completions.lock().unwrap().len(), 1, "inline={inline}");
+                    assert_eq!(imp.seen.lock().unwrap().pop(), Some(address), "inline={inline}");
+                    assert_eq!(keys(record_headers_ref(headers)), ["k", "added", "added"], "inline={inline}");
+                    kafka_common_header_internals_RecordHeaders_destroy(headers);
+                }
+            });
+            // SAFETY: Test code: every call reported; the handle is destroyed once.
+            unsafe { kafka_common_serialization_Serializer_destroy(handle.get().cast()) };
+        }
+    }
+
+    /// A header a C serializer adds is on the record a producer sends: here
+    /// `MockProducer`'s history, which keeps the record's own headers
+    /// (`MockProducer.java:612`), whether the C side reports during the call
+    /// or later from another thread.
+    #[test]
+    fn a_header_a_c_serializer_adds_is_on_the_produced_record() {
+        use crate::common::{Cluster, PartitionInfo};
+        use crate::ffi::producer::kafka_producer::ArcSerializer;
+        use crate::producer::{MockProducer, MockProducerOptionsBuilder, Producer, ProducerRecord};
+
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
+            None,
+            vec![],
+            vec![PartitionInfo::new("t".to_string(), 0, None, vec![], vec![])],
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            None,
+            std::collections::HashMap::new(),
+        );
+        for inline in [true, false] {
+            let imp = HeaderAdder::new(inline);
+            // SAFETY: Test code: the handle comes from its constructor and is consumed once, here.
+            let serializer = ArcSerializer(unsafe { take_serializer(imp.register()) });
+            let producer: MockProducer<GenericValue, GenericValue> = MockProducer::with_options(
+                MockProducerOptionsBuilder::new()
+                    .set_cluster(cluster.clone())
+                    .set_auto_complete(true)
+                    .set_value_serializer(Some(Box::new(serializer)))
+                    .build()
+                    .unwrap(),
+            );
+            let (headers, address) = record_headers_with_k();
+            let value = GenericValue::new(c"x".as_ptr().cast_mut().cast());
+            let record =
+                ProducerRecord::with_partition_key_headers("t".to_string(), None, None, Some(value), headers).unwrap();
+            std::thread::scope(|scope| {
+                let thread = scope.spawn(|| {
+                    if !inline {
+                        imp.report_next();
+                    }
+                });
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                runtime.block_on(Producer::send(&producer, record)).unwrap();
+                thread.join().unwrap();
+            });
+            assert_eq!(imp.seen.lock().unwrap().pop(), Some(address), "inline={inline}");
+            let history = producer.history();
+            assert_eq!(history.len(), 1);
+            assert_eq!(keys(history[0].headers()), ["k", "added"], "inline={inline}");
+            assert_eq!(
+                history[0].headers().last_header("added").unwrap().value(),
+                Some(&b"by C"[..]),
+                "inline={inline}"
+            );
+        }
+    }
+
+    /// Handing the record's headers to an asynchronous C serializer costs no
+    /// allocation per call: they are moved into the reused slot and back,
+    /// not copied. (The `Headers` view C asks for with `__as_Headers` is
+    /// built on first use, so this implementation does not ask.)
+    #[test]
+    fn async_c_serializer_with_headers_allocates_nothing_per_record() {
+        use crate::AllocTrackingGuard;
+        use crate::ffi::common::serialization::ready;
+
+        let imp = HeaderAdder::quiet();
+        let handle = imp.register();
+        // SAFETY: Test code: the handle is valid until destroyed below.
+        let serializer = unsafe { serializer_ref(handle) }.get();
+        let (mut headers, _) = record_headers_with_k();
+        let data = GenericValue::new(c"x".as_ptr().cast_mut().cast());
+        let mut record = || {
+            let value = ready(Serializer::serialize_with_headers(serializer, "t", &mut headers, Some(&data)))
+                .expect("an inline report completes the first poll")
+                .unwrap();
+            assert!(value.is_none());
+        };
+        // Warm up: the registry's slab and the slot's arguments are allocated once.
+        record();
+        let _guard = AllocTrackingGuard::new();
+        for _ in 0..100 {
+            record();
+        }
+        assert_eq!(AllocTrackingGuard::count(), 0, "allocations per 100 records");
+        drop(_guard);
+        assert_eq!(keys(&headers), ["k"], "moved back each call");
+        // SAFETY: Test code: every call reported; the handle is destroyed once.
+        unsafe { kafka_common_serialization_Serializer_destroy(handle) };
     }
 }
