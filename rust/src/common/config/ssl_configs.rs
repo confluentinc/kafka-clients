@@ -77,8 +77,7 @@ impl SslConfigs {
     /// Config key: `ssl.keystore.password`.
     pub const SSL_KEYSTORE_PASSWORD_CONFIG: &str = "ssl.keystore.password";
 
-    /// Config key: `ssl.key.password`: the password that decrypts an `ENCRYPTED PRIVATE KEY` (the
-    /// documentation of the `key_password` field lists the encryptions that are read).
+    /// Config key: `ssl.key.password`.
     pub const SSL_KEY_PASSWORD_CONFIG: &str = "ssl.key.password";
 
     /// Config key: `ssl.truststore.type`.
@@ -178,20 +177,6 @@ pub struct SslConfigs {
     /// Password for the private key.
     /// Corresponds to `ssl.key.password`, which Java defines as
     /// `Type.PASSWORD` (`SslConfigs.java:134`).
-    ///
-    /// When set, the private key of a PEM keystore (`ssl.keystore.key`, or the file of
-    /// `ssl.keystore.location` with type `PEM`) must be an `ENCRYPTED PRIVATE KEY`: it is
-    /// decrypted with this password, as `DefaultSslEngineFactory.PemStore.privateKey` does.
-    /// PKCS#8 with PBES2 is read: PBKDF2 with HMAC-SHA1/224/256/384/512 and AES-128-CBC or
-    /// AES-256-CBC, which is what `openssl pkcs8 -topk8 -v2 aes-256-cbc` writes (and the default of
-    /// OpenSSL 3).
-    ///
-    /// Some keys that Java reads are not read here: those with the legacy PBES1 ciphers
-    /// (`PBEWithMD5AndDES`, `PBEWithSHA1AndDESede`, the RC2 and RC4 ones), and PBES2 with
-    /// `hmacWithSHA512-224` or `hmacWithSHA512-256`. The error names the algorithm. Re-encrypt such
-    /// a key with
-    /// `openssl pkcs8 -topk8 -v2 aes-256-cbc -in old-key.pem -out new-key.pem`
-    /// (giving the old password for `old-key.pem` and choosing the new one for `new-key.pem`).
     pub(crate) key_password: Option<Password>,
 
     /// Endpoint identification algorithm for hostname verification.
