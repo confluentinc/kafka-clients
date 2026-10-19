@@ -104,8 +104,19 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// serializer implementations that need to inspect or modify headers during
     /// serialization (e.g., for schema registry integration).
     ///
+    /// The headers may be empty. The implementation is allowed to modify them,
+    /// as a side effect of serialization: it is considered best practice not to
+    /// delete or modify existing headers, but only to add new ones. The producer
+    /// sends the headers as they are after both the key and the value are
+    /// serialized, and makes them read-only from then on.
+    ///
+    /// The headers are borrowed for `'h`, a lifetime of their own, so the
+    /// serialized bytes (which live for `'a`) do not keep them borrowed: the
+    /// producer serializes the key, then lends the same headers to the value
+    /// serializer while it still holds the key's bytes.
+    ///
     /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`
-    /// (`Serializer.java:82`). The two Java overloads intersect on
+    /// (`Serializer.java:84`). The two Java overloads intersect on
     /// `{topic, data}`, which is exactly `serialize(String, T)` (`:62`) — so that
     /// one keeps the plain name and this one is suffixed with the parameter that
     /// distinguishes it (CLAUDE.md §2).
@@ -113,7 +124,7 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// # Arguments
     ///
     /// * `topic` - topic associated with data
-    /// * `headers` - record headers
+    /// * `headers` - headers associated with the record; may be modified
     /// * `data` - typed data; may be `None`
     ///
     /// # Returns
@@ -124,12 +135,15 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     ///
     /// As [`serialize`](Serializer::serialize).
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + use<'a, 'h, Self, T>
+    where
+        'a: 'h,
+    {
         let _ = headers;
         self.serialize(topic, data)
     }

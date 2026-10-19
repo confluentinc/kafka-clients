@@ -71,6 +71,12 @@ impl RecordHeadersInner {
         self as *const Self as *const kafka_common_header_internals_RecordHeaders_t
     }
 
+    /// A borrowed handle on `self` that C may mutate through, valid as long as
+    /// `self` and while no other reference to `self` is in use.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut kafka_common_header_internals_RecordHeaders_t {
+        self as *mut Self as *mut kafka_common_header_internals_RecordHeaders_t
+    }
+
     /// The `Headers` interface view on the handle at `this`, built on first
     /// request; `*mut` because the trait mutates. Works on the raw pointer so
     /// the view may later mutate the headers it points at.
@@ -134,6 +140,21 @@ pub(crate) unsafe fn record_headers_ref<'a>(
     // as long as that parent, or the call-local one a serializer or deserializer invoker passes
     // to C. The shared reference to its `headers` field is therefore sound for `'a`.
     unsafe { &*(headers as *const RecordHeadersInner) }.headers()
+}
+
+/// The headers behind a handle, mutable.
+///
+/// # Safety
+///
+/// `headers` must be a valid record-headers handle, alive for `'a`, with no
+/// other reference to it in use for `'a`.
+pub(crate) unsafe fn record_headers_mut<'a>(
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
+) -> &'a mut RecordHeaders {
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, so it
+    // points at a live `RecordHeadersInner` (see `record_headers_ref`), and no other reference to
+    // it is in use for `'a`, so the exclusive reference to its `headers` field aliases nothing.
+    unsafe { &mut (*(headers as *mut RecordHeadersInner)).headers }
 }
 
 /// `new RecordHeaders()`: empty, mutable. Owned, freed with

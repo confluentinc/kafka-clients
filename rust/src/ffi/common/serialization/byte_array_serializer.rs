@@ -77,12 +77,15 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
         Serializer::<[u8]>::serialize(&self.0, topic, data).await
     }
 
-    async fn serialize_with_headers<'a>(
+    async fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+    ) -> Result<Option<Cow<'a, [u8]>>, Error>
+    where
+        'a: 'h,
+    {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
         // invoker on the view `kafka_common_serialization_ByteArraySerializer__as_Serializer`

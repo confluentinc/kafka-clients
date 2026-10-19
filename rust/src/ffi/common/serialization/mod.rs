@@ -311,14 +311,13 @@ impl CallArgs {
         self.topic.as_ptr().cast()
     }
 
-    /// Stores a copy of `headers` and returns the handle C reads, at the
-    /// stable address of the boxed `CallArgs`.
+    /// Stores a copy of `headers` and returns the handle C reads (and, for a
+    /// serializer, may modify), at the stable address of the boxed `CallArgs`.
     pub(crate) fn set_headers(
         &mut self,
         headers: &crate::common::header::RecordHeaders,
-    ) -> *const crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t
-    {
-        self.headers.insert(RecordHeadersInner::new(headers.clone())).as_ptr()
+    ) -> *mut crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t {
+        self.headers.insert(RecordHeadersInner::new(headers.clone())).as_mut_ptr()
     }
 
     /// Stores `data` and returns the view C reads.

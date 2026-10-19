@@ -64,7 +64,7 @@ use crate::common::serialization::Serializer;
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{ResultSink, WaitReport};
 use crate::ffi::common::header::internals::record_headers::{
-    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
+    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_mut,
 };
 use crate::ffi::common::serialization::byte_array_serializer::GenericByteArraySerializer;
 use crate::ffi::common::serialization::string_serializer::GenericStringSerializer;
@@ -118,12 +118,15 @@ impl Serializer<GenericValue> for FfiSerializer {
         }
     }
 
-    async fn serialize_with_headers<'a>(
+    async fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+    ) -> Result<Option<Cow<'a, [u8]>>, Error>
+    where
+        'a: 'h,
+    {
         match self {
             Self::C(serializer) => serializer.serialize_with_headers(topic, headers, data).await,
             Self::String(serializer) => serializer.serialize_with_headers(topic, headers, data).await,
@@ -166,11 +169,11 @@ impl FfiSerializer {
     fn invoke(
         &self,
         topic: &str,
-        headers: Option<&RecordHeaders>,
+        headers: Option<&mut RecordHeaders>,
         data: Option<&GenericValue>,
     ) -> Result<Option<Vec<u8>>, Error> {
         match self {
-            Self::C(serializer) => block_on_thread(serializer.start(Dispatch::Inline, topic, headers, data)),
+            Self::C(serializer) => block_on_thread(serializer.start(Dispatch::Inline, topic, headers.as_deref(), data)),
             other => {
                 let output = match headers {
                     Some(headers) => ready(other.serialize_with_headers(topic, headers, data))?,
@@ -202,13 +205,15 @@ pub type kafka_common_serialization_Serializer_serialize_fn_t = unsafe extern "C
 ) -> kafka_Bytes_t;
 
 /// `byte[] serialize(String topic, Headers headers, T data)` of a
-/// synchronous C implementation; `headers` is a copy borrowed for the call.
-/// `NULL` is the Java default: `serialize(topic, data)`.
+/// synchronous C implementation; `headers` is a copy borrowed for the call,
+/// which the implementation may modify (Java lets a serializer add headers),
+/// though changes to the copy do not reach the record yet. `NULL` is the Java
+/// default: `serialize(topic, data)`.
 pub type kafka_common_serialization_Serializer_serialize_with_headers_fn_t = Option<
     unsafe extern "C" fn(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
         out_err: *mut *mut kafka_common_Error_t,
     ) -> kafka_Bytes_t,
@@ -227,13 +232,14 @@ pub type kafka_common_serialization_Serializer_serialize_async_fn_t =
 /// `byte[] serialize(String topic, Headers headers, T data)` of an
 /// asynchronous C implementation, reporting as
 /// [`kafka_common_serialization_Serializer_serialize_async_fn_t`]; `headers`
-/// is a copy, valid like the other arguments until it reports. `NULL` is the
-/// Java default: `serialize(topic, data)`.
+/// is a copy, valid like the other arguments until it reports, which the
+/// implementation may modify, though changes to the copy do not reach the
+/// record yet. `NULL` is the Java default: `serialize(topic, data)`.
 pub type kafka_common_serialization_Serializer_serialize_with_headers_async_fn_t = Option<
     unsafe extern "C" fn(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
         callback_id: i64,
     ),
@@ -544,7 +550,7 @@ impl CSerializer {
                 match (headers, *serialize_with_headers) {
                     (Some(headers), Some(function)) => {
                         // A copy: the class handle owns its headers.
-                        let headers = RecordHeadersInner::new(headers.clone());
+                        let mut headers = RecordHeadersInner::new(headers.clone());
                         dispatch(dispatch_to, move || {
                             let mut error = ptr::null_mut();
                             // SAFETY: `function` and `self_` are the pair the C caller registered
@@ -558,7 +564,7 @@ impl CSerializer {
                                 function(
                                     self_.get(),
                                     topic.as_ptr(),
-                                    headers.as_ptr(),
+                                    headers.as_mut_ptr(),
                                     data.get().cast_const(),
                                     &raw mut error,
                                 )
@@ -622,13 +628,16 @@ impl Serializer<GenericValue> for CSerializer {
             .map(|result| result.map(|bytes| bytes.map(Cow::Owned)))
     }
 
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
-        self.start(Dispatch::Blocking, topic, Some(headers), data)
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send
+    where
+        'a: 'h,
+    {
+        self.start(Dispatch::Blocking, topic, Some(&*headers), data)
             .map(|result| result.map(|bytes| bytes.map(Cow::Owned)))
     }
 
@@ -766,7 +775,7 @@ unsafe fn invoke(
     self_: *const kafka_common_serialization_Serializer_t,
     out_err: *mut *mut kafka_common_Error_t,
     topic: &str,
-    headers: Option<&RecordHeaders>,
+    headers: Option<&mut RecordHeaders>,
     data: Option<&GenericValue>,
 ) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
@@ -816,7 +825,7 @@ type BytesCompletion =
 unsafe fn invoke_cb(
     self_: *const kafka_common_serialization_Serializer_t,
     topic: &str,
-    headers: Option<&RecordHeaders>,
+    headers: Option<&mut RecordHeaders>,
     data: *const c_void,
     cb: BytesCompletion,
     opaque: *mut c_void,
@@ -830,10 +839,10 @@ unsafe fn invoke_cb(
     }) = serializer
     {
         let topic = owned_c_string(topic);
-        let headers = headers
+        let mut headers = headers
             .filter(|_| serialize_with_headers.is_some())
             .map(|headers| Box::new(RecordHeadersInner::new(headers.clone())));
-        let (topic_ptr, headers_ptr) = (topic.as_ptr(), headers.as_deref().map(RecordHeadersInner::as_ptr));
+        let (topic_ptr, headers_ptr) = (topic.as_ptr(), headers.as_deref_mut().map(RecordHeadersInner::as_mut_ptr));
         let opaque = SendPtr(opaque);
         let sink: ResultSink = Box::new(move |result| {
             // SAFETY: `result` is what the implementation passed to `__set_callback_result`, which
@@ -944,11 +953,14 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_cb(
 
 /// `byte[] serialize(String topic, Headers headers, T data)`; the bytes
 /// are delivered as for [`kafka_common_serialization_Serializer_serialize`].
+/// The implementation may add to `headers` (a C implementation receives a
+/// copy, whose changes do not reach `headers` yet).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid serializer handle, `topic` a valid
-/// NUL-terminated string, `headers` a valid record-headers handle, `data`
+/// NUL-terminated string, `headers` a valid record-headers handle not used
+/// otherwise for the call, `data`
 /// null or the representation the implementation reads, alive and unchanged
 /// for the call, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
@@ -956,15 +968,15 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_cb(
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_headers(
     self_: *const kafka_common_serialization_Serializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: *const c_void,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
-    // caller keeps alive and does not mutate for this call, as `record_headers_ref` requires.
-    let headers = unsafe { record_headers_ref(headers) };
+    // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
+    let headers = unsafe { record_headers_mut(headers) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and `out_err` as
     // `invoke` requires; `data` is null or the representation the implementation reads, alive and
     // unchanged for this call.
@@ -996,7 +1008,7 @@ pub type kafka_common_serialization_Serializer_serialize_with_headers_cb_t =
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_headers_cb(
     self_: *const kafka_common_serialization_Serializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: *const c_void,
     cb: kafka_common_serialization_Serializer_serialize_with_headers_cb_t,
     opaque: *mut c_void,
@@ -1004,8 +1016,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // unchanged for this call; the implementation receives a copy.
-    let headers = unsafe { record_headers_ref(headers) };
+    // not used otherwise for this call; an asynchronous implementation receives a copy.
+    let headers = unsafe { record_headers_mut(headers) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, `data` valid
     // until `cb` fires and `cb` a valid completion.
     unsafe { invoke_cb(self_, &topic, Some(headers), data, cb, opaque) }
@@ -1201,7 +1213,7 @@ mod tests {
     use crate::common::header::Headers;
     use crate::ffi::common::header::internals::record_headers::{
         box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
-        kafka_common_header_internals_RecordHeaders_to_string,
+        kafka_common_header_internals_RecordHeaders_to_string, record_headers_ref,
     };
     use crate::ffi::common::{
         kafka_common_Error_destroy, kafka_common_Error_message, kafka_common_Error_serialization,
@@ -1256,7 +1268,7 @@ mod tests {
     unsafe extern "C" fn c_serialize_with_headers(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
         out_err: *mut *mut kafka_common_Error_t,
     ) -> kafka_Bytes_t {
@@ -1559,7 +1571,7 @@ mod tests {
     unsafe extern "C" fn async_serialize_with_headers(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
         id: i64,
     ) {
@@ -1736,7 +1748,7 @@ mod tests {
                 let mut headers = RecordHeaders::new();
                 headers.add_with_key_value("k", Some(b"v")).unwrap();
                 let data = GenericValue::new(late.as_ptr().cast_mut().cast());
-                Serializer::serialize_with_headers(serializer, "t", &headers, Some(&data))
+                Serializer::serialize_with_headers(serializer, "t", &mut headers, Some(&data))
                     .await
                     .map(|bytes| bytes.map(Cow::into_owned))
             });
@@ -1938,8 +1950,12 @@ mod tests {
         {
             let (topic, mut headers) = (String::from("topic"), RecordHeaders::new());
             headers.add_with_key_value("k", Some(b"v")).unwrap();
-            let mut future =
-                std::pin::pin!(Serializer::serialize_with_headers(serializer, &topic, &headers, Some(&data)));
+            let mut future = std::pin::pin!(Serializer::serialize_with_headers(
+                serializer,
+                &topic,
+                &mut headers,
+                Some(&data)
+            ));
             assert!(poll_once(future.as_mut()).is_pending());
         }
         std::thread::scope(|scope| {

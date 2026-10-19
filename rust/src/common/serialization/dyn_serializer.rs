@@ -95,12 +95,14 @@ pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
     /// # Errors
     ///
     /// As [`Serializer::serialize_with_headers`].
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>>;
+    ) -> InlineFuture<'h, Result<Option<Cow<'a, [u8]>>, Error>>
+    where
+        'a: 'h;
 
     /// See [`Serializer::configure`].
     fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>;
@@ -118,12 +120,15 @@ impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
         InlineFuture::new(Serializer::serialize(self, topic, data))
     }
 
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>> {
+    ) -> InlineFuture<'h, Result<Option<Cow<'a, [u8]>>, Error>>
+    where
+        'a: 'h,
+    {
         InlineFuture::new(Serializer::serialize_with_headers(self, topic, headers, data))
     }
 
@@ -149,12 +154,15 @@ impl<T: ?Sized> Serializer<T> for dyn DynSerializer<T> + '_ {
         DynSerializer::serialize(self, topic, data)
     }
 
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send
+    where
+        'a: 'h,
+    {
         DynSerializer::serialize_with_headers(self, topic, headers, data)
     }
 
@@ -199,11 +207,11 @@ mod tests {
     fn test_dyn_call_on_a_built_in_is_ready_and_borrows() {
         let boxed: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
         let data = [1u8, 2, 3];
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
             &*boxed,
             "topic",
-            &headers,
+            &mut headers,
             Some(&data[..])
         ));
         match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
@@ -219,7 +227,7 @@ mod tests {
     fn test_dyn_call_allocates_nothing() {
         let string: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
         let array: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let data = [1u8, 2, 3];
         let mut cx = Context::from_waker(Waker::noop());
         let count = {
@@ -228,7 +236,7 @@ mod tests {
             let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
                 &*string,
                 "topic",
-                &headers,
+                &mut headers,
                 Some("value")
             ));
             assert!(matches!(

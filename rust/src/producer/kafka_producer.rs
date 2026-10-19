@@ -46,6 +46,7 @@ use crate::common::compress::Compression;
 use crate::common::errors::TimeoutError;
 use crate::common::header::Headers;
 use crate::common::header::RecordHeader;
+use crate::common::header::RecordHeaders;
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::ChannelBuilders;
@@ -2060,7 +2061,10 @@ impl<K, V> KafkaProducer<K, V> {
         let cluster = cluster_and_wait_time.cluster;
 
         // Destructure the record to take ownership of key/value for serialization.
-        let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
+        // The headers stay owned and mutable until both serializers have run:
+        // Java hands each serializer `record.headers()`, which it may add to
+        // (`KafkaProducer.java:1080`, `:1088`).
+        let (record_topic, partition_opt, timestamp_opt, mut record_headers, key, value) = record.into_parts();
 
         // Java's only catch around either serializer call is
         // `catch (ClassCastException cce)` (`KafkaProducer.java:1081` / `:1089`),
@@ -2080,11 +2084,13 @@ impl<K, V> KafkaProducer<K, V> {
         // back a borrow of the record's own buffer, and the accumulator's append
         // is the only copy (CLAUDE.md §14). Each serializer future lives inside
         // this method's own future, so awaiting one through `dyn` allocates
-        // nothing (`InlineFuture`).
+        // nothing (`InlineFuture`). The serialized bytes borrow only the record
+        // and the serializer, not the headers, so the key's bytes are held while
+        // the value serializer gets the same headers.
         let serialized_key = match DynSerializer::serialize_with_headers(
             &*self.key_serializer,
             &record_topic,
-            &record_headers,
+            &mut record_headers,
             key.as_ref(),
         )
         .await
@@ -2103,7 +2109,7 @@ impl<K, V> KafkaProducer<K, V> {
         let serialized_value = match DynSerializer::serialize_with_headers(
             &*self.value_serializer,
             &record_topic,
-            &record_headers,
+            &mut record_headers,
             value.as_ref(),
         )
         .await
@@ -2141,6 +2147,9 @@ impl<K, V> KafkaProducer<K, V> {
             partition_opt
         };
 
+        // `KafkaProducer.java:1100-1101`: once both serializers have run, the
+        // headers are read-only and are sent as they are.
+        Self::set_read_only(&mut record_headers);
         let headers = record_headers.to_array();
 
         self.do_send_bytes(
@@ -2861,11 +2870,13 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
             let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
             let cluster = cluster_and_wait_time.cluster;
 
-            let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
+            let (record_topic, partition, timestamp, mut record_headers, key, value) = record.into_parts();
 
-            // Java's `doSend` appends `record.headers().toArray()`
-            // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
-            // written straight into the batch buffer, as on the typed path.
+            // Java's `doSend` makes the headers read-only and appends
+            // `record.headers().toArray()` (`KafkaProducer.java:1100-1101`,
+            // `:1110-1111`); the header bytes are written straight into the
+            // batch buffer, as on the typed path.
+            Self::set_read_only(&mut record_headers);
             self.do_send_bytes(
                 &record_topic,
                 partition,
@@ -3045,6 +3056,15 @@ where
 }
 
 impl<K, V> KafkaProducer<K, V> {
+    /// Makes the record's headers read-only once both serializers have run, so
+    /// nothing changes them after the producer reads them
+    /// (`KafkaProducer.java:1158-1162`; the headers are always `RecordHeaders`
+    /// here, so Java's `instanceof` test always holds).
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#setReadOnly")]
+    fn set_read_only(headers: &mut RecordHeaders) {
+        headers.set_read_only();
+    }
+
     /// `Utils.closeQuietly(keySerializerPlugin, "producer keySerializer", firstException)`
     /// then the same for the value serializer (`KafkaProducer.java:1531-1532`):
     /// both are closed, each panic is logged as `closeQuietly` logs a failure
@@ -5371,6 +5391,121 @@ mod tests {
         assert_eq!(
             accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
             vec![vec![("test".to_string(), Some(b"header-value".to_vec()))]]
+        );
+    }
+
+    /// A `String` serializer that adds a header named `name`, with the data as
+    /// its value, and records the keys of the headers it was handed and
+    /// whether they were writable.
+    struct HeaderAddingSerializer {
+        name: &'static str,
+        seen: Arc<Mutex<Vec<SeenHeaders>>>,
+    }
+
+    /// The header keys a serializer was handed, and whether they were writable.
+    type SeenHeaders = (Vec<String>, bool);
+
+    impl Serializer<String> for HeaderAddingSerializer {
+        async fn serialize<'a>(
+            &'a self,
+            _topic: &'a str,
+            data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+            Ok(data.map(|data| Cow::Borrowed(data.as_bytes())))
+        }
+
+        async fn serialize_with_headers<'a, 'h>(
+            &'a self,
+            topic: &'a str,
+            headers: &'h mut RecordHeaders,
+            data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error>
+        where
+            'a: 'h,
+        {
+            use crate::common::header::Header;
+            let keys = headers.iter().map(|header| header.key().to_string()).collect();
+            self.seen.lock().unwrap().push((keys, !headers.is_read_only()));
+            headers
+                .add_with_key_value(self.name, data.map(|data| data.as_bytes()))
+                .map_err(Error::LocalIllegalState)?;
+            Serializer::serialize(self, topic, data).await
+        }
+    }
+
+    /// A serializer may add headers (Java's `Serializer.serialize(String,
+    /// Headers, T)` javadoc): `doSend` hands the record's headers to the key
+    /// serializer, then the same headers to the value serializer
+    /// (`KafkaProducer.java:1080`, `:1088`), and sends them as they are after
+    /// both (`:1100-1101`). The value serializer sees the key serializer's
+    /// header, and both added headers reach the batch, after the record's own.
+    #[tokio::test]
+    async fn test_serializer_added_headers_are_sent() {
+        use crate::common::header::RecordHeader;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let accumulator = create_accumulator();
+        let producer: KafkaProducer<String, String> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&ProducerConfig::defaults())
+                .set_key_serializer(Box::new(HeaderAddingSerializer { name: "key-header", seen: Arc::clone(&seen) }))
+                .set_value_serializer(Box::new(HeaderAddingSerializer {
+                    name: "value-header",
+                    seen: Arc::clone(&seen),
+                }))
+                .set_metadata(create_metadata_with_topic(TOPIC, 1))
+                .set_accumulator(Arc::clone(&accumulator))
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+
+        let mut record: ProducerRecord<String, String> =
+            ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        record
+            .headers_mut()
+            .add_with_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
+            .unwrap();
+
+        producer.send(record).await.expect("the send should be accepted");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                (vec!["test".to_string()], true),
+                (vec!["test".to_string(), "key-header".to_string()], true),
+            ],
+            "the key serializer runs first; both get the record's writable headers"
+        );
+        assert_eq!(
+            accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
+            vec![vec![
+                ("test".to_string(), Some(b"header-value".to_vec())),
+                ("key-header".to_string(), Some(b"key".to_vec())),
+                ("value-header".to_string(), Some(b"value".to_vec())),
+            ]]
+        );
+    }
+
+    /// `KafkaProducer.setReadOnly` (`KafkaProducer.java:1158-1162`), which
+    /// `doSend` runs after both serializers (`:1100`): a header added after it
+    /// fails with `RecordHeaders`' read-only message, as Java's
+    /// `testHeadersSuccess` asserts after `send` (`KafkaProducerTest.java:1117-1119`),
+    /// and the headers already there are kept.
+    #[test]
+    fn test_headers_are_read_only_after_serialization() {
+        use crate::common::header::Header;
+
+        let mut headers = RecordHeaders::new();
+        headers.add_with_key_value("test", Some(b"header2")).unwrap();
+        KafkaProducer::<String, String>::set_read_only(&mut headers);
+
+        assert!(headers.is_read_only());
+        let error = headers.add_with_key_value("test", Some(b"test")).unwrap_err();
+        assert_eq!("RecordHeaders has been closed.", Error::LocalIllegalState(error).message());
+        assert_eq!(
+            Some(&b"header2"[..]),
+            headers.last_header("test").and_then(|header| header.value())
         );
     }
 

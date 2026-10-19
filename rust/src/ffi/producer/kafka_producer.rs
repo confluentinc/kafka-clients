@@ -131,12 +131,15 @@ impl Serializer<GenericValue> for ArcSerializer {
         Serializer::serialize(self.0.get(), topic, data).await
     }
 
-    async fn serialize_with_headers<'a>(
+    async fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+    ) -> Result<Option<Cow<'a, [u8]>>, Error>
+    where
+        'a: 'h,
+    {
         Serializer::serialize_with_headers(self.0.get(), topic, headers, data).await
     }
 
@@ -632,7 +635,7 @@ mod tests {
                 ))),
             )
         };
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         for (kind, serializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
             let future = Serializer::serialize(serializer, "t", None);
             assert!(
@@ -640,7 +643,7 @@ mod tests {
                 "{kind} serialize: {} bytes",
                 size_of_val(&future)
             );
-            let future = Serializer::serialize_with_headers(serializer, "t", &headers, None);
+            let future = Serializer::serialize_with_headers(serializer, "t", &mut headers, None);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers: {} bytes",

@@ -368,8 +368,8 @@ impl<K, V> ProducerRecord<K, V> {
         &self.headers
     }
 
-    /// Returns a mutable reference to the headers.
-    #[cfg(test)]
+    /// Returns a mutable reference to the headers: Java's `headers()` is
+    /// mutable, and a serializer may add to it.
     pub(crate) fn headers_mut(&mut self) -> &mut RecordHeaders {
         &mut self.headers
     }

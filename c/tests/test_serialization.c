@@ -90,7 +90,7 @@ static kafka_Bytes_t upper_serialize(void *self, const char *topic, const void *
 }
 
 static kafka_Bytes_t upper_serialize_with_headers(void *self, const char *topic,
-                                                  const kafka_common_header_internals_RecordHeaders_t *headers,
+                                                  kafka_common_header_internals_RecordHeaders_t *headers,
                                                   const void *data, kafka_common_Error_t **out_err) {
     upper_serializer_t *imp = self;
     imp->with_headers_calls++;
@@ -464,7 +464,7 @@ static void async_upper_serialize(void *self, const char *topic, const void *dat
 }
 
 static void async_upper_serialize_with_headers(void *self, const char *topic,
-                                               const kafka_common_header_internals_RecordHeaders_t *headers,
+                                               kafka_common_header_internals_RecordHeaders_t *headers,
                                                const void *data, int64_t callback_id) {
     async_upper_serializer_t *imp = self;
     imp->with_headers_calls++;
