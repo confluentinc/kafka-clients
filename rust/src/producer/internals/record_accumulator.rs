@@ -6379,8 +6379,9 @@ mod tests {
     }
 
     /// Verifies that a force close completes while an append is blocked on buffer
-    /// memory, on both a single-worker and a multi-worker runtime, and that the
-    /// blocked append fails with the `BufferPool` error message.
+    /// memory, on both a single-worker and a multi-worker runtime, that the blocked
+    /// append fails with the `BufferPool` error message, and that the abort leaves no
+    /// append in progress and returns all memory to the pool.
     ///
     /// Regression test: `abort_incomplete_batches` did not yield between iterations,
     /// so on a single-worker runtime the blocked append could not run and the loop
@@ -6403,20 +6404,40 @@ mod tests {
                 let result = runtime.block_on(force_close_with_a_send_waiting_for_memory());
                 let _ = result_tx.send(result);
             });
-            let send_result = result_rx
+            let outcome = result_rx
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("the force close must finish ({workers} worker threads)"));
             assert_eq!(
                 Err("Producer closed while allocating memory".to_string()),
-                send_result,
+                outcome.send_result,
                 "{workers} worker threads"
+            );
+            assert!(
+                !outcome.appends_in_progress,
+                "no append may be in progress after the abort ({workers} worker threads)"
+            );
+            assert_eq!(
+                outcome.total_memory, outcome.available_memory,
+                "the pool must have all its memory back ({workers} worker threads)"
             );
         }
     }
 
+    /// The state [`force_close_with_a_send_waiting_for_memory`] leaves behind.
+    struct ForceCloseOutcome {
+        /// The result of the append that was blocked on memory.
+        send_result: Result<(), String>,
+        /// Whether an append is still in progress after the abort.
+        appends_in_progress: bool,
+        /// The buffer pool's available memory after the abort.
+        available_memory: i64,
+        /// The buffer pool's total memory.
+        total_memory: i64,
+    }
+
     /// Exhausts the buffer pool, starts an append that blocks on memory, performs the
-    /// Sender's force-close sequence, and returns the result of the blocked append.
-    async fn force_close_with_a_send_waiting_for_memory() -> Result<(), String> {
+    /// Sender's force-close sequence, and returns what it leaves behind.
+    async fn force_close_with_a_send_waiting_for_memory() -> ForceCloseOutcome {
         let n1 = node1();
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
         // Capacity for two batches; a third allocation blocks.
@@ -6465,7 +6486,13 @@ mod tests {
             })
         };
         sender.await.unwrap();
-        appender.await.unwrap()
+        let send_result = appender.await.unwrap();
+        ForceCloseOutcome {
+            send_result,
+            appends_in_progress: accum.appends_in_progress(),
+            available_memory: accum.free.available_memory(),
+            total_memory: accum.free.total_memory(),
+        }
     }
 
     /// Java brackets the whole of `append` in
