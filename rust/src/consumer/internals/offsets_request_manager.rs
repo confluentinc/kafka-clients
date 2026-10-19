@@ -220,22 +220,23 @@ struct PendingFollowupReset {
     initial_partitions: HashSet<TopicPartition>,
 }
 
-/// State shared between the [`OffsetsRequestManager`] and the
-/// [`OffsetsClusterListener`].
+/// State shared between the [`OffsetsRequestManager`], its spawned response
+/// forwarders' completions and the replay of parked requests.
 ///
-/// The cluster listener is registered on
-/// [`crate::Metadata::add_cluster_update_listener`] which gives it
-/// only a `&self` borrow — so any state the listener needs to mutate
-/// (`requests_to_send`, `requests_to_retry`) must live inside an
-/// `Arc<Mutex<...>>`. Read-only fields (metadata, subscription state,
-/// isolation level, timeout, fetcher-utils, completion sender) are wrapped
-/// in `Arc` so the listener can call into [`Self::prepare_fetch_offsets_requests`]
-/// without going through the manager.
+/// The [`OffsetsClusterListener`] does NOT hold this struct: it only sets
+/// [`Self::metadata_updated`], so it captures that flag alone. Holding the
+/// whole struct would close a reference cycle — this struct owns
+/// [`Self::metadata`], whose `Metadata` owns the boxed listener — that
+/// `Arc` reference counting never frees, so every closed consumer would stay
+/// allocated. Java builds the same cycle (`OffsetsRequestManager.java:148`,
+/// `metadata.addClusterUpdateListener(this)`) and its garbage collector frees
+/// it. The replay itself ([`Self::replay_retries_after_metadata_update`]) runs
+/// from [`OffsetsRequestManager::poll`].
 ///
 /// Java carries every one of these as instance fields on
 /// `OffsetsRequestManager` itself; the Rust split is a pure mechanical
-/// consequence of `&self` listener access vs. `&mut self` manager-poll
-/// access.
+/// consequence of the spawned forwarders and the deferred replay needing
+/// `Arc` access vs. `&mut self` manager-poll access.
 pub(crate) struct OffsetsManagerShared {
     pub(crate) subscription_state: Arc<Mutex<SubscriptionState>>,
     pub(crate) metadata: Arc<ConsumerMetadata>,
@@ -267,7 +268,10 @@ pub(crate) struct OffsetsManagerShared {
     /// metadata locks). The observable behaviour matches Java: the
     /// retried requests appear on `requests_to_send` before the next
     /// network poll.
-    pub(crate) metadata_updated: std::sync::atomic::AtomicBool,
+    ///
+    /// An `Arc` so the listener can hold the flag without holding this
+    /// struct (see the struct docs).
+    pub(crate) metadata_updated: Arc<std::sync::atomic::AtomicBool>,
     /// Nodes for which the manager wants the bg task to invoke
     /// `NetworkClientDelegate::try_connect` on its next iteration. Mirrors
     /// Java's `networkClientDelegate.tryConnect(node)` side effect inside
@@ -682,12 +686,13 @@ fn partial_fetched_for_node<'a>(
 /// Rust translation factors the `ClusterResourceListener` callback into a
 /// separate handle struct ([`OffsetsClusterListener`]) so we can register
 /// the callback with `Metadata::add_cluster_update_listener` without
-/// binding the listener's lifetime to the manager's `&mut`. The
-/// callback-shared state lives in [`OffsetsManagerShared`].
+/// binding the listener's lifetime to the manager's `&mut`. The listener
+/// holds only the `metadata_updated` flag; the state shared with spawned
+/// tasks lives in [`OffsetsManagerShared`].
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager")]
 pub(crate) struct OffsetsRequestManager {
-    /// Shared state accessible to the [`OffsetsClusterListener`] and to
-    /// per-response spawned tasks.
+    /// State shared with the deferred replay of parked requests. The
+    /// [`OffsetsClusterListener`] holds only its `metadata_updated` flag.
     shared: Arc<OffsetsManagerShared>,
     /// Java: `private final Time time`.
     time: Arc<dyn Time>,
@@ -827,7 +832,7 @@ impl OffsetsRequestManager {
             pending_completions_tx,
             requests_to_send: Mutex::new(Vec::new()),
             requests_to_retry: Mutex::new(Vec::new()),
-            metadata_updated: std::sync::atomic::AtomicBool::new(false),
+            metadata_updated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             try_connect_queue: Mutex::new(Vec::new()),
             completion_notify: std::sync::OnceLock::new(),
             #[cfg(test)]
@@ -846,12 +851,16 @@ impl OffsetsRequestManager {
             cached_update_positions_error: Arc::new(Mutex::new(None)),
             closing: false,
         };
-        // Register the cluster metadata update callback. The listener
-        // re-issues any deferred `fetch_offsets` requests on metadata
-        // change (Java: `OffsetsRequestManager.onUpdate`).
+        // Register the cluster metadata update callback. The listener flags
+        // the update and the next `poll` re-issues any deferred
+        // `fetch_offsets` requests (Java: `OffsetsRequestManager.onUpdate`).
+        // It captures only the flag: capturing `shared` would close a cycle
+        // through `shared.metadata`, which owns the listener.
         metadata
             .metadata_arc()
-            .add_cluster_update_listener(Box::new(OffsetsClusterListener { shared }));
+            .add_cluster_update_listener(Box::new(OffsetsClusterListener {
+                metadata_updated: Arc::clone(&shared.metadata_updated),
+            }));
         manager
     }
 
@@ -2008,8 +2017,12 @@ impl RequestManager for OffsetsRequestManager {
 /// `fetch_offsets` request whose first build attempt failed with stale
 /// metadata or whose responses returned retriable errors. Mirrors Java's
 /// `OffsetsRequestManager.onUpdate(ClusterResource)`.
+///
+/// Holds only the [`OffsetsManagerShared::metadata_updated`] flag, never the
+/// shared state, so the listener boxed into the consumer's `Metadata` does not
+/// keep that state (and the `Metadata` itself) alive in a cycle.
 struct OffsetsClusterListener {
-    shared: Arc<OffsetsManagerShared>,
+    metadata_updated: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ClusterResourceListener for OffsetsClusterListener {
@@ -2019,7 +2032,7 @@ impl ClusterResourceListener for OffsetsClusterListener {
         // to re-acquire `Metadata`'s inner lock, which is held by the
         // `update()` caller invoking this listener (see
         // `OffsetsManagerShared::metadata_updated` docs).
-        self.shared.metadata_updated.store(true, std::sync::atomic::Ordering::Release);
+        self.metadata_updated.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -2100,6 +2113,77 @@ mod tests {
             None,
             positions_validator,
         )
+    }
+
+    /// Waits, yielding to spawned tasks, until `weak` is dead or `tries`
+    /// yields have passed; returns the final strong count.
+    async fn strong_count_after_yields<T>(weak: &std::sync::Weak<T>, tries: usize) -> usize {
+        for _ in 0..tries {
+            if weak.strong_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        weak.strong_count()
+    }
+
+    /// A dropped manager frees its shared state. The cluster listener boxed
+    /// into `shared.metadata` must not hold `shared`, or the two keep each
+    /// other alive (Java's `OffsetsRequestManager.java:148` builds the same
+    /// cycle and relies on its garbage collector).
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_manager_frees_shared_state() {
+        let mgr = new_manager();
+        let shared = Arc::downgrade(&mgr.shared);
+        drop(mgr);
+        assert_eq!(0, strong_count_after_yields(&shared, 16).await);
+    }
+
+    /// A manager dropped with a request still queued frees its shared state,
+    /// for each of the three request kinds whose response forwarder awaits a
+    /// oneshot: the ListOffsets of `fetch_offsets`, the ListOffsets of a
+    /// position reset, and the OffsetsForLeaderEpoch of a position
+    /// validation. Each oneshot's sender sits in `shared.requests_to_send`, so
+    /// each forwarder must capture only the completion `Notify`: capturing
+    /// `shared` would keep the sender, and so the forwarder and the manager's
+    /// state, alive as long as the runtime running the forwarder (here the
+    /// test's) outlives the manager.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_manager_with_queued_request_frees_shared_state() {
+        for kind in ["fetch_offsets", "reset", "validation"] {
+            let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+            mgr.set_completion_notify(Arc::new(tokio::sync::Notify::new()));
+            let tp = TopicPartition::new("t1".to_string(), 1);
+            let mut rx = None;
+            match kind {
+                "fetch_offsets" => {
+                    bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+                    rx = Some(mgr.fetch_offsets(HashMap::from([(tp, ListOffsetsRequest::EARLIEST_TIMESTAMP)]), false));
+                },
+                "reset" => {
+                    bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+                    assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+                    mgr.reset_positions_if_needed(0).expect("ok");
+                },
+                _ => {
+                    bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 3);
+                    seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 3);
+                    mgr.validate_positions_if_needed(0).expect("ok");
+                },
+            }
+            assert_eq!(mgr.requests_to_send_count(), 1, "{kind}: exactly one request expected");
+            // Let the forwarder start awaiting its response.
+            tokio::task::yield_now().await;
+
+            let shared = Arc::downgrade(&mgr.shared);
+            drop(mgr);
+            drop(rx);
+            assert_eq!(
+                0,
+                strong_count_after_yields(&shared, 16).await,
+                "{kind}: shared state still alive"
+            );
+        }
     }
 
     /// Verifies that a freshly-constructed manager has nothing to poll.

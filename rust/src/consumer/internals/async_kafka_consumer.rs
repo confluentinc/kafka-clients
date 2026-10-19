@@ -3976,6 +3976,15 @@ where
         &self.client_id
     }
 
+    /// Test seam: weak references to the metadata and subscription state, so a
+    /// test can check that a closed and dropped consumer frees them.
+    #[cfg(test)]
+    pub(crate) fn metadata_and_subscriptions_for_test(
+        &self,
+    ) -> (std::sync::Weak<ConsumerMetadata>, std::sync::Weak<Mutex<SubscriptionState>>) {
+        (Arc::downgrade(&self.metadata), Arc::downgrade(&self.subscriptions))
+    }
+
     /// Java: `Map<MetricName, ? extends Metric> metrics()`
     /// (`AsyncKafkaConsumer.java:1301-1303`:
     /// `return Collections.unmodifiableMap(metrics.metrics());`).

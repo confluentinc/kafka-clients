@@ -742,6 +742,41 @@ mod tests {
         consumer.close().await.expect("close");
     }
 
+    /// A closed and dropped consumer frees its state. The offsets manager's
+    /// cluster listener, boxed into the consumer's `Metadata`, once held the
+    /// manager's shared state, which owns that `Metadata`: an `Arc` cycle that
+    /// kept the metadata, the subscription state and the manager allocated for
+    /// the life of the process. Java builds the same cycle
+    /// (`OffsetsRequestManager.java:148`) and its garbage collector frees it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_closed_consumer_is_freed() {
+        for query_offsets in [false, true] {
+            let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+            let mut consumer = new_consumer(&broker);
+            let (metadata, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
+            if query_offsets {
+                consumer.assign(vec![tp0()]).await.expect("assign");
+                broker.answer_list_offsets(Some(ListOffsetsAnswer { error: Errors::None, offset: 90 }));
+                consumer.end_offsets(&[tp0()]).await.expect("end offsets");
+            }
+            consumer.close().await.expect("close");
+            drop(consumer);
+
+            // Spawned tasks holding a clone end shortly after the close.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while (metadata.strong_count() > 0 || subscriptions.strong_count() > 0)
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                (0, 0),
+                (metadata.strong_count(), subscriptions.strong_count()),
+                "ConsumerMetadata / SubscriptionState still referenced (query_offsets = {query_offsets})"
+            );
+        }
+    }
+
     /// `KafkaConsumer` can move to another task but not be shared between
     /// tasks, as Java's `KafkaConsumer` is single-threaded and enforces it at
     /// run time with `acquire()` (`consumer-threading.md` §2). The compiler
