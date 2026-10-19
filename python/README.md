@@ -43,7 +43,8 @@ from confluent_kafka.common.serialization import (
 # package root:
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
-    TimeoutError, NoSuchElementError, ExecutionError, Duration,
+    TimeoutError, NoSuchElementError, ExecutionError, UnsupportedOperationError,
+    Duration,
 )
 ```
 
@@ -62,7 +63,10 @@ Java overload without it (`CLAUDE.md`, Python Binding Conventions, Signatures).
 (`ProducerRecord(topic=…, partition=None, key=None, value=…)`, an
 `Optional` parameter's `Optional.empty()`). Code written against kafka-python or
 confluent-kafka-python that passes `None` to skip an argument must leave the
-argument out instead. The signatures show the private default `MISSING`
+argument out instead; its positional callbacks and serdes take the keyword form
+(Serdes and callbacks), and an `except UnsupportedVersionError` meant for a mock's
+unimplemented method becomes `except UnsupportedOperationError` (Errors). The
+signatures show the private default `MISSING`
 (`help()`, `inspect.signature`): it only marks a parameter some overload omits
 and is never a value to pass.
 
@@ -122,13 +126,43 @@ A `get(timeout=…)` that runs out raises `TimeoutError`. A future's
 runs: on the producer's completion thread or the sync admin client's pump
 thread, on the event loop for an async client.
 
+## Serdes and callbacks take keyword arguments
+
+A serializer, a deserializer, a `send()` callback and a `commit_nowait()`
+callback are called with keyword arguments named after Java's parameters, and
+each must accept `**kwargs`:
+
+```python
+def on_done(*, metadata, exception, **kwargs): ...          # Java's Callback
+def on_commit(*, offsets, exception, **kwargs): ...         # OffsetCommitCallback
+def serializer(*, topic, data, headers=None, **kwargs): ...     # Serializer
+def deserializer(*, topic, data, headers=None, **kwargs): ...   # Deserializer
+
+producer.send(record=r, callback=lambda *, metadata, exception, **_: ...)
+```
+
+Java adds a parameter to such an interface as a `default` overload, which old
+implementations never see; in Python the binding passes it as one more keyword,
+which `**kwargs` takes, so a parameter Java adds later breaks no existing
+callable. A callable without `**kwargs` is rejected where it is given, with
+`IllegalArgumentError("<param> must accept **kwargs")` (`callback`,
+`key_serializer`, … or the config key `value.deserializer`, …), and the
+`Callback`, `OffsetCommitCallback`, `Serializer` and `Deserializer` protocols
+make `mypy` reject it too. The parameters may be declared positional-or-keyword
+in Java's order (`def ser(topic, data, headers=None, **kwargs)`), which the
+client then calls positionally, a little faster. The `ConsumerRebalanceListener`
+methods, which you override on a subclass, are called positionally, as before.
+Code written against the earlier positional callbacks
+(`lambda md, exc: ...`, `def deserializer(topic, data, headers)`) must be
+rewritten in this form.
+
 ## Producer
 
 - `send(record=…, callback=cb)` returns a `KafkaFuture` for the record's
   `RecordMetadata` (`.get()` waits for it); like Java's, it cannot be cancelled,
   and a send failure reaches `get()` as `ExecutionError`. A serializer is called
-  with a `None` key or value as given and decides what null maps to. `cb(metadata,
-  exception)` is Java's `Callback`: it runs on the producer's background
+  with a `None` key or value as given and decides what null maps to.
+  `cb(metadata=…, exception=…)` is Java's `Callback`: it runs on the producer's background
   completion thread (`KafkaProducer`) or on the event loop
   (`AsyncKafkaProducer`), one at a time in completion order, before the future
   completes; a raising callback fails nothing, and the client's core logs its
@@ -158,7 +192,7 @@ thread, on the event loop for an async client.
   returned) and leaves the position at the record:
   `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
 - `commit()` is Java's `commitSync` and waits; `commit_nowait(callback=cb)` is
-  Java's `commitAsync`. `cb(offsets, exception)` is Java's
+  Java's `commitAsync`. `cb(offsets=…, exception=…)` is Java's
   `OffsetCommitCallback`; `offsets` is `None` when the commit failed and for
   an explicit empty `offsets`, as Java passes `null`.
 - The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
@@ -228,7 +262,9 @@ with Admin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
 - Errors are classes: `isinstance(e.__cause__, RetriableError)`.
 - `MockAdminClient` (and `AsyncMockAdminClient`) is Java's `MockAdminClient`, for tests: no
   broker, in-memory state, `MockAdminClient.create()...build()` (`MockAdminClient()` has one `Node.no_node()` broker, as Java's, so topic calls need real brokers). Where Java's mock
-  throws "Not implemented yet", it raises `UnsupportedVersionError`.
+  throws "Not implemented yet", it raises `UnsupportedOperationError` (Java's
+  `UnsupportedOperationException`, a `RuntimeError` at the package root, not a
+  `KafkaError`).
 - Overloads whose entry point the core lacks (streams and share groups, metadata quorum, …)
   are not generated; they are listed in the docstring of `confluent_kafka.admin.admin`.
 
@@ -240,7 +276,13 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `ExecutionError`) live at the package root.
+`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`) live at the
+package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
+which the mocks raise for what Java's mocks do not implement
+(`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"); it
+is not a `KafkaError`, so `except KafkaError` does not catch it, as in Java. An
+error from the client's core for the same case is still `UnsupportedVersionError`
+until the core has its own one.
 
 ## Directory Structure
 
