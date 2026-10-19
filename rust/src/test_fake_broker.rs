@@ -29,25 +29,42 @@
 //! `ListOffsets` requests are recorded and held until the test sets an answer
 //! with [`FakeBroker::answer_list_offsets`], which lets a consumer test step
 //! through the moments Java's `MockClient` tests stop at (request sent, no
-//! response yet). Every other request is read and left unanswered.
+//! response yet). A `Fetch` is answered with the records the test sets with
+//! [`FakeBroker::answer_fetch`], once; without one it is answered empty after a
+//! short wait, as a broker does when `fetch.max.wait.ms` elapses with no data.
+//! Every other request is read and left unanswered.
+//!
+//! Requests are recorded when they arrive, as Java's `MockClient` records them
+//! when the client sends them, even while an earlier request on the same
+//! connection is held: a reader task records each frame and hands it to the
+//! connection's responder, which answers in arrival order, as a broker must.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
+use crate::FetchRequestData;
+use crate::FetchResponseData;
 use crate::ListOffsetsRequestData;
 use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
+use crate::common::compress::Compression;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::{ApiVersionsResponse, RequestHeader, RequestUtils};
+use crate::common::record::TimestampType;
+use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
+use crate::common::requests::{ApiVersionsResponse, FetchResponse, RequestHeader, RequestUtils, ResponseHeader};
+use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as FetchPartitionData};
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
@@ -74,6 +91,26 @@ pub(crate) struct ListOffsetsAnswer {
     pub(crate) offset: i64,
 }
 
+/// The records the fake returns for every partition of one `Fetch`, as Java's
+/// `KafkaConsumerTest.FetchInfo`: `count` records from `offset`, with the log
+/// spanning `log_first_offset..=log_last_offset`, so the high watermark is
+/// `log_last_offset + 1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FetchAnswer {
+    /// The log start offset.
+    pub(crate) log_first_offset: i64,
+    /// The last offset in the log.
+    pub(crate) log_last_offset: i64,
+    /// The offset of the first record returned.
+    pub(crate) offset: i64,
+    /// How many records are returned.
+    pub(crate) count: i32,
+}
+
+/// How long a `Fetch` without a [`FetchAnswer`] waits before it is answered
+/// empty: the fake's `fetch.max.wait.ms`.
+const EMPTY_FETCH_WAIT: Duration = Duration::from_millis(20);
+
 /// What the serving tasks share with the test.
 struct Shared {
     api_versions: Mutex<Vec<ReceivedApiVersions>>,
@@ -81,6 +118,28 @@ struct Shared {
     list_offsets_timestamps: Mutex<Vec<i64>>,
     /// `None` holds `ListOffsets` requests; `Some` answers them.
     list_offsets_answer: watch::Sender<Option<ListOffsetsAnswer>>,
+    /// How many `Fetch` requests arrived.
+    fetch_requests: AtomicUsize,
+    /// The answer for the next `Fetch`, taken by the one that uses it.
+    fetch_answer: Mutex<Option<FetchAnswer>>,
+}
+
+/// A request read from a connection, waiting for its turn to be answered.
+enum Pending {
+    /// The response is already serialized.
+    Ready(Vec<u8>),
+    /// Answered once the test sets a [`ListOffsetsAnswer`].
+    ListOffsets {
+        response_header: ResponseHeader,
+        version: i16,
+        request: ListOffsetsRequestData,
+    },
+    /// Answered with the [`FetchAnswer`], or empty after [`EMPTY_FETCH_WAIT`].
+    Fetch {
+        response_header: ResponseHeader,
+        version: i16,
+        request: FetchRequestData,
+    },
 }
 
 /// The fake broker: a listener plus the requests it has seen.
@@ -100,6 +159,8 @@ impl FakeBroker {
             api_versions: Mutex::new(Vec::new()),
             list_offsets_timestamps: Mutex::new(Vec::new()),
             list_offsets_answer: watch::Sender::new(None),
+            fetch_requests: AtomicUsize::new(0),
+            fetch_answer: Mutex::new(None),
         });
         let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
@@ -147,6 +208,17 @@ impl FakeBroker {
         self.shared.list_offsets_answer.send_replace(answer);
     }
 
+    /// Answers the next `Fetch` with `answer`; the ones after it are answered
+    /// empty again.
+    pub(crate) fn answer_fetch(&self, answer: FetchAnswer) {
+        *self.shared.fetch_answer.lock().expect("fake broker mutex poisoned") = Some(answer);
+    }
+
+    /// How many `Fetch` requests have arrived so far.
+    pub(crate) fn fetch_requests(&self) -> usize {
+        self.shared.fetch_requests.load(Ordering::SeqCst)
+    }
+
     /// Waits (up to `timeout`) until at least `count` ApiVersions requests have
     /// arrived, and returns them.
     pub(crate) async fn await_api_versions_requests(
@@ -171,13 +243,50 @@ impl Drop for FakeBroker {
     }
 }
 
+/// Serves one connection: a reader task records each request as it arrives
+/// and queues it; this task answers the queue in arrival order.
 async fn serve(
-    mut stream: TcpStream,
+    stream: TcpStream,
     addr: SocketAddr,
     seen: Arc<Shared>,
     cluster_id: String,
     topic: String,
     topic_id: Uuid,
+) {
+    let (reader, mut writer) = stream.into_split();
+    let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
+    let reader_task = tokio::spawn(read_requests(
+        reader,
+        addr,
+        Arc::clone(&seen),
+        cluster_id,
+        topic,
+        topic_id,
+        pending_tx,
+    ));
+    while let Some(pending) = pending_rx.recv().await {
+        let Some(response) = respond(&seen, pending).await else {
+            break;
+        };
+        let mut out = Vec::with_capacity(4 + response.len());
+        out.extend_from_slice(&(response.len() as i32).to_be_bytes());
+        out.extend_from_slice(&response);
+        if writer.write_all(&out).await.is_err() {
+            break;
+        }
+    }
+    reader_task.abort();
+}
+
+/// Reads, records and queues every request of a connection until it closes.
+async fn read_requests(
+    mut stream: OwnedReadHalf,
+    addr: SocketAddr,
+    seen: Arc<Shared>,
+    cluster_id: String,
+    topic: String,
+    topic_id: Uuid,
+    pending: mpsc::UnboundedSender<Pending>,
 ) {
     loop {
         let mut size = [0u8; 4];
@@ -192,22 +301,27 @@ async fn serve(
         let header = RequestHeader::parse(&mut accessor).expect("fake broker: request header");
         let version = header.api_version();
         let response_header = header.to_response_header();
-        let response = if *header.api_key() == ApiKeys::API_VERSIONS {
+        let request = if *header.api_key() == ApiKeys::API_VERSIONS {
             let data = ApiVersionsRequestData::read(&mut accessor, version).expect("fake broker: ApiVersions body");
             seen.api_versions
                 .lock()
                 .expect("fake broker mutex poisoned")
                 .push(ReceivedApiVersions { version, cluster_id: data.cluster_id.clone(), node_id: data.node_id });
             let mut body = ApiVersionsResponse::default_api_versions_response(ListenerType::Broker);
-            RequestUtils::serialize(
+            Pending::Ready(serialize(RequestUtils::serialize(
                 response_header.data(),
                 response_header.header_version(),
                 body.data_mut(),
                 version,
-            )
+            )))
         } else if *header.api_key() == ApiKeys::METADATA {
             let mut body = metadata_response(addr, &cluster_id, &topic, topic_id);
-            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else if *header.api_key() == ApiKeys::LIST_OFFSETS {
             let request = ListOffsetsRequestData::read(&mut accessor, version).expect("fake broker: ListOffsets body");
             seen.list_offsets_timestamps.lock().expect("fake broker mutex poisoned").extend(
@@ -216,27 +330,55 @@ async fn serve(
                     .iter()
                     .flat_map(|topic| topic.partitions().iter().map(|partition| partition.timestamp())),
             );
-            let mut answers = seen.list_offsets_answer.subscribe();
-            let Ok(answer) = answers
-                .wait_for(Option::is_some)
-                .await
-                .map(|answer| answer.expect("checked by wait_for"))
-            else {
-                return;
-            };
-            let mut body = list_offsets_response(&request, answer);
-            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+            Pending::ListOffsets { response_header, version, request }
+        } else if *header.api_key() == ApiKeys::FETCH {
+            let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
+            seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
+            Pending::Fetch { response_header, version, request }
         } else {
             continue;
         };
-        let bytes = response.expect("fake broker: serialize response").into_buffer();
-        let mut out = Vec::with_capacity(4 + bytes.len());
-        out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
-        out.extend_from_slice(&bytes);
-        if stream.write_all(&out).await.is_err() {
+        if pending.send(request).is_err() {
             return;
         }
     }
+}
+
+/// The serialized response to `pending`, once it can be given; `None` when
+/// the fake is shutting down.
+async fn respond(seen: &Shared, pending: Pending) -> Option<Vec<u8>> {
+    match pending {
+        Pending::Ready(response) => Some(response),
+        Pending::ListOffsets { response_header, version, request } => {
+            let mut answers = seen.list_offsets_answer.subscribe();
+            let answer = answers.wait_for(Option::is_some).await.ok()?.expect("checked by wait_for");
+            let mut body = list_offsets_response(&request, answer);
+            Some(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        },
+        Pending::Fetch { response_header, version, request } => {
+            let answer = seen.fetch_answer.lock().expect("fake broker mutex poisoned").take();
+            if answer.is_none() {
+                tokio::time::sleep(EMPTY_FETCH_WAIT).await;
+            }
+            let mut body = fetch_response(&request, answer);
+            Some(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        },
+    }
+}
+
+/// The bytes of a serialized response.
+fn serialize<E: std::fmt::Debug>(response: Result<ByteBufferAccessor, E>) -> Vec<u8> {
+    response.expect("fake broker: serialize response").into_buffer()
 }
 
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {
@@ -300,5 +442,68 @@ fn list_offsets_response(request: &ListOffsetsRequestData, answer: ListOffsetsAn
         .collect();
     let mut data = ListOffsetsResponseData::new();
     data.set_topics(topics);
+    data
+}
+
+/// Answers every partition of `request`: with the records of `answer`, as
+/// Java's `KafkaConsumerTest.fetchResponse(Map<TopicPartition, FetchInfo>)`
+/// builds them, or with no records and unknown offsets (`-1`, which the
+/// consumer does not apply) when there is no answer.
+fn fetch_response(request: &FetchRequestData, answer: Option<FetchAnswer>) -> FetchResponseData {
+    let responses = request
+        .topics()
+        .iter()
+        .map(|topic| {
+            let partitions = topic
+                .partitions()
+                .iter()
+                .map(|partition| {
+                    let mut response = FetchPartitionData::new();
+                    response.set_partition_index(partition.partition());
+                    response.set_error_code(Errors::None.code());
+                    response.set_last_stable_offset(-1);
+                    response.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+                    match answer {
+                        Some(answer) => {
+                            let records: Vec<SimpleRecord> = (0..answer.count)
+                                .map(|i| {
+                                    SimpleRecord::with_timestamp_key_value(
+                                        0,
+                                        Some(format!("key-{i}").into_bytes()),
+                                        Some(format!("value-{i}").into_bytes()),
+                                    )
+                                })
+                                .collect();
+                            let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+                                RecordBatch::CURRENT_MAGIC_VALUE,
+                                answer.offset,
+                                Compression::none().build(),
+                                TimestampType::CreateTime,
+                                &records,
+                            );
+                            response.set_high_watermark(answer.log_last_offset + 1);
+                            response.set_log_start_offset(answer.log_first_offset);
+                            response.set_records(Some(records.buffer_bytes().clone()));
+                        },
+                        None => {
+                            response.set_high_watermark(-1);
+                            response.set_log_start_offset(-1);
+                            response.set_records(Some(bytes::Bytes::new()));
+                        },
+                    }
+                    response
+                })
+                .collect();
+            let mut response = FetchableTopicResponse::new();
+            response.set_topic(topic.topic().clone());
+            response.set_topic_id(topic.topic_id());
+            response.set_partitions(partitions);
+            response
+        })
+        .collect();
+    let mut data = FetchResponseData::new();
+    data.set_error_code(Errors::None.code());
+    data.set_session_id(crate::common::requests::FetchMetadata::INVALID_SESSION_ID);
+    data.set_responses(responses);
     data
 }

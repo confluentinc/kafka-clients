@@ -439,7 +439,7 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::serialization::Deserializer;
     use crate::consumer::CloseOptions;
-    use crate::test_fake_broker::{FakeBroker, ListOffsetsAnswer};
+    use crate::test_fake_broker::{FakeBroker, FetchAnswer, ListOffsetsAnswer};
     use crate::test_thread_safety::{is_send, is_sync};
 
     const TOPIC: &str = "current-lag-topic";
@@ -560,13 +560,9 @@ mod tests {
 
     /// Translated from `KafkaConsumerTest.testCurrentLag` (CONSUMER arm),
     /// through the public API and the background task, against a fake broker
-    /// in place of Java's `MockClient`.
-    ///
-    /// The tail of the Java test, where a FETCH response moves the position to
-    /// 55 and the lag to 45, is not translated: the fake broker serves no
-    /// FETCH. The lag after the LIST_OFFSETS response is what `currentLag`
-    /// computes; the high watermark a fetch would set takes the same path
-    /// (`SubscriptionState.partitionLag`).
+    /// in place of Java's `MockClient`. The fake answers the FETCHes sent
+    /// before the test's own one empty, with unknown offsets the consumer does
+    /// not apply, so they leave the lag as Java's unanswered FETCH does.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_current_lag() {
         let broker = FakeBroker::start("fake-cluster", TOPIC).await;
@@ -576,7 +572,13 @@ mod tests {
         assert_eq!(None, consumer.current_lag(&tp0()).await.expect("lag"));
         // poll once again, which should send the list-offset request
         consumer.seek_with_offset(tp0(), 50).await.expect("seek");
-        wait_for_latest_list_offsets(&mut consumer, &broker, 1, true).await;
+        // requests: list-offset, fetch
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while latest_list_offsets(&broker) < 1 || broker.fetch_requests() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "No list-offset & fetch request sent");
+            consumer.poll(Duration::ZERO).await.expect("poll");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         // no error for no end offset (so unknown lag)
         assert_eq!(None, consumer.current_lag(&tp0()).await.expect("lag"));
@@ -594,6 +596,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(1, latest_list_offsets(&broker), "one LIST_OFFSETS for the end offset");
+
+        // one successful fetch should update the log end offset and the position
+        broker.answer_fetch(FetchAnswer { log_first_offset: 1, log_last_offset: 99, offset: 50, count: 5 });
+        // requests: fetch
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let records = loop {
+            assert!(tokio::time::Instant::now() < deadline, "No fetch request sent");
+            let records = consumer.poll(Duration::from_millis(1)).await.expect("poll");
+            if !records.is_empty() {
+                break records;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(5, records.count());
+        assert_eq!(55, consumer.position(&tp0()).await.expect("position"));
+        assert_eq!(1, records.next_offsets().len());
+        assert_eq!(
+            Some(&OffsetAndMetadata::new(55).expect("valid offset")),
+            records.next_offsets().get(&tp0())
+        );
+
+        // correct lag result
+        assert_eq!(Some(45), consumer.current_lag(&tp0()).await.expect("lag"));
 
         close_and_assert_current_lag_fails(consumer).await;
     }
@@ -685,6 +710,71 @@ mod tests {
         // correct lag result should be returned as well
         assert_eq!(Some(40), consumer.current_lag(&tp0()).await.expect("lag"));
         close_and_assert_current_lag_fails(consumer).await;
+    }
+
+    /// An offsets query completes as soon as its response is read, as Java's
+    /// does inside `client.poll` (`NetworkClientDelegate.java:454-464` →
+    /// `OffsetsRequestManager.java:686`, `:208`). The LIST_OFFSETS forwarder
+    /// must wake the background task; without that wake the completion waits
+    /// for the network poll's own timeout (`MAX_POLL_TIMEOUT_MS`, 5 s) and a
+    /// shorter timeout fails every time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_offsets_query_completes_without_waiting_for_poll_timeout() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let mut consumer = new_consumer(&broker);
+        consumer.assign(vec![tp0()]).await.expect("assign");
+
+        broker.answer_list_offsets(Some(ListOffsetsAnswer { error: Errors::None, offset: 90 }));
+        assert_eq!(
+            HashMap::from([(tp0(), 90)]),
+            consumer
+                .end_offsets_with_timeout(&[tp0()], Duration::from_secs(1))
+                .await
+                .expect("end offsets")
+        );
+        assert_eq!(
+            HashMap::from([(tp0(), 90)]),
+            consumer
+                .beginning_offsets_with_timeout(&[tp0()], Duration::from_secs(1))
+                .await
+                .expect("beginning offsets")
+        );
+        consumer.close().await.expect("close");
+    }
+
+    /// A closed and dropped consumer frees its state. The offsets manager's
+    /// cluster listener, boxed into the consumer's `Metadata`, once held the
+    /// manager's shared state, which owns that `Metadata`: an `Arc` cycle that
+    /// kept the metadata, the subscription state and the manager allocated for
+    /// the life of the process. Java builds the same cycle
+    /// (`OffsetsRequestManager.java:148`) and its garbage collector frees it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_closed_consumer_is_freed() {
+        for query_offsets in [false, true] {
+            let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+            let mut consumer = new_consumer(&broker);
+            let (metadata, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
+            if query_offsets {
+                consumer.assign(vec![tp0()]).await.expect("assign");
+                broker.answer_list_offsets(Some(ListOffsetsAnswer { error: Errors::None, offset: 90 }));
+                consumer.end_offsets(&[tp0()]).await.expect("end offsets");
+            }
+            consumer.close().await.expect("close");
+            drop(consumer);
+
+            // Spawned tasks holding a clone end shortly after the close.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while (metadata.strong_count() > 0 || subscriptions.strong_count() > 0)
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                (0, 0),
+                (metadata.strong_count(), subscriptions.strong_count()),
+                "ConsumerMetadata / SubscriptionState still referenced (query_offsets = {query_offsets})"
+            );
+        }
     }
 
     /// `KafkaConsumer` can move to another task but not be shared between

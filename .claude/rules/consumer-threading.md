@@ -39,25 +39,35 @@ Java methods that do not block remain synchronous:
   - `metrics()`, `wakeup()` and the Rust-only `handle()` take `&self`
 
 The receiver follows Java's guard, not whether the method reads or writes.
-Every Java consumer method except `metrics()` and `wakeup()` starts with
-`acquireAndEnsureOpen()`, which throws `ConcurrentModificationException` when
-another thread is inside the consumer; `&mut self` is the type-level form of
-that guard, so the getters take it too. It is also forward compatibility
-(CLAUDE.md §3): a Java getter that gains a side effect (`currentLag` became
-`addAndGet(CurrentLagEvent)`) would otherwise force a breaking `&self` ->
-`&mut self` change. `metrics()` and `wakeup()` are unguarded in Java
-(`wakeup()` is cross-thread by design), and `handle()` hands out the
-`ConsumerHandle` (§31, §41), the one cross-thread path into the consumer.
-`cargo xtask lint-custom` (`check-consumer-receiver`) fails on any other
-`Consumer` / `DynConsumer` method taking `&self`.
+Java's consumer methods start with `acquireAndEnsureOpen()`, which throws
+`ConcurrentModificationException` when another thread is inside the consumer;
+`&mut self` is the type-level form of that guard, so the guarded getters take
+it too. It is also forward compatibility (CLAUDE.md §3): a Java getter that
+gains a side effect (`currentLag` became `addAndGet(CurrentLagEvent)`) would
+otherwise force a breaking `&self` -> `&mut self` change.
 
-Misuse of the sync getters is a programming bug, so it panics with Java's
-message instead of returning a `Result` (the precedent is "precondition
-throws stay panics"): a closed consumer panics with
+A method keeps `&self` only when Java leaves it outside the guard. Java's
+unguarded methods are `metrics()`, `wakeup()` (cross-thread by design),
+`clientInstanceId(Duration)`, `registerMetricForSubscription` and
+`unregisterMetricFromSubscription` (`AsyncKafkaConsumer.java:887-902,1301,1855-1861`).
+The last three are not translated yet: when one is, it takes `&self` and is
+added to the allowlist of `cargo xtask lint-custom`
+(`check-consumer-receiver`). The Rust-only `handle()` also takes `&self`: it
+hands out the `ConsumerHandle` (§31, §41), the one cross-thread path into the
+consumer. The lint fails on any other `Consumer` / `DynConsumer` method taking
+`&self`. (`enforceRebalance` is unguarded in `AsyncKafkaConsumer` but guarded
+in `ClassicKafkaConsumer`, so it takes `&mut self`.)
+
+On `KafkaConsumer`, misuse of the guarded sync getters is a programming bug,
+so it panics with Java's message instead of returning a `Result` (the
+precedent is "precondition throws stay panics"): a closed consumer panics with
 `"This consumer has already been closed."`, and `group_metadata()` without
 `group.id` with `InvalidGroupIdException`'s message. Each getter documents its
 panic under `# Panics`. `current_lag` is already async and fallible, so on a
-closed consumer it returns `Err(IllegalStateError)` instead.
+closed consumer it returns `Err(IllegalStateError)` instead. `MockConsumer`
+follows Java's `MockConsumer`: its getters do not check for a closed consumer,
+and its `metrics()` panics when closed, where Java's `ensureNotClosed()`
+throws.
 
 `clientId()` is package-private on Java's `KafkaConsumer` and absent from the
 `Consumer` interface, so it is not on the Rust trait and has no C binding.
@@ -134,8 +144,9 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
             -> impl Future<Output = Result<Option<i64>, Error>> + Send;
 
         // Methods that do not block in Java stay sync. The ones Java guards
-        // with `acquireAndEnsureOpen()` take `&mut self` and panic on misuse
-        // (§1); the unguarded ones take `&self`.
+        // with `acquireAndEnsureOpen()` take `&mut self` and, on
+        // `KafkaConsumer`, panic on misuse (§1); the ones Java leaves
+        // unguarded, and the Rust-only `handle`, take `&self`.
         fn assignment(&mut self) -> HashSet<TopicPartition>;
         fn subscription(&mut self) -> HashSet<String>;
         fn paused(&mut self) -> HashSet<TopicPartition>;
