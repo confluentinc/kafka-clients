@@ -37,6 +37,7 @@ use confluent_kafka::admin::{
     AlterConfigOp, AlterConfigsOptions, ConfigEntry, DeleteTopicsOptions, DescribeClusterOptions,
     DescribeConfigsOptions, ListConfigResourcesOptions, OpType,
 };
+use confluent_kafka::common::Error;
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, config_resource};
 
@@ -50,6 +51,15 @@ use crate::multilanguage_admin_test;
 /// that `ClientQuotasRequestTest` passes to
 /// `TestUtils.retryOnExceptionWithTimeout`.
 const CONFIG_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// An explicit `timeoutMs` the option-driving scenarios set, so the request
+/// field crosses every backend with a non-default value.
+const EXPLICIT_TIMEOUT_MS: i32 = 30_000;
+
+/// How long a `validateOnly` alteration is re-checked for having changed
+/// nothing: the window a real alteration needs to become visible (the set path
+/// above settles well inside [`CONFIG_PROPAGATION_TIMEOUT`]).
+const VALIDATE_ONLY_NON_CHANGE_WINDOW: Duration = Duration::from_secs(3);
 
 /// Java's `ConfigEntry.ConfigSource` enum constants. The wire carries the
 /// constant *name* because that enum has no numeric id in Java, so an unknown
@@ -582,6 +592,204 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
     ctx.cleanup().await;
 }
 
+/// `describeCluster(includeFencedBrokers = true)` with an explicit timeout.
+///
+/// The second scenario for `describe_cluster`. `includeFencedBrokers` is
+/// KIP-1073's `DescribeCluster` v2 flag (`DescribeClusterOptions.includeFencedBrokers`,
+/// sent as `IncludeFencedBrokers`), which also switches the request to the
+/// broker-registration view the controller answers with fenced brokers
+/// included. On a healthy cluster no broker is fenced, so the option must leave
+/// the node set and the controller exactly as the default call reports them; a
+/// backend that dropped the flag passes this half, and the `is_fenced` half of
+/// the wire is asserted by the scenario that carries it.
+async fn describe_cluster_with_fenced_brokers_and_timeout<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let default_view = admin
+        .describe_cluster(DescribeClusterOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe cluster: {e}"));
+    let with_fenced = admin
+        .describe_cluster(
+            DescribeClusterOptions::new()
+                .set_include_fenced_brokers(true)
+                .set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe cluster with fenced brokers: {e}"));
+
+    let ids = |nodes: &[confluent_kafka::common::Node]| nodes.iter().map(|n| n.id()).collect::<HashSet<_>>();
+    assert!(
+        !with_fenced.nodes.is_empty(),
+        "{backend} backend: includeFencedBrokers must still report the live brokers"
+    );
+    assert_eq!(
+        ids(&with_fenced.nodes),
+        ids(&default_view.nodes),
+        "{backend} backend: a healthy cluster has no fenced broker, so includeFencedBrokers adds none"
+    );
+    for node in &with_fenced.nodes {
+        assert!(
+            !node.host().is_empty() && node.port() > 0,
+            "{backend} backend: node {} must carry a real host:port, got {}:{}",
+            node.id(),
+            node.host(),
+            node.port()
+        );
+    }
+    assert_eq!(
+        with_fenced.cluster_id, default_view.cluster_id,
+        "{backend} backend: both views describe the same cluster"
+    );
+    assert_eq!(
+        with_fenced.controller.as_ref().map(|n| n.id()),
+        default_view.controller.as_ref().map(|n| n.id()),
+        "{backend} backend: both views report the same controller"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// `incrementalAlterConfigs(validateOnly = true)` over three resources: one
+/// valid, one naming an unknown config, one naming a missing topic.
+///
+/// The second scenario for `incremental_alter_configs`, whose other callers all
+/// take the success arm without options. Java's `AlterConfigsResult` holds one
+/// future per resource, and the broker validates each resource independently
+/// (`ConfigurationControlManager.incrementalAlterConfigs`): an unknown topic
+/// config name is `INVALID_CONFIG` (`LogConfig.validateNames`), a missing topic is
+/// `UNKNOWN_TOPIC_OR_PARTITION`, and the valid resource succeeds beside them.
+/// `validateOnly` then must leave the valid resource's config untouched, which
+/// is re-checked across a propagation window rather than once, for the reason
+/// `create_topics_validate_only_does_not_create` gives.
+async fn incremental_alter_configs_validate_only_and_per_resource_errors<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let valid_topic = ctx.topic("admin_alter_validate");
+    let bad_name_topic = ctx.topic("admin_alter_bad_name");
+    let missing_topic = ctx.topic("admin_alter_missing");
+    create_topic(&admin, &valid_topic, 1, 1).await;
+    create_topic(&admin, &bad_name_topic, 1, 1).await;
+
+    let valid = ConfigResource::new(config_resource::Type::Topic, valid_topic.clone());
+    let bad_name = ConfigResource::new(config_resource::Type::Topic, bad_name_topic.clone());
+    let missing = ConfigResource::new(config_resource::Type::Topic, missing_topic.clone());
+    let original = retention_ms(&admin, &valid)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: {e}"));
+    let set = |name: &str, value: &str| {
+        vec![AlterConfigOp::new(
+            ConfigEntry::new(name.to_string(), Some(value.to_string())),
+            OpType::Set,
+        )]
+    };
+    let configs = HashMap::from([
+        (valid.clone(), set("retention.ms", "123456789")),
+        (bad_name.clone(), set("no.such.topic.config", "1")),
+        (missing.clone(), set("retention.ms", "123456789")),
+    ]);
+    let altered = admin
+        .incremental_alter_configs(
+            &configs,
+            AlterConfigsOptions::new()
+                .set_validate_only(true)
+                .set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: incremental alter configs: {e}"));
+    assert_eq!(
+        altered.len(),
+        3,
+        "{backend} backend: one entry per resource, got {:?}",
+        altered.keys().collect::<Vec<_>>()
+    );
+    altered[&valid]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: validating a valid change should succeed: {e}"));
+    let err = altered[&bad_name]
+        .as_ref()
+        .expect_err(&format!("{backend} backend: an unknown topic config name must fail"));
+    assert!(
+        matches!(err, Error::InvalidConfiguration(_)),
+        "{backend} backend: an unknown topic config is INVALID_CONFIG, got {err:?}"
+    );
+    let err = altered[&missing]
+        .as_ref()
+        .expect_err(&format!("{backend} backend: altering a missing topic must fail"));
+    assert!(
+        matches!(err, Error::UnknownTopicOrPartition(_)),
+        "{backend} backend: a missing topic is UNKNOWN_TOPIC_OR_PARTITION, got {err:?}"
+    );
+
+    let deadline = tokio::time::Instant::now() + VALIDATE_ONLY_NON_CHANGE_WINDOW;
+    while tokio::time::Instant::now() < deadline {
+        let value = retention_ms(&admin, &valid)
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: {e}"));
+        assert_eq!(
+            value, original,
+            "{backend} backend: validateOnly must not change {valid_topic}'s retention.ms"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    delete_and_close(&admin, &[valid_topic, bad_name_topic]).await;
+    ctx.cleanup().await;
+}
+
+/// `listConfigResources` restricted to `BROKER`, with an explicit timeout.
+///
+/// The second scenario for `list_config_resources`, which
+/// [`list_config_resources_lists_resources`] drives unfiltered and
+/// TOPIC-filtered. A BROKER-only listing must name every broker
+/// `describeCluster` reports — the request's type set is the only thing that
+/// selects them — and nothing of another type.
+async fn list_config_resources_broker_only_with_timeout<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let brokers: HashSet<String> = admin
+        .describe_cluster(DescribeClusterOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe cluster: {e}"))
+        .nodes
+        .iter()
+        .map(|n| n.id().to_string())
+        .collect();
+    let resources = admin
+        .list_config_resources(
+            &HashSet::from([config_resource::Type::Broker]),
+            ListConfigResourcesOptions::new().set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: list BROKER config resources: {e}"));
+    assert!(
+        resources.iter().all(|r| r.r#type() == config_resource::Type::Broker),
+        "{backend} backend: a BROKER-only listing must contain only BROKER resources, got {:?}",
+        resources.iter().map(|r| r.r#type()).collect::<HashSet<_>>()
+    );
+    let listed: HashSet<String> = resources.iter().map(|r| r.name().to_string()).collect();
+    assert!(
+        brokers.is_subset(&listed),
+        "{backend} backend: every broker {brokers:?} must be a listed BROKER resource, got {listed:?}"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_describe_cluster_returns_nodes_controller_and_id,
     describe_cluster_returns_nodes_controller_and_id
@@ -605,4 +813,16 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_list_config_resources_lists_resources,
     list_config_resources_lists_resources
+);
+multilanguage_admin_test!(
+    test_describe_cluster_with_fenced_brokers_and_timeout,
+    describe_cluster_with_fenced_brokers_and_timeout
+);
+multilanguage_admin_test!(
+    test_incremental_alter_configs_validate_only_and_per_resource_errors,
+    incremental_alter_configs_validate_only_and_per_resource_errors
+);
+multilanguage_admin_test!(
+    test_list_config_resources_broker_only_with_timeout,
+    list_config_resources_broker_only_with_timeout
 );
