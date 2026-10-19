@@ -1786,6 +1786,44 @@ def test_the_completion_untracks_its_future_without_a_done_callback(
         p.close(timeout=0)
 
 
+async def test_the_async_send_future_is_its_own_state_in_one_object(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # One object per record: the AsyncKafkaFuture send() returns is the
+    # record's own future state, its lock the producer's, and the completion
+    # the C send gets; a dependant built from it is an ordinary future.
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        captured["cb"] = cb
+        resolve(0)  # handed over, its completion held
+        return 0
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        future = await p.send(record=RECORD)
+        assert isinstance(future, AsyncRecordFuture) and isinstance(future, AsyncKafkaFuture)
+        assert captured["cb"] is future
+        assert future._impl is future and future._lock is p._fire_lock  # noqa: SLF001
+        # No self-reference and no __dict__: freed by its reference count.
+        assert future not in gc.get_referents(future) and not hasattr(future, "__dict__")
+        assert str(future) == "KafkaFuture{value=null,exception=null,done=false}"
+        assert not future.is_done() and future.get_now(value_if_absent=None) is None
+        dependant = future.then_apply(function=RecordMetadata.offset)
+        assert isinstance(dependant, AsyncKafkaFuture) and not isinstance(dependant, AsyncRecordFuture)
+        seen: list[tuple[Any, Any]] = []
+        future.when_complete(action=lambda md, exc: seen.append((md, exc)))
+        captured["cb"](_METADATA, 0, 0)
+        assert future.is_done() and future not in p._futures  # noqa: SLF001
+        metadata = await future.get()
+        assert metadata.offset() == _METADATA[2]
+        assert await dependant.get() == _METADATA[2]
+        assert seen == [(metadata, None)]
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
 async def test_an_async_send_future_cannot_be_cancelled_and_is_untracked_by_its_completion(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # Java's FutureRecordMetadata.cancel() returns false: the future stays
@@ -4071,6 +4109,85 @@ async def test_a_task_cancelled_at_the_fast_path_yield_has_sent_nothing(
         assert p._fast_path_sends == 0  # noqa: SLF001
         await p.send(record=RECORD)  # and the next send works
         assert order == ["send"] * (every + 1)
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+# Between those yields, send() runs the callback pump on entry only on every
+# 64th send in a row that the producer took at once (AsyncProducer._PUMP_EVERY)
+# and on the first send after a suspension; the sends in between only count. A
+# completion that arrives while the caller waits is the notify hook's, which
+# wakes the loop (the tests below), so it never waits for a later send.
+# ---------------------------------------------------------------------------
+
+def _counting_pump(monkeypatch: pytest.MonkeyPatch, order: list[str]) -> None:
+    """Record each run of the callback pump (the C drain) as "pump" in
+    ``order``; the drain still runs."""
+    real = _lib.Producer__execute_callbacks
+
+    def execute_callbacks(c_producer: int) -> Any:
+        order.append("pump")
+        return real(c_producer)
+
+    monkeypatch.setattr(_lib, "Producer__execute_callbacks", execute_callbacks)
+
+
+async def test_the_async_send_runs_the_pump_on_every_64th_send_taken_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(_lib, "Producer_send_cb", _taking_at_once(order))
+    _counting_pump(monkeypatch, order)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        every = AsyncKafkaProducer._PUMP_EVERY  # noqa: SLF001
+        assert every == 64
+        for _ in range(every):
+            await p.send(record=RECORD)
+        # The first send pumped on entry (the count at 0); the next 63 only
+        # counted.
+        assert order == ["pump", "send"] + ["send"] * (every - 1)
+        await p.send(record=RECORD)
+        # The 65th, the count at 64, pumped before touching its record.
+        assert order == ["pump", "send"] + ["send"] * (every - 1) + ["pump", "send"]
+        assert p._fast_path_sends == every + 1  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+async def test_the_first_async_send_after_a_queued_one_runs_the_pump(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    taken = _taking_at_once(order)
+    loop = asyncio.get_running_loop()
+
+    def queued(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        # The record waits for the submission task: send() suspends until the
+        # handover, which comes from the loop here.
+        order.append("queued")
+        loop.call_soon(resolve, 0)
+        loop.call_soon(cb, _METADATA, 0, 0)
+        return 0
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+    _counting_pump(monkeypatch, order)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        for _ in range(10):
+            await p.send(record=RECORD)
+        assert order == ["pump", "send"] + ["send"] * 9
+        monkeypatch.setattr(_lib, "Producer_send_cb", queued)
+        await p.send(record=RECORD)
+        # The count was 10, so this send did not pump; it suspended, and the
+        # count restarted.
+        assert order == ["pump", "send"] + ["send"] * 9 + ["queued"]
+        assert p._fast_path_sends == 0  # noqa: SLF001
+        monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+        await p.send(record=RECORD)
+        # The first send after the suspension pumped on entry.
+        assert order[-2:] == ["pump", "send"]
+        assert p._fast_path_sends == 1  # noqa: SLF001
     finally:
         monkeypatch.undo()
         await p.close(timeout=0)

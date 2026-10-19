@@ -850,8 +850,8 @@ async def async_main():
                                 exc, start_time)
 
     def record_completion_async(result, exc, start_time):
-        # Runs on the event loop when the delivery completes (v3: the
-        # AsyncKafkaFuture's when_complete action, which runs where the record
+        # Runs on the event loop when the delivery completes (v3: the send()
+        # callback, which runs on the loop before the record's future
         # completes), stamping latency at completion so a backed-up reader can't
         # inflate it. Single-threaded (the loop), so no lock is needed. Matches
         # the sync path and the native rust/C apps.
@@ -946,13 +946,17 @@ async def async_main():
                     start_time = int(time.time() * 1000)
                     # Record latency in the delivery callback (stamped at the
                     # ack on the event loop), not in a recorder task.
-                    fut = await producer.send(record=next_message)
                     if v2:
+                        fut = await producer.send(record=next_message)
                         fut.add_done_callback(
                             lambda f, st=start_time: record_delivery_async(f, st))
                     else:
-                        fut.when_complete(
-                            action=lambda md, exc, st=start_time: record_completion_async(
+                        # The send() callback (Java's Callback), as the sync cell
+                        # passes it: it runs on the event loop before the record's
+                        # future completes, and the future itself is not kept.
+                        await producer.send(
+                            record=next_message,
+                            callback=lambda md, exc, st=start_time: record_completion_async(
                                 md, exc, st))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
