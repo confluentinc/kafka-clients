@@ -306,7 +306,12 @@ class AsyncAdmin(_AdminState):
 
         return AsyncKafkaAdminClient._create_internal(configs=configs)
 
-    async def close(self, *, timeout: Duration | None = MISSING) -> None:
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, timeout: Duration) -> None: ...
+
+    async def close(self, *, timeout: Duration = MISSING) -> None:
         """See :meth:`Admin.close`. Cancelling the awaiting task raises
         ``CancelledError`` at once; the close goes on in the core and the handle is
         freed when it ends."""
@@ -348,8 +353,14 @@ class AsyncAdmin(_AdminState):
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
+    @overload
+    def create_topics(self, *, new_topics: Iterable[NewTopic]) -> CreateTopicsResult[Async]: ...
+    @overload
     def create_topics(self, *, new_topics: Iterable[NewTopic],
-                      options: CreateTopicsOptions | None = MISSING) -> CreateTopicsResult[Async]:
+                      options: CreateTopicsOptions) -> CreateTopicsResult[Async]: ...
+
+    def create_topics(self, *, new_topics: Iterable[NewTopic],
+                      options: CreateTopicsOptions = MISSING) -> CreateTopicsResult[Async]:
         """See :meth:`Admin.create_topics`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
@@ -361,16 +372,18 @@ class AsyncAdmin(_AdminState):
         return _conversions.create_topics_result(native, Async, self._binding.loop)
 
     @overload
+    def delete_topics(self, *, topics: Iterable[str]) -> DeleteTopicsResult[Async]: ...
+    @overload
     def delete_topics(self, *, topics: Iterable[str],
-                            options: DeleteTopicsOptions | None = None
-                            ) -> DeleteTopicsResult[Async]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Async]: ...
+    @overload
+    def delete_topics(self, *, topics: TopicCollection) -> DeleteTopicsResult[Async]: ...
     @overload
     def delete_topics(self, *, topics: TopicCollection,
-                            options: DeleteTopicsOptions | None = None
-                            ) -> DeleteTopicsResult[Async]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Async]: ...
 
     def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
-                            options: DeleteTopicsOptions | None = MISSING
+                            options: DeleteTopicsOptions = MISSING
                             ) -> DeleteTopicsResult[Async]:
         """See :meth:`Admin.delete_topics`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -385,7 +398,12 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_topics_result(native, by_ids, Async, self._binding.loop)
 
-    def list_topics(self, *, options: ListTopicsOptions | None = MISSING
+    @overload
+    def list_topics(self) -> ListTopicsResult[Async]: ...
+    @overload
+    def list_topics(self, *, options: ListTopicsOptions) -> ListTopicsResult[Async]: ...
+
+    def list_topics(self, *, options: ListTopicsOptions = MISSING
                     ) -> ListTopicsResult[Async]:
         """See :meth:`Admin.list_topics`."""
         self._check_not_closed()
@@ -394,19 +412,21 @@ class AsyncAdmin(_AdminState):
         return _conversions.list_topics_result(native, Async, self._binding.loop)
 
     @overload
+    def describe_topics(self, *, topic_names: Iterable[str]) -> DescribeTopicsResult[Async]: ...
+    @overload
     def describe_topics(self, *, topic_names: Iterable[str],
-                              options: DescribeTopicsOptions | None = None
-                              ) -> DescribeTopicsResult[Async]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Async]: ...
+    @overload
+    def describe_topics(self, *, topics: TopicCollection) -> DescribeTopicsResult[Async]: ...
     @overload
     def describe_topics(self, *, topics: TopicCollection,
-                              options: DescribeTopicsOptions | None = None
-                              ) -> DescribeTopicsResult[Async]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Async]: ...
 
     @java_forms(Form("topic_names"), Form("topic_names", "options"),
                 Form("topics"), Form("topics", "options"))
-    def describe_topics(self, *, topic_names: Iterable[str] | None = MISSING,
-                              topics: TopicCollection | None = MISSING,
-                              options: DescribeTopicsOptions | None = MISSING
+    def describe_topics(self, *, topic_names: Iterable[str] = MISSING,
+                              topics: TopicCollection = MISSING,
+                              options: DescribeTopicsOptions = MISSING
                               ) -> DescribeTopicsResult[Async]:
         """See :meth:`Admin.describe_topics`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -429,7 +449,13 @@ class AsyncAdmin(_AdminState):
         return _conversions.describe_topics_result(
             native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Async, self._binding.loop)
 
-    def describe_cluster(self, *, options: DescribeClusterOptions | None = MISSING
+    @overload
+    def describe_cluster(self) -> DescribeClusterResult[Async]: ...
+    @overload
+    def describe_cluster(self, *,
+                         options: DescribeClusterOptions) -> DescribeClusterResult[Async]: ...
+
+    def describe_cluster(self, *, options: DescribeClusterOptions = MISSING
                                ) -> DescribeClusterResult[Async]:
         """See :meth:`Admin.describe_cluster`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -438,8 +464,14 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
         return _conversions.describe_cluster_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter) -> DescribeAclsResult[Async]: ...
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter,
+                      options: DescribeAclsOptions) -> DescribeAclsResult[Async]: ...
+
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                      options: DescribeAclsOptions | None = MISSING) -> DescribeAclsResult[Async]:
+                      options: DescribeAclsOptions = MISSING) -> DescribeAclsResult[Async]:
         """See :meth:`Admin.describe_acls`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
@@ -449,8 +481,14 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_acls_result(native, Async, self._binding.loop)
 
+    @overload
+    def create_acls(self, *, acls: Iterable[AclBinding]) -> CreateAclsResult[Async]: ...
+    @overload
     def create_acls(self, *, acls: Iterable[AclBinding],
-                    options: CreateAclsOptions | None = MISSING) -> CreateAclsResult[Async]:
+                    options: CreateAclsOptions) -> CreateAclsResult[Async]: ...
+
+    def create_acls(self, *, acls: Iterable[AclBinding],
+                    options: CreateAclsOptions = MISSING) -> CreateAclsResult[Async]:
         """See :meth:`Admin.create_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
@@ -460,8 +498,14 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.create_acls_result(native, Async, self._binding.loop)
 
+    @overload
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter]) -> DeleteAclsResult[Async]: ...
+    @overload
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                    options: DeleteAclsOptions | None = MISSING) -> DeleteAclsResult[Async]:
+                    options: DeleteAclsOptions) -> DeleteAclsResult[Async]: ...
+
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter],
+                    options: DeleteAclsOptions = MISSING) -> DeleteAclsResult[Async]:
         """See :meth:`Admin.delete_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
@@ -471,8 +515,15 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_acls_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_configs(self, *,
+                         resources: Iterable[ConfigResource]) -> DescribeConfigsResult[Async]: ...
+    @overload
     def describe_configs(self, *, resources: Iterable[ConfigResource],
-                               options: DescribeConfigsOptions | None = MISSING
+                         options: DescribeConfigsOptions) -> DescribeConfigsResult[Async]: ...
+
+    def describe_configs(self, *, resources: Iterable[ConfigResource],
+                               options: DescribeConfigsOptions = MISSING
                                ) -> DescribeConfigsResult[Async]:
         """See :meth:`Admin.describe_configs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -484,9 +535,19 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_configs_result(native, Async, self._binding.loop)
 
+    @overload
+    def incremental_alter_configs(
+        self, *,
+        configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+    ) -> AlterConfigsResult[Async]: ...
+    @overload
+    def incremental_alter_configs(self, *,
+                                  configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+                                  options: AlterConfigsOptions) -> AlterConfigsResult[Async]: ...
+
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-            options: AlterConfigsOptions | None = MISSING) -> AlterConfigsResult[Async]:
+            options: AlterConfigsOptions = MISSING) -> AlterConfigsResult[Async]:
         """See :meth:`Admin.incremental_alter_configs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
@@ -497,9 +558,21 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.incremental_alter_configs_result(native, Async, self._binding.loop)
 
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+    ) -> AlterReplicaLogDirsResult[Async]: ...
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+        options: AlterReplicaLogDirsOptions,
+    ) -> AlterReplicaLogDirsResult[Async]: ...
+
     def alter_replica_log_dirs(
             self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
-            options: AlterReplicaLogDirsOptions | None = MISSING
+            options: AlterReplicaLogDirsOptions = MISSING
             ) -> AlterReplicaLogDirsResult[Async]:
         """See :meth:`Admin.alter_replica_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -511,8 +584,14 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_replica_log_dirs_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_log_dirs(self, *, brokers: Iterable[int]) -> DescribeLogDirsResult[Async]: ...
+    @overload
     def describe_log_dirs(self, *, brokers: Iterable[int],
-                                options: DescribeLogDirsOptions | None = MISSING
+                          options: DescribeLogDirsOptions) -> DescribeLogDirsResult[Async]: ...
+
+    def describe_log_dirs(self, *, brokers: Iterable[int],
+                                options: DescribeLogDirsOptions = MISSING
                                 ) -> DescribeLogDirsResult[Async]:
         """See :meth:`Admin.describe_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -524,9 +603,21 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_log_dirs_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+    ) -> DescribeReplicaLogDirsResult[Async]: ...
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> DescribeReplicaLogDirsResult[Async]: ...
+
     def describe_replica_log_dirs(
             self, *, replicas: Iterable[TopicPartitionReplica],
-            options: DescribeReplicaLogDirsOptions | None = MISSING
+            options: DescribeReplicaLogDirsOptions = MISSING
             ) -> DescribeReplicaLogDirsResult[Async]:
         """See :meth:`Admin.describe_replica_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -538,8 +629,17 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_replica_log_dirs_result(native, Async, self._binding.loop)
 
+    @overload
+    def create_partitions(
+        self, *,
+        new_partitions: Mapping[str, NewPartitions],
+    ) -> CreatePartitionsResult[Async]: ...
+    @overload
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
-                                options: CreatePartitionsOptions | None = MISSING
+                          options: CreatePartitionsOptions) -> CreatePartitionsResult[Async]: ...
+
+    def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
+                                options: CreatePartitionsOptions = MISSING
                                 ) -> CreatePartitionsResult[Async]:
         """See :meth:`Admin.create_partitions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -551,8 +651,17 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.create_partitions_result(native, Async, self._binding.loop)
 
+    @overload
+    def delete_records(
+        self, *,
+        records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+    ) -> DeleteRecordsResult[Async]: ...
+    @overload
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                             options: DeleteRecordsOptions | None = MISSING
+                       options: DeleteRecordsOptions) -> DeleteRecordsResult[Async]: ...
+
+    def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+                             options: DeleteRecordsOptions = MISSING
                              ) -> DeleteRecordsResult[Async]:
         """See :meth:`Admin.delete_records`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -564,7 +673,15 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_records_result(native, Async, self._binding.loop)
 
-    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = MISSING
+    @overload
+    def create_delegation_token(self) -> CreateDelegationTokenResult[Async]: ...
+    @overload
+    def create_delegation_token(
+        self, *,
+        options: CreateDelegationTokenOptions,
+    ) -> CreateDelegationTokenResult[Async]: ...
+
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions = MISSING
                                 ) -> CreateDelegationTokenResult[Async]:
         """See :meth:`Admin.create_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -574,8 +691,17 @@ class AsyncAdmin(_AdminState):
                             _conversions.create_delegation_token_options(options))
         return _conversions.create_delegation_token_result(native, Async, self._binding.loop)
 
+    @overload
+    def renew_delegation_token(self, *, hmac: bytes) -> RenewDelegationTokenResult[Async]: ...
+    @overload
+    def renew_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult[Async]: ...
+
     def renew_delegation_token(self, *, hmac: bytes,
-                               options: RenewDelegationTokenOptions | None = MISSING
+                               options: RenewDelegationTokenOptions = MISSING
                                ) -> RenewDelegationTokenResult[Async]:
         """See :meth:`Admin.renew_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -585,8 +711,17 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
         return _conversions.renew_delegation_token_result(native, Async, self._binding.loop)
 
+    @overload
+    def expire_delegation_token(self, *, hmac: bytes) -> ExpireDelegationTokenResult[Async]: ...
+    @overload
+    def expire_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult[Async]: ...
+
     def expire_delegation_token(self, *, hmac: bytes,
-                                options: ExpireDelegationTokenOptions | None = MISSING
+                                options: ExpireDelegationTokenOptions = MISSING
                                 ) -> ExpireDelegationTokenResult[Async]:
         """See :meth:`Admin.expire_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -596,8 +731,16 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
         return _conversions.expire_delegation_token_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_delegation_token(self) -> DescribeDelegationTokenResult[Async]: ...
+    @overload
+    def describe_delegation_token(
+        self, *,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult[Async]: ...
+
     def describe_delegation_token(self, *,
-                                  options: DescribeDelegationTokenOptions | None = MISSING
+                                  options: DescribeDelegationTokenOptions = MISSING
                                   ) -> DescribeDelegationTokenResult[Async]:
         """See :meth:`Admin.describe_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -607,8 +750,20 @@ class AsyncAdmin(_AdminState):
                             _conversions.describe_delegation_token_options(options))
         return _conversions.describe_delegation_token_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult[Async]: ...
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+    ) -> DescribeConsumerGroupsResult[Async]: ...
+
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                 options: DescribeConsumerGroupsOptions | None = MISSING
+                                 options: DescribeConsumerGroupsOptions = MISSING
                                  ) -> DescribeConsumerGroupsResult[Async]:
         """See :meth:`Admin.describe_consumer_groups`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -622,20 +777,31 @@ class AsyncAdmin(_AdminState):
 
     @overload
     def list_consumer_group_offsets(
-        self, *, group_id: str, options: ListConsumerGroupOffsetsOptions | None = None
+        self, *,
+        group_id: str,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult[Async]: ...
+    @overload
+    def list_consumer_group_offsets(self, *,
+                                    group_id: str) -> ListConsumerGroupOffsetsResult[Async]: ...
+    @overload
+    def list_consumer_group_offsets(
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
+        options: ListConsumerGroupOffsetsOptions,
     ) -> ListConsumerGroupOffsetsResult[Async]: ...
     @overload
     def list_consumer_group_offsets(
-        self, *, group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
     ) -> ListConsumerGroupOffsetsResult[Async]: ...
 
     @java_forms(Form("group_id", "options"), Form("group_id"),
                 Form("group_specs", "options"), Form("group_specs"))
     def list_consumer_group_offsets(
-        self, *, group_id: str | None = MISSING,
-        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = MISSING,
-        options: ListConsumerGroupOffsetsOptions | None = MISSING
+        self, *, group_id: str = MISSING,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] = MISSING,
+        options: ListConsumerGroupOffsetsOptions = MISSING
     ) -> ListConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.list_consumer_group_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -656,8 +822,18 @@ class AsyncAdmin(_AdminState):
         return _conversions.list_consumer_group_offsets_result(group_specs, native, Async,
                                                                self._binding.loop)
 
+    @overload
+    def delete_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult[Async]: ...
+    @overload
+    def delete_consumer_groups(self, *,
+                               group_ids: Iterable[str]) -> DeleteConsumerGroupsResult[Async]: ...
+
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                               options: DeleteConsumerGroupsOptions | None = MISSING
+                               options: DeleteConsumerGroupsOptions = MISSING
                                ) -> DeleteConsumerGroupsResult[Async]:
         """See :meth:`Admin.delete_consumer_groups`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -669,12 +845,26 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_consumer_groups_result(native, Async, self._binding.loop)
 
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult[Async]: ...
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+    ) -> DeleteConsumerGroupOffsetsResult[Async]: ...
+
     def delete_consumer_group_offsets(
         self, *, group_id: str, partitions: Iterable[TopicPartition],
-        options: DeleteConsumerGroupOffsetsOptions | None = MISSING
+        options: DeleteConsumerGroupOffsetsOptions = MISSING
     ) -> DeleteConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.delete_consumer_group_offsets`; the result's futures are
-        ``AsyncKafkaFuture``\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
         options = _conversions.options_or_new(options, DeleteConsumerGroupOffsetsOptions)
         _conversions.non_null(group_id, "group_id")
@@ -686,7 +876,12 @@ class AsyncAdmin(_AdminState):
         return _conversions.delete_consumer_group_offsets_result(tps, native, Async,
                                                                  self._binding.loop)
 
-    def list_groups(self, *, options: ListGroupsOptions | None = MISSING
+    @overload
+    def list_groups(self) -> ListGroupsResult[Async]: ...
+    @overload
+    def list_groups(self, *, options: ListGroupsOptions) -> ListGroupsResult[Async]: ...
+
+    def list_groups(self, *, options: ListGroupsOptions = MISSING
                     ) -> ListGroupsResult[Async]:
         """See :meth:`Admin.list_groups`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -695,9 +890,20 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
         return _conversions.list_groups_result(native, Async, self._binding.loop)
 
+    @overload
+    def elect_leaders(
+        self, *,
+        election_type: ElectionType,
+        partitions: Iterable[TopicPartition] | None,
+    ) -> ElectLeadersResult[Async]: ...
+    @overload
+    def elect_leaders(self, *, election_type: ElectionType,
+                      partitions: Iterable[TopicPartition] | None,
+                      options: ElectLeadersOptions) -> ElectLeadersResult[Async]: ...
+
     def elect_leaders(self, *, election_type: ElectionType,
                             partitions: Iterable[TopicPartition] | None,
-                            options: ElectLeadersOptions | None = MISSING
+                            options: ElectLeadersOptions = MISSING
                             ) -> ElectLeadersResult[Async]:
         """See :meth:`Admin.elect_leaders`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -709,9 +915,21 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.elect_leaders_result(native, Async, self._binding.loop)
 
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+    ) -> AlterPartitionReassignmentsResult[Async]: ...
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+        options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult[Async]: ...
+
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-            options: AlterPartitionReassignmentsOptions | None = MISSING
+            options: AlterPartitionReassignmentsOptions = MISSING
             ) -> AlterPartitionReassignmentsResult[Async]:
         """See :meth:`Admin.alter_partition_reassignments`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -723,20 +941,39 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_partition_reassignments_result(native, Async, self._binding.loop)
 
+    @overload
+    def list_partition_reassignments(self) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
-            options: ListPartitionReassignmentsOptions | None = MISSING
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition],
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Async]: ...
+
+    def list_partition_reassignments(
+            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`Admin.list_partition_reassignments`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        if partitions is MISSING:
-            partitions = None  # Java's listPartitionReassignments(options): Optional.empty()
-        else:
+        targets: Iterable[TopicPartition] | None = None
+        if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
             _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
+            targets = partitions
         options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions)
         native = self._call(_lib.Admin_list_partition_reassignments,
-                            *_conversions.list_partition_reassignments_args(partitions),
+                            *_conversions.list_partition_reassignments_args(targets),
                             options._setters_ran())
         return _conversions.list_partition_reassignments_result(native, Async, self._binding.loop)
 
@@ -755,12 +992,26 @@ class AsyncAdmin(_AdminState):
         return _conversions.remove_members_from_consumer_group_result(options, native, Async,
                                                                       self._binding.loop)
 
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+    ) -> AlterConsumerGroupOffsetsResult[Async]: ...
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult[Async]: ...
+
     def alter_consumer_group_offsets(
         self, *, group_id: str, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-        options: AlterConsumerGroupOffsetsOptions | None = MISSING
+        options: AlterConsumerGroupOffsetsOptions = MISSING
     ) -> AlterConsumerGroupOffsetsResult[Async]:
         """See :meth:`Admin.alter_consumer_group_offsets`; the result's futures are
-        ``AsyncKafkaFuture``\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
         options = _conversions.options_or_new(options, AlterConsumerGroupOffsetsOptions)
         _conversions.non_null(group_id, "group_id")
@@ -771,8 +1022,17 @@ class AsyncAdmin(_AdminState):
         return _conversions.alter_consumer_group_offsets_result(native, Async,
                                                                 self._binding.loop)
 
+    @overload
+    def list_offsets(
+        self, *,
+        topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+    ) -> ListOffsetsResult[Async]: ...
+    @overload
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                           options: ListOffsetsOptions | None = MISSING) -> ListOffsetsResult[Async]:
+                     options: ListOffsetsOptions) -> ListOffsetsResult[Async]: ...
+
+    def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+                           options: ListOffsetsOptions = MISSING) -> ListOffsetsResult[Async]:
         """See :meth:`Admin.list_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
@@ -784,8 +1044,18 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.list_offsets_result(native, partitions, Async, self._binding.loop)
 
+    @overload
+    def describe_client_quotas(self, *,
+                               filter: ClientQuotaFilter) -> DescribeClientQuotasResult[Async]: ...
+    @overload
+    def describe_client_quotas(
+        self, *,
+        filter: ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult[Async]: ...
+
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                               options: DescribeClientQuotasOptions | None = MISSING
+                               options: DescribeClientQuotasOptions = MISSING
                                ) -> DescribeClientQuotasResult[Async]:
         """See :meth:`Admin.describe_client_quotas`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -797,8 +1067,20 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_client_quotas_result(native, Async, self._binding.loop)
 
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+    ) -> AlterClientQuotasResult[Async]: ...
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult[Async]: ...
+
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                            options: AlterClientQuotasOptions | None = MISSING
+                            options: AlterClientQuotasOptions = MISSING
                             ) -> AlterClientQuotasResult[Async]:
         """See :meth:`Admin.alter_client_quotas`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -811,18 +1093,23 @@ class AsyncAdmin(_AdminState):
         return _conversions.alter_client_quotas_result(native, Async, self._binding.loop)
 
     @overload
-    def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
-                                        ) -> DescribeUserScramCredentialsResult[Async]: ...
+    def describe_user_scram_credentials(self) -> DescribeUserScramCredentialsResult[Async]: ...
     @overload
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None,
-            options: DescribeUserScramCredentialsOptions
+        self, *,
+        users: Sequence[str] | None,
+    ) -> DescribeUserScramCredentialsResult[Async]: ...
+    @overload
+    def describe_user_scram_credentials(
+        self, *,
+        users: Sequence[str] | None,
+        options: DescribeUserScramCredentialsOptions,
     ) -> DescribeUserScramCredentialsResult[Async]: ...
 
     @java_forms(Form(), Form("users"), Form("users", "options"))
     def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None = MISSING,
-            options: DescribeUserScramCredentialsOptions | None = MISSING
+            options: DescribeUserScramCredentialsOptions = MISSING
     ) -> DescribeUserScramCredentialsResult[Async]:
         """See :meth:`Admin.describe_user_scram_credentials`; the result's futures
         are ``AsyncKafkaFuture``\\ s."""
@@ -838,9 +1125,21 @@ class AsyncAdmin(_AdminState):
         return _conversions.describe_user_scram_credentials_result(
             native, Async, self._binding.loop)
 
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+    ) -> AlterUserScramCredentialsResult[Async]: ...
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult[Async]: ...
+
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
-            options: AlterUserScramCredentialsOptions | None = MISSING
+            options: AlterUserScramCredentialsOptions = MISSING
     ) -> AlterUserScramCredentialsResult[Async]:
         """See :meth:`Admin.alter_user_scram_credentials`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -852,7 +1151,13 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_user_scram_credentials_result(native, Async, self._binding.loop)
 
-    def describe_features(self, *, options: DescribeFeaturesOptions | None = MISSING
+    @overload
+    def describe_features(self) -> DescribeFeaturesResult[Async]: ...
+    @overload
+    def describe_features(self, *,
+                          options: DescribeFeaturesOptions) -> DescribeFeaturesResult[Async]: ...
+
+    def describe_features(self, *, options: DescribeFeaturesOptions = MISSING
                           ) -> DescribeFeaturesResult[Async]:
         """See :meth:`Admin.describe_features`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -861,8 +1166,17 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_describe_features, options._setters_ran())
         return _conversions.describe_features_result(native, Async, self._binding.loop)
 
+    @overload
+    def update_features(
+        self, *,
+        feature_updates: Mapping[str, FeatureUpdate],
+    ) -> UpdateFeaturesResult[Async]: ...
+    @overload
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                        options: UpdateFeaturesOptions | None = MISSING
+                        options: UpdateFeaturesOptions) -> UpdateFeaturesResult[Async]: ...
+
+    def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
+                        options: UpdateFeaturesOptions = MISSING
                         ) -> UpdateFeaturesResult[Async]:
         """See :meth:`Admin.update_features`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -874,8 +1188,18 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.update_features_result(native, Async, self._binding.loop)
 
+    @overload
+    def unregister_controller(self, *,
+                              controller_id: int) -> UnregisterControllerResult[Async]: ...
+    @overload
+    def unregister_controller(
+        self, *,
+        controller_id: int,
+        options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult[Async]: ...
+
     def unregister_controller(self, *, controller_id: int,
-                              options: UnregisterControllerOptions | None = MISSING
+                              options: UnregisterControllerOptions = MISSING
                               ) -> UnregisterControllerResult[Async]:
         """See :meth:`Admin.unregister_controller`."""
         self._check_not_closed()
@@ -885,8 +1209,20 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.unregister_controller_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_producers(
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> DescribeProducersResult[Async]: ...
+    @overload
+    def describe_producers(
+        self, *,
+        partitions: Iterable[TopicPartition],
+        options: DescribeProducersOptions,
+    ) -> DescribeProducersResult[Async]: ...
+
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                           options: DescribeProducersOptions | None = MISSING
+                           options: DescribeProducersOptions = MISSING
                            ) -> DescribeProducersResult[Async]:
         """See :meth:`Admin.describe_producers`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -898,8 +1234,20 @@ class AsyncAdmin(_AdminState):
                             *_conversions.describe_producers_args(targets), options._setters_ran())
         return _conversions.describe_producers_result(native, Async, self._binding.loop, targets)
 
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+    ) -> DescribeTransactionsResult[Async]: ...
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+        options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult[Async]: ...
+
     def describe_transactions(self, *, transactional_ids: Iterable[str],
-                              options: DescribeTransactionsOptions | None = MISSING
+                              options: DescribeTransactionsOptions = MISSING
                               ) -> DescribeTransactionsResult[Async]:
         """See :meth:`Admin.describe_transactions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -912,8 +1260,15 @@ class AsyncAdmin(_AdminState):
                             *_conversions.describe_transactions_args(ids), options._setters_ran())
         return _conversions.describe_transactions_result(native, Async, self._binding.loop, ids)
 
+    @overload
+    def abort_transaction(self, *,
+                          spec: AbortTransactionSpec) -> AbortTransactionResult[Async]: ...
+    @overload
     def abort_transaction(self, *, spec: AbortTransactionSpec,
-                          options: AbortTransactionOptions | None = MISSING
+                          options: AbortTransactionOptions) -> AbortTransactionResult[Async]: ...
+
+    def abort_transaction(self, *, spec: AbortTransactionSpec,
+                          options: AbortTransactionOptions = MISSING
                           ) -> AbortTransactionResult[Async]:
         """See :meth:`Admin.abort_transaction`; the result's future is an
         ``AsyncKafkaFuture``."""
@@ -924,7 +1279,13 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.abort_transaction_result(native, Async, self._binding.loop, spec)
 
-    def list_transactions(self, *, options: ListTransactionsOptions | None = MISSING
+    @overload
+    def list_transactions(self) -> ListTransactionsResult[Async]: ...
+    @overload
+    def list_transactions(self, *,
+                          options: ListTransactionsOptions) -> ListTransactionsResult[Async]: ...
+
+    def list_transactions(self, *, options: ListTransactionsOptions = MISSING
                           ) -> ListTransactionsResult[Async]:
         """See :meth:`Admin.list_transactions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -934,8 +1295,15 @@ class AsyncAdmin(_AdminState):
                             _conversions.list_transactions_options(options))
         return _conversions.list_transactions_result(native, Async, self._binding.loop)
 
+    @overload
+    def fence_producers(self, *,
+                        transactional_ids: Iterable[str]) -> FenceProducersResult[Async]: ...
+    @overload
     def fence_producers(self, *, transactional_ids: Iterable[str],
-                        options: FenceProducersOptions | None = MISSING
+                        options: FenceProducersOptions) -> FenceProducersResult[Async]: ...
+
+    def fence_producers(self, *, transactional_ids: Iterable[str],
+                        options: FenceProducersOptions = MISSING
                         ) -> FenceProducersResult[Async]:
         """See :meth:`Admin.fence_producers`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -949,9 +1317,11 @@ class AsyncAdmin(_AdminState):
         return _conversions.fence_producers_result(native, Async, self._binding.loop, ids)
 
     @overload
-    def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
-                                    options: ListConfigResourcesOptions
-                                    ) -> ListConfigResourcesResult[Async]: ...
+    def list_config_resources(
+        self, *,
+        config_resource_types: Iterable[ConfigResource.Type],
+        options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult[Async]: ...
     @overload
     def list_config_resources(self) -> ListConfigResourcesResult[Async]: ...
 
@@ -960,7 +1330,7 @@ class AsyncAdmin(_AdminState):
                 Form())
     def list_config_resources(
             self, *, config_resource_types: Iterable[ConfigResource.Type] = MISSING,
-            options: ListConfigResourcesOptions | None = MISSING
+            options: ListConfigResourcesOptions = MISSING
             ) -> ListConfigResourcesResult[Async]:
         """See :meth:`Admin.list_config_resources`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -972,8 +1342,20 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.list_config_resources_result(native, Async, self._binding.loop)
 
+    @overload
+    def describe_classic_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult[Async]: ...
+    @overload
+    def describe_classic_groups(
+        self, *,
+        group_ids: Iterable[str],
+    ) -> DescribeClassicGroupsResult[Async]: ...
+
     def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                options: DescribeClassicGroupsOptions | None = MISSING
+                                options: DescribeClassicGroupsOptions = MISSING
                                 ) -> DescribeClassicGroupsResult[Async]:
         """See :meth:`Admin.describe_classic_groups`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
@@ -985,8 +1367,20 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_classic_groups_result(native, Async, self._binding.loop)
 
+    @overload
+    def force_terminate_transaction(
+        self, *,
+        transactional_id: str,
+    ) -> TerminateTransactionResult[Async]: ...
+    @overload
+    def force_terminate_transaction(
+        self, *,
+        transactional_id: str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult[Async]: ...
+
     def force_terminate_transaction(self, *, transactional_id: str,
-                                    options: TerminateTransactionOptions | None = MISSING
+                                    options: TerminateTransactionOptions = MISSING
                                     ) -> TerminateTransactionResult[Async]:
         """See :meth:`Admin.force_terminate_transaction`; the result's future is an
         ``AsyncKafkaFuture``."""

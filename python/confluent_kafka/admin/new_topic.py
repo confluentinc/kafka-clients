@@ -57,6 +57,8 @@ class NewTopic:
                  "_configs")
 
     @overload
+    def __init__(self, *, name: str, num_partitions: int, replication_factor: int) -> None: ...
+    @overload
     def __init__(self, *, name: str, num_partitions: int | None,
                  replication_factor: int | None) -> None: ...
     @overload

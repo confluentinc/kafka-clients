@@ -741,9 +741,10 @@ def test_groups() -> None:
     assert str(cg) == ("(groupId=g, protocol='', protocolData=, members=, state="
                        + str(ClassicGroupState.EMPTY)
                        + ", coordinator=None, authorizedOperations=[])")
+    # An explicit None is Java's null ("not known"), stored as given.
     assert ClassicGroupDescription(
         group_id="g", protocol="", protocol_data="", members=[], state=ClassicGroupState.EMPTY,
-        coordinator=None, authorized_operations=None).authorized_operations() == set()
+        coordinator=None, authorized_operations=None).authorized_operations() is None
     unknown = ClassicGroupDescription._new(
         group_id=None, protocol="", protocol_data=None, members=None,
         state=ClassicGroupState.EMPTY, coordinator=None, authorized_operations=None)

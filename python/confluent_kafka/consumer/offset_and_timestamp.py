@@ -23,6 +23,8 @@ constructor fills it; a ``None`` is ``Optional.empty()``.
 
 from __future__ import annotations
 
+from typing import overload
+
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -38,6 +40,10 @@ class OffsetAndTimestamp:
 
     __slots__ = ("_timestamp", "_offset", "_leader_epoch")
 
+    @overload
+    def __init__(self, *, offset: int, timestamp: int) -> None: ...
+    @overload
+    def __init__(self, *, offset: int, timestamp: int, leader_epoch: int | None) -> None: ...
     def __init__(self, *, offset: int, timestamp: int,
                  leader_epoch: int | None = MISSING) -> None:
         if leader_epoch is MISSING:

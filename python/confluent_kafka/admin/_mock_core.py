@@ -57,7 +57,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
 
 from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka.admin._conversions import element, non_null
@@ -584,6 +584,13 @@ class MockAdminClientCore:
                 raise IllegalArgumentError(
                     message="The controller node must be in the list of brokers")
             self._controller = controller
+
+    @overload
+    def add_topic(self, *, internal: bool, name: str, partitions: Sequence[TopicPartitionInfo],
+                  configs: Mapping[str, str]) -> None: ...
+    @overload
+    def add_topic(self, *, internal: bool, name: str, partitions: Sequence[TopicPartitionInfo],
+                  configs: Mapping[str, str], uses_topic_id: bool) -> None: ...
 
     def add_topic(self, *, internal: bool, name: str, partitions: Sequence[TopicPartitionInfo],
                   configs: Mapping[str, str], uses_topic_id: bool = MISSING) -> None:

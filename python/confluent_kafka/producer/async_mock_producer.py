@@ -216,6 +216,11 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
         self._abort_transaction()
         await self._await_callbacks()
 
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+                   ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
                    callback: _AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
@@ -242,6 +247,10 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     def metrics(self) -> dict[MetricName, Metric]:
         return self._metrics()
 
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, timeout: Duration) -> None: ...
     async def close(self, *, timeout: Duration = MISSING) -> None:
         """Java's mock never reads the timeout, a negative or a ``None`` one
         included."""

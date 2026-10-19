@@ -159,6 +159,11 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def abort_transaction(self) -> None:
         self._abort_transaction()
 
+    @overload
+    def send(self, *, record: ProducerRecord[K, V]) -> KafkaFuture[RecordMetadata]: ...
+    @overload
+    def send(self, *, record: ProducerRecord[K, V], callback: Callback | None
+             ) -> KafkaFuture[RecordMetadata]: ...
     def send(self, *, record: ProducerRecord[K, V],
              callback: Callback | None = MISSING) -> KafkaFuture[RecordMetadata]:
         """Adds the record to the list of sent records (``history()``). With
@@ -184,6 +189,10 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def metrics(self) -> dict[MetricName, Metric]:
         return self._metrics()
 
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
     def close(self, *, timeout: Duration = MISSING) -> None:
         """Java's mock never reads the timeout, a negative or a ``None`` one
         included."""

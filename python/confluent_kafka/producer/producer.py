@@ -64,7 +64,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -443,6 +443,11 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         self._run_void("EndTxn(false)", _lib.Producer_abort_transaction_cb)
 
+    @overload
+    def send(self, *, record: ProducerRecord[K, V]) -> KafkaFuture[RecordMetadata]: ...
+    @overload
+    def send(self, *, record: ProducerRecord[K, V], callback: Callback | None
+             ) -> KafkaFuture[RecordMetadata]: ...
     def send(self, *, record: ProducerRecord[K, V],
              callback: Callback | None = MISSING) -> KafkaFuture[RecordMetadata]:
         """Asynchronously send a record to a topic and invoke the provided
@@ -623,6 +628,10 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
     def close(self, *, timeout: Duration = MISSING) -> None:
         """Close this producer: ``close()`` waits until all previously sent
         requests complete; ``close(timeout=…)`` waits up to ``timeout`` for the

@@ -29,6 +29,7 @@ it (``TokenInformation.java:128-150``).
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import overload
 
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
@@ -46,6 +47,14 @@ class TokenInformation:
     __slots__ = ("_owner", "_token_requester", "_renewers", "_issue_timestamp",
                  "_max_timestamp", "_expiry_timestamp", "_token_id")
 
+    @overload
+    def __init__(self, *, token_id: str, owner: KafkaPrincipal,
+                 renewers: Iterable[KafkaPrincipal], issue_timestamp: int, max_timestamp: int,
+                 expiry_timestamp: int) -> None: ...
+    @overload
+    def __init__(self, *, token_id: str, owner: KafkaPrincipal, token_requester: KafkaPrincipal,
+                 renewers: Iterable[KafkaPrincipal], issue_timestamp: int, max_timestamp: int,
+                 expiry_timestamp: int) -> None: ...
     def __init__(self, *, token_id: str, owner: KafkaPrincipal,
                  token_requester: KafkaPrincipal = MISSING,
                  renewers: Iterable[KafkaPrincipal], issue_timestamp: int, max_timestamp: int,
