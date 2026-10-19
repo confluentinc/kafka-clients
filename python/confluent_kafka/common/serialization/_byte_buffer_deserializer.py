@@ -21,6 +21,8 @@ pins its whole batch; ``bytes_deserializer()`` copies instead.
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.headers import Headers
 
 
@@ -29,6 +31,6 @@ class ByteBufferDeserializer:
 
     __slots__ = ()
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> memoryview | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> memoryview | None:
         return data

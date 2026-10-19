@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import MISSING, reject_str
+from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
@@ -957,7 +958,7 @@ class _ConsumerState:
     def _wrap_commit_callback(self, callback: Callable[..., object] | None, *,
                               empty_offsets: bool = False
                               ) -> Callable[[dict[Any, Any], int, int], bool | None] | None:
-        """Adapt ``callback(offsets, exception)`` to the C commit trampoline,
+        """Adapt ``callback(offsets=..., exception=...)`` to the C commit trampoline,
         which calls it with the committed offsets, a BORROWED error handle and
         the invocation's callback id.
 
@@ -989,6 +990,7 @@ class _ConsumerState:
             return None
         if not callable(callback):
             raise TypeError("callback must be callable")
+        require_kwargs(callback, "callback")
 
         def adapter(raw_offsets: dict[Any, Any], error_handle: int,
                     callback_id: int) -> bool | None:
@@ -999,7 +1001,7 @@ class _ConsumerState:
             exception = from_ffi_error(error_handle, owned=False) if error_handle else None
             token = self._enter_callback()
             try:
-                result: object = callback(offsets, cast(Exception, exception))
+                result: object = callback(offsets=offsets, exception=cast(Exception, exception))
                 if inspect.isawaitable(result):
                     if self._defer_callback(cast("Awaitable[object]", result), callback_id):
                         return True

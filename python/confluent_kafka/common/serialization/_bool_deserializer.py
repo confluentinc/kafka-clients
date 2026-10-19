@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
@@ -28,8 +30,8 @@ class BooleanDeserializer:
 
     __slots__ = ()
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> bool | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bool | None:
         if data is None:
             return None
         if len(data) != 1:

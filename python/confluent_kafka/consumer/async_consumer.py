@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -70,6 +70,15 @@ __all__ = ["AsyncConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
+
+
+class _AsyncOffsetCommitCallback(Protocol):
+    """The ``async def`` form of ``OffsetCommitCallback`` (rule 3), awaited on
+    the event loop: Java's ``onComplete`` parameters, keyword-only, plus
+    ``**kwargs``."""
+
+    def __call__(self, *, offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                 exception: Exception | None, **kwargs: Any) -> Awaitable[None]: ...
 
 
 class AsyncConsumer(Generic[K, V], _ConsumerState):
@@ -152,23 +161,17 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def commit_nowait(self) -> None: ...
     @overload
     async def commit_nowait(self, *, callback: OffsetCommitCallback
-                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                        Exception | None], Awaitable[None]]
-                            | None) -> None: ...
+                            | _AsyncOffsetCommitCallback | None) -> None: ...
     @overload
     async def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                             callback: OffsetCommitCallback
-                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                        Exception | None], Awaitable[None]]
-                            | None) -> None: ...
+                            | _AsyncOffsetCommitCallback | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     async def commit_nowait(self, *,
                             offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
                             callback: OffsetCommitCallback
-                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                        Exception | None], Awaitable[None]]
-                            | None = MISSING) -> None:
+                            | _AsyncOffsetCommitCallback | None = MISSING) -> None:
         """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``).
 
         It is ``async def`` because its entry point,

@@ -16,15 +16,19 @@
 
 *(deviation)* Java's interface, with its three ``serialize`` overloads, is one
 callable shape whose headers are always passed (CLAUDE.md, Python Binding
-Conventions, Serialization). A serializer is any callable of that shape; the
-protocol exists for the type checker. The producer calls a serializer with the
+Conventions, Serialization). A serializer is any callable of that shape: it is
+called with keyword arguments, ``serializer(topic=..., value=...,
+headers=...)``, and must accept ``**kwargs``, so a parameter Java adds later
+reaches it as one more keyword; a client given one without ``**kwargs``
+raises ``IllegalArgumentError("<param> must accept **kwargs")``. The protocol
+exists for the type checker. The producer calls a serializer with the
 record's key or value as given, ``None`` included (Java's null, as Java's
 ``KafkaProducer`` does), and the serializer decides what null maps to.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from confluent_kafka.common.headers import Headers
 
@@ -39,8 +43,8 @@ class Serializer(Protocol[T_contra]):
     Java: ``org.apache.kafka.common.serialization.Serializer<T>``.
     """
 
-    def __call__(self, topic: str, value: T_contra | None,
-                 headers: Headers | None = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: T_contra | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
         """Convert ``value`` into bytes: ``topic`` is the topic associated
         with the data, ``headers`` the headers associated with the record (its
         own ``Headers``, which a serializer may change: they turn read-only

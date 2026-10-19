@@ -55,7 +55,7 @@ class _RecordingSerde:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, topic, data, headers=None):  # noqa: ANN001
+    def __call__(self, *, topic, data, headers=None, **kwargs):  # noqa: ANN001
         return None if data is None else bytes(data)
 
 
@@ -86,7 +86,7 @@ class TestResolveSerde:
     def test_kwarg_function_accepted(self) -> None:
         default = bytes_deserializer()
 
-        def fn(topic, data, headers=None):  # noqa: ANN001
+        def fn(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
             return data
 
         got = resolve_serde(fn, {}, KEY, is_key=False, default=default)
@@ -193,7 +193,7 @@ class TestLifecycleHelpers:
         assert serde.configured == (configs, False)
 
     def test_configure_if_defined_noop_on_bare_function(self) -> None:
-        def fn(topic, data, headers=None):  # noqa: ANN001
+        def fn(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
             return data
 
         configure_if_defined(fn, {}, False)  # must not raise

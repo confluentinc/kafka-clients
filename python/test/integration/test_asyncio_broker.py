@@ -137,7 +137,7 @@ def test_keyboard_interrupt_in_poll_rewinds(kafka_broker: Any,
     rewinds = _spy_rewinds(monkeypatch)
     interrupted: list[bool] = []
 
-    def value_deserializer(topic: str, data: memoryview | None, headers: Any = None) -> str:
+    def value_deserializer(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
         assert data is not None
         text = bytes(data).decode()
         if text == "v3" and not interrupted:

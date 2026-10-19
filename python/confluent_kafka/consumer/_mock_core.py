@@ -62,6 +62,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from confluent_kafka._args import MISSING, reject_str
+from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -403,10 +404,12 @@ class MockConsumerCore(Generic[K, V]):
         lock: the callback runs inline, on this thread, and an exception it
         raises propagates; what it returned (``None`` without a callback)."""
         self._ensure_not_closed()
+        if callback is not None:
+            require_kwargs(callback, "callback")
         self._committed_offsets.update(offsets)
         if callback is None:
             return None
-        return callback(dict(offsets), None)
+        return callback(offsets=dict(offsets), exception=None)
 
     def _c_commit_async(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                       callback: Callable[..., object] | None) -> None:

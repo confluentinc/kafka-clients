@@ -1073,7 +1073,7 @@ def test_a_timeout_inside_a_callback_is_refused_where_the_handle_has_no_timed_fo
         consumer.assign(partitions=[TP0])
         raised: list[BaseException] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             for timeout in (0, -1, 1.0):
                 try:
                     call(consumer, timeout=timeout)
@@ -1091,7 +1091,7 @@ def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
         consumer.assign(partitions=[TP0])
         raised: list[BaseException] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             try:
                 consumer.position(partition=TP0, timeout=0.2)
             except BaseException as exc:  # noqa: BLE001 - asserted below
@@ -1137,7 +1137,7 @@ def test_current_lag_inside_a_callback_goes_through_the_handle(
         consumer.assign(partitions=[TP0])
         answered: list[object] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             try:
                 answered.append(consumer.current_lag(topic_partition=TP0))
             except BaseException as exc:  # noqa: BLE001 - asserted below
@@ -1485,8 +1485,8 @@ def test_commit_callback_runs_on_the_thread_of_a_later_waiting_call() -> None:
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         seen: list[tuple[Any, Any, int]] = []
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
-            (o, e, threading.get_ident())))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        seen.append((offsets, exception, threading.get_ident())))
         consumer.commit(offsets={})
         assert seen == [(None, None, threading.get_ident())]
 
@@ -1497,12 +1497,13 @@ def test_commit_callback_runs_inside_a_later_commit_nowait() -> None:
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         seen: list[int] = []
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(threading.get_ident()))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        seen.append(threading.get_ident()))
         assert seen == []
         # The core queues the completed commit's callback from a task of its
         # own; let it run, then a later commit_nowait() delivers it.
         time.sleep(0.2)
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert seen == [threading.get_ident()]
 
 
@@ -1511,7 +1512,7 @@ def test_commit_callback_may_call_back_into_the_consumer() -> None:
         consumer.assign(partitions=[TP0])
         seen: dict[str, Any] = {}
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             seen["assignment"] = consumer.assignment()
             seen["paused"] = consumer.paused()
 
@@ -1525,7 +1526,7 @@ def test_another_thread_during_the_commit_callback_meets_the_guard() -> None:
         consumer.assign(partitions=[TP0])
         seen: dict[str, Any] = {}
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             def other() -> None:
                 try:
                     consumer.assignment()
@@ -1560,7 +1561,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
     started, release = threading.Event(), threading.Event()
     ran_on: list[int] = []
 
-    def slow(offsets: Any, exception: Any) -> None:
+    def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         ran_on.append(threading.get_ident())
         started.set()
         release.wait(WAIT)
@@ -1574,7 +1575,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
 
         def first() -> None:
             try:
-                consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+                consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
                 outcome["first"] = "returned"
             except BaseException as exc:  # noqa: BLE001
                 outcome["first"] = exc
@@ -1584,7 +1585,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
         assert started.wait(WAIT)
         started_at = time.monotonic()
         with pytest.raises(ConcurrentModificationError) as e:
-            consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+            consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert str(e.value) == CONCURRENT
         # Refused at once, not queued behind the first call.
         assert time.monotonic() - started_at < 1.0
@@ -1607,7 +1608,8 @@ def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> Non
     seen: dict[str, str] = {}
 
     def record(name: str) -> Any:
-        return lambda o, e: seen.__setitem__(name, threading.current_thread().name)
+        return lambda *, offsets, exception, **_: seen.__setitem__(
+            name, threading.current_thread().name)
 
     def commit_nowait_on(thread_name: str, callback_name: str) -> None:
         worker = threading.Thread(
@@ -1624,7 +1626,7 @@ def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> Non
         assert seen == {"first": "thread-b"}
         time.sleep(0.2)
         # And the second's inside this thread's call.
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert seen == {"first": "thread-b", "second": threading.current_thread().name}
     finally:
         consumer.close()
@@ -1639,9 +1641,10 @@ def queue_a_raising_commit_callback(consumer: KafkaConsumer[bytes, bytes], raise
     """Queue a commit callback that raises ``raised``, with one more callback
     queued behind it: the raising one queues it (an empty commit completes at
     once) before it raises."""
-    def boom(offsets: Any, exception: Any) -> None:
+    def boom(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         events.append("boom")
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("next"))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        events.append('next'))
         raise raised
 
     consumer.commit_nowait(offsets={}, callback=boom)
@@ -1691,10 +1694,10 @@ def test_a_raising_commit_callback_propagates_from_a_commit_inside_a_callback() 
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
 
-        def raising(offsets: Any, exception: Any) -> None:
+        def raising(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             raise raised
 
-        def first(offsets: Any, exception: Any) -> None:
+        def first(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             consumer.commit_nowait(offsets={}, callback=raising)
             try:
                 consumer.commit(offsets={})
@@ -1764,8 +1767,8 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
         await consumer.assign(partitions=[TP0])
         seen: list[int] = []
-        await consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
-            threading.get_ident()))
+        await consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                              seen.append(threading.get_ident()))
         await consumer.commit(offsets={})
         assert seen == [threading.get_ident()]
         await consumer.close(option=CloseOptions.timeout(timeout=0))
@@ -1795,7 +1798,7 @@ def test_async_commit_nowait_raises_its_own_error_and_close_does_not() -> None:
         assert str(e.value) == NO_GROUP_ID
         with pytest.raises(InvalidGroupIdError) as e:
             await consumer.commit_nowait(offsets={TP0: OffsetAndMetadata(offset=1)},
-                                         callback=lambda o, e: None)
+                                         callback=lambda *, offsets, exception, **_: None)
         assert str(e.value) == NO_GROUP_ID
         await consumer.close(option=CloseOptions.timeout(timeout=0))
 
@@ -1807,11 +1810,11 @@ def test_async_a_raising_commit_callback_propagates_from_commit_nowait(coroutine
     raised = CommitCallbackError("callback boom")
     events: list[str] = []
 
-    def plain(offsets: Any, exception: Any) -> None:
+    def plain(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         events.append("boom")
         raise raised
 
-    async def awaited(offsets: Any, exception: Any) -> None:
+    async def awaited(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         await asyncio.sleep(0)
         events.append("boom")
         raise raised
@@ -1979,7 +1982,7 @@ class RecordingDeserializer:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, topic: str, data: memoryview | None, headers: Any = None) -> Any:
+    def __call__(self, *, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> Any:
         return None if data is None else bytes(data).decode()
 
 
@@ -2300,7 +2303,7 @@ def test_cancelling_an_async_commit_nowait_leaves_no_wakeup_armed(
         release = asyncio.Event()
         ended: list[bool] = []
 
-        async def slow(offsets: Any, exception: Any) -> None:
+        async def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await release.wait()
             ended.append(True)
@@ -2371,7 +2374,7 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow(offsets: Any, exception: Any) -> None:
+        async def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await release.wait()
 
@@ -2489,7 +2492,7 @@ def test_a_wake_on_ctrl_c_the_call_did_not_consume_never_outlives_it(
         elif then == "handle_committed":
             raised: list[BaseException] = []
 
-            def committed(offsets: Any, exception: Any) -> None:
+            def committed(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
                 try:
                     consumer.committed(partitions=[TP0])
                 except Exception as exc:
@@ -2515,7 +2518,8 @@ def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_po
     consumer = new_consumer()
     try:
         consumer.assign(partitions=[TP0])
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: consumer.wakeup())
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        consumer.wakeup())
         with pytest.raises(WakeupError):
             consumer.poll(timeout=0)
         assert consumer.poll(timeout=0).is_empty()
@@ -2765,7 +2769,7 @@ class _StrandedCallback:
         never = asyncio.Event()
         consumer = self.consumer
 
-        async def stuck(offsets: Any, exception: Any) -> None:
+        async def stuck(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await never.wait()
 
@@ -2971,7 +2975,8 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
         consumer.seek_to_beginning(partitions=[TP0])
         consumer.seek_to_end(partitions=[TP0])
         assert consumer.poll(timeout=0).is_empty()
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: committed.append((o, e)))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        committed.append((offsets, exception)))
         consumer.commit(offsets={})
         # The commit callback ran inside the later waiting call, on this thread.
         assert committed == [(None, None)]
@@ -3116,7 +3121,7 @@ class _NativeBatch:
 
 # A null key or value is not deserialized (Serialization; Java's
 # CompletedFetch.parseRecord: `keyBytes == null ? null : deserialize(...)`).
-def _refuses_null(topic: str, data: memoryview | None, headers: Any = None) -> str:
+def _refuses_null(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
     """A deserializer that fails on Java's null, as one assuming non-null
     bytes would."""
     if data is None:
@@ -3154,7 +3159,7 @@ def test_a_failing_deserializer_still_fails_on_non_null_bytes() -> None:
     from confluent_kafka.common.errors import RecordDeserializationError
     from confluent_kafka.consumer._poll import deserialize_batch
 
-    def failing(topic: str, data: memoryview | None, headers: Any = None) -> str:
+    def failing(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
         assert data is not None
         raise ValueError("bad value")
 
@@ -3271,7 +3276,7 @@ def test_ctrl_c_during_the_seek_back_of_a_failed_deserialization_seeks_every_rec
     # TP0's 3 and TP1's 7 and seek TP0 back to 4. Ctrl+C during that seek lets
     # it end; the poll then raises KeyboardInterrupt instead of returning the
     # records, so each partition goes back to its first record not returned.
-    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+    def value_deserializer(*, topic: str, data: Any, headers: Any = None, **kwargs: Any) -> bytes:
         if bytes(data) == b"0:4":
             raise ValueError("bad value")
         return bytes(data)
@@ -3320,7 +3325,7 @@ def _interrupting_value_deserializer(raised: BaseException) -> Callable[..., byt
     a cancellation) landing while the poll deserializes its batch."""
     calls = {"n": 0}
 
-    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+    def value_deserializer(*, topic: str, data: Any, headers: Any = None, **kwargs: Any) -> bytes:
         calls["n"] += 1
         if calls["n"] == 2:
             raise raised

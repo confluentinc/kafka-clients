@@ -95,7 +95,7 @@ _Call = tuple[str, int, int, Exception | None]
 
 def _recorder(calls: list[_Call], label: str) -> Any:
     """A callback appending ``(label, partition, offset, exception)``."""
-    def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         calls.append((label, metadata.partition(), metadata.offset(), exception))
     return callback
 
@@ -277,8 +277,8 @@ def test_an_oversized_record_fails_with_record_too_large(
                                       **limit})
     try:
         future = producer.send(record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
-                               callback=lambda metadata, exception: calls.append(
-                                   (metadata, exception)))
+                               callback=lambda *, metadata, exception, **_:
+                                            calls.append((metadata, exception)))
         error = failure(future, 30)
     finally:
         producer.close()
@@ -298,7 +298,7 @@ def test_an_oversized_async_record_fails_with_record_too_large(
         try:
             future = await producer.send(
                 record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
-                callback=lambda metadata, exception: calls.append((metadata, exception)))
+                callback=lambda *, metadata, exception, **_: calls.append((metadata, exception)))
             return await async_failure(future, 30)
         finally:
             await producer.close()
@@ -465,7 +465,7 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
         started = asyncio.Event()
         finished: list[bool] = []
 
-        async def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+        async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             assert exception is None
             started.set()
             await release.wait()

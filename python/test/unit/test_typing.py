@@ -27,7 +27,7 @@ from __future__ import annotations
 import sys
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if sys.version_info >= (3, 11):
     from typing import assert_type
@@ -187,13 +187,28 @@ def _serde_factory_types() -> None:
     _jd: Deserializer[object] = json_deserializer()
     del _js, _jd
 
-    # A serde is just a callable of the right shape — a bare function type-checks.
-    def value_deser(topic: str, data: memoryview | None,
-                    headers: object = None) -> str | None:
+    # A serde is just a callable of the right shape — a bare function type-checks:
+    # Java's names keyword-only, plus **kwargs.
+    def value_deser(*, topic: str, data: memoryview | None,
+                    headers: object = None, **kwargs: Any) -> str | None:
         return None if data is None else bytes(data).decode()
 
     d: Deserializer[str] = value_deser
     assert_type(d, "Deserializer[str]")
+
+    # Without **kwargs a function is no Deserializer / Serializer: the protocol
+    # rejects it (the unused-ignore check of --strict proves the error is there).
+    def no_kwargs_deser(*, topic: str, data: memoryview | None,
+                        headers: object = None) -> str | None:
+        return None
+
+    def no_kwargs_ser(*, topic: str, value: str | None,
+                      headers: object = None) -> bytes | None:
+        return None
+
+    _bad_d: Deserializer[str] = no_kwargs_deser  # type: ignore[assignment]
+    _bad_s: Serializer[str] = no_kwargs_ser  # type: ignore[assignment]
+    del _bad_d, _bad_s
 
 
 def _error_reexport_is_typed() -> None:
@@ -285,21 +300,28 @@ def _consumer_family_types(c: object = None) -> None:
     kc.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
     kc.seek(partition=tp, offset=5)
     kc.seek(partition=tp, offset_and_metadata=OffsetAndMetadata(offset=5))
-    callback: OffsetCommitCallback = lambda offsets, exception: None  # noqa: E731
+    callback: OffsetCommitCallback = lambda *, offsets, exception, **_: None  # noqa: E731
+
+    def no_kwargs_commit(*, offsets: object, exception: Exception | None) -> None:
+        return None
+
+    # A callback without **kwargs is no OffsetCommitCallback.
+    _bad_commit: OffsetCommitCallback = no_kwargs_commit  # type: ignore[assignment]
+    del _bad_commit
     kc.commit_nowait()
     kc.commit_nowait(callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=None)
 
-    async def async_callback(offsets: dict[TopicPartition, OffsetAndMetadata] | None,
-                             exception: Exception | None) -> None:
+    async def async_callback(*, offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                             exception: Exception | None, **kwargs: Any) -> None:
         pass
 
     # Only an async consumer awaits an `async def` commit callback; the sync
     # client rejects one (strict mode's warn_unused_ignores checks the ignores).
-    kc.commit_nowait(callback=async_callback)  # type: ignore[arg-type]
-    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
-                     callback=async_callback)  # type: ignore[arg-type]
+    kc.commit_nowait(callback=async_callback)  # type: ignore[call-overload]
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},  # type: ignore[call-overload]
+                     callback=async_callback)
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
@@ -410,7 +432,15 @@ def _producer_family_types(p: object = None) -> None:
 
     kp = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                        value_serializer=string_serializer())
-    callback: Callback = lambda metadata, exception: None  # noqa: E731
+    callback: Callback = lambda *, metadata, exception, **_: None  # noqa: E731
+
+    def no_kwargs_callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+        return None
+
+    # A callback without **kwargs (or taking Java's names positionally only) is no
+    # Callback.
+    _bad_callback: Callback = no_kwargs_callback  # type: ignore[assignment]
+    del _bad_callback
     # A record's omitted key binds Never, which fits any producer (covariance).
     sent = kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
     assert_type(sent, KafkaFuture[RecordMetadata])
@@ -441,11 +471,11 @@ def _producer_family_types(p: object = None) -> None:
         assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))).get(),
                     RecordMetadata)
 
-        async def async_callback(metadata: RecordMetadata,
-                                 exception: Exception | None) -> None:
+        async def async_callback(*, metadata: RecordMetadata,
+                                 exception: Exception | None, **kwargs: Any) -> None:
             del metadata, exception
         # Only the asyncio producers await an `async def` send callback; the
-        # sync producers take the plain Callback alias.
+        # sync producers take the plain Callback protocol.
         assert_type(await ap.send(record=ProducerRecord(topic="t", value="v"),
                                   callback=async_callback),
                     AsyncKafkaFuture[RecordMetadata])
@@ -453,8 +483,8 @@ def _producer_family_types(p: object = None) -> None:
         amp = AsyncMockProducer(auto_complete=True, partitioner=None)
         assert_type(await amp.send(record=ProducerRecord(topic="t", value=b"v"),
                                    callback=async_callback), AsyncKafkaFuture[RecordMetadata])
-        kp.send(record=ProducerRecord(topic="t", value="v"),
-                callback=async_callback)  # type: ignore[arg-type]
+        kp.send(record=ProducerRecord(topic="t", value="v"),  # type: ignore[call-overload]
+                callback=async_callback)
 
     del _async
 

@@ -625,7 +625,7 @@ def make_logging_commit_callback(log, client_id):
     Java passes ``null``) and an optional exception.
     """
 
-    def on_complete(offsets, exception):
+    def on_complete(*, offsets, exception, **_kwargs):
         offsets = offsets or {}
         log.append(
             client_id,
@@ -639,7 +639,7 @@ def make_logging_commit_callback(log, client_id):
     return on_complete
 
 
-def ignore_commit_completion(offsets, exception):
+def ignore_commit_completion(*, offsets, exception, **_kwargs):
     """The callback of a ``commit_nowait(offsets=…)`` the harness sends without
     one: Java has no ``commitAsync(Map)`` overload, only ``commitAsync(Map,
     OffsetCommitCallback)`` (``commit_nowait(offsets=…)`` alone is rejected), and
@@ -654,7 +654,7 @@ def make_logging_delivery_callback(log, client_id):
     (``KafkaProducer.AppendCallbacks.onCompletion``), recorded as it is.
     """
 
-    def delivery_callback(metadata, exception):
+    def delivery_callback(*, metadata, exception, **_kwargs):
         topic, partition = metadata.topic(), metadata.partition()
         partitions = ((topic, partition),)
         offsets = {_offset_key(topic, partition): metadata.offset()}

@@ -24,6 +24,8 @@ the Java class the size selects:
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
@@ -39,8 +41,8 @@ class IntDeserializer:
         self._size = size
         self._message = f"Size of data received by {_CLASS_NAME_BY_SIZE[size]} is not {size}"
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> int | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> int | None:
         if data is None:
             return None
         if len(data) != self._size:

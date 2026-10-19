@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
@@ -40,8 +42,8 @@ class StringSerializer:
         if isinstance(encoding_value, str):
             self._encoding = normalize_encoding(encoding_value)
 
-    def __call__(self, topic: str, value: str | None,
-                 headers: Headers | None = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: str | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
         if value is None:
             return None
         try:

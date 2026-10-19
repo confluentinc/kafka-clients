@@ -55,7 +55,7 @@ from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
 from ._record_future import AsyncRecordFuture
-from ._send import run_callback
+from ._send import check_callback, run_callback
 from .async_producer import AsyncProducer, _AsyncCallback, _in_async_callback, _running_loop
 from .mock_producer import _FORMS
 from .record_metadata import RecordMetadata
@@ -231,6 +231,8 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
         self._raise_deferred_callback_error()
         if callback is MISSING:
             callback = None  # Java's send(record) passes null
+        if callback is not None:
+            check_callback(callback)
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
         self._send(record, callback, future)
         return AsyncRecordFuture._of_impl(future, asyncio.get_running_loop())

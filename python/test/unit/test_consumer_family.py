@@ -330,9 +330,9 @@ def test_every_stub_form_works() -> None:
     c.commit()
     c.commit(offsets={TP: OffsetAndMetadata(offset=2)})
     c.commit_nowait()
-    c.commit_nowait(callback=lambda offsets, exception: None)
+    c.commit_nowait(callback=lambda *, offsets, exception, **_: None)
     c.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
-                    callback=lambda offsets, exception: None)
+                    callback=lambda *, offsets, exception, **_: None)
     c.close()
     c.close(option=CloseOptions.timeout(timeout=timedelta(seconds=1)))
 

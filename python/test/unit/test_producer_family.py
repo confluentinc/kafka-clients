@@ -253,7 +253,13 @@ def test_module_exports() -> None:
                               "BufferExhaustedError"]
     assert not hasattr(module, "DeliveryCallback")
     assert Partitioner is object
-    assert Callback.__args__[0] is RecordMetadata  # type: ignore[attr-defined]
+    # A Protocol of Java's onCompletion parameters, keyword-only plus **kwargs.
+    params = inspect.signature(Callback.__call__).parameters
+    assert [(n, p.kind) for n, p in params.items()] == [
+        ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+        ("metadata", inspect.Parameter.KEYWORD_ONLY),
+        ("exception", inspect.Parameter.KEYWORD_ONLY),
+        ("kwargs", inspect.Parameter.VAR_KEYWORD)]
 
 
 # ===========================================================================
@@ -423,7 +429,7 @@ class _UpperSerializer:
     def configure(self, configs: dict[str, Any], is_key: bool) -> None:
         _UpperSerializer.configured.append(is_key)
 
-    def __call__(self, topic: str, value: str | None, headers: Any = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         return None if value is None else value.upper().encode()
 
 
@@ -557,7 +563,7 @@ def test_serializer_is_called_on_a_null_value_with_the_headers() -> None:
     # null maps to.
     calls: list[tuple[str, object, object]] = []
 
-    def serializer(topic: str, value: str | None, headers: Any = None) -> bytes | None:
+    def serializer(*, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         calls.append((topic, value, headers))
         return b"<null>" if value is None else value.encode()
 
@@ -571,7 +577,7 @@ def test_serializer_is_called_on_a_null_value_with_the_headers() -> None:
 def test_serializer_must_return_bytes() -> None:
     with pytest.raises(TypeError) as err:
         _native(ProducerRecord(topic=TOPIC, value=b"v"),
-                value_serializer=lambda topic, value, headers=None: "text")
+                value_serializer=lambda *, topic, value, headers=None, **_: "text")
     assert str(err.value) == "a serializer must return bytes or None, not str"
 
 
@@ -588,9 +594,9 @@ def test_send_failure_metadata_callback_and_future() -> None:
     done = threading.Event()
     holder: dict[str, Any] = {}
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         future = holder.get("f")
-        seen.append((threading.get_ident(), future is not None and future.is_done(), md, e))
+        seen.append((threading.get_ident(), future is not None and future.is_done(), metadata, exception))
         done.set()
 
     with KafkaProducer(configs=UNREACHABLE) as p:
@@ -623,8 +629,8 @@ def test_a_send_waits_for_its_handover_and_keeps_api_errors_in_the_future(
     configs = {**UNREACHABLE, "max.block.ms": 300}
     seen: list[Exception | None] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append(e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append(exception)
 
     async def send_async() -> tuple[float, BaseException | None]:
         p = AsyncKafkaProducer(configs=configs)
@@ -706,8 +712,8 @@ def test_ctrl_c_while_a_send_waits_for_its_handover_raises_after_it(
     seen: list[Exception | None] = []
     called = threading.Event()
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append(e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append(exception)
         called.set()
 
     armed = True
@@ -767,8 +773,8 @@ async def test_cancelling_a_send_waiting_for_its_handover_raises_after_it(
     captured = _fake_queued_send(monkeypatch)
     seen: list[Exception | None] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append(e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append(exception)
 
     task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
     while "resolve" not in captured:
@@ -846,8 +852,8 @@ def test_a_rethrown_send_runs_its_callback_once_if_the_record_completes(
     captured = _fake_queued_send(monkeypatch)
     seen: list[tuple[int, Exception | None]] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append((md.offset(), e))
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append((metadata.offset(), exception))
 
     def hand_over() -> None:
         while "resolve" not in captured:
@@ -891,8 +897,8 @@ async def test_a_rethrown_async_send_runs_its_callback_once_if_the_record_comple
     captured = _fake_queued_send(monkeypatch)
     seen: list[tuple[int, Exception | None]] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        seen.append((md.offset(), e))
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append((metadata.offset(), exception))
 
     try:
         task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
@@ -941,7 +947,7 @@ def test_callbacks_run_in_completion_order_and_a_raising_one_is_reported(
     all_done = threading.Event()
 
     def make(i: int) -> Callback:
-        def cb(md: RecordMetadata, e: Exception | None) -> None:
+        def cb(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             order.append(i)
             if i == 3:
                 all_done.set()
@@ -1037,7 +1043,7 @@ def test_send_future_dependants_run_where_the_record_completes_after_its_callbac
     order: list[tuple[str, int]] = []
     out: dict[str, Any] = {}
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         order.append(("callback", threading.get_ident()))
 
     def offset_of(md: RecordMetadata) -> int:
@@ -1108,7 +1114,8 @@ async def test_async_send_future_dependants_run_on_the_loop_after_its_callback(
     async def send() -> tuple[AsyncKafkaFuture[RecordMetadata], dict[str, Any]]:
         captured = _fake_queued_send(monkeypatch)
         task = asyncio.ensure_future(p.send(
-            record=RECORD, callback=lambda md, e: order.append(("callback", threading.get_ident()))))
+            record=RECORD, callback=lambda *, metadata, exception, **_:
+                                        order.append(('callback', threading.get_ident()))))
         while "resolve" not in captured:
             await asyncio.sleep(0.01)
         captured["resolve"](0)
@@ -1177,7 +1184,7 @@ def test_a_producer_call_from_a_record_futures_dependant_is_a_call_from_a_callba
         out["send_s"] = time.monotonic() - start
         done.set()
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         out["callback_thread"] = threading.get_ident()
         p.send(record=RECORD).when_complete(action=action)
 
@@ -1266,7 +1273,7 @@ def test_mock_send_future_dependants_run_in_the_completing_call() -> None:
     # callback.
     order: list[str] = []
     p = MockProducer()
-    f = p.send(record=RECORD, callback=lambda md, e: order.append("callback"))
+    f = p.send(record=RECORD, callback=lambda *, metadata, exception, **_: order.append('callback'))
     assert isinstance(f, KafkaFuture)
     offset = f.then_apply(function=lambda md: order.append("then_apply") or md.offset())
     assert order == [] and not f.cancel(may_interrupt_if_running=True)
@@ -1290,7 +1297,8 @@ def test_flush_waits_for_the_records_sent_before_it() -> None:
     # (their callbacks run first).
     with KafkaProducer(configs=UNREACHABLE) as p:
         seen: list[int] = []
-        futures = [p.send(record=RECORD, callback=lambda md, e, i=i: seen.append(i))
+        futures = [p.send(record=RECORD, callback=lambda *, metadata, exception, i=i, **_:
+                                                      seen.append(i))
                    for i in range(3)]
         p.flush()
         assert all(f.is_done() for f in futures)
@@ -1303,7 +1311,7 @@ def test_flush_in_a_callback_raises_and_close_in_a_callback_does_not_deadlock(
     out: dict[str, Any] = {}
     done = threading.Event()
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         try:
             p.flush()
         except KafkaError as error:
@@ -1330,7 +1338,7 @@ def test_flush_in_a_callback_of_a_closed_producer_reports_the_closed_state() -> 
     out: dict[str, Any] = {}
     done = threading.Event()
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         p.close()
         try:
             p.flush()
@@ -1449,7 +1457,7 @@ def test_a_send_racing_close_is_refused_after_its_serializer() -> None:
     # Java's RecordAccumulator.append refuses one after close.
     started = threading.Event()
 
-    def slow(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
+    def slow(*, topic: str, value: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         started.set()
         time.sleep(0.5)
         return value
@@ -1702,9 +1710,9 @@ def test_close_returns_after_every_delivery_callback_has_run() -> None:
     # after close() returns.
     ran: list[Exception | None] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         time.sleep(0.02)
-        ran.append(e)
+        ran.append(exception)
 
     p = KafkaProducer(configs=UNREACHABLE)
     for _ in range(10):
@@ -1716,9 +1724,9 @@ def test_close_returns_after_every_delivery_callback_has_run() -> None:
 async def test_async_close_returns_after_every_delivery_callback_has_run() -> None:
     ran: list[Exception | None] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         time.sleep(0.02)
-        ran.append(e)
+        ran.append(exception)
 
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     for _ in range(10):
@@ -1922,7 +1930,8 @@ def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
 
     def sender() -> None:
         for _ in range(250):
-            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f = p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                   callbacks.append(None))
             f.when_complete(action=lambda md, e: done_callbacks.append(None))
             with lock:
                 futures.append(f)
@@ -1962,7 +1971,8 @@ async def test_async_senders_with_refused_cancellations_leave_nothing_tracked(
 
     async def sender(n: int) -> None:
         for i in range(200):
-            f = await p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f = await p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                         callbacks.append(None))
             f.when_complete(action=lambda md, e: done_callbacks.append(None))
             # cancel() answers False and cancels nothing (Java's
             # FutureRecordMetadata): the completion still runs the callback,
@@ -2002,7 +2012,8 @@ def test_close_with_records_in_flight_from_several_threads_completes_and_untrack
     def sender() -> None:
         started.wait()
         for _ in range(4):
-            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
+            f = p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                   callbacks.append(exception))
             with lock:
                 futures.append(f)
 
@@ -2026,7 +2037,8 @@ async def test_async_close_with_records_in_flight_from_several_tasks_completes_a
 
     async def sender() -> None:
         for _ in range(4):
-            futures.append(await p.send(record=RECORD, callback=lambda md, e: callbacks.append(e)))
+            futures.append(await p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                                    callbacks.append(exception)))
 
     await asyncio.gather(*(sender() for _ in range(3)))
     await p.close()
@@ -2047,8 +2059,8 @@ def test_close_from_a_callback_with_records_in_flight_completes_the_rest() -> No
     closed = threading.Event()
     outcomes: list[KafkaFuture[RecordMetadata] | BaseException] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
-        callbacks.append(e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        callbacks.append(exception)
         p.close()  # the first one closes; closing again is harmless
         closed.set()
 
@@ -2084,7 +2096,7 @@ def test_an_async_send_from_another_loop_is_refused_before_its_serializer() -> N
     # RuntimeError before its serializer runs, and the producer stays usable.
     serialized: list[bytes | None] = []
 
-    def recording(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
+    def recording(*, topic: str, value: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         serialized.append(value)
         return value
 
@@ -2151,7 +2163,7 @@ def test_one_drain_keeps_the_gil_from_the_first_callback_to_the_last(
     # releases the thread, the last records whether it ran.
     records = 5
 
-    def callback(metadata: Any, error: BaseException | None) -> None:
+    def callback(*, metadata: Any, exception: BaseException | None, **kwargs: Any) -> None:
         nonlocal ran
         ran += 1
         if ran == 1:
@@ -2235,7 +2247,7 @@ def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
         release = asyncio.Event()
         loop.call_later(5, release.set)
 
-        async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             entered.set()
             await release.wait()
 
@@ -2428,7 +2440,8 @@ def test_sync_producer_never_calls_a_blocking_entry_point(
     _forbid_blocking_entry_points(monkeypatch)
     got: list[Exception | None] = []
     p = KafkaProducer(configs=UNREACHABLE)
-    future = p.send(record=RECORD, callback=lambda md, e: got.append(e))
+    future = p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                got.append(exception))
     for call in (p.init_transactions, p.begin_transaction, p.commit_transaction,
                  p.abort_transaction):
         with pytest.raises(IllegalStateError) as err:
@@ -2495,11 +2508,11 @@ def test_a_send_from_a_callback_calls_the_blocking_send(monkeypatch: pytest.Monk
     inner: list[KafkaFuture[RecordMetadata]] = []
     outer: list[KafkaFuture[RecordMetadata]] = []
 
-    def second(md: RecordMetadata, e: Exception | None) -> None:
-        errors.append(e)
+    def second(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        errors.append(exception)
 
-    def first(md: RecordMetadata, e: Exception | None) -> None:
-        errors.append(e)
+    def first(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        errors.append(exception)
         inner.append(p.send(record=RECORD, callback=second))
 
     sender = threading.Thread(
@@ -2550,7 +2563,7 @@ def test_sends_between_two_producers_callbacks_call_the_blocking_send(
     outer: list[KafkaFuture[RecordMetadata]] = []
 
     def sending_to(other: KafkaProducer[bytes, bytes]) -> Callback:
-        def callback(md: RecordMetadata, e: Exception | None) -> None:
+        def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             inner.append(other.send(record=RECORD))
 
         return callback
@@ -3012,9 +3025,9 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     seen: list[tuple[int, bool, RecordMetadata]] = []
     holder: dict[str, Any] = {}
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         future = holder.get("f")
-        seen.append((threading.get_ident(), future is not None and future.is_done(), md))
+        seen.append((threading.get_ident(), future is not None and future.is_done(), metadata))
 
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     holder["f"] = f = await p.send(record=RECORD, callback=callback)
@@ -3051,10 +3064,10 @@ async def test_async_send_awaits_an_async_def_callback_before_the_future() -> No
     seen: list[tuple[bool, Exception | None]] = []
     holder: dict[str, Any] = {}
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         started.set()
         await release.wait()
-        seen.append((holder["f"].is_done(), e))
+        seen.append((holder["f"].is_done(), exception))
 
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
@@ -3077,7 +3090,7 @@ async def test_async_flush_waits_for_an_async_def_callback() -> None:
     started = asyncio.Event()
     finished: list[bool] = []
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         started.set()
         await release.wait()
         finished.append(True)
@@ -3103,7 +3116,7 @@ async def test_async_def_callbacks_run_one_at_a_time_in_completion_order() -> No
     release = asyncio.Event()
     order: list[str] = []
 
-    async def first(md: RecordMetadata, e: Exception | None) -> None:
+    async def first(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         order.append("first started")
         await release.wait()
         order.append("first done")
@@ -3111,7 +3124,8 @@ async def test_async_def_callbacks_run_one_at_a_time_in_completion_order() -> No
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
         f1 = await p.send(record=RECORD, callback=first)
-        f2 = await p.send(record=RECORD, callback=lambda md, e: order.append("second"))
+        f2 = await p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                      order.append('second'))
         await _until(lambda: order == ["first started"])
         await asyncio.sleep(0.3)
         assert order == ["first started"] and not f2.is_done()
@@ -3139,10 +3153,12 @@ async def test_a_raising_callback_on_the_async_producer_is_reported_and_fails_no
     # once; Python logs nothing.
     seen: list[str] = []
 
-    def plain(md: RecordMetadata, e: Exception | None) -> None:
+    def plain(*, metadata: RecordMetadata, exception: Exception | None,
+              **kwargs: Any) -> None:
         raise RuntimeError("callback blew up")
 
-    async def async_def(md: RecordMetadata, e: Exception | None) -> None:
+    async def async_def(*, metadata: RecordMetadata, exception: Exception | None,
+                        **kwargs: Any) -> None:
         await asyncio.sleep(0)
         if kind == "cancelled":
             raise asyncio.CancelledError
@@ -3153,7 +3169,8 @@ async def test_a_raising_callback_on_the_async_producer_is_reported_and_fails_no
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
         f = await p.send(record=RECORD, callback=plain if kind == "plain" else async_def)
-        g = await p.send(record=RECORD, callback=lambda md, e: seen.append("next"))
+        g = await p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                     seen.append('next'))
         for future in (f, g):
             await async_assert_send_throws(future, KafkaTimeoutError, 30)
         await p.flush()
@@ -3168,7 +3185,7 @@ async def test_flush_in_an_async_def_callback_raises_javas_error() -> None:
     out: dict[str, Any] = {}
     p = AsyncKafkaProducer(configs=UNREACHABLE)
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         try:
             await p.flush()
         except KafkaError as error:
@@ -3194,11 +3211,11 @@ def test_a_coroutine_callback_on_a_sync_producer_raises_a_type_error_at_send(
     # is sent, and stay usable.
     ran: list[bool] = []
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         ran.append(True)
 
     class AsyncCallable:
-        async def __call__(self, md: RecordMetadata, e: Exception | None) -> None:
+        async def __call__(self, *, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             ran.append(True)
 
     p = (KafkaProducer(configs=UNREACHABLE) if cls is KafkaProducer
@@ -3211,7 +3228,8 @@ def test_a_coroutine_callback_on_a_sync_producer_raises_a_type_error_at_send(
         if cls is MockProducer:
             assert p.history() == []
         called: list[Exception | None] = []
-        f = p.send(record=RECORD, callback=lambda md, e: called.append(e))
+        f = p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                               called.append(exception))
         failure(f, 30)
         assert len(called) == 1
     finally:
@@ -3226,11 +3244,12 @@ def test_a_callback_returning_a_coroutine_on_the_sync_producer_is_closed_and_rep
     # for a raising callback, which the core logs.
     ran: list[bool] = []
 
-    async def coroutine(md: RecordMetadata, e: Exception | None) -> None:
+    async def coroutine(*, metadata: RecordMetadata, exception: Exception | None,
+                        **kwargs: Any) -> None:
         ran.append(True)
 
-    def callback(md: RecordMetadata, e: Exception | None) -> Any:
-        return coroutine(md, e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> Any:
+        return coroutine(metadata=metadata, exception=exception)
 
     capfd.readouterr()
     with caplog.at_level(logging.DEBUG, logger="confluent_kafka"):
@@ -3248,7 +3267,7 @@ async def test_async_mock_awaits_an_async_def_callback_and_flush_waits_for_it() 
     release = asyncio.Event()
     finished: list[bool] = []
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         await release.wait()
         finished.append(True)
 
@@ -3271,7 +3290,8 @@ def _send_handed_over(p: Any, loop: asyncio.AbstractEventLoop, captured: dict[st
     before its handover, so before send() returns."""
     async def send() -> AsyncKafkaFuture[RecordMetadata]:
         task = asyncio.ensure_future(
-            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+            p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                               ran.append(exception)))
         while "resolve" not in captured:
             await asyncio.sleep(0.01)
         captured["resolve"](0)
@@ -3648,7 +3668,8 @@ def test_mock_callback_runs_on_the_caller_before_the_future_completes() -> None:
                      value_serializer=None)
     caller = threading.get_ident()
     seen: list[tuple[int, RecordMetadata, Exception | None]] = []
-    f = p.send(record=RECORD, callback=lambda md, e: seen.append((threading.get_ident(), md, e)))
+    f = p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                           seen.append((threading.get_ident(), metadata, exception)))
     ((thread, md, e),) = seen
     assert thread == caller and e is None
     assert (md.topic(), md.partition(), md.offset()) == (TOPIC, 0, 0)
@@ -3664,7 +3685,7 @@ def test_mock_raising_callback_propagates_from_the_completing_call() -> None:
     # queued.
     raised = RuntimeError("callback blew up")
 
-    def boom(md: RecordMetadata, e: Exception | None) -> None:
+    def boom(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         raise raised
 
     p = MockProducer()
@@ -3715,11 +3736,12 @@ def test_mock_callback_returning_a_coroutine_raises_a_type_error() -> None:
     # has it closed and a TypeError raised from the completing call.
     ran: list[bool] = []
 
-    async def coroutine(md: RecordMetadata, e: Exception | None) -> None:
+    async def coroutine(*, metadata: RecordMetadata, exception: Exception | None,
+                        **kwargs: Any) -> None:
         ran.append(True)
 
-    def callback(md: RecordMetadata, e: Exception | None) -> Any:
-        return coroutine(md, e)
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> Any:
+        return coroutine(metadata=metadata, exception=exception)
 
     p = MockProducer()
     f = p.send(record=RECORD, callback=callback)
@@ -3732,7 +3754,7 @@ def test_mock_callback_returning_a_coroutine_raises_a_type_error() -> None:
 async def test_async_mock_raising_callback_propagates_from_the_completing_call() -> None:
     raised = RuntimeError("callback blew up")
 
-    def boom(md: RecordMetadata, e: Exception | None) -> None:
+    def boom(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         raise raised
 
     auto = AsyncMockProducer(auto_complete=True, partitioner=None, key_serializer=None,
@@ -3761,7 +3783,7 @@ async def test_async_mock_raising_async_def_callback_is_a_deferred_error(
     raised: BaseException = (asyncio.CancelledError() if cancelled
                              else RuntimeError("async callback blew up"))
 
-    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+    async def boom(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         await asyncio.sleep(0)
         raise raised
 
@@ -3787,7 +3809,7 @@ async def test_async_mock_raising_async_def_callback_is_a_deferred_error(
 async def test_async_mock_close_raises_a_deferred_callback_error_once_closed() -> None:
     raised = RuntimeError("async callback blew up")
 
-    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+    async def boom(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         await asyncio.sleep(0)
         raise raised
 
@@ -3921,7 +3943,8 @@ async def test_async_mock_family() -> None:
                           value_serializer=None)
     loop_thread = threading.get_ident()
     seen: list[int] = []
-    f = await p.send(record=RECORD, callback=lambda md, e: seen.append(threading.get_ident()))
+    f = await p.send(record=RECORD, callback=lambda *, metadata, exception, **_:
+                                                 seen.append(threading.get_ident()))
     assert f.is_done() and seen == [loop_thread]
     md = await (await p.send(record=RECORD)).get()
     assert md.offset() == 1

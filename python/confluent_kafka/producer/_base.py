@@ -248,7 +248,7 @@ def serialize(serializer: Serializer[Any], topic: str, data: object,
     """One serializer call, Java's ``serialize(topic, headers, data)``: a
     ``None`` ``data`` is passed too (the serializer decides what Java's null
     maps to), and a ``None`` result is a null key or value."""
-    out = serializer(topic, data, cast(Any, headers))
+    out = serializer(topic=topic, value=data, headers=cast(Any, headers))
     if out is None or type(out) is bytes:
         return out
     if isinstance(out, (bytes, bytearray, memoryview)):

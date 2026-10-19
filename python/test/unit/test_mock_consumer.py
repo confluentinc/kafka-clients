@@ -783,11 +783,12 @@ def test_commit_nowait_callback_runs_inline_and_propagates() -> None:
     seen: list[Any] = []
     offsets = {partition: OffsetAndMetadata(offset=3)}
     consumer.commit_nowait(offsets=offsets,
-                           callback=lambda o, e: seen.append((o, e, threading.get_ident())))
+                           callback=lambda *, offsets, exception, **_:
+                                        seen.append((offsets, exception, threading.get_ident())))
     assert seen == [(offsets, None, threading.get_ident())]
     assert consumer.committed(partitions=[partition]) == offsets
 
-    def boom(o: Any, e: Any) -> None:
+    def boom(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         raise ValueError("callback")
 
     with pytest.raises(ValueError):

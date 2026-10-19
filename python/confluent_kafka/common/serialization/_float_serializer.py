@@ -28,6 +28,8 @@ as an infinity, as Java's ``(float)`` narrowing gives.
 
 from __future__ import annotations
 
+from typing import Any
+
 import math
 import struct
 
@@ -60,8 +62,8 @@ class FloatSerializer:
     def __init__(self, size: int = 8) -> None:
         self._size = size
 
-    def __call__(self, topic: str, value: float | None,
-                 headers: Headers | None = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: float | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
         if value is None:
             return None
         if self._size == 4:

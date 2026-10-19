@@ -165,13 +165,13 @@ def deserialize_batch(
         value: object = None
         if key_buffer is not None:
             try:
-                key = key_deserializer(topic, key_buffer, headers)
+                key = key_deserializer(topic=topic, data=key_buffer, headers=headers)
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does
                 error = _deserialization_error(
                     origin.KEY, tp, nr, key_buffer, value_buffer, headers, exc)
         if error is None and value_buffer is not None:
             try:
-                value = value_deserializer(topic, value_buffer, headers)
+                value = value_deserializer(topic=topic, data=value_buffer, headers=headers)
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does
                 error = _deserialization_error(
                     origin.VALUE, tp, nr, key_buffer, value_buffer, headers, exc)

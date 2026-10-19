@@ -58,7 +58,7 @@ _Outcome = tuple[int, int, Exception | None]
 
 
 def _recorder(outcomes: list[_Outcome]) -> Any:
-    def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         outcomes.append((metadata.partition(), metadata.offset(), exception))
     return callback
 
@@ -147,7 +147,7 @@ def test_close_from_a_send_callback_does_not_deadlock(kafka_broker: Any, mode: s
         if isinstance(producer, KafkaProducer):
             sync_producer = producer
 
-            def callback(metadata: RecordMetadata, exception: Exception | None) -> Any:
+            def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> Any:
                 if record(metadata, exception):
                     started = time.monotonic()
                     sync_producer.close()  # close(0) from the completion thread
@@ -155,8 +155,7 @@ def test_close_from_a_send_callback_does_not_deadlock(kafka_broker: Any, mode: s
         else:
             async_producer: AsyncKafkaProducer[Any, Any] = producer
 
-            async def callback(metadata: RecordMetadata,  # type: ignore[misc]
-                               exception: Exception | None) -> Any:
+            async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> Any:
                 if record(metadata, exception):
                     started = time.monotonic()
                     await async_producer.close()

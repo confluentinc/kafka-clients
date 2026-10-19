@@ -135,7 +135,7 @@ class MockSerializer:
     def __init__(self) -> None:
         MockSerializer.INIT_COUNT += 1
 
-    def __call__(self, topic: str, value: str | None, headers: Any = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         return None if value is None else value.encode("utf-8")
 
     def close(self) -> None:
@@ -154,7 +154,7 @@ def test_no_serializer_provided() -> None:
     producer_props = {"bootstrap.servers": "localhost:9000"}
     with KafkaProducer(configs=producer_props) as producer:
         assert producer._key_serializer(  # noqa: SLF001 - the default in use
-            "t", b"k") == b"k"
+            topic="t", value=b"k") == b"k"
 
 
 def test_constructor_failure_close_resource() -> None:
@@ -216,7 +216,7 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     release = threading.Event()
     futures: list[KafkaFuture[RecordMetadata]] = []
 
-    def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         entered.set()
         release.wait(30)
 
@@ -300,7 +300,7 @@ def test_headers_success() -> None:
     # the serializers get the record's headers.
     calls: list[tuple[str, object, object]] = []
 
-    def recording(topic: str, value: str | None, headers: Any = None) -> bytes | None:
+    def recording(*, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         calls.append((topic, value, headers))
         return None if value is None else value.encode()
 
@@ -435,8 +435,8 @@ def test_callback_and_interceptor_handle_error() -> None:
     seen: list[tuple[RecordMetadata, Exception | None]] = []
     done = threading.Event()
 
-    def call_back(record_metadata: RecordMetadata, exception: Exception | None) -> None:
-        seen.append((record_metadata, exception))
+    def call_back(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        seen.append((metadata, exception))
         done.set()
 
     with KafkaProducer(configs=configs, key_serializer=string_serializer(),
@@ -468,7 +468,7 @@ def test_should_not_invoke_flush_in_callback() -> None:
 
     with KafkaProducer(configs=configs, key_serializer=string_serializer(),
                        value_serializer=string_serializer()) as producer:
-        def callback(record_metadata: RecordMetadata, exception: Exception | None) -> None:
+        def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             try:
                 producer.flush()
             except KafkaError as e:
@@ -599,7 +599,7 @@ class RecordingSerializer:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, topic: str, value: Any, headers: Any = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: Any, headers: Any = None, **kwargs: Any) -> bytes | None:
         return None if value is None else str(value).encode()
 
 

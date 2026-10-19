@@ -264,7 +264,8 @@ def test_commit_callback_runs_on_the_polling_thread(kafka_broker: Any) -> None:
         consumer.assign(partitions=[tp])
         assert _poll_until(consumer, lambda v: len(v) >= 1) == ["a"]
         consumer.commit_nowait(offsets={tp: OffsetAndMetadata(offset=1)},
-                               callback=lambda o, e: seen.append((o, e, threading.get_ident())))
+                               callback=lambda *, offsets, exception, **_:
+                                            seen.append((offsets, exception, threading.get_ident())))
         deadline = time.monotonic() + DEADLINE
         while not seen:
             assert time.monotonic() < deadline, "the commit callback did not run"
@@ -288,7 +289,8 @@ def test_async_commit_callback_runs_on_the_event_loop(kafka_broker: Any) -> None
             await consumer.assign(partitions=[tp])
             assert await _poll_until_async(consumer, lambda v: len(v) >= 1) == ["a"]
             await consumer.commit_nowait(offsets={tp: OffsetAndMetadata(offset=1)},
-                                         callback=lambda o, e: seen.append(threading.get_ident()))
+                                         callback=lambda *, offsets, exception, **_:
+                                                      seen.append(threading.get_ident()))
             await consumer.commit()  # waits for the pending async commit
             assert seen == [threading.get_ident()]
         finally:
@@ -330,7 +332,7 @@ def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: 
     topic = _topic(kafka_broker, ["a", "bad", "c"])
     tp = TopicPartition(topic=topic, partition=0)
 
-    def value_deserializer(topic: str, data: memoryview | None, headers: Any = None) -> str:
+    def value_deserializer(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
         assert data is not None
         text = bytes(data).decode()
         if text == "bad":
@@ -456,7 +458,8 @@ def test_commit_nowait_during_a_rebalance_runs_the_listener_on_this_thread(
                     time.sleep(0.05)  # processing the records
                     if with_callback:
                         consumer.commit_nowait(
-                            callback=lambda o, e: state["callbacks"].append(threading.get_ident()))
+                            callback=lambda *, offsets, exception, **_:
+                                         state['callbacks'].append(threading.get_ident()))
                     else:
                         consumer.commit_nowait()
                 if any(event[0] == "revoked" for event in events):
@@ -774,12 +777,12 @@ def test_async_poll_returns_its_records_before_a_deferred_commit_callback_error(
             configs=_configs(kafka_broker), value_deserializer=string_deserializer())
         events: list[str] = []
 
-        async def raising(offsets: Any, exception: Any) -> None:
+        async def raising(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             await asyncio.sleep(0)
             events.append("raising")
             raise raised
 
-        async def first(offsets: Any, exception: Any) -> None:
+        async def first(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             await asyncio.sleep(0)
             await consumer.commit_nowait(offsets={}, callback=raising)
             await consumer.commit(offsets={})
@@ -820,7 +823,8 @@ def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any)
     seen: list[tuple[Any, Any]] = []
     try:
         consumer.commit_nowait(offsets={missing: OffsetAndMetadata(offset=5)},
-                               callback=lambda o, e: seen.append((o, e)))
+                               callback=lambda *, offsets, exception, **_:
+                                            seen.append((offsets, exception)))
         deadline = time.monotonic() + DEADLINE
         while not seen:
             assert time.monotonic() < deadline, "the commit callback did not run"

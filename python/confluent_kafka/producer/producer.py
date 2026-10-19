@@ -95,6 +95,7 @@ from ._base import (
 )
 from ._send import (
     MetadataTuple,
+    check_callback,
     completion_to_python,
     in_any_callback,
     in_callback,
@@ -520,6 +521,7 @@ class Producer(Generic[K, V], _ProducerState):
         check_record(record)
         if callback is not None:
             reject_coroutine_callback(callback)
+            check_callback(callback)
         native, topic, partition = self._native_parts(record)
         # The record's future: Python state the completion completes, under the
         # KafkaFuture returned (RecordFuture: cancel() answers False, as Java's

@@ -648,14 +648,15 @@ def test_poll_hands_out_writable_headers_after_the_deserializers() -> None:
     batch = _native_batch(1)
     seen: list[Headers] = []
 
-    def deserializer(topic: str, data: memoryview | None, headers: Headers | None = None) -> bytes:
+    def deserializer(*, topic: str, data: memoryview | None, headers: Headers | None = None, **kwargs: Any) -> bytes:
         assert headers is not None and not headers._is_read_only()  # noqa: SLF001
         headers.add(key="added", value=b"by-deserializer")
         seen.append(headers)
         return bytes(data or b"")
 
     result = deserialize_batch(batch, key_deserializer=deserializer,
-                               value_deserializer=lambda t, d, h=None: bytes(d or b""))
+                               value_deserializer=lambda *, topic, data, headers=None, **_: bytes(
+                                   data or b""))
     (record,) = result.records.records(partition=TopicPartition(topic="t", partition=0))
     assert record.headers() is seen[0]
     _assert_header("added", "by-deserializer", record.headers().last_header(key="added"))

@@ -68,7 +68,7 @@ import socket
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Protocol, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -104,6 +104,7 @@ from ._base import (
 )
 from ._send import (
     MetadataTuple,
+    check_callback,
     completion_to_python,
     run_callback,
 )
@@ -126,9 +127,13 @@ R = TypeVar("R")
 
 _LOG = logging.getLogger("confluent_kafka.producer")
 
-#: The ``send()`` callback of the asyncio producer: Java's ``Callback``, which by
-#: rule 3 may also be an ``async def``, awaited on the record's event loop.
-_AsyncCallback = Callable[[RecordMetadata, Exception | None], Awaitable[None] | None]
+class _AsyncCallback(Protocol):
+    """The ``send()`` callback of the asyncio producer: Java's ``Callback``,
+    which by rule 3 may also be an ``async def``, awaited on the record's
+    event loop."""
+
+    def __call__(self, *, metadata: RecordMetadata, exception: Exception | None,
+                 **kwargs: Any) -> Awaitable[None] | None: ...
 
 # The producers (by id) whose ``async def`` send() callback the current task
 # awaits, Java's ``Thread.currentThread() == this.ioThread``: the C API waits
@@ -796,6 +801,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
         check_record(record)
+        if callback is not None:
+            check_callback(callback)
         # Before the serializers, so a call from another loop has no effect.
         # The pump runs on every _PUMP_EVERY-th send taken at once in a row
         # and on the first after a suspension; the others only count.

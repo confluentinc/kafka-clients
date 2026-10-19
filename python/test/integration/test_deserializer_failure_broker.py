@@ -49,7 +49,7 @@ from .broker_helpers import (
 Origin = RecordDeserializationError.DeserializationExceptionOrigin
 
 
-def _value_deserializer(topic: str, data: memoryview | None, headers: Any = None) -> str:
+def _value_deserializer(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
     assert data is not None
     text = bytes(data).decode()
     if text == "bad":

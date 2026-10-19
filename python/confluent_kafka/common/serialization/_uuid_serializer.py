@@ -21,6 +21,8 @@ Java's byte for byte.
 
 from __future__ import annotations
 
+from typing import Any
+
 import uuid
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
@@ -48,8 +50,8 @@ class UUIDSerializer:
         if isinstance(encoding_value, str):
             self._encoding = encoding_value
 
-    def __call__(self, topic: str, value: uuid.UUID | None,
-                 headers: Headers | None = None) -> bytes | None:
+    def __call__(self, *, topic: str, value: uuid.UUID | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
         if value is None:
             return None
         try:

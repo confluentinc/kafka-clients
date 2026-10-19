@@ -42,7 +42,7 @@ from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
 from ._record_future import RecordFuture
-from ._send import reject_coroutine_callback
+from ._send import check_callback, reject_coroutine_callback
 from .producer import Producer
 from .record_metadata import RecordMetadata
 
@@ -176,6 +176,7 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
             callback = None  # Java's send(record) passes null
         if callback is not None:
             reject_coroutine_callback(callback)
+            check_callback(callback)
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
         self._send(record, callback, future)
         return RecordFuture._of_impl(future)

@@ -27,6 +27,8 @@ consumer calls: ``"Size of data received by DoubleDeserializer is not 8"``,
 
 from __future__ import annotations
 
+from typing import Any
+
 import struct
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
@@ -55,8 +57,8 @@ class FloatDeserializer:
         self._size = size
         self._message = f"Size of data received by {_CLASS_NAME_BY_SIZE[size]} is not {size}"
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> float | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> float | None:
         if data is None:
             return None
         if len(data) != self._size:

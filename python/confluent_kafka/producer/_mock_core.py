@@ -46,6 +46,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from confluent_kafka._args import MISSING
+from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
 from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.kafka_error import KafkaError
@@ -135,6 +136,10 @@ class MockProducerCore(Generic[K, V]):
         self._cluster = None if cluster is MISSING else cluster
         self._auto_complete = auto_complete
         self._partitioner = partitioner
+        if key_serializer is not None:
+            require_kwargs(key_serializer, "key_serializer")
+        if value_serializer is not None:
+            require_kwargs(value_serializer, "value_serializer")
         self._key_serializer: Serializer[Any] = (
             bytes_serializer() if key_serializer is None else key_serializer)
         self._value_serializer: Serializer[Any] = (
@@ -430,8 +435,9 @@ class MockProducerCore(Generic[K, V]):
                 # just to raise the serializer's error if the serializers are not
                 # the proper ones to serialize the key / value
                 # (each with `new RecordHeaders()`, MockProducer.java:316-317).
-                self._key_serializer(record.topic(), record.key(), Headers())
-                self._value_serializer(record.topic(), record.value(), Headers())
+                self._key_serializer(topic=record.topic(), value=record.key(), headers=Headers())
+                self._value_serializer(topic=record.topic(), value=record.value(),
+                                       headers=Headers())
             topic_partition = TopicPartition(topic=record.topic(), partition=partition)
             offset = self._next_offset(topic_partition)
             base_offset = max(0, offset - _INT_MAX)
@@ -524,8 +530,10 @@ class MockProducerCore(Generic[K, V]):
                     message=f"Invalid partition given with record: {partition} is not in the "
                     f"range [0...{num_partitions}].")
             return partition
-        key_bytes = self._key_serializer(topic, record.key(), record.headers())
-        value_bytes = self._value_serializer(topic, record.value(), record.headers())
+        key_bytes = self._key_serializer(topic=topic, value=record.key(),
+                                         headers=record.headers())
+        value_bytes = self._value_serializer(topic=topic, value=record.value(),
+                                             headers=record.headers())
         if self._partitioner is None:
             return self._partitions_for_topic(record.topic())[0].partition()
         chosen: int = self._partitioner.partition(  # type: ignore[attr-defined]

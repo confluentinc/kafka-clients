@@ -24,6 +24,13 @@ after construction on the config route and ``close_if_defined`` at client close
   dotted path or a class, is resolved, no-arg constructed and configured; an
   instance or an unresolvable name raises ``ConfigError``;
 * else the ``bytes_*`` default.
+
+A serde from either route must accept ``**kwargs`` (it is called with keyword
+arguments named after Java's parameters): one without raises
+``IllegalArgumentError("<param> must accept **kwargs")``, naming the
+constructor parameter (``key_serializer``) on the argument route and the config
+key (``key.serializer``) on the config route, where it is checked after
+``configure``, the instance then being closed.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from collections.abc import Callable
 from typing import cast
 
 from confluent_kafka._java import java_trim
+from confluent_kafka._kwargs import accepts_kwargs, require_kwargs
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -162,6 +170,7 @@ def resolve_serde(
                 message=f"{key} must be a callable serializer/deserializer, "
                 f"got {type(kwarg).__name__}"
             )
+        require_kwargs(kwarg, key.replace(".", "_"))
         return cast("Callable[..., object]", kwarg)
 
     config_value = config.get(key)
@@ -176,8 +185,12 @@ def resolve_serde(
         raise ConfigError(name=key, value=config_value,
                           message="Expected a Class instance or class name.")
     try:
-        return _construct_from_class(key, cls, config, is_key)
+        instance = _construct_from_class(key, cls, config, is_key)
     except Exception as exc:
         if construct_failure is None:
             raise
         raise construct_failure(exc) from exc
+    if not accepts_kwargs(instance):
+        close_if_defined(instance)
+        require_kwargs(instance, key)
+    return instance
