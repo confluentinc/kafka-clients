@@ -1,0 +1,86 @@
+version: v1.0
+name: publish-pypi
+
+# The manual "Publish to PyPI" promotion of semaphore.yml. It publishes a
+# final Python version to PyPI from the build of its python/<version> tag,
+# with exactly the wheels that this workflow published to Test PyPI and that
+# passed the post-publish checks there (see the Python release blocks of
+# semaphore.yml). Its blocks run only on the tag of a final version: a
+# pre-release is published to Test PyPI only. The tag pattern must stay the
+# pattern of semaphore.yml without the pre-release suffix.
+#
+# A promotion can be started even from a failed pipeline, so the publish job
+# does not rely on the result of the build it was promoted from:
+# publish-wheels.sh refuses, before the token is loaded, unless the Test PyPI
+# checks recorded these wheels as verified in this workflow.
+#
+# Uploading is commented out until the Python release is signed off: the
+# publish block runs every check, then fails without uploading. To enable it,
+# uncomment its `publish-wheels.sh upload` command and delete the command after
+# it. To resume an interrupted publish, rerun the failed blocks of this
+# pipeline.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 2
+
+global_job_config:
+  env_vars:
+    # As in semaphore.yml: [project] name in python/pyproject.toml.
+    - name: PYPI_PACKAGE
+      value: confluent-kafka
+  prologue:
+    commands:
+      - checkout
+
+blocks:
+  - name: "Release (Python): publish to PyPI"
+    dependencies: []
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      env_vars:
+        - name: PYPI_INDEX
+          value: https://pypi.org
+      jobs:
+        - name: "twine upload (PyPI)"
+          commands:
+            - bash .semaphore/publish-wheels.sh prepare
+            # Commented out until the Python release is signed off (see above).
+            # - bash .semaphore/publish-wheels.sh upload
+            - |
+              echo "Not uploading to ${PYPI_INDEX}: the upload is commented out in .semaphore/publish-pypi.yml until the Python release is signed off. Every check passed; nothing was published." >&2
+              exit 1
+
+  - name: "Release (Python): post-publish checksum (PyPI)"
+    # As for Test PyPI in semaphore.yml, on PyPI. A failure means the
+    # published version is defective for users. Release a fixed version, and
+    # yank this one if it is unusable.
+    dependencies: ["Release (Python): publish to PyPI"]
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+    execution_time_limit:
+      minutes: 20
+    task:
+      jobs:
+        - name: "PyPI index and downloads match the upload"
+          commands:
+            - artifact pull workflow pypi/pypi.org/uploaded.sha256 --destination /tmp/uploaded.sha256
+            - /usr/bin/python3 .semaphore/check-published-wheels.py https://pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/}" /tmp/uploaded.sha256
+
+  - name: "Release (Python): post-publish smoke test (PyPI, Linux amd64)"
+    # As for Test PyPI in semaphore.yml, installing from PyPI.
+    dependencies: ["Release (Python): post-publish checksum (PyPI)"]
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      jobs:
+        - name: "Install from PyPI (Linux amd64)"
+          commands:
+            - sh .semaphore/test-wheels.sh --index https://pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/}"
