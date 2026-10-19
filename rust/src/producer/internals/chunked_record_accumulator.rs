@@ -355,13 +355,16 @@ impl ChunkedRecordAccumulator {
                 // (RecordAccumulator::append), but reserve only enough for the record rather than
                 // a whole batch.size. (Java's `TODO: review when compression is supported`:
                 // KAFKA-20579; compression is rejected at construction.)
-                let new_batch_size = AbstractRecords::estimate_size_in_bytes_upper_bound(
+                // `KafkaProducer` rejected any record larger than `max.request.size`, an
+                // `i32`, so the estimate fits.
+                let new_batch_size = i32::try_from(AbstractRecords::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     base.compression.compression_type(),
                     key,
                     value,
                     headers,
-                );
+                ))
+                .unwrap_or(i32::MAX);
                 let remaining_time_to_block = base.remaining_time_to_block_ms(deadline_ms);
                 kafka_trace!(
                     base.log_context,

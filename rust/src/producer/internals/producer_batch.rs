@@ -266,13 +266,18 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
-            self.magic(),
-            self.records_builder.compression().compression_type(),
-            key,
-            value,
-            headers,
-        ));
+        // `KafkaProducer` rejected any record larger than `max.request.size`, an `i32`,
+        // so the estimate fits.
+        self.max_record_size = self.max_record_size.max(
+            i32::try_from(AbstractRecords::estimate_size_in_bytes_upper_bound(
+                self.magic(),
+                self.records_builder.compression().compression_type(),
+                key,
+                value,
+                headers,
+            ))
+            .unwrap_or(i32::MAX),
+        );
         self.last_append_time = now;
 
         let key_size = key.map_or(-1, |k| k.len() as i32);
@@ -314,13 +319,18 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
-            self.magic(),
-            self.records_builder.compression().compression_type(),
-            key,
-            value,
-            headers,
-        ));
+        // `KafkaProducer` rejected any record larger than `max.request.size`, an `i32`,
+        // so the estimate fits.
+        self.max_record_size = self.max_record_size.max(
+            i32::try_from(AbstractRecords::estimate_size_in_bytes_upper_bound(
+                self.magic(),
+                self.records_builder.compression().compression_type(),
+                key,
+                value,
+                headers,
+            ))
+            .unwrap_or(i32::MAX),
+        );
 
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
@@ -669,7 +679,7 @@ impl ProducerBatch {
             value,
             headers,
         ))
-        .max(batch_size) as usize;
+        .max(batch_size as i64) as usize;
 
         let builder = MemoryRecords::builder_with_initial_capacity_magic(
             initial_size,
