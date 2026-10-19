@@ -319,9 +319,10 @@ where
     /// `tokio::time::timeout` or a `tokio::select!`, also while a
     /// [`Deserializer`](crate::common::serialization::Deserializer) is
     /// pending. The call then returns no records and leaves the positions
-    /// where they were before it, so a later commit of the consumed offsets
-    /// covers none of the records it decoded, and a later `poll()` returns
-    /// them, unless the partition was sought, paused or reassigned in between.
+    /// where they were before it, also when a partition's leader changed in
+    /// the meantime, so a later commit of the consumed offsets covers none of
+    /// the records it decoded, and a later `poll()` returns them, unless the
+    /// partition was sought, reset, paused or reassigned in between.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
     fn poll(&mut self, timeout: Duration) -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
 

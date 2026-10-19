@@ -209,11 +209,14 @@ where
     /// The future can be dropped while a deserializer is pending (a `poll()`
     /// cancelled by `tokio::time::timeout` or a `select!`). Nothing it decoded
     /// is then returned, and every consumed position it moved goes back to
-    /// what it was before this call, so neither a commit of the consumed
-    /// offsets nor the next call skips a record: the fetches it took are put
-    /// back, and the ones it had read from no longer match their partition's
-    /// position, so the next call ignores them as Java ignores any stale fetch
-    /// and the fetcher fetches those records again (see [`CollectState`]).
+    /// the offset it had before this call, whether the partition is fetching
+    /// or, after a leader change, awaiting validation (which then validates
+    /// the restored position against the new leader), so neither a commit of
+    /// the consumed offsets nor the next call skips a record: the fetches it
+    /// took are put back, and the ones it had read from no longer match their
+    /// partition's position, so the next call ignores them as Java ignores any
+    /// stale fetch and the fetcher fetches those records again (see
+    /// [`CollectState`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch")]
     pub(crate) async fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, Error> {
         // The loop's state lives in a guard, so that a call dropped while a
@@ -1148,8 +1151,13 @@ struct InFlightFetch<K, V> {
 /// - re-adds the paused fetches, as Java's `finally` does;
 /// - discards the records collected from the partitions already done;
 /// - moves each consumed position the call moved back to the one it had
-///   before the call, if the partition is still assigned and its position is
-///   still the one the call set (anything else moved it since, and wins).
+///   before the call, if the partition is still assigned and its offset is
+///   still the one the call set (a seek or reset since then wins). The
+///   partition's current leader is kept: if a leader change since then put
+///   the partition in AWAIT_VALIDATION at the moved offset, the restored
+///   position is validated against the new leader instead (Java's
+///   `seekUnvalidated`), and a validation already sent for the moved one is
+///   ignored, its request position no longer matching.
 ///
 /// A fetch the call had read records from, the one put back or one still
 /// buffered, now starts past its partition's position, so the next call
@@ -1212,11 +1220,33 @@ where
                     ),
                     _ => continue,
                 };
+                // How the position goes back depends on the partition's fetch
+                // state. FETCHING: the position is valid, and only the offset
+                // changes. AWAIT_VALIDATION: a leader change since the call
+                // moved the position (a KIP-951 leader update or a metadata
+                // update, through `maybe_validate_position_for_current_leader`)
+                // asked for the moved position to be validated against the new
+                // leader; the restored one is validated against it instead,
+                // as Java's `seekUnvalidated` does for a position whose epoch
+                // is still to be checked. An `OffsetsForLeaderEpoch` already
+                // sent for the moved position is then ignored by
+                // `maybe_complete_validation`, its request position no longer
+                // being the current one. AWAIT_RESET has no position and is
+                // excluded above: the reset wins.
+                let awaiting_validation = guard.awaiting_validation(&partition).unwrap_or(false);
+                if !awaiting_validation && !guard.has_valid_position(&partition) {
+                    continue;
+                }
                 debug!(
                     "Moving the position of {partition} back from {advanced_to} to {restored}, \
                      since the poll returning its records was cancelled"
                 );
-                if let Err(e) = guard.set_position(&partition, restored) {
+                let result = if awaiting_validation {
+                    guard.seek_unvalidated(&partition, restored)
+                } else {
+                    guard.set_position(&partition, restored)
+                };
+                if let Err(e) = result {
                     warn!("Could not move the position of {partition} back after a cancelled poll: {e}");
                 }
             }
@@ -1361,6 +1391,32 @@ mod tests {
         )
     }
 
+    /// [`build_completed_fetch`] over a batch stamped with
+    /// `partition_leader_epoch`, as a broker stamps every batch it returns.
+    fn build_completed_fetch_with_leader_epoch(
+        h: &Harness,
+        partition: TopicPartition,
+        record_count: i32,
+        partition_leader_epoch: i32,
+    ) -> CompletedFetch {
+        let records: Vec<SimpleRecord> = (0..record_count)
+            .map(|i| {
+                SimpleRecord::with_timestamp_key_value(
+                    0,
+                    Some("key".as_bytes().to_vec()),
+                    Some(format!("value-{i}").into_bytes()),
+                )
+            })
+            .collect();
+        let mr = MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
+            0,
+            Compression::none().build(),
+            partition_leader_epoch,
+            &records,
+        );
+        build_completed_fetch_with_raw_records(h, partition, mr.buffer().to_vec())
+    }
+
     /// Translated from `FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`
     /// (KAFKA-15529). With `max.poll.records` one above the record count the
     /// fetch is exhausted within one `collect_fetch`, and when it is drained the
@@ -1427,6 +1483,9 @@ mod tests {
 
     /// The partition collected in full before the cancellation.
     const CANCEL_DONE: (&str, i32) = ("topic-a", 0);
+    /// The partition leader epoch of `CANCEL_DONE`'s batch, so its moved
+    /// position carries an offset epoch, as with a real broker.
+    const CANCEL_DONE_LEADER_EPOCH: i32 = 5;
     /// The partition whose record 3 the deserializer is pending on.
     const CANCEL_IN_FLIGHT: (&str, i32) = ("topic-b", 0);
 
@@ -1460,8 +1519,12 @@ mod tests {
             guard.seek(&done, 0).unwrap();
             guard.seek(&in_flight, 0).unwrap();
         }
-        h.fetch_buffer
-            .add(build_completed_fetch(h, done, 0, DEFAULT_RECORD_COUNT, None));
+        h.fetch_buffer.add(build_completed_fetch_with_leader_epoch(
+            h,
+            done,
+            DEFAULT_RECORD_COUNT,
+            CANCEL_DONE_LEADER_EPOCH,
+        ));
         h.fetch_buffer
             .add(build_completed_fetch(h, in_flight, 0, DEFAULT_RECORD_COUNT, None));
         collector
@@ -1663,6 +1726,84 @@ mod tests {
         assert!(offsets_of(&fetch, &done).is_empty());
         assert!(offsets_of(&fetch, &in_flight).is_empty());
         assert_eq!(1, fetch.partitions().count());
+    }
+
+    /// A leader change while a collect is pending (a KIP-951 leader update or
+    /// a metadata update, which the background task applies through
+    /// `maybe_validate_position_for_current_leader`) puts a partition the
+    /// collect has moved into AWAIT_VALIDATION at the moved offset. The
+    /// cancelled collect still moves it back, keeping the new leader: with an
+    /// offset epoch the restored position awaits validation against the new
+    /// leader, an `OffsetsForLeaderEpoch` response for the moved position is
+    /// ignored, and once validated every record is fetched and returned
+    /// exactly once; without one it goes straight to FETCHING.
+    #[test]
+    fn test_collect_cancelled_mid_fetch_after_a_leader_change_restores_the_position() {
+        let new_leader = LeaderAndEpoch::new(
+            Some(Node::new(1, "localhost".to_string(), 9092)),
+            Some(CANCEL_DONE_LEADER_EPOCH + 1),
+        );
+        for original_epoch in [Some(CANCEL_DONE_LEADER_EPOCH), None] {
+            let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+            let collector = cancel_fixture(&h);
+            let (done, in_flight) = (tp(CANCEL_DONE.0, CANCEL_DONE.1), tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1));
+            let original = FetchPosition::with_leader(0, original_epoch, LeaderAndEpoch::no_leader_or_epoch());
+            h.subs.lock().unwrap().seek_validated(&done, original).unwrap();
+
+            let mut moved = None;
+            collect_and_cancel(&h, &collector, || {
+                let mut guard = h.subs.lock().unwrap();
+                assert!(
+                    guard.maybe_validate_position_for_current_leader(&crate::ApiVersions::new(), &done, &new_leader),
+                    "the moved position carries the batch's epoch, so it awaits validation"
+                );
+                moved = guard.position(&done).unwrap().cloned();
+            });
+            let moved = moved.expect("a position");
+            assert_eq!(
+                FetchPosition::with_leader(
+                    DEFAULT_RECORD_COUNT as i64,
+                    Some(CANCEL_DONE_LEADER_EPOCH),
+                    new_leader.clone()
+                ),
+                moved
+            );
+
+            let restored = FetchPosition::with_leader(0, original_epoch, new_leader.clone());
+            {
+                let mut guard = h.subs.lock().unwrap();
+                assert_eq!(Some(&restored), guard.position(&done).unwrap(), "{original_epoch:?}");
+                assert_eq!(
+                    original_epoch.is_some(),
+                    guard.awaiting_validation(&done).unwrap(),
+                    "{original_epoch:?}"
+                );
+                if original_epoch.is_some() {
+                    // The response to the validation sent for the moved position.
+                    let mut end_offset = crate::offset_for_leader_epoch_response_data::EpochEndOffset::new();
+                    end_offset.set_leader_epoch(CANCEL_DONE_LEADER_EPOCH);
+                    end_offset.set_end_offset(DEFAULT_RECORD_COUNT as i64);
+                    assert!(guard.maybe_complete_validation(&done, &moved, &end_offset).is_none());
+                    assert!(guard.awaiting_validation(&done).unwrap(), "a stale validation is ignored");
+                    assert_eq!(Some(&restored), guard.position(&done).unwrap());
+                    // The response to the validation of the restored position.
+                    assert!(guard.maybe_complete_validation(&done, &restored, &end_offset).is_none());
+                }
+                assert!(guard.has_valid_position(&done));
+                assert_eq!(Some(&restored), guard.position(&done).unwrap());
+            }
+
+            assert!(collector.collect_fetch_now(&h.fetch_buffer).unwrap().is_empty());
+            h.fetch_buffer
+                .add(build_completed_fetch(&h, done.clone(), 0, DEFAULT_RECORD_COUNT, None));
+            h.fetch_buffer
+                .add(build_completed_fetch(&h, in_flight.clone(), 0, DEFAULT_RECORD_COUNT, None));
+            let fetch = collector.collect_fetch_now(&h.fetch_buffer).unwrap();
+            let all: Vec<i64> = (0..DEFAULT_RECORD_COUNT as i64).collect();
+            assert_eq!(all, offsets_of(&fetch, &done), "{original_epoch:?}");
+            assert_eq!(all, offsets_of(&fetch, &in_flight), "{original_epoch:?}");
+            assert!(collector.collect_fetch_now(&h.fetch_buffer).unwrap().is_empty());
+        }
     }
 
     /// Critic 100 L1 (KAFKA-15529, the Rust ownership model): Java initializes

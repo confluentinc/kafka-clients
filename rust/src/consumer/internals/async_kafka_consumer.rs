@@ -5202,10 +5202,11 @@ where
     /// # Cancellation
     ///
     /// Dropping the future (a `tokio::time::timeout` or `select!` around it)
-    /// while a deserializer is pending returns nothing and moves no position:
-    /// every position the collect had moved goes back, and the records it had
-    /// decoded are fetched again by a later `poll()` (see
-    /// `FetchCollector::collect_fetch`).
+    /// while a deserializer is pending returns nothing and moves no consumed
+    /// offset: every position the collect had moved goes back to its offset
+    /// before the call, with the partition's current leader (a leader change
+    /// meanwhile is validated as usual), and the records it had decoded are
+    /// fetched again by a later `poll()` (see `FetchCollector::collect_fetch`).
     pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error> {
         self.ensure_open()?;
 
@@ -5726,8 +5727,9 @@ where
     /// # Cancellation
     ///
     /// Dropped while a deserializer is pending, the collector moves back every
-    /// position it had moved and discards what it had decoded, so the records
-    /// are fetched again (see `FetchCollector::collect_fetch`).
+    /// position it had moved, also after a leader change, and discards what
+    /// it had decoded, so the records are fetched again (see
+    /// `FetchCollector::collect_fetch`).
     async fn collect_fetch(&self) -> Result<ConsumerRecords<K, V>, Error> {
         // Java `:2031-2049`.
         if !self.wait_reconciliation_check().await? {
