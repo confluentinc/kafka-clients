@@ -185,7 +185,7 @@ void test_create_close_destroy(void) {
 
 void test_create_destroy_without_close(void) {
     kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
-    /* Destroy without close: the Drop impl handles cleanup. */
+    /* Destroy without close: destroy closes the producer itself. */
     kafka_producer_KafkaProducer_destroy(producer);
 }
 

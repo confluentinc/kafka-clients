@@ -552,6 +552,12 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
 /// [`crate::ffi::producer`]); null is a no-op. Every `__as_Producer` view of
 /// it is invalid afterwards.
 ///
+/// A producer not closed yet is closed first, as
+/// [`kafka_producer_Producer_close`](crate::ffi::producer::kafka_producer_Producer_close)
+/// closes it: the records it holds are
+/// sent, and their delivery callbacks fire with the outcome before this
+/// returns. With no broker reachable that waits up to `delivery.timeout.ms`.
+///
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
@@ -1080,6 +1086,103 @@ mod tests {
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
             assert_eq!(*closes.lock().unwrap(), vec![None, None]);
             assert_eq!(sends.lock().unwrap().len(), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// Records a delivery callback's outcome in the test's slot: the record's
+    /// offset, or the error's message. It does not report: `_destroy` completes
+    /// the callbacks still unreported.
+    unsafe extern "C" fn record_delivery(
+        self_: *mut c_void,
+        metadata: *const crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_t,
+        error: *const kafka_common_Error_t,
+        _callback_id: i64,
+    ) {
+        let outcome = if error.is_null() {
+            // SAFETY: Test code: without an error, `metadata` is a live handle borrowed for the
+            // call.
+            Ok(unsafe { crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_offset(metadata) })
+        } else {
+            // SAFETY: Test code: `error` is a live handle borrowed for the call.
+            Err(unsafe { c_str_to_string(kafka_common_Error_message(error)) })
+        };
+        // SAFETY: Test code: `self_` is the test's slot, alive until the producer is destroyed.
+        unsafe { &*(self_ as *const std::sync::Mutex<Vec<Result<i64, String>>>) }
+            .lock()
+            .unwrap()
+            .push(outcome);
+    }
+
+    /// `_destroy` of a `KafkaProducer` the caller did not close closes it as
+    /// `close()` does, so the records it holds are delivered, and their delivery
+    /// callbacks fire with the broker's answer before `_destroy` returns. The
+    /// records stay in the accumulator (`linger.ms`) until `_destroy`. It used to
+    /// drop the producer, which force-closed it, and then stop the runtime, so a
+    /// record failed with "Producer is closed forcefully." or its callback never
+    /// fired.
+    #[test]
+    fn destroy_without_close_delivers_the_records_the_producer_holds() {
+        use crate::test_fake_broker::FakeBroker;
+
+        const SENDS: i64 = 5;
+        // The fake broker runs on a runtime of its own.
+        let broker_runtime = tokio::runtime::Runtime::new().unwrap();
+        let broker = broker_runtime.block_on(FakeBroker::start_acknowledging_produce("fake-cluster", "topic"));
+        let bootstrap = broker.bootstrap();
+        let props = box_string_map([
+            ("bootstrap.servers", bootstrap.as_str()),
+            // Non-idempotent, as the fake never answers InitProducerId.
+            ("enable.idempotence", "false"),
+            ("linger.ms", "60000"),
+        ]);
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let delivered = std::sync::Mutex::new(Vec::<Result<i64, String>>::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (no call
+        // fails), `props`, `config`, `record`, `callback` and the producer are live from their
+        // constructor to their single destroy below, each future is read and destroyed once, the
+        // value `get` returns is the future's own record-metadata handle, read before the future is
+        // destroyed, and `delivered` outlives the destroy that runs the callbacks writing it.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let producer =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_ProducerConfig_destroy(config);
+            let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
+                &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
+                record_delivery,
+            );
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut futures = Vec::new();
+            for _ in 0..SENDS {
+                futures.push(kafka_producer_KafkaProducer_send(producer, record, callback, &raw mut err));
+                assert!(err.is_null());
+            }
+            assert!(delivered.lock().unwrap().is_empty(), "the records are still held");
+
+            kafka_producer_KafkaProducer_destroy(producer);
+
+            assert_eq!(
+                *delivered.lock().unwrap(),
+                (0..SENDS).map(Ok).collect::<Vec<_>>(),
+                "each callback fired with its record's offset before destroy returned"
+            );
+            for (offset, future) in (0..SENDS).zip(futures) {
+                let value = crate::ffi::kafka_future::kafka_common_KafkaFuture_get(future, &raw mut err);
+                assert!(err.is_null(), "the record was delivered");
+                assert_eq!(
+                    crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_offset(value as *const _),
+                    offset
+                );
+                kafka_common_KafkaFuture_destroy(future);
+            }
+            crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
         }
     }
