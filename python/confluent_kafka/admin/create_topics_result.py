@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -64,10 +64,10 @@ class _TopicMetadataAndConfig:
         Form("exception"),
         name="TopicMetadataAndConfig",
     )
-    def __init__(self, *, topic_id: Uuid | None = None, num_partitions: int | None = None,
-                 replication_factor: int | None = None, config: Config | None = None,
-                 exception: ApiError | None = None) -> None:
-        if exception is None:
+    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
+                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                 exception: ApiError | None = MISSING) -> None:
+        if exception is MISSING:
             self._exception: ApiError | None = None
             self._topic_id = topic_id
             self._num_partitions = num_partitions

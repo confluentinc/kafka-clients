@@ -2489,6 +2489,7 @@ impl Renderer<'_> {
             imp.first("confluent_kafka._java", "java_str");
         }
         if self.r.holder.is_some() {
+            imp.first("confluent_kafka._args", "MISSING");
             imp.first("confluent_kafka._args", "Form");
             imp.first("confluent_kafka._args", "java_forms");
         }
@@ -2715,10 +2716,10 @@ class _{H}:
         Form("exception"),
         name="{H}",
     )
-    def __init__(self, *, topic_id: Uuid | None = None, num_partitions: int | None = None,
-                 replication_factor: int | None = None, config: Config | None = None,
-                 exception: ApiError | None = None) -> None:
-        if exception is None:
+    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
+                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                 exception: ApiError | None = MISSING) -> None:
+        if exception is MISSING:
             self._exception: ApiError | None = None
             self._topic_id = topic_id
             self._num_partitions = num_partitions

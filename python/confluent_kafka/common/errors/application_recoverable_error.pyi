@@ -14,9 +14,18 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.ApplicationRecoverableError).
 
+from typing import overload
+
 from confluent_kafka.common.errors.api_error import ApiError
 
 __all__ = ["ApplicationRecoverableError"]
 
 class ApplicationRecoverableError(ApiError):
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...

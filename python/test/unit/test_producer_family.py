@@ -50,7 +50,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.common import (
     AsyncKafkaFuture,
     KafkaError,
@@ -213,10 +213,10 @@ def test_transaction_methods_take_no_timeout() -> None:
 
 def test_send_callback_defaults_to_unset() -> None:
     # Java's send(record) passes null to send(record, callback) (CLAUDE.md,
-    # Signatures, "'Given' means ..."): callback defaults to UNSET. Both sets
+    # Signatures, "'Given' means ..."): callback defaults to MISSING. Both sets
     # are Java overloads, so there is no check, and send fills an omitted one.
     for cls in (Producer, AsyncProducer, MockProducer, AsyncMockProducer):
-        assert inspect.signature(cls.send).parameters["callback"].default is UNSET, cls
+        assert inspect.signature(cls.send).parameters["callback"].default is MISSING, cls
     p = MockProducer(auto_complete=True, partitioner=None)
     assert p.send(record=RECORD).get().offset() == 0
     assert p.send(record=RECORD, callback=None).get().offset() == 1

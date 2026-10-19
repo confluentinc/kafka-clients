@@ -12,8 +12,8 @@ it gets no keyword constructor, and its subclasses construct as Java's do (CLAUD
 Python Binding Conventions, Class family). Its type parameter
 ``T extends AbstractOptions`` only stands for the class itself, so the setter returns
 ``typing.Self``. ``timeoutMs()`` and ``timeoutMs(Integer)`` share one name: one
-method, two stubs; its argument defaults to ``_args.UNSET``, so an explicit ``None``
-sets Java's ``null`` instead of reading (Signatures).
+method, two stubs; left out, it reads, and an explicit ``None`` sets Java's ``null``
+(Signatures).
 """
 === AbstractOptions class
 """The common APIs shared by the Options classes of the admin client commands.
@@ -40,7 +40,7 @@ left out leaves the field at Java's starting value. Java re-declares ``timeoutMs
 Java builds it with setters, so the constructor also takes one keyword per setter
 field (CLAUDE.md, Python Binding Conventions, Signatures). Each setter shares its name
 with its getter: one method, two stubs, no argument reading and one argument setting.
-The arguments are not nullable, so their default is ``None`` ("not given": read).
+Left out, the argument reads; it is not nullable, so a ``None`` raises ``TypeError``.
 """
 === DescribeTopicsOptions method include_authorized_operations
 """With ``include_authorized_operations``: set it and return this object.
@@ -75,8 +75,8 @@ field, named after the field, not the setter: ``group_states`` calls
 ``in_group_states``, ``types`` calls ``with_types``, ``protocol_types`` calls
 ``with_protocol_types`` (CLAUDE.md, Python Binding Conventions, Signatures). The
 setters store a changed value: ``null`` or empty becomes ``Set.of()``, anything else a
-``Set.copyOf`` copy. ``Set.copyOf``'s ``NullPointerException`` on a ``null`` element is an
-implicit dereference of the argument, not a check, so it is not translated.
+``Set.copyOf`` copy, whose ``NullPointerException`` on a ``null`` element is
+``TypeError("<argument> must not contain None")``.
 Java's sets are immutable, so the getters return a new ``set`` each call. The static
 factories are ``@staticmethod``\\ s.
 """
@@ -123,11 +123,11 @@ field (CLAUDE.md, Python Binding Conventions, Signatures). Two Java setters writ
 ``maxlifeTimeMs(long)``; the keyword ``max_lifetime_ms`` calls the one named like the
 field, and the deprecated pair (setter and getter) is not generated (Class family).
 ``owner()`` returns ``Optional.ofNullable(owner)``, so the field can hold ``null``:
-the setter's argument is nullable, and, as it shares its name with the getter,
-defaults to ``_args.UNSET`` so that ``owner(owner=None)`` sets ``null``.
+the setter's argument is nullable, so ``owner(owner=None)`` sets ``null``.
 ``renewers`` is not nullable (it starts as ``new LinkedList<>()``, Java has no null branch
 or Javadoc for it, and the admin client iterates it), so ``renewers()`` with no argument
-reads and ``None`` is "not given" (Signatures, Nullability).
+reads and ``renewers(renewers=None)`` raises ``TypeError`` *(at the setter, where Java
+fails in the admin client)* (Signatures, Nullability).
 
 Not generated (deprecated): ``maxlifeTimeMs(long)``, ``maxlifeTimeMs()``.
 """
@@ -144,10 +144,11 @@ this object. Without: the maximum lifetime in milliseconds."""
 Java has a constructor that takes arguments, so the class keeps only Java's
 constructors, ``(members)`` and ``()``, as one keyword-only constructor; every
 combination is one of them, so there is no ``java_forms`` check (CLAUDE.md, Python
-Binding Conventions, Signatures). ``members=None`` is the same as leaving it out: the
-``()`` form, which removes all members. Java's setter ``reason(String)`` returns
-``void``, so ``reason(reason=…)`` returns ``None``; it shares its name with the getter,
-and its argument is nullable ("an optional reason"), so it defaults to ``_args.UNSET``.
+Binding Conventions, Signatures). Leaving ``members`` out is the ``()`` form, which
+removes all members; ``members=None`` raises ``TypeError``, as Java's
+``members.isEmpty()`` on a null. Java's setter ``reason(String)`` returns ``void``, so
+``reason(reason=…)`` returns ``None``; it shares its name with the getter, and its
+argument is nullable ("an optional reason"), so ``reason(reason=None)`` sets ``null``.
 """
 === RemoveMembersFromConsumerGroupOptions method reason
 """With ``reason``: sets an optional reason (returns ``None``, as Java's
@@ -157,8 +158,8 @@ Java builds it with setters, so the constructor also takes one keyword per sette
 field, named after the field (``filtered_states`` calls ``filter_states``, …) (CLAUDE.md,
 Python Binding Conventions, Signatures). Java's ``hashCode`` hashes the two set
 fields, so they are stored as ``frozenset``\\ s (hashable) and their getters return a new
-``set``. ``new HashSet<>(null)`` is an implicit dereference, not a check: a ``None``
-argument raises what ``frozenset(None)`` raises. Like Java, ``toString`` prints
+``set``. ``new HashSet<>(null)`` dereferences its argument: a ``None`` raises
+``TypeError`` naming it. Like Java, ``toString`` prints
 ``timeoutMs`` but ``equals`` / ``hashCode`` leave it out.
 """
 === ListTransactionsOptions method filter_states
@@ -196,8 +197,8 @@ broker id, or ``None`` when not set."""
 === ListOffsetsOptions module
 Java has a constructor that takes an argument, so the class keeps only Java's
 constructors, ``()`` and ``(isolationLevel)``, as one keyword-only constructor
-(CLAUDE.md, Python Binding Conventions, Signatures). ``()`` calls
-``this(IsolationLevel.READ_UNCOMMITTED)``, a Java-given default, so ``isolation_level``
-defaults to that enum constant; every combination is a Java form, so there is no
+(CLAUDE.md, Python Binding Conventions, Signatures), with one stub each. ``()`` calls
+``this(IsolationLevel.READ_UNCOMMITTED)``, a Java-given default the constructor fills
+when ``isolation_level`` is left out; every combination is a Java form, so there is no
 ``java_forms`` check. ``isolationLevel`` is ``final``: there is no setter.
 """

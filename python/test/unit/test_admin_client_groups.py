@@ -156,7 +156,8 @@ def _admin(configs: dict[str, Any] | None = None) -> Admin:
 
 def _remove_options(members: list[MemberToRemove] | None = None, *, reason: str | None = None,
                     timeout_ms: int | None = SHORT) -> RemoveMembersFromConsumerGroupOptions:
-    options = RemoveMembersFromConsumerGroupOptions(members=members)
+    options = (RemoveMembersFromConsumerGroupOptions() if members is None
+               else RemoveMembersFromConsumerGroupOptions(members=members))
     options.timeout_ms(timeout_ms=timeout_ms)
     if reason is not None:
         options.reason(reason=reason)

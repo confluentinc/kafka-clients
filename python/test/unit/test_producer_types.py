@@ -84,12 +84,12 @@ def test_producer_record_forms_and_headers() -> None:
     assert str(ProducerRecord(topic="t", partition=1, key="k", value="v")) == (
         "ProducerRecord(topic=t, partition=1, headers=RecordHeaders(headers = [], "
         "isReadOnly = False), key=k, value=v, timestamp=None)")
-    # partition and key default to UNSET, so an explicit None is given: Java's
+    # partition and key default to MISSING, so an explicit None is given: Java's
     # (topic, partition, key, value) with a null key, or a null partition.
     null_key = ProducerRecord(topic="t", partition=0, key=None, value=b"v")
     assert (null_key.partition(), null_key.key(), null_key.value()) == (0, None, b"v")
     assert ProducerRecord(topic="t", partition=None, key=b"k", value=b"v").partition() is None
-    # timestamp and headers default to UNSET as well (constructors 3-6 pass a
+    # timestamp and headers default to MISSING as well (constructors 3-6 pass a
     # null to a longer one): a null timestamp selects (topic, partition,
     # timestamp, key, value), an empty header list (topic, partition, key,
     # value, headers).

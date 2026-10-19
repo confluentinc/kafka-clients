@@ -330,6 +330,13 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
             p.name: (_REQUIRED if p.default is p.empty else p.default)
             for p in keyword
         }
+        # Every parameter some overload omits defaults to MISSING; what Java's
+        # shorter overload passes is a Form default, never a signature default
+        # (CLAUDE.md, Signatures).
+        constant = [n for n, m in marker.items() if m is not _REQUIRED and m is not MISSING]
+        if constant:
+            raise TypeError(
+                f"java_forms on {fn.__qualname__}: {constant} must default to MISSING")
         required = tuple(n for n in order if marker[n] is _REQUIRED)
 
         def mask_of(names: tuple[str, ...] | list[str]) -> int:
@@ -537,8 +544,3 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
         return result
 
     return decorate
-
-
-#: The former name of ``MISSING``, kept only until the generated modules are
-#: regenerated against ``MISSING`` (they import it); the same object.
-UNSET: Any = MISSING

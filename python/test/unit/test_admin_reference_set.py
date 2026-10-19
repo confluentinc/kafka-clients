@@ -445,7 +445,13 @@ class TestRemoveMembersFromConsumerGroupOptions:
         options = RemoveMembersFromConsumerGroupOptions()
         assert options.members() == set()
         assert options.remove_all() is True
-        assert RemoveMembersFromConsumerGroupOptions(members=None).remove_all() is True
+        # Left out (or MISSING) is Java's (); a None is Java's null, whose
+        # members.isEmpty() throws.
+        from confluent_kafka._args import MISSING
+
+        assert RemoveMembersFromConsumerGroupOptions(members=MISSING).remove_all() is True
+        with pytest.raises(TypeError, match=r"^members must not be None$"):
+            RemoveMembersFromConsumerGroupOptions(members=None)  # type: ignore[call-overload]
         assert RemoveMembersFromConsumerGroupOptions(
             members=[MemberToRemove(group_instance_id="i")]).remove_all() is False
 
