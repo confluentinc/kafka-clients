@@ -41,8 +41,8 @@ name: build-test-release
 #      crate with warnings denied.
 #   6. "Check crate package (Linux amd64)" -- packages the crate and checks its
 #      contents.
-#   7. The "Release:" blocks, which run only on a release tag (see the comment
-#      above them).
+#   7. The "Release (Rust):" and "Release (Python):" blocks, which run only on
+#      a release tag of their package (see the comments above them).
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -61,41 +61,55 @@ name: build-test-release
 # It runs in a detached git worktree and pushes new commits when promotions
 # run either manually or automatically.
 #
-# Releases are driven by git tags:
-#   1. Merge the change that sets [package] version in rust/Cargo.toml to
-#      master.
+# Releases are driven by git tags, one per package:
+#   - rust/<version> publishes the confluent-kafka crate to crates.io. The
+#     version is [package] version in rust/Cargo.toml, and may carry an
+#     -alpha.N, -beta.N or -rc.N suffix.
+#   - python/<version> publishes the confluent-kafka wheels. The version is
+#     [project] version in python/pyproject.toml. A final version goes to
+#     PyPI; a pre-release, with an aN, bN or rcN suffix, goes to Test PyPI.
+#     The PyPI project is shared with confluent-kafka-python, the
+#     librdkafka-based client.
+# To release a package:
+#   1. Merge the change that sets its version to master.
 #   2. On the build of that master commit, run the manual "Create release tag"
-#      promotion (create-release-tag.yml) and enter the same version. It
-#      refuses unless every CI job passed on that build, then pushes the tag
-#      v<version>. A release version may carry an -alpha.N, -beta.N or -rc.N
-#      suffix.
+#      promotion (create-release-tag.yml), choose the package and enter the
+#      same version. It refuses unless every CI job passed on that build, then
+#      pushes the tag <package>/<version>.
 #   3. The tag push runs this pipeline on the tag. CI runs again, and the
-#      "Release:" blocks publish the crate once every CI job has passed.
+#      release blocks of that package publish it once every CI job has passed.
 # A release tag pushed by other means follows the same path from step 3. The
-# "Release:" blocks are skipped on every other build, including -dev tags used
-# to test the release process, so there is no publish to start by hand.
+# release blocks are skipped on every other build, including -dev tags used to
+# test the release process, so there is no publish to start by hand. The one
+# exception is the Python wheel blocks, which also build and test the wheels,
+# without publishing them, on a pull request that changes how they are built.
 #
 # Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release: publish to
-# crates.io".
+# block must also be added to the dependencies of "Release (Rust): publish to
+# crates.io" and "Release (Python): publish to PyPI".
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
-# A release tag build runs CI, then the publish and the post-publish checks one
-# after another, which takes longer than an ordinary build. The limit is explicit
-# so that it does not depend on Semaphore's default for a pipeline.
+# A release tag build runs CI (and, for Python, the wheel builds alongside it),
+# then the publish and the post-publish checks one after another, which takes
+# longer than an ordinary build. The limit is explicit so that it does not
+# depend on Semaphore's default for a pipeline.
 execution_time_limit:
-  hours: 2
+  hours: 3
 
 global_job_config:
   env_vars:
-    # The crate that the "Release:" blocks publish.
+    # The crate that the "Release (Rust):" blocks publish.
     - name: CRATE
+      value: confluent-kafka
+    # The PyPI project that the "Release (Python):" blocks publish: [project]
+    # name in python/pyproject.toml.
+    - name: PYPI_PACKAGE
       value: confluent-kafka
   prologue:
     commands:
@@ -350,29 +364,30 @@ blocks:
           commands:
             - make package-check
 
-  # Release blocks. They run only on the build of a release tag, v<version>
-  # with an optional -alpha.N, -beta.N or -rc.N suffix, and are skipped on
-  # every other build. The tag pattern in their `run` conditions must stay
-  # identical in all of them and in create-release-tag.yml.
+  # Rust release blocks. They run only on the build of a Rust release tag,
+  # rust/<version> with an optional -alpha.N, -beta.N or -rc.N suffix, and are
+  # skipped on every other build. The tag pattern in their `run` conditions
+  # must stay identical in all of them and in create-release-tag.yml.
   #
-  # "Release: pre-publish package check" and "Release: pre-publish smoke
-  # test" build and test the crate alongside CI, on VMs that hold no secrets,
-  # and each records the SHA-256 of the .crate it tested. "Release: publish
-  # to crates.io" depends on every CI block and on both pre-publish blocks, so
-  # it starts only when all of them have passed. It runs on a separate VM and
-  # compiles nothing (`--no-verify`), so no build script or procedural macro
-  # executes while the token is loaded. It uploads a .crate only if it is byte-identical to the
-  # tested ones, which is possible because `cargo package` output is
-  # reproducible for a given commit and toolchain. The "post-publish" blocks
-  # then verify the crate as users receive it from crates.io.
+  # "Release (Rust): pre-publish package check" and "Release (Rust):
+  # pre-publish smoke test" build and test the crate alongside CI, on VMs that
+  # hold no secrets, and each records the SHA-256 of the .crate it tested.
+  # "Release (Rust): publish to crates.io" depends on every CI block and on
+  # both pre-publish blocks, so it starts only when all of them have passed. It
+  # runs on a separate VM and compiles nothing (`--no-verify`), so no build
+  # script or procedural macro executes while the token is loaded. It uploads a
+  # .crate only if it is byte-identical to the tested ones, which is possible
+  # because `cargo package` output is reproducible for a given commit and
+  # toolchain. The "post-publish" blocks then verify the crate as users receive
+  # it from crates.io.
   #
   # Semaphore runs the pipelines of one git ref one at a time, so two runs for
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
-  - name: "Release: pre-publish package check"
+  - name: "Release (Rust): pre-publish package check"
     dependencies: []
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -380,7 +395,7 @@ blocks:
         commands:
           # The version is read from rust/Cargo.toml rather than from the tag,
           # so a tag that names another version is refused, with a clear
-          # message, by "Release: publish to crates.io". record_tested_crate
+          # message, by "Release (Rust): publish to crates.io". record_tested_crate
           # records, under the given name, the SHA-256 of the .crate tested by
           # the calling job, so that the publish job can confirm it uploads the
           # same bytes. /usr/bin/python3 is the image's system Python (3.12 on
@@ -407,9 +422,15 @@ blocks:
             # submodule, which the publish job does not; every job must package
             # the same tree.
             - sudo apt install -y cmake rustup
+            # Packages and builds the crate as `cargo publish` would, with the
+            # ffi-macros edit the publish job makes (see there), then restores
+            # the two files: `cargo xtask package-check` makes the same edit
+            # itself.
+            - sed -i -e '/^ffi-macros = /d' -e 's/, "dep:ffi-macros"//' rust/Cargo.toml
+            - sed -i -e '/^ "ffi-macros",$/d' rust/Cargo.lock
             - cd rust
-            # Packages and builds the crate as `cargo publish` would.
-            - cargo package -p "${CRATE}" --locked
+            - cargo package -p "${CRATE}" --locked --allow-dirty
+            - git checkout -- Cargo.toml Cargo.lock
             # crates.io rejects a crate without a description or license only
             # at upload time, after the tests have run, and rust-version and
             # repository are displayed on the crate page. `cargo package` only
@@ -429,14 +450,14 @@ blocks:
             - cargo --locked xtask package-check
             - record_tested_crate verify-package
 
-  - name: "Release: pre-publish smoke test"
+  - name: "Release (Rust): pre-publish smoke test"
     # Tests the packaged crate against a real broker before anything is
     # uploaded. Each job starts a temporary apache/kafka container (Docker is
     # available on the Ubuntu image) and runs xtask/smoke/main.rs in a new
     # project.
     dependencies: []
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 40
     task:
@@ -444,7 +465,7 @@ blocks:
         commands:
           # The version is read from rust/Cargo.toml rather than from the tag,
           # so a tag that names another version is refused, with a clear
-          # message, by "Release: publish to crates.io". record_tested_crate
+          # message, by "Release (Rust): publish to crates.io". record_tested_crate
           # records, under the given name, the SHA-256 of the .crate tested by
           # the calling job, so that the publish job can confirm it uploads the
           # same bytes. /usr/bin/python3 is the image's system Python (3.12 on
@@ -480,7 +501,7 @@ blocks:
             - cargo --locked xtask package-smoke-test --with-broker --toolchain stable --release
             - record_tested_crate smoke-stable
 
-  - name: "Release: publish to crates.io"
+  - name: "Release (Rust): publish to crates.io"
     # Publishes the version declared in rust/Cargo.toml. The prologue refuses,
     # before the token is loaded, unless all of the following hold:
     #   - the build is of a release tag that still points at the commit the
@@ -500,10 +521,10 @@ blocks:
       - "Verify language bindings (macOS arm64)"
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
-      - "Release: pre-publish package check"
-      - "Release: pre-publish smoke test"
+      - "Release (Rust): pre-publish package check"
+      - "Release (Rust): pre-publish smoke test"
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -544,24 +565,24 @@ blocks:
               esac
               rm -f "${body}"
             }
-          # The version to publish is the tag name without its leading `v`. The
+          # The version to publish is the tag name without its leading `rust/`. The
           # block's `run` condition already limits it to release tags; the check
           # is repeated here, before the token is loaded, so that the publish
           # does not depend on that condition alone. A build whose jobs were
           # redirected to another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the
           # global prologue) did not test the tagged commit.
           - |
-            release_tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
+            release_tag_pattern='^rust/[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
             if [ "${SEMAPHORE_GIT_REF_TYPE}" != "tag" ]; then
-              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag v<version> for the master commit to release"
+              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag rust/<version> for the master commit to release"
             fi
             if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
-              refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a release tag (v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
+              refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Rust release tag (rust/<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
             fi
             if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
               refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"
             fi
-            export CRATE_VERSION="${SEMAPHORE_GIT_TAG_NAME#v}"
+            export CRATE_VERSION="${SEMAPHORE_GIT_TAG_NAME#rust/}"
           # Because a crates.io version can never be replaced, the tag must
           # still point at the commit this build tested, and that commit must be
           # part of master. Checking immediately before the upload also catches
@@ -638,15 +659,35 @@ blocks:
         - name: "cargo publish"
           commands:
             - sudo apt install -y rustup
+            # cargo refuses to package a dependency that is not on crates.io,
+            # even an optional one, so `ffi-macros` (used only by src/ffi,
+            # which is not packaged) is removed from the manifest and the lock
+            # file, hence `--allow-dirty` below. `cargo xtask package-check`
+            # and `package-smoke-test` make the same edit in Rust
+            # (`strip_ffi_macros` in rust/xtask/src/main.rs, whose tests pin
+            # these two lines), but no code built from the repository may run
+            # while the token is loaded.
+            - sed -i -e '/^ffi-macros = /d' -e 's/, "dep:ffi-macros"//' rust/Cargo.toml
+            - sed -i -e '/^ "ffi-macros",$/d' rust/Cargo.lock
+            # `--allow-dirty` would package any change, so the tree must differ
+            # from the tagged commit by this edit only. `--ignored` because
+            # cargo also packages a git-ignored file that matches `include`.
+            - |
+              changed=$(git status --porcelain --ignored --untracked-files=all) \
+                || refuse "could not read the status of the working tree"
+              if [ "${changed}" != "$(printf ' M rust/Cargo.lock\n M rust/Cargo.toml')" ]; then
+                printf '%s\n' "${changed}" >&2
+                refuse "the working tree differs from ${SEMAPHORE_GIT_TAG_NAME} by more than the ffi-macros edit"
+              fi
             - cd rust
             # Packages without building, as `cargo publish --no-verify` does,
             # and lists the contents so that the job log records what was
             # uploaded.
-            - cargo package -p "${CRATE}" --locked --no-verify
+            - cargo package -p "${CRATE}" --locked --no-verify --allow-dirty
             - crate_file="target/package/${CRATE}-${CRATE_VERSION}.crate"
             - tar -tzf "${crate_file}"
             # Proceeds only if the crate is byte-identical to the one tested by
-            # "Verify package" and both smoke tests.
+            # "Release (Rust): pre-publish package check" and both smoke tests.
             - |
               local_sha=$(sha256sum "${crate_file}") || refuse "could not hash ${crate_file}"
               local_sha=${local_sha%% *}
@@ -674,7 +715,7 @@ blocks:
             # case, the publish is treated as successful if crates.io lists
             # this exact crate.
             - |
-              if ! cargo publish -p "${CRATE}" --locked --no-verify; then
+              if ! cargo publish -p "${CRATE}" --locked --no-verify --allow-dirty; then
                 echo "cargo publish failed; checking whether crates.io has ${CRATE} ${CRATE_VERSION} anyway"
                 published=""
                 for attempt in $(seq 1 10); do
@@ -697,21 +738,21 @@ blocks:
                 echo "The uploaded crate (${uploaded_sha}) differs from the tested one (${local_sha}). Yank ${CRATE} ${CRATE_VERSION} and investigate." >&2
                 exit 1
               fi
-            # Records the checksum of the uploaded bytes, which "Release:
+            # Records the checksum of the uploaded bytes, which "Release (Rust):
             # post-publish checksum" compares with what crates.io serves.
             - echo "${uploaded_sha}  ${CRATE}-${CRATE_VERSION}.crate" > /tmp/crate.sha256
             - artifact push workflow /tmp/crate.sha256 --destination "crates-io/${CRATE}-${CRATE_VERSION}.sha256" --force
 
-  - name: "Release: post-publish checksum"
+  - name: "Release (Rust): post-publish checksum"
     # Checks that crates.io lists the version as live, with the checksum of the
     # uploaded bytes, and serves exactly those bytes for download. This block
     # and the two below load no token and repeat none of the release checks:
     # the release has already happened. A failure means the published version
     # is defective for users. Release a fixed version, and yank this one if it
     # is unusable.
-    dependencies: ["Release: publish to crates.io"]
+    dependencies: ["Release (Rust): publish to crates.io"]
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -766,14 +807,14 @@ blocks:
               fi
               echo "crates.io lists and serves exactly the uploaded ${CRATE} ${version}"
 
-  - name: "Release: post-publish smoke test (Linux amd64)"
+  - name: "Release (Rust): post-publish smoke test (Linux amd64)"
     # Each job creates a new project that depends on the released version from
     # crates.io (pinned with `=`), starts a temporary apache/kafka broker, and
     # runs the smoke test's offline checks and broker round trip, with the
     # crate's minimum supported Rust version and the latest stable toolchain.
-    dependencies: ["Release: publish to crates.io"]
+    dependencies: ["Release (Rust): publish to crates.io"]
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 40
     task:
@@ -790,12 +831,12 @@ blocks:
             - rustup toolchain install stable --profile minimal
             - cargo --locked xtask package-smoke-test --registry --with-broker --toolchain stable --release
 
-  - name: "Release: post-publish smoke test (macOS arm64)"
+  - name: "Release (Rust): post-publish smoke test (macOS arm64)"
     # Build and offline smoke test only. The broker round trip is covered on
     # Linux, and skipping Colima keeps this job short.
-    dependencies: ["Release: publish to crates.io"]
+    dependencies: ["Release (Rust): publish to crates.io"]
     run:
-      when: "tag =~ '^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 40
     task:
@@ -814,24 +855,568 @@ blocks:
           commands:
             - cargo --locked xtask package-smoke-test --registry --msrv
 
+  # Python release blocks. They run only on the build of a Python release tag,
+  # python/<version> where <version> is <major>.<minor>.<patch> with an
+  # optional aN, bN or rcN suffix (PEP 440, in its normalized form), and are
+  # skipped on every other build. The exception is the four wheel blocks, which
+  # also run, without publishing anything, on a pull request that changes how
+  # the wheels are built or this file, so that a change to the build is tested
+  # before a release depends on it. The tag pattern in their `run` conditions
+  # must stay identical in all of them and in create-release-tag.yml.
+  #
+  # Each "Release (Python): wheels" block builds the wheels for one platform,
+  # one for each supported CPython version, alongside CI and on a VM that holds
+  # no secrets (.semaphore/build-wheels.sh). It tests them
+  # (.semaphore/test-wheels.sh), then records them and the SHA-256 of each
+  # tested wheel in the workflow's artifacts. "Release (Python): publish to
+  # PyPI" depends on every CI block and on the four wheel blocks, so it starts
+  # only when all of them have passed. It runs on a separate VM, builds
+  # nothing, and uploads the recorded wheels only if each is byte-identical to
+  # a tested one. A final version goes to PyPI and a pre-release to Test PyPI.
+  # The "post-publish" blocks then verify the wheels as users receive them
+  # from that index.
+  #
+  # There are no Windows wheels: a Windows agent runs its commands in
+  # PowerShell, which cannot run the bash in this file's global prologue and
+  # epilogue.
+  #
+  # As for the crate, to resume an interrupted publish, rerun the failed blocks
+  # of the tag build.
+  - name: "Release (Python): wheels (Linux amd64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml']))"
+    execution_time_limit:
+      minutes: 90
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: WHEEL_PLATFORM
+          value: linux-amd64
+      jobs:
+        - name: "Build and test the wheels (Linux amd64)"
+          commands:
+            # cibuildwheel requires Python 3.11 or later.
+            - sem-version python 3.11
+            - sh .semaphore/build-wheels.sh
+            # The tests must load the copy of the library inside each wheel.
+            - rm -rf python/native
+            # Some unit tests read the Java sources in the kafka submodule. It
+            # is initialized after the build, so that cibuildwheel does not
+            # copy it into its container.
+            - git submodule update --init --depth=1 kafka
+            - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
+            - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
+            - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
+
+  - name: "Release (Python): wheels (Linux arm64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml']))"
+    execution_time_limit:
+      minutes: 90
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: WHEEL_PLATFORM
+          value: linux-arm64
+      jobs:
+        - name: "Build and test the wheels (Linux arm64)"
+          commands:
+            # cibuildwheel requires Python 3.11 or later.
+            - sem-version python 3.13
+            - sh .semaphore/build-wheels.sh
+            # The tests must load the copy of the library inside each wheel.
+            - rm -rf python/native
+            # Some unit tests read the Java sources in the kafka submodule. It
+            # is initialized after the build, so that cibuildwheel does not
+            # copy it into its container.
+            - git submodule update --init --depth=1 kafka
+            - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
+            - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
+            - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
+
+  - name: "Release (Python): wheels (macOS amd64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml']))"
+    execution_time_limit:
+      minutes: 90
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-amd64-6
+      env_vars:
+        - name: WHEEL_PLATFORM
+          value: macos-amd64
+        # The oldest macOS the wheels support, for the Rust library and the
+        # extension alike.
+        - name: MACOSX_DEPLOYMENT_TARGET
+          value: "11.0"
+      jobs:
+        - name: "Build and test the wheels (macOS amd64)"
+          commands:
+            # cibuildwheel requires Python 3.11 or later.
+            - sem-version python 3.13
+            - sh .semaphore/build-wheels.sh
+            # The tests must load the copy of the library inside each wheel.
+            - rm -rf python/native
+            - git submodule update --init --depth=1 kafka
+            - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
+            - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
+            - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
+
+  - name: "Release (Python): wheels (macOS arm64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$' or (pull_request =~ '.*' and change_in(['/.semaphore/build-ffi-library.sh', '/.semaphore/build-wheels.sh', '/.semaphore/test-wheels.sh', '/python/setup.py', '/python/pyproject.toml']))"
+    execution_time_limit:
+      minutes: 90
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: WHEEL_PLATFORM
+          value: macos-arm64
+        # The oldest macOS the wheels support, for the Rust library and the
+        # extension alike.
+        - name: MACOSX_DEPLOYMENT_TARGET
+          value: "11.0"
+      jobs:
+        - name: "Build and test the wheels (macOS arm64)"
+          commands:
+            # cibuildwheel requires Python 3.11 or later.
+            - sem-version python 3.13
+            - sh .semaphore/build-wheels.sh
+            # The tests must load the copy of the library inside each wheel.
+            - rm -rf python/native
+            - git submodule update --init --depth=1 kafka
+            - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
+            - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
+            - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
+
+  - name: "Release (Python): publish to PyPI"
+    # Publishes the version declared in python/pyproject.toml: a final version
+    # to PyPI, a pre-release to Test PyPI. The prologue refuses, before the
+    # token is loaded, unless all of the following hold:
+    #   - the build is of a Python release tag that still points at the commit
+    #     the build checked out;
+    #   - the tagged commit is part of master;
+    #   - the tag matches [project] version in python/pyproject.toml at that
+    #     commit, and [project] name is ${PYPI_PACKAGE};
+    #   - the version is not yet on the index it is published to. The only
+    #     exception is completing an interrupted publish of the same version
+    #     from this workflow (see the job below).
+    # The dependencies guarantee that every CI job passed and that every wheel
+    # was built and tested: Semaphore starts this block only when all of them
+    # have passed. A new CI block must be added to this list.
+    dependencies:
+      - "Verify Rust (Linux amd64)"
+      - "Verify language bindings (Linux amd64)"
+      - "Verify Rust (macOS arm64)"
+      - "Verify language bindings (macOS arm64)"
+      - "Check Rust docs (Linux amd64)"
+      - "Check crate package (Linux amd64)"
+      - "Release (Python): wheels (Linux amd64)"
+      - "Release (Python): wheels (Linux arm64)"
+      - "Release (Python): wheels (macOS amd64)"
+      - "Release (Python): wheels (macOS arm64)"
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      env_vars:
+        # The platforms of the wheel blocks above, each of which records its
+        # wheels under pypi/wheels/<platform> and their checksums under
+        # pypi/tested/<platform>.
+        - name: WHEEL_PLATFORMS
+          value: linux-amd64 linux-arm64 macos-amd64 macos-arm64
+      prologue:
+        commands:
+          # Helper functions for the checks below and for the job commands.
+          # Semaphore runs a job's prologue and commands in a single shell
+          # session, so the functions remain available to the job.
+          #
+          # refuse: fails the job with a message stating why nothing was
+          # published.
+          #
+          # simple_index <index>: prints `version <version>` for each version
+          # of ${PYPI_PACKAGE} on the index (https://pypi.org or
+          # https://test.pypi.org), yanked ones included, then `file <sha256>
+          # <filename>` for each of its files, and nothing if the project does
+          # not exist there. Returns non-zero only when the index cannot be
+          # read. It reads the JSON form of the simple repository API (PEP 691,
+          # with the version list of PEP 700). /usr/bin/python3 is the image's
+          # system Python (3.12 on Ubuntu 24.04), which provides tomllib.
+          - |
+            refuse() {
+              echo "Refusing to publish: $*" >&2
+              exit 1
+            }
+            simple_index() {
+              local body status
+              body=$(mktemp) || return 1
+              status=$(curl -sS --retry 3 --retry-delay 5 -o "${body}" -w '%{http_code}' \
+                -H 'Accept: application/vnd.pypi.simple.v1+json' "$1/simple/${PYPI_PACKAGE}/") || { rm -f "${body}"; return 1; }
+              case "${status}" in
+                200)
+                  /usr/bin/python3 -c '
+            import json, sys
+            page = json.load(open(sys.argv[1]))
+            for version in page["versions"]:
+                print("version", version)
+            for file in page["files"]:
+                print("file", file["hashes"]["sha256"], file["filename"])
+            ' "${body}" || { rm -f "${body}"; return 1; }
+                  ;;
+                404) ;;
+                *)
+                  echo "$1 returned HTTP ${status} for ${PYPI_PACKAGE}" >&2
+                  rm -f "${body}"
+                  return 1
+                  ;;
+              esac
+              rm -f "${body}"
+            }
+          # The version to publish is the tag name without its leading
+          # `python/`. The block's `run` condition already limits it to Python
+          # release tags; the check is repeated here, before the token is
+          # loaded, so that the publish does not depend on that condition
+          # alone. A build whose jobs were redirected to another branch
+          # (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the global prologue) did not
+          # test the tagged commit. A pre-release goes to Test PyPI, whose
+          # versions never reach users of PyPI; a final version goes to PyPI.
+          - |
+            release_tag_pattern='^python/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'
+            if [ "${SEMAPHORE_GIT_REF_TYPE}" != "tag" ]; then
+              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag python/<version> for the master commit to release"
+            fi
+            if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
+              refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Python release tag (python/<major>.<minor>.<patch>, optionally followed by aN, bN or rcN)"
+            fi
+            if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
+              refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"
+            fi
+            export PACKAGE_VERSION="${SEMAPHORE_GIT_TAG_NAME#python/}"
+            if [[ "${PACKAGE_VERSION}" =~ (a|b|rc)[0-9]+$ ]]; then
+              export PYPI_INDEX=https://test.pypi.org PYPI_UPLOAD_URL=https://test.pypi.org/legacy/ PYPI_TOKEN_KEY=test_pypi_token
+            else
+              export PYPI_INDEX=https://pypi.org PYPI_UPLOAD_URL=https://upload.pypi.org/legacy/ PYPI_TOKEN_KEY=pypi_token
+            fi
+            echo "${PYPI_PACKAGE} ${PACKAGE_VERSION} is published to ${PYPI_INDEX}"
+          # Because a version on PyPI can never be replaced, the tag must still
+          # point at the commit this build tested, and that commit must be part
+          # of master. Checking immediately before the upload also catches a
+          # tag that was moved or deleted while CI ran. `git ls-remote` reports
+          # a lightweight tag as the commit itself, and an annotated tag as the
+          # tag object followed by `<tag>^{}`, the commit it references.
+          # Semaphore does not stop a multi-line command at its first failing
+          # line, so each step is checked explicitly.
+          - |
+            head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
+            remote_tag=$(git ls-remote origin "refs/tags/${SEMAPHORE_GIT_TAG_NAME}" "refs/tags/${SEMAPHORE_GIT_TAG_NAME}^{}") \
+              || refuse "could not read tag ${SEMAPHORE_GIT_TAG_NAME} from origin"
+            tag_sha=$(printf '%s\n' "${remote_tag}" | awk '$2 ~ /\^\{\}$/ { peeled = $1 } $1 != "" { direct = $1 } END { print (peeled != "" ? peeled : direct) }')
+            if [ -z "${tag_sha}" ]; then
+              refuse "tag ${SEMAPHORE_GIT_TAG_NAME} no longer exists on origin"
+            fi
+            if [ "${tag_sha}" != "${head_sha}" ]; then
+              refuse "tag ${SEMAPHORE_GIT_TAG_NAME} now points at ${tag_sha}, not at ${head_sha}, which this build tested; the build of the moved tag publishes instead"
+            fi
+            git fetch --quiet --no-tags origin master \
+              || refuse "could not fetch origin/master to confirm that ${SEMAPHORE_GIT_TAG_NAME} is on master"
+            git merge-base --is-ancestor "${head_sha}" FETCH_HEAD \
+              || refuse "${SEMAPHORE_GIT_TAG_NAME} (${head_sha}) is not on master; tag a master commit"
+          # The tag must match [project] version in python/pyproject.toml at
+          # the tagged commit, which must also name the project this block
+          # publishes.
+          - |
+            manifest=$(/usr/bin/python3 -c 'import sys, tomllib; p = tomllib.load(open("python/pyproject.toml", "rb"))["project"]; n, v = p.get("name"), p.get("version"); print(n, v) if isinstance(n, str) and isinstance(v, str) else sys.exit("[project] name and version must be literal strings")') \
+              || refuse "could not read [project] name and version from python/pyproject.toml"
+            read -r manifest_name manifest_version <<< "${manifest}"
+            if [ "${manifest_name}" != "${PYPI_PACKAGE}" ]; then
+              refuse "python/pyproject.toml at this commit names the project '${manifest_name}', not ${PYPI_PACKAGE}"
+            fi
+            if [ "${PACKAGE_VERSION}" != "${manifest_version}" ]; then
+              refuse "tag ${SEMAPHORE_GIT_TAG_NAME} names version '${PACKAGE_VERSION}', but python/pyproject.toml at this commit has '${manifest_version}'; tag the commit that sets the version"
+            fi
+          # A version already on the index, whether yanked or not, cannot be
+          # published again, and PyPI refuses a file name that was ever used,
+          # even after its file was deleted. The exception is a version whose
+          # upload this workflow has already started: the publish job records
+          # upload-started before uploading, so a rerun after an interrupted
+          # upload can complete it. A version need not be higher than the ones
+          # already published: as with Apache Kafka, a patch of an older minor
+          # version can follow a newer minor version (4.4.101 after 4.5.0).
+          - |
+            listing=$(simple_index "${PYPI_INDEX}") \
+              || refuse "could not read ${PYPI_INDEX} to confirm that ${PYPI_PACKAGE} ${PACKAGE_VERSION} is new"
+            if printf '%s\n' "${listing}" | awk -v v="${PACKAGE_VERSION}" '$1 == "version" && $2 == v { found = 1 } END { exit !found }'; then
+              if artifact pull workflow pypi/upload-started --destination /tmp/upload-started --force >/dev/null 2>&1; then
+                echo "${PYPI_PACKAGE} ${PACKAGE_VERSION} is already on ${PYPI_INDEX} and this workflow started its upload; continuing to finish that publish"
+              else
+                refuse "${PYPI_PACKAGE} ${PACKAGE_VERSION} is already on ${PYPI_INDEX}, and a published version cannot be replaced; bump [project] version in python/pyproject.toml and tag that commit"
+              fi
+            else
+              echo "${PYPI_PACKAGE} ${PACKAGE_VERSION} is not yet on ${PYPI_INDEX}"
+            fi
+      jobs:
+        - name: "twine upload"
+          commands:
+            # Installed before the token is loaded. twine is the only code that
+            # runs while it is.
+            - python -m pip install twine==6.1.0
+            # Proceeds only if the wheels recorded by the wheel blocks are
+            # exactly the wheels they tested, all of this version, one set per
+            # platform. Prints `<sha256>  <wheel>` for each, and copies them
+            # into a directory of their own for the upload.
+            - |
+              wheels_dir=$(mktemp -d) && tested_dir=$(mktemp -d) && upload_dir=$(mktemp -d) \
+                || refuse "could not create a temporary directory"
+              artifact pull workflow pypi/wheels --destination "${wheels_dir}/wheels" --force >/dev/null \
+                || refuse "this workflow has no wheels for ${PYPI_PACKAGE} ${PACKAGE_VERSION}"
+              artifact pull workflow pypi/tested --destination "${tested_dir}/tested" --force >/dev/null \
+                || refuse "this workflow has no tested checksums for ${PYPI_PACKAGE} ${PACKAGE_VERSION}"
+              /usr/bin/python3 - "${wheels_dir}" "${tested_dir}" "${upload_dir}" "${PACKAGE_VERSION}" "${WHEEL_PLATFORMS}" > /tmp/upload.sha256 <<'PYTHON' \
+                || refuse "the wheels to upload are not the wheels that were tested"
+              import hashlib, os, re, shutil, sys
+
+              wheels_root, tested_root, upload_dir, version, platforms = sys.argv[1:6]
+              # The distribution name in wheel file names (PEP 427).
+              dist = re.sub(r"[-_.]+", "_", os.environ["PYPI_PACKAGE"])
+
+              def find(root, name, directory):
+                  hits = [os.path.join(parent, name) for parent, dirs, files in os.walk(root) if name in (dirs if directory else files)]
+                  if len(hits) != 1:
+                      sys.exit(f"expected one {'directory' if directory else 'file'} named {name} in the recorded artifacts, found {len(hits)}")
+                  return hits[0]
+
+              def sha256(path):
+                  digest = hashlib.sha256()
+                  with open(path, "rb") as f:
+                      for chunk in iter(lambda: f.read(1 << 20), b""):
+                          digest.update(chunk)
+                  return digest.hexdigest()
+
+              problems = []
+              for platform in platforms.split():
+                  wheel_dir = find(wheels_root, platform, True)
+                  tested = {}
+                  for line in open(find(tested_root, platform, False)):
+                      if line.strip():
+                          checksum, name = line.split()
+                          tested[name] = checksum
+                  present = sorted(os.listdir(wheel_dir))
+                  if present != sorted(tested):
+                      problems.append(f"{platform}: the recorded wheels {present} are not the tested wheels {sorted(tested)}")
+                      continue
+                  for name in present:
+                      path = os.path.join(wheel_dir, name)
+                      if not (name.startswith(f"{dist}-{version}-") and name.endswith(".whl")):
+                          problems.append(f"{platform}: {name} is not a {dist} {version} wheel")
+                      elif sha256(path) != tested[name]:
+                          problems.append(f"{platform}: {name} is not the wheel that was tested")
+                      elif os.path.exists(os.path.join(upload_dir, name)):
+                          problems.append(f"{platform}: {name} was also recorded for another platform")
+                      else:
+                          shutil.copy(path, upload_dir)
+                          print(f"{tested[name]}  {name}")
+              if problems:
+                  sys.exit("\n".join(problems))
+              PYTHON
+              cat /tmp/upload.sha256
+              echo "Uploading $(grep -c . /tmp/upload.sha256) wheels to ${PYPI_INDEX}, identical to the wheels that were tested"
+            # Checks the metadata of each wheel as the index will. It warns that
+            # the package has no long description, which does not block the
+            # upload.
+            - python -m twine check "${upload_dir}"/*.whl
+            - export TWINE_USERNAME=__token__
+            - . vault-get-secret --secret-key="${PYPI_TOKEN_KEY}" --export-as=TWINE_PASSWORD "pypi/${PYPI_PACKAGE}"
+            - test -n "${TWINE_PASSWORD:-}" || refuse "Vault returned no ${PYPI_TOKEN_KEY} for pypi/${PYPI_PACKAGE}"
+            # Recorded before the upload, so that a rerun after an interrupted
+            # upload passes the "already on the index" check (see the
+            # prologue).
+            - echo "${SEMAPHORE_JOB_ID}" > /tmp/upload-started
+            - artifact push workflow /tmp/upload-started --destination pypi/upload-started --force
+            # `--skip-existing` lets a rerun after an interrupted upload skip
+            # the wheels that the index already has. twine may also report an
+            # error for an upload that the index accepted. In either case, the
+            # publish is treated as successful if the index lists every wheel
+            # with the checksum that was tested; "Release (Python):
+            # post-publish checksum" then checks the files the index serves.
+            - |
+              if ! python -m twine upload --non-interactive --skip-existing --repository-url "${PYPI_UPLOAD_URL}" "${upload_dir}"/*.whl; then
+                echo "twine upload failed; checking whether ${PYPI_INDEX} has every wheel anyway"
+                listed=""
+                for attempt in $(seq 1 10); do
+                  if simple_index "${PYPI_INDEX}" \
+                    | awk 'NR == FNR { want[$2] = $1; next } $1 == "file" && ($3 in want) && want[$3] == $2 { seen[$3] = 1 } END { for (w in want) if (!(w in seen)) exit 1 }' /tmp/upload.sha256 -; then
+                    listed=yes
+                    break
+                  fi
+                  sleep 30
+                done
+                if [ -z "${listed}" ]; then
+                  refuse "twine upload failed and ${PYPI_INDEX} does not list every wheel with the checksum that was tested"
+                fi
+                echo "${PYPI_INDEX} lists exactly these wheels; continuing"
+              fi
+            - unset TWINE_PASSWORD
+            # Records the uploaded wheels and the index they went to, for the
+            # post-publish blocks.
+            - artifact push workflow /tmp/upload.sha256 --destination pypi/uploaded.sha256 --force
+            - printf '%s\n' "${PYPI_INDEX}" > /tmp/pypi-index
+            - artifact push workflow /tmp/pypi-index --destination pypi/index --force
+
+  - name: "Release (Python): post-publish checksum"
+    # Checks that the index lists every uploaded wheel, not yanked, with the
+    # checksum of the uploaded bytes, serves exactly those bytes for download,
+    # and lists no other file for the version. This block and the two below
+    # load no token and repeat none of the release checks: the release has
+    # already happened. A failure means the published version is defective for
+    # users. Release a fixed version, and yank this one if it is unusable.
+    dependencies: ["Release (Python): publish to PyPI"]
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 20
+    task:
+      jobs:
+        - name: "PyPI index and downloads match the upload"
+          commands:
+            # Written by the publish job after a successful upload. If they are
+            # absent, nothing was published from this workflow and the job
+            # fails.
+            - artifact pull workflow pypi/index --destination /tmp/pypi-index
+            - artifact pull workflow pypi/uploaded.sha256 --destination /tmp/uploaded.sha256
+            # Reads the index's listing, retrying because newly uploaded files
+            # take some time to appear. The listing and the downloads are
+            # served separately, so each is checked against the upload.
+            - |
+              /usr/bin/python3 - "$(cat /tmp/pypi-index)" "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/}" /tmp/uploaded.sha256 <<'PYTHON'
+              import hashlib, json, re, sys, time, urllib.request
+
+              index, package, version, uploaded_path = sys.argv[1:5]
+              dist = re.sub(r"[-_.]+", "_", package)
+              uploaded = {}
+              for line in open(uploaded_path):
+                  if line.strip():
+                      checksum, name = line.split()
+                      uploaded[name] = checksum
+
+              def fetch(url, headers=None):
+                  for attempt in range(1, 4):
+                      try:
+                          with urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=120) as response:
+                              return response.read()
+                      except OSError as error:
+                          if attempt == 3:
+                              raise
+                          print(f"{url}: {error}; retrying in 10s")
+                          time.sleep(10)
+
+              listing_url = f"{index}/simple/{package}/"
+              for attempt in range(1, 21):
+                  try:
+                      page = json.loads(fetch(listing_url, {"Accept": "application/vnd.pypi.simple.v1+json"}))
+                      files = {f["filename"]: f for f in page["files"]}
+                  except OSError as error:
+                      print(f"could not read {listing_url}: {error}")
+                      files = {}
+                  missing = sorted(name for name in uploaded if name not in files)
+                  if not missing:
+                      break
+                  print(f"{len(missing)} of the {len(uploaded)} wheels are not listed on {index} yet (attempt {attempt}/20); retrying in 30s")
+                  time.sleep(30)
+              else:
+                  sys.exit(f"{index} did not list {', '.join(missing)}")
+
+              problems = []
+              for name, file in sorted(files.items()):
+                  if (name.startswith(f"{dist}-{version}-") or name == f"{dist}-{version}.tar.gz") and name not in uploaded:
+                      problems.append(f"{name} is on {index} but was not uploaded by this workflow")
+              for name, checksum in sorted(uploaded.items()):
+                  file = files[name]
+                  downloaded = hashlib.sha256(fetch(file["url"])).hexdigest()
+                  print(f"{name}\n  uploaded:   {checksum}\n  listed:     {file['hashes'].get('sha256')}\n  downloaded: {downloaded}")
+                  if file.get("yanked"):
+                      problems.append(f"{name} is yanked on {index}")
+                  if file["hashes"].get("sha256") != checksum or downloaded != checksum:
+                      problems.append(f"{name} on {index} does not match the wheel that was uploaded")
+              if problems:
+                  sys.exit("\n".join(problems))
+              print(f"{index} lists and serves exactly the {len(uploaded)} uploaded wheels of {package} {version}")
+              PYTHON
+
+  - name: "Release (Python): post-publish smoke test (Linux amd64)"
+    # Installs the released version from the index with each supported Python
+    # version, in each Linux distribution that the wheels were tested in, and
+    # runs the import and smoke tests (.semaphore/test-wheels.sh --index). It
+    # waits for the checksum block, which waits until the index lists every
+    # wheel.
+    dependencies: ["Release (Python): post-publish checksum"]
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      jobs:
+        - name: "Install from the index (Linux amd64)"
+          commands:
+            - artifact pull workflow pypi/index --destination /tmp/pypi-index
+            - sh .semaphore/test-wheels.sh --index "$(cat /tmp/pypi-index)/simple/" "${SEMAPHORE_GIT_TAG_NAME#python/}"
+
+  - name: "Release (Python): post-publish smoke test (macOS arm64)"
+    dependencies: ["Release (Python): post-publish checksum"]
+    run:
+      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      jobs:
+        - name: "Install from the index (macOS arm64)"
+          commands:
+            - artifact pull workflow pypi/index --destination /tmp/pypi-index
+            - sh .semaphore/test-wheels.sh --index "$(cat /tmp/pypi-index)/simple/" "${SEMAPHORE_GIT_TAG_NAME#python/}"
+
 promotions:
   - name: Start translation plan
     pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
-  # Manual. Tags the commit of this master build as v<RELEASE_VERSION>, which
-  # starts a release (see the header and the "Release:" blocks).
-  # RELEASE_VERSION serves as a typed confirmation: unless it equals [package]
-  # version in rust/Cargo.toml at this commit, no tag is created.
+  # Manual. Tags the commit of this master build as
+  # <PACKAGE>/<RELEASE_VERSION>, which starts the release of that package (see
+  # the header and the release blocks). RELEASE_VERSION serves as a typed
+  # confirmation: unless it equals the package's version at this commit, no tag
+  # is created.
   - name: Create release tag
     pipeline_file: create-release-tag.yml
     parameters:
       env_vars:
+        - name: PACKAGE
+          required: true
+          options:
+            - rust
+            - python
+          description: "The package to release: rust publishes the
+            confluent-kafka crate to crates.io; python publishes the
+            confluent-kafka wheels to PyPI, or to Test PyPI for a
+            pre-release."
         - name: RELEASE_VERSION
           required: true
-          description: "The confluent-kafka version to release, without a
-            leading v (for example 0.2.0 or 0.2.0-rc.1). Must equal [package]
-            version in rust/Cargo.toml at this commit."
+          description: "The version to release. For rust, [package] version in
+            rust/Cargo.toml at this commit (for example 0.2.0 or 0.2.0-rc.1);
+            for python, [project] version in python/pyproject.toml at this
+            commit (for example 0.2.0 or 0.2.0rc1)."
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
