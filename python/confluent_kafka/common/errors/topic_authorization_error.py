@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from typing import ClassVar
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import UNSET, Form, java_forms, reject_str
 from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.authorization_error import AuthorizationError
 
@@ -51,6 +51,7 @@ class TopicAuthorizationError(AuthorizationError):
         unauthorized_topics: Iterable[str] = UNSET,
         _java_form: int = -1,
     ) -> None:
+        reject_str("unauthorized_topics", unauthorized_topics)
         unauthorized_topics = _throwable.materialize(unauthorized_topics)
         if _java_form == 0:
             _throwable.init(self, message, None)

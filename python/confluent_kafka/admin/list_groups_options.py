@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, TypeVar
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import UNSET, reject_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 if TYPE_CHECKING:
@@ -118,6 +118,8 @@ class ListGroupsOptions(AbstractOptions):
     def with_protocol_types(self, *, protocol_types: Iterable[str] | None) -> ListGroupsOptions:
         """If protocol types is set, only groups of these protocol types will be
         returned by ``list_groups()``. Otherwise, all groups are returned."""
+        if protocol_types is not None:
+            reject_str("protocol_types", protocol_types)
         self._protocol_types = _copy_of(protocol_types)
         self._record("with_protocol_types", self._protocol_types)
         return self

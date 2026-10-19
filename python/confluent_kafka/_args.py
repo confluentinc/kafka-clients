@@ -55,7 +55,7 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-__all__ = ["UNSET", "Form", "is_given", "java_forms"]
+__all__ = ["UNSET", "Form", "is_given", "java_forms", "reject_str"]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -137,6 +137,19 @@ def _is_not_given(value: object, marker: object) -> bool:
         return type(value) is type(marker) and bool(value == marker)
     except Exception:  # noqa: BLE001 - an exotic __eq__ never reads as "not given"
         return False
+
+
+def reject_str(name: str, value: object, *, element: str = "str") -> None:
+    """Refuse a ``str``, ``bytes`` or ``bytearray`` given for ``name``, a parameter
+    whose Java type is a collection of ``String`` (CLAUDE.md, Python Binding
+    Conventions, Signatures). Java cannot receive one there; Python would iterate
+    it by character, so ``subscribe(topics="orders")`` would subscribe to "o", "r",
+    "d", "e", "s" and ``delete_topics(topics="orders")`` would delete them. Python's
+    own ``TypeError``, raised before any other check, like a positional call's. ``element``
+    names what the iterable holds when it is not ``str`` (``"lists of str"`` for a
+    ``List<List<String>>``)."""
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"{name} must be an iterable of {element}, not {type(value).__name__}")
 
 
 def is_given(value: object, default: object) -> bool:

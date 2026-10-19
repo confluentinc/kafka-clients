@@ -39,6 +39,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from confluent_kafka._args import reject_str
 from confluent_kafka._errors import from_borrowed_ffi_error
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.errors.api_error import ApiError
@@ -181,6 +182,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DESCRIBE_TOPIC_ID_COLLECTION",
+    "describe_topic_names",
+    "group_ids_list",
+    "transactional_ids_list",
     "DESCRIBE_TOPIC_NAMES",
     "DESCRIBE_TOPIC_NAME_COLLECTION",
     "Kind",
@@ -451,6 +455,7 @@ def topic_collection_target(topics: Any, rpc: str) -> tuple[bool, list[Any]]:
     from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
     if not isinstance(topics, TopicCollection):
+        reject_str("topics", topics)
         return False, list(topics)
     if isinstance(topics, TopicCollection.TopicIdCollection):
         return True, topics.topic_ids()
@@ -552,6 +557,27 @@ def _topic_description(raw: tuple[Any, ...]) -> TopicDescription:
 DESCRIBE_TOPIC_NAMES = 0
 DESCRIBE_TOPIC_NAME_COLLECTION = 1
 DESCRIBE_TOPIC_ID_COLLECTION = 2
+
+
+def describe_topic_names(topic_names: Iterable[str]) -> list[str]:
+    """``describeTopics(Collection<String> topicNames)``'s names as a list; a ``str``
+    is refused (``reject_str``)."""
+    reject_str("topic_names", topic_names)
+    return list(topic_names)
+
+
+def group_ids_list(group_ids: Iterable[str]) -> list[str]:
+    """A ``Collection<String> groupIds`` as a list; a ``str`` is refused
+    (``reject_str``)."""
+    reject_str("group_ids", group_ids)
+    return list(group_ids)
+
+
+def transactional_ids_list(transactional_ids: Iterable[str]) -> list[str]:
+    """A ``Collection<String> transactionalIds`` as a list; a ``str`` is refused
+    (``reject_str``)."""
+    reject_str("transactional_ids", transactional_ids)
+    return list(transactional_ids)
 
 
 def describe_topics_args(form: int, keys: list[Any]) -> tuple[Any, ...]:
@@ -1587,7 +1613,10 @@ def alter_client_quotas_result(native: Any, kind: Kind, loop: asyncio.AbstractEv
 
 def describe_user_scram_credentials_args(users: Iterable[str] | None) -> tuple[Any, ...]:
     """``Admin_describe_user_scram_credentials(h, users, options)``'s plain arguments:
-    ``None`` is Java's ``null`` users (every user)."""
+    ``None`` is Java's ``null`` users (every user); a ``str`` is refused
+    (``reject_str``)."""
+    if users is not None:
+        reject_str("users", users)
     return (None if users is None else list(users),)
 
 
@@ -1771,7 +1800,8 @@ def _transactional_id_key(transactional_id: str) -> _CoordinatorKey:
 
 def describe_transactions_args(transactional_ids: Iterable[str]) -> tuple[Any, ...]:
     """``Admin_describe_transactions(h, transactional_ids, options)``'s plain
-    arguments."""
+    arguments; a ``str`` is refused (``reject_str``)."""
+    reject_str("transactional_ids", transactional_ids)
     return (list(dict.fromkeys(transactional_ids)),)
 
 
@@ -1867,7 +1897,9 @@ def list_transactions_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
 
 
 def fence_producers_args(transactional_ids: Iterable[str]) -> tuple[Any, ...]:
-    """``Admin_fence_producers(h, transactional_ids, options)``'s plain arguments."""
+    """``Admin_fence_producers(h, transactional_ids, options)``'s plain arguments;
+    a ``str`` is refused (``reject_str``)."""
+    reject_str("transactional_ids", transactional_ids)
     return (list(dict.fromkeys(transactional_ids)),)
 
 

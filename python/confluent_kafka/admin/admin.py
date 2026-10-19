@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Any, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import UNSET, Form, java_forms, reject_str
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka._wait import WAIT_SLICE_S
@@ -566,6 +566,7 @@ class Admin(_AdminState):
         ``options``: the options to use when deleting the topics (Java's short forms
         pass ``new DeleteTopicsOptions()``). Returns the ``DeleteTopicsResult``.
         """
+        reject_str("topics", topics)  # the shape check precedes the closed check
         self._check_not_closed()
         if options is None:
             options = DeleteTopicsOptions()
@@ -613,12 +614,15 @@ class Admin(_AdminState):
         short forms pass ``new DescribeTopicsOptions()``). Returns the
         ``DescribeTopicsResult``.
         """
+        if topics is None:
+            reject_str("topic_names", topic_names)  # the shape check precedes the closed check
         self._check_not_closed()
         if options is None:
             options = DescribeTopicsOptions()
         if topics is None:
             assert topic_names is not None
-            form, keys = _conversions.DESCRIBE_TOPIC_NAMES, list(topic_names)
+            form, keys = (_conversions.DESCRIBE_TOPIC_NAMES,
+                          _conversions.describe_topic_names(topic_names))
         else:
             by_ids, keys = _conversions.topic_collection_target(topics, "describeTopics")
             form = (_conversions.DESCRIBE_TOPIC_ID_COLLECTION if by_ids
@@ -1056,10 +1060,11 @@ class Admin(_AdminState):
         passes ``new DescribeConsumerGroupsOptions()``). Returns the
         ``DescribeConsumerGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
         if options is None:
             options = DescribeConsumerGroupsOptions()
-        native = self._call(_lib.Admin_describe_consumer_groups, list(group_ids),
+        native = self._call(_lib.Admin_describe_consumer_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.describe_consumer_groups_result(native, Sync, None)
 
@@ -1115,10 +1120,11 @@ class Admin(_AdminState):
         ``new DeleteConsumerGroupsOptions()``). Returns the
         ``DeleteConsumerGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupsOptions()
-        native = self._call(_lib.Admin_delete_consumer_groups, list(group_ids),
+        native = self._call(_lib.Admin_delete_consumer_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.delete_consumer_groups_result(native, Sync, None)
 
@@ -1623,7 +1629,7 @@ class Admin(_AdminState):
         """
         if options is None:
             options = DescribeTransactionsOptions()
-        ids = list(transactional_ids)
+        ids = _conversions.transactional_ids_list(transactional_ids)
         native = self._call(_lib.Admin_describe_transactions,
                             *_conversions.describe_transactions_args(ids), options._setters_ran())
         return _conversions.describe_transactions_result(native, Sync, None, ids)
@@ -1678,7 +1684,7 @@ class Admin(_AdminState):
         """
         if options is None:
             options = FenceProducersOptions()
-        ids = list(transactional_ids)
+        ids = _conversions.transactional_ids_list(transactional_ids)
         native = self._call(_lib.Admin_fence_producers, *_conversions.fence_producers_args(ids),
                             options._setters_ran())
         return _conversions.fence_producers_result(native, Sync, None, ids)
@@ -1725,10 +1731,11 @@ class Admin(_AdminState):
         passes ``new DescribeClassicGroupsOptions()``). Returns the
         ``DescribeClassicGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
         if options is None:
             options = DescribeClassicGroupsOptions()
-        native = self._call(_lib.Admin_describe_classic_groups, list(group_ids),
+        native = self._call(_lib.Admin_describe_classic_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.describe_classic_groups_result(native, Sync, None)
 

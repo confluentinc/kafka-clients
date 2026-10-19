@@ -68,6 +68,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import reject_str
 from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
@@ -341,7 +342,8 @@ _BLANK_TOPIC_PARTITION = TopicPartition(topic="", partition=0)
 def blank_null_topics(topics: Iterable[str]) -> list[str]:
     """``subscribe(topics)``'s topics for the FFI, a ``None`` topic as ``""``
     (Java: ``isBlank(topic)`` → "Topic collection to subscribe to cannot
-    contain null or empty topic")."""
+    contain null or empty topic"). A ``str`` is refused (``reject_str``)."""
+    reject_str("topics", topics)
     return ["" if topic is None else topic for topic in topics]
 
 

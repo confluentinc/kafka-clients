@@ -61,6 +61,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from confluent_kafka._args import reject_str
 from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
@@ -285,6 +286,7 @@ class MockConsumerCore(Generic[K, V]):
     def _c_subscribe_topics(self, topics: Iterable[str],
                           callback: ConsumerRebalanceListener | None) -> None:
         """Java's private ``subscribe(Collection, Optional)``."""
+        reject_str("topics", topics)
         with self._lock:
             self._ensure_not_closed()
             self._committed_offsets.clear()

@@ -58,7 +58,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import UNSET, reject_str
 from confluent_kafka._java import java_str, parse_int
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
@@ -427,7 +427,11 @@ class MockAdminClientBuilderCore:
         return self
 
     def broker_log_dirs(self, *, broker_log_dirs: Sequence[Sequence[str]]) -> Self:
-        self._broker_log_dirs = list(broker_log_dirs)
+        reject_str("broker_log_dirs", broker_log_dirs, element="lists of str")
+        dirs = list(broker_log_dirs)  # read once: a one-shot iterable keeps its items
+        for broker_dirs in dirs:
+            reject_str("broker_log_dirs", broker_dirs)
+        self._broker_log_dirs = dirs
         return self
 
     def default_replication_factor(self, *, default_replication_factor: int) -> Self:
@@ -855,6 +859,8 @@ class MockAdminClientCore:
 
     def _describe_topics(self, topic_names: Iterable[str] | None,
                          topics: TopicCollection | None) -> DescribeTopicsResult[Any]:
+        if topic_names is not None:
+            reject_str("topic_names", topic_names)
         from confluent_kafka.admin.describe_topics_result import DescribeTopicsResult
         from confluent_kafka.common import TopicCollection
 
@@ -1334,6 +1340,7 @@ class MockAdminClientCore:
 
     def _describe_consumer_groups(self, group_ids: Iterable[str]
                                   ) -> DescribeConsumerGroupsResult[Any]:
+        reject_str("group_ids", group_ids)
         with self._lock:
             raise _unsupported(_NOT_IMPLEMENTED)
 
@@ -1368,6 +1375,7 @@ class MockAdminClientCore:
 
     def _delete_consumer_groups(self, group_ids: Iterable[str]
                                 ) -> DeleteConsumerGroupsResult[Any]:
+        reject_str("group_ids", group_ids)
         with self._lock:
             raise _unsupported(_NOT_IMPLEMENTED)
 
@@ -1517,6 +1525,8 @@ class MockAdminClientCore:
     def _describe_user_scram_credentials(self, users: Sequence[str] | None
                                          ) -> DescribeUserScramCredentialsResult[Any]:
         """Not synchronized in Java."""
+        if users is not None:
+            reject_str("users", users)
         raise _unsupported(_NOT_IMPLEMENTED)
 
     def _alter_user_scram_credentials(self, alterations: Sequence[UserScramCredentialAlteration]
@@ -1635,6 +1645,7 @@ class MockAdminClientCore:
     def _describe_transactions(self, transactional_ids: Iterable[str]
                                ) -> DescribeTransactionsResult[Any]:
         """Not synchronized in Java."""
+        reject_str("transactional_ids", transactional_ids)
         raise _unsupported(_NOT_IMPLEMENTED)
 
     def _abort_transaction(self, spec: AbortTransactionSpec) -> AbortTransactionResult[Any]:
@@ -1647,6 +1658,7 @@ class MockAdminClientCore:
 
     def _fence_producers(self, transactional_ids: Iterable[str]) -> FenceProducersResult[Any]:
         """Not synchronized in Java."""
+        reject_str("transactional_ids", transactional_ids)
         raise _unsupported(_NOT_IMPLEMENTED)
 
     def _list_config_resources(self, config_resource_types: Iterable[ConfigResource.Type]
@@ -1682,6 +1694,7 @@ class MockAdminClientCore:
 
     def _describe_classic_groups(self, group_ids: Iterable[str]
                                  ) -> DescribeClassicGroupsResult[Any]:
+        reject_str("group_ids", group_ids)
         with self._lock:
             raise _unsupported(_NOT_IMPLEMENTED)
 

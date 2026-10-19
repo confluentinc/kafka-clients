@@ -2395,6 +2395,15 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     // see the same elements, even for a generator.
     for p in &model.params {
         if py_type(&p.java_ty, true, info, &mut used)?.starts_with("Iterable[") {
+            // A collection of String refuses a str (CLAUDE.md, Signatures): read by
+            // character it would be the wrong topics. `reject_str` ignores every other
+            // value, UNSET and None included.
+            if matches!(
+                p.java_ty.as_str(),
+                "Set<String>" | "Collection<String>" | "List<String>" | "Iterable<String>"
+            ) {
+                body.push(format!("        reject_str(\"{0}\", {0})", p.name));
+            }
             body.push(format!("        {0} = _throwable.materialize({0})", p.name));
         }
     }
@@ -2679,6 +2688,9 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     }
     if model.decorated {
         args_names.push("java_forms");
+    }
+    if class_text.contains("reject_str(") {
+        args_names.push("reject_str");
     }
     if !args_names.is_empty() {
         pkg_block.push(format!("from confluent_kafka._args import {}", args_names.join(", ")));
