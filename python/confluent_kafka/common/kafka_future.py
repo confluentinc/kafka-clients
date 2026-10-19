@@ -29,7 +29,9 @@ Two value sources sit behind one surface:
   client;
 - :class:`_KafkaFutureImpl`, Java's ``KafkaFutureImpl``: Python state, the
   value source of ``completed_future``, of the dependants (``then_apply``,
-  ``when_complete``, ``all_of``) and of the mocks' futures.
+  ``when_complete``, ``all_of``) and of the mocks' futures. Its behaviour is
+  the mixin :class:`_FutureState`, so a future can be its own state: the
+  asyncio producer's record is one (``async_producer._AsyncRecord``).
 
 A future over a C handle is lazy: it is three slots, and the Python state that
 mirrors the handle (a :class:`_KafkaFutureImpl` the ``get_cb`` delivery
@@ -45,8 +47,10 @@ The extension wraps only C futures whose C ``get`` does not drain a client's
 callback queue (every admin future): a done handle is then read at once
 through ``get_if_done``, on any thread, without waiting and without running
 the client's callbacks, which is how ``get``, ``get_now`` and the state reads
-answer a done handle before its ``get_cb`` delivery has run. The producer's
-``send()`` future is backed by :class:`_KafkaFutureImpl` instead.
+answer a done handle before its ``get_cb`` delivery has run. The producers'
+``send()`` futures are backed by Python state instead: a
+:class:`_KafkaFutureImpl` on the sync producers, the record object itself on
+the asyncio ones.
 
 The cancel family is Python-side, as Java's ``KafkaFutureImpl``: ``cancel()``
 cancels the future and, through it, every dependant built from it, never its
@@ -87,7 +91,7 @@ _LONG_MAX = (1 << 63) - 1
 # which carries the Python exception a completer gave.
 _LOCAL_CALLBACK = -30
 
-# A _KafkaFutureImpl's states.
+# A _FutureState's states.
 _PENDING = 0
 _VALUE = 1
 _ERROR = 2
@@ -105,8 +109,14 @@ _LAZY_LOCK = threading.Lock()
 # ---------------------------------------------------------------------------
 
 
-class _KafkaFutureImpl(Generic[T]):
-    """Java's ``KafkaFutureImpl``: a future completed from Python, from any thread.
+class _FutureState(Generic[T]):
+    """Java's ``KafkaFutureImpl`` as a mixin: the behaviour of a future
+    completed from Python, from any thread, over four attributes the class
+    mixing it in stores: ``_lock`` (a ``threading.Lock``, its own or a shared
+    one), ``_state`` (``_PENDING`` to ``_CANCELLED``), ``_outcome`` (the value,
+    or the error) and ``_listeners``. :class:`_KafkaFutureImpl` is the state
+    standing alone; the asyncio producer's record is a future that is its own
+    state (``async_producer._AsyncRecord``), one object per send.
 
     Its listeners (dependants, the inner future, ``when_complete``) run where
     the completion runs: inside :meth:`complete` / :meth:`complete_with_error`
@@ -121,13 +131,16 @@ class _KafkaFutureImpl(Generic[T]):
     compensation achieves.
     """
 
-    __slots__ = ("_listeners", "_lock", "_outcome", "_state")
+    # No slots of its own: a class mixing it in beside another slotted base
+    # would otherwise conflict in layout. The four attributes are declared
+    # here and stored by the class mixing it in, so mypy's slot check flags
+    # their assignment below (hence the ``misc`` ignores).
+    __slots__ = ()
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._state = _PENDING
-        self._outcome: Any = None
-        self._listeners: list[Callable[[_KafkaFutureImpl[T]], None]] | None = None
+    _lock: threading.Lock
+    _state: int
+    _outcome: Any
+    _listeners: list[Callable[[_FutureState[T]], None]] | None
 
     # -- completion ------------------------------------------------------------
 
@@ -135,10 +148,10 @@ class _KafkaFutureImpl(Generic[T]):
         with self._lock:
             if self._state != _PENDING:
                 return False
-            self._state = state
+            self._state = state  # type: ignore[misc]
             self._outcome = outcome
             listeners = self._listeners
-            self._listeners = None
+            self._listeners = None  # type: ignore[misc]
         if listeners:
             # Every listener runs, so sibling dependants, the inner future and
             # all_of's count always complete; the first error a listener let
@@ -194,12 +207,12 @@ class _KafkaFutureImpl(Generic[T]):
     def is_completed_exceptionally(self) -> bool:
         return self._state >= _ERROR
 
-    def _add_listener(self, listener: Callable[[_KafkaFutureImpl[T]], None]) -> None:
+    def _add_listener(self, listener: Callable[[_FutureState[T]], None]) -> None:
         """Run ``listener(self)`` on completion, or now when already done."""
         with self._lock:
             if self._state == _PENDING:
                 if self._listeners is None:
-                    self._listeners = [listener]
+                    self._listeners = [listener]  # type: ignore[misc]
                 else:
                     self._listeners.append(listener)
                 return
@@ -213,7 +226,7 @@ class _KafkaFutureImpl(Generic[T]):
         carrying this future's failure or cancellation unchanged."""
         dependant: _KafkaFutureImpl[R] = _KafkaFutureImpl()
 
-        def on_done(source: _KafkaFutureImpl[T]) -> None:
+        def on_done(source: _FutureState[T]) -> None:
             if source._state == _VALUE:
                 try:
                     result = function(source._outcome)
@@ -237,7 +250,7 @@ class _KafkaFutureImpl(Generic[T]):
         error if this future succeeded, else with this future's."""
         dependant: _KafkaFutureImpl[T] = _KafkaFutureImpl()
 
-        def on_done(source: _KafkaFutureImpl[T]) -> None:
+        def on_done(source: _FutureState[T]) -> None:
             state, outcome = source._state, source._outcome
             try:
                 if state == _VALUE:
@@ -257,8 +270,27 @@ class _KafkaFutureImpl(Generic[T]):
         self._add_listener(on_done)
         return dependant
 
+    def __str__(self) -> str:
+        """Java's ``KafkaFutureImpl.toString()``."""
+        return _to_string(self._state, self._outcome)
+
+
+class _KafkaFutureImpl(_FutureState[T]):
+    """Java's ``KafkaFutureImpl`` standing alone: Python state with its own
+    lock, the value source of ``completed_future``, of the dependants
+    (``then_apply``, ``when_complete``, ``all_of``), of the mocks' futures and
+    of the sync producers' ``send()`` futures."""
+
+    __slots__ = ("_listeners", "_lock", "_outcome", "_state")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = _PENDING
+        self._outcome = None
+        self._listeners = None
+
     @staticmethod
-    def all_of(sources: list[_KafkaFutureImpl[Any]]) -> _KafkaFutureImpl[None]:
+    def all_of(sources: list[_FutureState[Any]]) -> _KafkaFutureImpl[None]:
         """Java's ``KafkaFuture.allOf``: completed once every source is, with
         ``None``, or failed (or cancelled) with the first failure among them."""
         result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
@@ -268,7 +300,7 @@ class _KafkaFutureImpl(Generic[T]):
         lock = threading.Lock()
         state: list[Any] = [len(sources), None]  # remaining, first failure
 
-        def on_done(source: _KafkaFutureImpl[Any]) -> None:
+        def on_done(source: _FutureState[Any]) -> None:
             with lock:
                 if source._state != _VALUE and state[1] is None:
                     state[1] = source._outcome
@@ -283,10 +315,6 @@ class _KafkaFutureImpl(Generic[T]):
         for source in sources:
             source._add_listener(on_done)
         return result
-
-    def __str__(self) -> str:
-        """Java's ``KafkaFutureImpl.toString()``."""
-        return _to_string(self._state, self._outcome)
 
 
 def _to_string(state: int, outcome: Any) -> str:
@@ -383,11 +411,13 @@ class _InnerAsyncFuture(asyncio.Future[T]):
         raise _user_completion()
 
 
-def _cancel_from_inner(impl: _KafkaFutureImpl[Any], cancelled_error: type[BaseException]
+def _cancel_from_inner(impl: _FutureState[Any], cancelled_error: type[BaseException]
                        ) -> Callable[[Any], None]:
     def on_inner_done(inner: Any) -> None:
         if inner.cancelled():
-            impl.cancel(cancelled_error())
+            # The state's cancel, not the future's: a future that is its own
+            # state answers cancel(may_interrupt_if_running=...) instead.
+            impl._settle(_CANCELLED, cancelled_error())
     return on_inner_done
 
 
@@ -404,7 +434,7 @@ class _KafkaFutureBase(Generic[T]):
     __slots__ = ("_impl", "_inner", "_native")
 
     _native: Any
-    _impl: _KafkaFutureImpl[T] | None
+    _impl: _FutureState[T] | None
     _inner: Any
 
     #: The ``CancelledError`` class of the kind.
@@ -412,9 +442,11 @@ class _KafkaFutureBase(Generic[T]):
 
     # -- the lazy state ------------------------------------------------------------
 
-    def _state(self) -> _KafkaFutureImpl[T]:
+    def _python_state(self) -> _FutureState[T]:
         """The Python state, made on first use for a future over a C handle:
-        a :class:`_KafkaFutureImpl` the handle's ``get_cb`` delivery completes."""
+        a :class:`_KafkaFutureImpl` the handle's ``get_cb`` delivery completes.
+        Not ``_state``: that is the state's own progress field, and a future
+        that is its own state (``async_producer._AsyncRecord``) has both."""
         impl = self._impl
         if impl is not None:
             return impl
@@ -436,7 +468,7 @@ class _KafkaFutureBase(Generic[T]):
         inner = self._inner
         if inner is not None:
             return inner
-        impl = self._state()
+        impl = self._python_state()
         with _LAZY_LOCK:
             inner = self._inner
             if inner is not None:
@@ -447,10 +479,10 @@ class _KafkaFutureBase(Generic[T]):
         inner.add_done_callback(_cancel_from_inner(impl, self._CANCELLED_ERROR))
         return inner
 
-    def _link(self, inner: Any) -> Callable[[_KafkaFutureImpl[T]], None]:
+    def _link(self, inner: Any) -> Callable[[_FutureState[T]], None]:
         raise NotImplementedError
 
-    def _answer(self, impl: _KafkaFutureImpl[T]) -> T:
+    def _answer(self, impl: _FutureState[T]) -> T:
         """The value of a done state, or its failure raised as ``get`` raises it."""
         state = impl._state
         if state == _VALUE:
@@ -462,7 +494,7 @@ class _KafkaFutureBase(Generic[T]):
             raise self._CANCELLED_ERROR(*error.args)
         raise _execution_error(error) from error
 
-    def _read_done_handle(self) -> _KafkaFutureImpl[T] | None:
+    def _read_done_handle(self) -> _FutureState[T] | None:
         """The Python state, settled at once from a done C handle when it is
         missing or still pending (its ``get_cb`` delivery not yet run), as
         Java's ``CompletableFuture`` reads a completed state directly: the
@@ -504,7 +536,7 @@ class _KafkaFutureBase(Generic[T]):
         core; ``False`` for a future already done."""
         if self.is_done():
             return False
-        return self._state().cancel(self._CANCELLED_ERROR())
+        return self._python_state().cancel(self._CANCELLED_ERROR())
 
     def is_cancelled(self) -> bool:
         """Returns true if this future was cancelled before it completed normally."""
@@ -567,7 +599,7 @@ class KafkaFuture(_KafkaFutureBase[T]):
         return future
 
     @classmethod
-    def _of_impl(cls, impl: _KafkaFutureImpl[U]) -> KafkaFuture[U]:
+    def _of_impl(cls, impl: _FutureState[U]) -> KafkaFuture[U]:
         """A future over Python state (``completed_future``, a dependant, a mock's)."""
         future: Any = cls.__new__(cls)
         future._native = None
@@ -587,7 +619,7 @@ class KafkaFuture(_KafkaFutureBase[T]):
         """Returns a new KafkaFuture that is completed when all the given futures
         have completed. If any future fails, the returned future fails with it.
         If multiple futures fail, the first failure is returned."""
-        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of([f._state() for f in futures]))
+        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of([f._python_state() for f in futures]))
 
     def to_completion_stage(self) -> concurrent.futures.Future[T]:
         """Gets the inner ``concurrent.futures.Future`` this future waits on,
@@ -606,7 +638,7 @@ class KafkaFuture(_KafkaFutureBase[T]):
         The function runs where this future completes (the producer's
         completion thread, the admin client's pump thread), or inside this call
         when the future is already done."""
-        return KafkaFuture._of_impl(self._state().then_apply(function))
+        return KafkaFuture._of_impl(self._python_state().then_apply(function))
 
     def when_complete(self, *, action: Callable[[T | None, BaseException | None], None]
                       ) -> KafkaFuture[T]:
@@ -624,7 +656,7 @@ class KafkaFuture(_KafkaFutureBase[T]):
 
         The action runs where this future completes, or inside this call when
         the future is already done."""
-        return KafkaFuture._of_impl(self._state().when_complete(action))
+        return KafkaFuture._of_impl(self._python_state().when_complete(action))
 
     def cancel(self, *, may_interrupt_if_running: bool) -> bool:
         """If not already completed, completes this future with a
@@ -688,13 +720,13 @@ class KafkaFuture(_KafkaFutureBase[T]):
     def _new_inner(self) -> concurrent.futures.Future[T]:
         return _InnerFuture()
 
-    def _link(self, inner: Any) -> Callable[[_KafkaFutureImpl[T]], None]:
-        def settle(impl: _KafkaFutureImpl[T]) -> None:
+    def _link(self, inner: Any) -> Callable[[_FutureState[T]], None]:
+        def settle(impl: _FutureState[T]) -> None:
             _settle_sync(inner, impl)
         return settle
 
 
-def _settle_sync(inner: concurrent.futures.Future[Any], impl: _KafkaFutureImpl[Any]) -> None:
+def _settle_sync(inner: concurrent.futures.Future[Any], impl: _FutureState[Any]) -> None:
     if inner.done():
         return
     state = impl._state
@@ -750,7 +782,7 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
         return future
 
     @classmethod
-    def _of_impl(cls, impl: _KafkaFutureImpl[U], loop: asyncio.AbstractEventLoop | None = None
+    def _of_impl(cls, impl: _FutureState[U], loop: asyncio.AbstractEventLoop | None = None
                  ) -> AsyncKafkaFuture[U]:
         """A future over Python state."""
         future: Any = cls.__new__(cls)
@@ -775,7 +807,7 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
         sources = list(futures)
         loop = next((f._loop for f in sources if f._loop is not None), None)
         return AsyncKafkaFuture._of_impl(
-            _KafkaFutureImpl.all_of([f._state() for f in sources]), loop)
+            _KafkaFutureImpl.all_of([f._python_state() for f in sources]), loop)
 
     def to_completion_stage(self) -> asyncio.Future[T]:
         """Gets the inner ``asyncio.Future`` this future waits on, on the
@@ -790,14 +822,14 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
 
         The function runs where this future completes (the event loop of an
         asyncio client), or inside this call when the future is already done."""
-        return AsyncKafkaFuture._of_impl(self._state().then_apply(function), self._loop)
+        return AsyncKafkaFuture._of_impl(self._python_state().then_apply(function), self._loop)
 
     def when_complete(self, *, action: Callable[[T | None, BaseException | None], None]
                       ) -> AsyncKafkaFuture[T]:
         """Returns a new AsyncKafkaFuture with the same result or error as this
         future, that executes the given action when this future completes; see
         :meth:`KafkaFuture.when_complete`."""
-        return AsyncKafkaFuture._of_impl(self._state().when_complete(action), self._loop)
+        return AsyncKafkaFuture._of_impl(self._python_state().when_complete(action), self._loop)
 
     def cancel(self, *, may_interrupt_if_running: bool) -> bool:
         """If not already completed, completes this future with an
@@ -856,10 +888,10 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
             self._loop = loop
         return _InnerAsyncFuture(loop=loop)
 
-    def _link(self, inner: Any) -> Callable[[_KafkaFutureImpl[T]], None]:
+    def _link(self, inner: Any) -> Callable[[_FutureState[T]], None]:
         loop: asyncio.AbstractEventLoop = inner.get_loop()
 
-        def settle(impl: _KafkaFutureImpl[T]) -> None:
+        def settle(impl: _FutureState[T]) -> None:
             if _on_loop_thread(loop):
                 _settle_async(inner, impl)
             else:
@@ -877,7 +909,7 @@ def _on_loop_thread(loop: asyncio.AbstractEventLoop) -> bool:
         return False
 
 
-def _settle_async(inner: asyncio.Future[Any], impl: _KafkaFutureImpl[Any]) -> None:
+def _settle_async(inner: asyncio.Future[Any], impl: _FutureState[Any]) -> None:
     if inner.done():
         return
     state = impl._state

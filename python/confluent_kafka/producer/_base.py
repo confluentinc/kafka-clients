@@ -30,8 +30,10 @@ the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs a
 callback). The handover of a record taken, or refused, at once is reported on
 the calling thread instead, inside the send. Both families reuse the same
 entry points: a record's completion completes the same Python state (a
-``_KafkaFutureImpl``), and they differ only in the future ``send()`` hands out
-over it (``KafkaFuture`` / ``AsyncKafkaFuture``) and where the user's callback
+``_FutureState``: a ``_KafkaFutureImpl`` on the sync producer, the record's
+own future on the asyncio one), and they differ only in the future ``send()``
+hands out over it (``KafkaFuture`` / ``AsyncKafkaFuture``) and where the
+user's callback
 runs (CLAUDE.md, Python Binding Conventions, Futures, Implementation over the
 FFI and Threads and callbacks).
 
@@ -82,7 +84,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from confluent_kafka import Duration
     from confluent_kafka.common import TopicPartition
-    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
+    from confluent_kafka.common.kafka_future import _FutureState
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -235,7 +237,7 @@ def free_error(error: int) -> None:
         _lib.KafkaError_destroy(error)
 
 
-def wait_futures(futures: list[_KafkaFutureImpl[Any]]) -> None:
+def wait_futures(futures: list[_FutureState[Any]]) -> None:
     """Wait (as :func:`wait_sliced`) until every record future of ``futures``
     (the Python state under each ``KafkaFuture`` a ``send()`` returned) is
     done: the internal wait of ``flush()`` and ``commit_transaction()``, never
@@ -246,7 +248,7 @@ def wait_futures(futures: list[_KafkaFutureImpl[Any]]) -> None:
     lock = threading.Lock()
     remaining = len(futures)
 
-    def one_done(_future: _KafkaFutureImpl[Any]) -> None:
+    def one_done(_future: _FutureState[Any]) -> None:
         nonlocal remaining
         with lock:
             remaining -= 1
@@ -370,7 +372,7 @@ class _ProducerState:
         self._uses = 0
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
-        self._futures: set[_KafkaFutureImpl[Any]] = set()
+        self._futures: set[_FutureState[Any]] = set()
         # Bound once: every completion untracks its record's future with it.
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
@@ -525,7 +527,7 @@ class _ProducerState:
                                      headers)
         return native, topic, partition
 
-    def _track(self, future: _KafkaFutureImpl[Any]) -> None:
+    def _track(self, future: _FutureState[Any]) -> None:
         """Track a sent record's future until its completion untracks it, right
         after completing it (``_discard_future``), so a flush() or
         commit_transaction() waits for the records sent before it. Untracking
