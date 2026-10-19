@@ -27,6 +27,12 @@
 //! `ApiVersions` gets the default broker response and `Metadata` gets one
 //! broker (node 0, this listener) leading partition 0 of one topic. Every
 //! other request is read and left unanswered.
+//!
+//! [`FakeBroker::start_with_group_coordinator`] additionally acts as the group
+//! coordinator: `FindCoordinator` names this listener, and a joining or
+//! heartbeating `ConsumerGroupHeartbeat` gets member epoch 1 with an empty
+//! assignment. A leave heartbeat (member epoch -1) is recorded and left
+//! unanswered, so the client's leave can only end by a timeout.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,11 +43,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
+use crate::ConsumerGroupHeartbeatRequestData;
+use crate::ConsumerGroupHeartbeatResponseData;
+use crate::FindCoordinatorRequestData;
+use crate::FindCoordinatorResponseData;
 use crate::MetadataResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::{ApiVersionsResponse, RequestHeader, RequestUtils};
+use crate::consumer_group_heartbeat_response_data::Assignment;
+use crate::find_coordinator_response_data::Coordinator;
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
 /// The node id the fake advertises for itself in its Metadata responses.
@@ -62,33 +74,61 @@ pub(crate) struct ReceivedApiVersions {
 pub(crate) struct FakeBroker {
     addr: SocketAddr,
     api_versions: Arc<Mutex<Vec<ReceivedApiVersions>>>,
+    heartbeat_epochs: Arc<Mutex<Vec<i32>>>,
     accept_task: JoinHandle<()>,
+}
+
+/// What a connection serves, shared by every connection of one fake.
+struct ServeState {
+    addr: SocketAddr,
+    api_versions: Arc<Mutex<Vec<ReceivedApiVersions>>>,
+    /// `Some` when the fake acts as the group coordinator: the member epoch
+    /// of every `ConsumerGroupHeartbeat` received, in arrival order.
+    heartbeat_epochs: Option<Arc<Mutex<Vec<i32>>>>,
+    cluster_id: String,
+    topic: String,
+    topic_id: Uuid,
 }
 
 impl FakeBroker {
     /// Binds `127.0.0.1:0` and serves every accepted connection. Metadata
     /// responses carry `cluster_id` and a single-partition `topic`.
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, false).await
+    }
+
+    /// Like [`Self::start`], and also acts as the group coordinator (see the
+    /// module docs): joins are answered, leave heartbeats are not.
+    pub(crate) async fn start_with_group_coordinator(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, true).await
+    }
+
+    async fn start_inner(cluster_id: &str, topic: &str, group_coordinator: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
         let api_versions = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&api_versions);
-        let cluster_id = cluster_id.to_string();
-        let topic = topic.to_string();
-        let topic_id = Uuid::random_uuid();
+        let heartbeat_epochs = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(ServeState {
+            addr,
+            api_versions: Arc::clone(&api_versions),
+            heartbeat_epochs: group_coordinator.then(|| Arc::clone(&heartbeat_epochs)),
+            cluster_id: cluster_id.to_string(),
+            topic: topic.to_string(),
+            topic_id: Uuid::random_uuid(),
+        });
         let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(
-                    stream,
-                    addr,
-                    Arc::clone(&seen),
-                    cluster_id.clone(),
-                    topic.clone(),
-                    topic_id,
-                ));
+                tokio::spawn(serve(stream, Arc::clone(&state)));
             }
         });
-        Self { addr, api_versions, accept_task }
+        Self { addr, api_versions, heartbeat_epochs, accept_task }
+    }
+
+    /// The member epochs of the `ConsumerGroupHeartbeat` requests received so
+    /// far, in arrival order (always empty unless started with
+    /// [`Self::start_with_group_coordinator`]).
+    pub(crate) fn heartbeat_epochs(&self) -> Vec<i32> {
+        self.heartbeat_epochs.lock().expect("fake broker mutex poisoned").clone()
     }
 
     /// `host:port` for `bootstrap.servers`.
@@ -125,14 +165,7 @@ impl Drop for FakeBroker {
     }
 }
 
-async fn serve(
-    mut stream: TcpStream,
-    addr: SocketAddr,
-    seen: Arc<Mutex<Vec<ReceivedApiVersions>>>,
-    cluster_id: String,
-    topic: String,
-    topic_id: Uuid,
-) {
+async fn serve(mut stream: TcpStream, state: Arc<ServeState>) {
     loop {
         let mut size = [0u8; 4];
         if stream.read_exact(&mut size).await.is_err() {
@@ -148,11 +181,11 @@ async fn serve(
         let response_header = header.to_response_header();
         let response = if *header.api_key() == ApiKeys::API_VERSIONS {
             let data = ApiVersionsRequestData::read(&mut accessor, version).expect("fake broker: ApiVersions body");
-            seen.lock().expect("fake broker mutex poisoned").push(ReceivedApiVersions {
-                version,
-                cluster_id: data.cluster_id.clone(),
-                node_id: data.node_id,
-            });
+            state
+                .api_versions
+                .lock()
+                .expect("fake broker mutex poisoned")
+                .push(ReceivedApiVersions { version, cluster_id: data.cluster_id.clone(), node_id: data.node_id });
             let mut body = ApiVersionsResponse::default_api_versions_response(ListenerType::Broker);
             RequestUtils::serialize(
                 response_header.data(),
@@ -161,7 +194,28 @@ async fn serve(
                 version,
             )
         } else if *header.api_key() == ApiKeys::METADATA {
-            let mut body = metadata_response(addr, &cluster_id, &topic, topic_id);
+            let mut body = metadata_response(state.addr, &state.cluster_id, &state.topic, state.topic_id);
+            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+        } else if *header.api_key() == ApiKeys::FIND_COORDINATOR && state.heartbeat_epochs.is_some() {
+            let request =
+                FindCoordinatorRequestData::read(&mut accessor, version).expect("fake broker: FindCoordinator body");
+            let mut body = find_coordinator_response(state.addr, &request, version);
+            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+        } else if *header.api_key() == ApiKeys::CONSUMER_GROUP_HEARTBEAT
+            && let Some(epochs) = &state.heartbeat_epochs
+        {
+            let request = ConsumerGroupHeartbeatRequestData::read(&mut accessor, version)
+                .expect("fake broker: ConsumerGroupHeartbeat body");
+            epochs.lock().expect("fake broker mutex poisoned").push(request.member_epoch);
+            if request.member_epoch < 0 {
+                // A leave heartbeat: never answered.
+                continue;
+            }
+            let mut body = ConsumerGroupHeartbeatResponseData::new();
+            body.member_id = Some(request.member_id.clone());
+            body.member_epoch = 1;
+            body.heartbeat_interval_ms = 100;
+            body.assignment = Some(Assignment::new());
             RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
         } else {
             continue;
@@ -174,6 +228,35 @@ async fn serve(
             return;
         }
     }
+}
+
+fn find_coordinator_response(
+    addr: SocketAddr,
+    request: &FindCoordinatorRequestData,
+    version: i16,
+) -> FindCoordinatorResponseData {
+    let mut data = FindCoordinatorResponseData::new();
+    data.error_message = None;
+    if version >= 4 {
+        data.coordinators = request
+            .coordinator_keys
+            .iter()
+            .map(|key| {
+                let mut coordinator = Coordinator::new();
+                coordinator.key = key.clone();
+                coordinator.node_id = FAKE_BROKER_NODE_ID;
+                coordinator.host = addr.ip().to_string();
+                coordinator.port = i32::from(addr.port());
+                coordinator.error_message = None;
+                coordinator
+            })
+            .collect();
+    } else {
+        data.node_id = FAKE_BROKER_NODE_ID;
+        data.host = addr.ip().to_string();
+        data.port = i32::from(addr.port());
+    }
+    data
 }
 
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {

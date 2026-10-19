@@ -891,10 +891,20 @@ impl ConsumerConfig {
                     config.bootstrap_resolve_timeout_ms = v;
                 },
                 Self::REQUEST_TIMEOUT_MS_CONFIG => {
-                    config.request_timeout_ms = parse_i32(key, value)?;
+                    // Java `ConsumerConfig` (`:618-623`): `Type.INT`, `atLeast(0)`.
+                    let v = parse_i32(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.request_timeout_ms = v;
                 },
                 Self::DEFAULT_API_TIMEOUT_MS_CONFIG => {
-                    config.default_api_timeout_ms = parse_i32(key, value)?;
+                    // Java `ConsumerConfig` (`:624-629`): `Type.INT`, `atLeast(0)`.
+                    let v = parse_i32(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.default_api_timeout_ms = v;
                 },
                 Self::METADATA_MAX_AGE_CONFIG => {
                     config.metadata_max_age_ms = parse_i64(key, value)?;
@@ -1240,6 +1250,40 @@ mod tests {
             "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
              Value must be at least 0"
         );
+    }
+
+    /// `request.timeout.ms` and `default.api.timeout.ms` are `atLeast(0)`
+    /// (Java `ConsumerConfig.java:618-629`): 0 is accepted and a negative
+    /// value is rejected when the config is built. A negative value would
+    /// otherwise reach `CompletableEvent::calculate_deadline_ms`, which maps a
+    /// negative timeout to "no deadline", so every default-timeout API and
+    /// `close()` could wait forever.
+    #[test]
+    fn test_request_and_default_api_timeout_ms_validators() {
+        for key in [
+            ConsumerConfig::REQUEST_TIMEOUT_MS_CONFIG,
+            ConsumerConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
+        ] {
+            let mut props = base_props();
+            props.insert(key.to_string(), "0".to_string());
+            let c = ConsumerConfig::new(&props).unwrap();
+            if key == ConsumerConfig::REQUEST_TIMEOUT_MS_CONFIG {
+                assert_eq!(c.request_timeout_ms, 0);
+            } else {
+                assert_eq!(c.default_api_timeout_ms, 0);
+            }
+
+            let mut props = base_props();
+            props.insert(key.to_string(), "-1".to_string());
+            let err = ConsumerConfig::new(&props).unwrap_err();
+            let Error::Config(config_error) = err else {
+                panic!("expected a config error for {key}, got {err:?}");
+            };
+            assert_eq!(
+                config_error.message(),
+                format!("Invalid value -1 for configuration {key}: Value must be at least 0")
+            );
+        }
     }
 
     /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
