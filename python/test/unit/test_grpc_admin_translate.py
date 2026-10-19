@@ -672,3 +672,21 @@ def test_log_dir_is_cordoned_crosses_the_wire():
         error=None, replica_infos={}))
     assert not plain.is_cordoned
     assert not plain.HasField("total_bytes") and not plain.HasField("usable_bytes")
+
+
+def test_consumer_request_helpers():
+    # The ConsumerService request fields the multilanguage consumer scenarios
+    # added: an optional timeout, a pattern subscription and close options.
+    assert tr._consumer_timeout(cpb.PositionRequest()) is None
+    assert tr._consumer_timeout(cpb.PositionRequest(timeout_ms=1500)) == 1.5
+    kwargs = tr._consumer_subscribe_kwargs(cpb.SubscribeRequest(pattern="t.*"), None)
+    assert set(kwargs) == {"pattern", "callback"} and kwargs["pattern"].pattern() == "t.*"
+    kwargs = tr._consumer_subscribe_kwargs(cpb.SubscribeRequest(topics=["a", "b"]), None)
+    assert kwargs == {"topics": ["a", "b"], "callback": None}
+    assert tr._consumer_close_options(cpb.ConsumerCloseRequest(consumer_id=1)) is None
+    options = tr._consumer_close_options(cpb.ConsumerCloseRequest(
+        consumer_id=1, group_membership_operation="REMAIN_IN_GROUP", close_timeout_ms=2500))
+    assert options.group_membership_operation().name == "REMAIN_IN_GROUP"
+    assert options.timeout() == 2.5
+    assert not tr._current_lag_response(None).HasField("lag")
+    assert tr._current_lag_response(0).lag == 0

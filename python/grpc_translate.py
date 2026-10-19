@@ -48,8 +48,10 @@ from confluent_kafka.common import KafkaError  # noqa: E402
 # ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
 from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
+    CloseOptions,
     ConsumerRebalanceListener,
     OffsetAndMetadata,
+    SubscriptionPattern,
 )
 from confluent_kafka.producer import ProducerRecord  # noqa: E402
 # The admin client is the new ``confluent_kafka.admin`` package: keyword-only
@@ -381,6 +383,40 @@ def _group_metadata_to_proto(group_metadata):
         member_id=group_metadata.member_id(),
         group_instance_id=group_metadata.group_instance_id(),
     )
+
+
+def _consumer_timeout(request):
+    """The optional ``timeout_ms`` of a ConsumerService request as the
+    binding's ``timeout`` (seconds): ``None`` (not given) selects the Java
+    overload without a ``Duration``."""
+    return request.timeout_ms / 1000.0 if request.HasField("timeout_ms") else None
+
+
+def _consumer_subscribe_kwargs(request, listener):
+    """SubscribeRequest -> the keyword arguments of ``Consumer.subscribe``:
+    ``pattern`` (a ``SubscriptionPattern``, Java's ``subscribe(SubscriptionPattern
+    [, listener])``) when the request carries one, else ``topics``."""
+    if request.HasField("pattern"):
+        return {"pattern": SubscriptionPattern(pattern=request.pattern), "callback": listener}
+    return {"topics": list(request.topics), "callback": listener}
+
+
+def _consumer_close_options(request):
+    """ConsumerCloseRequest -> the ``CloseOptions`` of Java's
+    ``close(CloseOptions)``, or ``None`` for the no-argument ``close()``. The
+    operation crosses as its enum constant name; the timeout is optional."""
+    if not request.HasField("group_membership_operation"):
+        return None
+    operation = CloseOptions.GroupMembershipOperation[request.group_membership_operation]
+    timeout = (request.close_timeout_ms / 1000.0
+               if request.HasField("close_timeout_ms") else None)
+    return CloseOptions(operation=operation, timeout=timeout)
+
+
+def _current_lag_response(lag):
+    """``current_lag()``'s ``int | None`` (Java's ``OptionalLong``) ->
+    CurrentLagResponse, absent ``lag`` for an empty one."""
+    return cpb.CurrentLagResponse() if lag is None else cpb.CurrentLagResponse(lag=lag)
 
 
 def _oam_to_proto(oam):
