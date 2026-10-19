@@ -931,17 +931,9 @@ impl<C: KafkaClient> Sender<C> {
         // Okay we stopped accepting requests but there may still be requests in the
         // transaction manager, accumulator or waiting for acknowledgment. Wait until
         // these are completed.
-        //
-        // Unlike Java, this also waits for `in_flight_batches` to be empty. A batch whose
-        // produce response did not complete it stays there until it expires (see
-        // `handle_produce_response_for`). Java stops without completing such a batch,
-        // so its record never resolves. Waiting lets it expire with Java's
-        // delivery-timeout error instead. `close(timeout)` still bounds the wait by
-        // forcing the close.
         while !self.force_close.load(Ordering::Acquire)
             && ((self.accumulator.has_undrained() || self.client.in_flight_request_count() > 0)
-                || self.has_pending_transactional_requests()
-                || !self.in_flight_batches.is_empty())
+                || self.has_pending_transactional_requests())
         {
             self.run_once_logging_errors().await;
         }
@@ -1280,6 +1272,9 @@ impl<C: KafkaClient> Sender<C> {
         // Java's callback holds them directly; here they are located by identity
         // (see `PendingProduceRequest`).
         let mut batches: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
+        // Where each batch taken from `in_flight_batches` was, so a batch this response
+        // does not complete goes back to the same place (see the end of this method).
+        let mut taken_from: HashMap<TopicPartition, usize> = HashMap::new();
         for (tp, identity) in &pending.batches {
             // Take the batch this request actually carried, not merely the
             // oldest one for the partition — see `PendingProduceRequest`.
@@ -1290,6 +1285,7 @@ impl<C: KafkaClient> Sender<C> {
                     .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
                 {
                     taken = Some(partition_batches.remove(index));
+                    taken_from.insert(tp.clone(), index);
                 }
                 if partition_batches.is_empty() {
                     self.in_flight_batches.remove(tp);
@@ -1389,13 +1385,20 @@ impl<C: KafkaClient> Sender<C> {
         // its buffer at expiry. A batch that is already done came from
         // `batches_awaiting_response` and only needed this response to release its
         // buffer, so release it now.
-        for mut batch in batches.into_values() {
+        //
+        // The batch goes back at the index it was taken from, because Java never moves
+        // it. That order matters: `get_expired_inflight_batches` stops at the first
+        // batch that has not expired. The list is in drain order, which is not creation
+        // order once an older batch has been retried, and nothing else in the list
+        // changes while this response is handled.
+        for (tp, mut batch) in batches {
             batch.set_inflight(false);
             if batch.is_done() {
                 self.accumulator.deallocate(&mut batch);
             } else {
-                let partition_batches = self.in_flight_batches.entry(batch.topic_partition.clone()).or_default();
-                let index = partition_batches.partition_point(|other| other.created_ms <= batch.created_ms);
+                let index = taken_from.get(&tp).copied();
+                let partition_batches = self.in_flight_batches.entry(tp).or_default();
+                let index = index.map_or(partition_batches.len(), |index| index.min(partition_batches.len()));
                 partition_batches.insert(index, batch);
             }
         }
@@ -7206,15 +7209,18 @@ mod tests {
         assert_left_in_flight_until_delivery_timeout(&mut ctx, &tp1, &future1, total_memory).await;
     }
 
-    /// A graceful close waits for a batch that a produce response did not complete, so
-    /// its record fails with the delivery-timeout error instead of never resolving.
+    /// A graceful close does not wait for a batch that a produce response did not
+    /// complete, as in Java.
+    ///
+    /// Java's shutdown loop waits only for undrained batches, in-flight requests and
+    /// transactional requests (`Sender.java:258`). The batch is in none of them, so
+    /// `run` returns without completing it, and its record is left unresolved.
     #[tokio::test]
-    async fn test_a_graceful_close_waits_for_a_batch_the_response_did_not_complete() {
+    async fn test_a_graceful_close_does_not_wait_for_a_batch_the_response_did_not_complete() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         let tp1 = ctx.tp1.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
-        let total_memory = ctx.accumulator.buffer_pool_available_memory();
 
         let future0 = ctx.append_to_accumulator_with(&tp0, 0, "k0", "v0").await;
         let future1 = ctx.append_to_accumulator_with(&tp1, 0, "k1", "v1").await;
@@ -7225,19 +7231,76 @@ mod tests {
         assert!(future1.is_done());
         assert!(!future0.is_done());
 
-        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+        // No time passes, so the batch cannot expire while the close runs. A close that
+        // waited for it would spin without yielding, so `run` is driven on a thread of
+        // its own to report that as a failure rather than a hang.
         ctx.sender.initiate_close();
-        tokio::time::timeout(std::time::Duration::from_secs(5), ctx.sender.run())
-            .await
-            .expect("the close must finish");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(ctx.sender.run());
+            let _ = done_tx.send(ctx);
+        });
+        let ctx = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the close must not wait for the batch");
 
-        assert!(future0.is_done(), "the record must not be left unresolved by the close");
-        assert_eq!(
-            future0.get().await.expect_err("the record must expire").error(),
-            Errors::RequestTimedOut
-        );
-        assert!(!ctx.accumulator.has_incomplete());
-        assert_eq!(ctx.accumulator.buffer_pool_available_memory(), total_memory);
+        assert!(!future0.is_done(), "the close must not complete the batch, as in Java");
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+    }
+
+    /// A batch the produce response does not complete goes back to its place in the
+    /// partition's in-flight list, as in Java, where it is never removed.
+    ///
+    /// The list is in drain order. An older batch that is retried is drained again
+    /// after a newer one, so the list is not in creation order. Here `A` is created
+    /// first and `B` second, and `A` is retried and resent, so the list is `[B, A]`.
+    /// The response to `B` then omits the partition. `B` must stay first, because
+    /// `get_expired_inflight_batches` stops at the first batch that has not expired.
+    #[tokio::test]
+    async fn test_a_batch_the_response_does_not_complete_keeps_its_place_in_flight() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        let created_a = ctx.time.milliseconds();
+        let future_a = ctx.append_to_accumulator_with(&tp0, 0, "a", "a").await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send A
+
+        ctx.time.sleep(10);
+        let created_b = ctx.time.milliseconds();
+        let future_b = ctx.append_to_accumulator_with(&tp0, 0, "b", "b").await;
+        ctx.sender.run_once().await.expect("run_once"); // send B
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+
+        // A fails with a retriable error and is sent again, behind B.
+        let response = ctx.produce_response(&tp0, -1, Errors::NotEnoughReplicas, 0);
+        ctx.sender.client_mut().respond_to_request(0, response);
+        ctx.sender.run_once().await.expect("run_once"); // handle A's response
+        ctx.sender.run_once().await.expect("run_once"); // resend A
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 2);
+        let created: Vec<i64> = ctx
+            .sender
+            .in_flight_batches(&tp0)
+            .iter()
+            .map(|batch| batch.created_ms)
+            .collect();
+        assert_eq!(created, [created_b, created_a], "the retried A is drained after B");
+
+        // B's response omits the partition, so B is not completed.
+        let response = ctx.produce_response_for(&[]);
+        ctx.sender.client_mut().respond_to_request(0, response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        assert!(!future_a.is_done());
+        assert!(!future_b.is_done());
+        let created: Vec<i64> = ctx
+            .sender
+            .in_flight_batches(&tp0)
+            .iter()
+            .map(|batch| batch.created_ms)
+            .collect();
+        assert_eq!(created, [created_b, created_a], "B must go back before A, where it was");
     }
 
     /// Asserts that the batch for `tp`, which a produce response did not complete, is
