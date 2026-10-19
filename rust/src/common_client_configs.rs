@@ -88,6 +88,43 @@ impl CommonClientConfigs {
     /// shipped `2 * 60 * 1000`).
     pub const DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS: i64 = 0;
 
+    /// Config key: `metadata.recovery.strategy`
+    ///
+    /// Controls how the client recovers when none of the brokers known to it
+    /// is available. If set to `none`, the client fails. If set to
+    /// `rebootstrap`, the client repeats the bootstrap process using
+    /// `bootstrap.servers`. Rebootstrapping is useful when a client
+    /// communicates with brokers so infrequently that the set of brokers may
+    /// change entirely before the client refreshes metadata. Metadata recovery
+    /// is triggered when all last-known brokers appear unavailable
+    /// simultaneously. Brokers appear unavailable when disconnected and no
+    /// current retry attempt is in-progress. Consider increasing
+    /// `reconnect.backoff.ms` and `reconnect.backoff.max.ms` and decreasing
+    /// `socket.connection.setup.timeout.ms` and
+    /// `socket.connection.setup.timeout.max.ms` for the client. Rebootstrap is
+    /// also triggered if connection cannot be established to any of the
+    /// brokers for `metadata.recovery.rebootstrap.trigger.ms` milliseconds or
+    /// if server requests rebootstrap.
+    ///
+    /// (Text of Java's `CommonClientConfigs.METADATA_RECOVERY_STRATEGY_DOC`
+    /// (`CommonClientConfigs.java:248-257`), carried as rustdoc for the reason
+    /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &str = "metadata.recovery.strategy";
+
+    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`
+    ///
+    /// If a client configured to rebootstrap using
+    /// `metadata.recovery.strategy=rebootstrap` is unable to obtain metadata
+    /// from any of the brokers in the last known metadata for this interval,
+    /// client repeats the bootstrap process using `bootstrap.servers`
+    /// configuration.
+    ///
+    /// (Text of Java's
+    /// `CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC`
+    /// (`CommonClientConfigs.java:262-264`), carried as rustdoc for the reason
+    /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &str = "metadata.recovery.rebootstrap.trigger.ms";
+
     /// Config key: `metadata.cluster.check.enable` (KIP-1242)
     ///
     /// Whether the client should send cluster and node information when

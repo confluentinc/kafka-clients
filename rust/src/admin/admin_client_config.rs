@@ -100,7 +100,7 @@ impl AdminClientConfig {
     /// `connections.max.idle.ms`
     pub const CONNECTIONS_MAX_IDLE_MS_CONFIG: &'static str = "connections.max.idle.ms";
     /// `metadata.max.age.ms`
-    pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
+    pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
     /// `metadata.cluster.check.enable` (KIP-1242).
@@ -119,10 +119,6 @@ impl AdminClientConfig {
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
-    /// `sasl.mechanism`
-    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
-    /// `sasl.jaas.config`
-    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Creates a config from a property map. `bootstrap.servers` must be non-empty.
     ///
@@ -173,7 +169,7 @@ impl AdminClientConfig {
                 Self::RECONNECT_BACKOFF_MS_CONFIG => config.reconnect_backoff_ms = parse_i64(key, value)?,
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => config.reconnect_backoff_max_ms = parse_i64(key, value)?,
                 Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => config.connections_max_idle_ms = parse_i64(key, value)?,
-                Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
+                Self::METADATA_MAX_AGE_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
                 },
@@ -190,10 +186,10 @@ impl AdminClientConfig {
                         )
                     })?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
+                SaslConfigs::SASL_MECHANISM => {
                     config.sasl_config.mechanism = value.to_string();
                 },
-                Self::SASL_JAAS_CONFIG => {
+                SaslConfigs::SASL_JAAS_CONFIG => {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {

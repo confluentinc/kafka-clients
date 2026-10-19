@@ -25,7 +25,7 @@
 //!    `AsyncKafkaConsumer::new(config, kd, vd)`.
 //! 2. The full RequestManagers + bg-task scaffold builds and spawns
 //!    without panic.
-//! 3. `Consumer` dispatch works for sync accessors (`client_id`), both on
+//! 3. `Consumer` dispatch works for sync accessors (`assignment`), both on
 //!    the concrete `KafkaConsumer` and boxed as
 //!    `Box<dyn DynConsumer<K, V>>`.
 //! 4. `close().await` through `Box<dyn DynConsumer<K, V>>` cleanly tears
@@ -49,7 +49,7 @@ use confluent_kafka::consumer::KafkaConsumer;
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
     }
 }
@@ -70,33 +70,28 @@ fn make_smoke_config() -> ConsumerConfig {
 
 /// Smoke: the production ctor succeeds against a refuses-connection
 /// broker (metadata.bootstrap is non-connecting), trait dispatch works
-/// for `client_id()` on the concrete type and through `DynConsumer`, and
+/// for a sync accessor on the concrete type and through `DynConsumer`, and
 /// `close().await` through `DynConsumer` cleanly tears down the bg task.
 /// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let consumer = KafkaConsumer::<String, String>::new(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_smoke_config(),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
     .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
-    // Static trait dispatch on the concrete type. `client_id` is the
-    // Phase-11-translated sync accessor.
-    assert_eq!(
-        consumer.client_id(),
-        "smoke-test-consumer",
-        "client_id() should round-trip the config value",
-    );
+    // Static trait dispatch on the concrete type: a fresh consumer has no
+    // assignment.
+    assert!(consumer.assignment().is_empty(), "a new consumer has no assignment");
 
     // Dynamic dispatch through `Box<dyn DynConsumer<K, V>>`: the same
     // production consumer behind the type-erased view.
     let mut consumer: Box<dyn confluent_kafka::consumer::DynConsumer<String, String>> = Box::new(consumer);
-    assert_eq!(
-        consumer.client_id(),
-        "smoke-test-consumer",
-        "client_id() through DynConsumer should match the concrete call",
+    assert!(
+        consumer.assignment().is_empty(),
+        "assignment() through DynConsumer should match the concrete call",
     );
 
     // Bg-task graceful shutdown: signal close + drop the join handle.
@@ -340,8 +335,9 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
         (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
         (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
     ]);
+    // `bootstrap.resolve.timeout.ms` stays at its default of 0, asserted by the
+    // crate's `consumer_config::tests::test_bootstrap_resolve_timeout_ms`.
     let config = ConsumerConfig::new(&props).unwrap();
-    assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
     let error =
         KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
             .err()

@@ -309,13 +309,16 @@ impl ProducerCallbackLog {
         match self {
             ProducerCallbackLog::Native(log) => {
                 let log = Arc::clone(log);
-                let callback: confluent_kafka::producer::Callback =
-                    Box::new(move |metadata, error| push(&log, delivery_entry(metadata, error)));
+                let callback: Box<dyn confluent_kafka::producer::Callback> =
+                    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                        push(&log, delivery_entry(metadata, error))
+                    });
                 producer.send_with_callback(record, Some(callback)).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ProducerCallbackLog::Grpc(_) => {
-                let callback: confluent_kafka::producer::Callback = Box::new(|_, _| {});
+                let callback: Box<dyn confluent_kafka::producer::Callback> =
+                    Box::new(|_: Option<&RecordMetadata>, _: Option<&Error>| {});
                 producer.send_with_callback(record, Some(callback)).await
             },
         }

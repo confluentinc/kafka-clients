@@ -45,8 +45,9 @@
 //! background task and are therefore always queued, whichever `send` form
 //! registered them. A blocking entry point invokes interface methods
 //! (serializers, partitioner) directly on the calling thread; a `_cb` entry
-//! point invokes them on a runtime worker, so C implementations must be
-//! thread-safe.
+//! point invokes C serializers on the runtime, never on the calling thread
+//! (see "`send_cb` tries the producer first" for the partitioner and the
+//! built-in serializers), so C implementations must be thread-safe.
 //!
 //! The blocking forms drive the runtime from the calling thread with
 //! `block_on`; a C interface method (a serializer, the partitioner) that is
@@ -88,11 +89,15 @@
 //!
 //! # Ordering between `send_cb` and the control operations
 //!
-//! `send_cb` first tries the producer on the calling thread, without
-//! waiting: a record the producer takes, or refuses, at once is done there,
-//! and `cb` fires inside the call (see below). Only a record the producer
-//! would have to wait for, on metadata or on buffer memory, is *queued*: a
-//! per-producer submission task takes the queued records in FIFO order and
+//! When both of the producer's serializers are built-in, `send_cb` first
+//! tries the producer on the calling thread, without waiting: a record the
+//! producer takes, or refuses, at once is done there, and `cb` fires inside
+//! the call (see below). Only a record the producer would have to wait for,
+//! on metadata or on buffer memory, is *queued*. When either serializer is a
+//! C implementation, every record is queued and `cb` fires later, through the
+//! callback vector, a closed producer's refusal included; only a send made
+//! while `_destroy` runs completes inside the call.
+//! A per-producer submission task takes the queued records in FIFO order and
 //! tries each again on the producer without waiting. One it still has to
 //! wait for moves to a task of its own, which runs Java's blocking `send` for
 //! it, so the records behind it are not held back: Java's `send` blocking on
@@ -132,9 +137,11 @@
 //!
 //! Java's `send` blocks for up to `max.block.ms` on metadata and on buffer
 //! memory. `send_cb` and `send_with_callback_cb` spare the caller that wait
-//! without a thread hop and a queued completion for every record: they run
-//! the producer's non-blocking `try_send` (crate-internal, with no Java
-//! counterpart) on the calling thread, and
+//! without a thread hop and a queued completion for every record: when both
+//! of the producer's serializers are built-in (a `NULL` handle or a built-in
+//! class, which never wait), they run the producer's non-blocking `try_send`
+//! (crate-internal, with no Java counterpart) on the calling thread, invoking
+//! the partitioner there, and
 //!
 //!   - fire `cb` inside the call, with the owned future, when the producer
 //!     took the record at once (`TrySendOutcome::Accepted`);
@@ -154,14 +161,24 @@
 //! fires when it is queued. A caught panic in the body is reported through
 //! `cb` too, queued, as by every `_cb` entry point.
 //!
-//! The producer is tried first whatever the queue holds, so a record taken at
-//! once can reach the producer before one queued earlier, by this caller or
-//! by another. That is Java's order: records are ordered by when they reach
-//! the accumulator, and a `send` blocking on metadata or on buffer memory
-//! holds back its own caller's next record, nothing else. A caller that wants
-//! its records in sending order therefore waits for a queued record's `cb`
-//! before its next send, as Java's `send` would have made it wait; the queue
-//! then holds at most one record per such caller.
+//! When either serializer is a C implementation, the calling thread does not
+//! try the producer: a serializer registered with
+//! `kafka_common_serialization_Serializer_new_async` may report from the very
+//! thread that called `send_cb` (a single-threaded event loop), and one
+//! registered with `_new` runs on the blocking pool, so `try_send`, which
+//! awaits both serializers, would block the caller until they are done, or
+//! forever. Every record then goes to the submission task, which awaits the
+//! serializers on the runtime, and `cb` fires later, through the callback
+//! vector. The choice is made once, when the producer is built.
+//!
+//! When it is tried first, the producer is tried whatever the queue holds, so
+//! a record taken at once can reach the producer before one queued earlier,
+//! by this caller or by another. That is Java's order: records are ordered
+//! by when they reach the accumulator, and a `send` blocking on metadata or
+//! on buffer memory holds back its own caller's next record, nothing else. A
+//! caller that wants its records in sending order therefore waits for a
+//! queued record's `cb` before its next send, as Java's `send` would have
+//! made it wait; the queue then holds at most one record per such caller.
 //!
 //! # Destroy
 //!
@@ -229,7 +246,7 @@ use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     block_on, box_future, box_report_future, kafka_common_KafkaFuture_t, map_future_handle,
 };
-use crate::ffi::producer::callback::{callback_registration, kafka_producer_Callback_t};
+use crate::ffi::producer::callback::{kafka_producer_Callback_t, take_callback};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
 use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
@@ -258,7 +275,7 @@ enum SubmitRequest {
     /// A `send_cb` to hand to the producer.
     Send {
         record: GenericRecord,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         /// The future `callback`'s report completes (see [`delivery_callback`]).
         completion: Option<KafkaFutureImpl<RecordMetadata>>,
         cb: kafka_producer_Producer_send_cb_t,
@@ -313,6 +330,13 @@ pub(crate) struct Client {
     /// never reads the timeout (`MockProducer.java:436-442`), so the mock's
     /// view passes a negative one on as zero and never overrides it.
     follows_kafka_producer_close: bool,
+    /// Whether `send_cb` tries the producer on the calling thread before
+    /// queueing the record: true when both serializers are built-in (a
+    /// `NULL` handle, a built-in class), which complete at once; false when
+    /// either is a C implementation, which `send_cb` must not wait for on the
+    /// calling thread (see the module docs, "`send_cb` tries the producer
+    /// first"). Fixed when the producer is built, so no record pays the check.
+    tries_send_inline: bool,
 }
 
 impl Client {
@@ -572,7 +596,7 @@ async fn submission_loop(client: Arc<Client>, mut rx: UnboundedReceiver<SubmitRe
 async fn send_waiter(
     client: Arc<Client>,
     record: GenericRecord,
-    callback: Option<Callback>,
+    callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
     cb: kafka_producer_Producer_send_cb_t,
     opaque: SendPtr,
@@ -704,9 +728,13 @@ where
     /// callback, overrides a positive one to zero, and whose `flush()` fails
     /// from a delivery callback; false for the mock, which does neither (see
     /// [`Client::follows_kafka_producer_close`]).
+    ///
+    /// `tries_send_inline` is false when a serializer of the producer is a C
+    /// implementation (see [`Client::tries_send_inline`]).
     pub(crate) fn new(
         make: impl FnOnce() -> Result<P, Error>,
         follows_kafka_producer_close: bool,
+        tries_send_inline: bool,
     ) -> Result<Box<Self>, Error> {
         init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -731,6 +759,7 @@ where
             txn_control_busy: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             follows_kafka_producer_close,
+            tries_send_inline,
         });
         let submission = spawn_callback_task(runtime.handle(), submission_loop(Arc::clone(&client), submit_rx));
         Ok(Box::new(Self { producer, client, runtime, submission }))
@@ -1517,17 +1546,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, `record` a live handle and
     // `out_err` a valid slot, and a null `callback` is allowed, which is what
     // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null(), out_err) }
+    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null_mut(), out_err) }
 }
 
 /// `Producer.send(ProducerRecord)`, completed through `cb` with the owned
-/// future, or the error: the producer is tried on the calling thread first,
-/// and `cb` fires inside this call when it takes or refuses the record at
-/// once; a record it would have to wait for is copied and queued for the
-/// submission task, and `cb` fires later, through the callback vector, once
-/// the record was handed to the producer (see
-/// [`kafka_producer_Producer_send_with_callback_cb`] and the module docs).
-/// The record's key and value `void *` are read during the call in the first
+/// future, or the error: when both serializers are built-in, the producer is
+/// tried on the calling thread first, and `cb` fires inside this call when it
+/// takes or refuses the record at once; a record it would have to wait for,
+/// and every record of a producer with a C serializer, is copied and queued
+/// for the submission task, and `cb` fires later, through the callback
+/// vector, once the record was handed to the producer (see
+/// [`kafka_producer_Producer_send_with_callback_cb`] and the module docs). A
+/// C serializer is thus never invoked on the calling thread, and an
+/// asynchronous one may report from it once this call returned. The
+/// record's key and value `void *` are read during the call in the first
 /// case and stay borrowed until `cb` fires in the second.
 ///
 /// # Safety
@@ -1551,7 +1583,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view and `record` a live handle,
     // and a null `callback` is allowed, which is what
     // `kafka_producer_Producer_send_with_callback_cb`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback_cb(self_, record, std::ptr::null(), cb, opaque) }
+    unsafe { kafka_producer_Producer_send_with_callback_cb(self_, record, std::ptr::null_mut(), cb, opaque) }
 }
 
 /// `Producer.send(ProducerRecord, Callback)`, blocking as
@@ -1581,14 +1613,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live handle,
-/// `out_err` a valid slot pointing at null.
+/// `self_` and `record` must be live handles, `callback` null or a live handle
+/// (consumed), `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1614,14 +1646,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 }
 
 /// `Producer.send(ProducerRecord, Callback)`, completed through `cb` as
-/// [`kafka_producer_Producer_send_cb`]: the producer is tried on the calling
-/// thread first, without waiting, and `cb` fires inside this call, on the
-/// calling thread, with the future when the producer takes the record at
-/// once and with the error when it refuses it (a closed producer among the
-/// refusals); a record the producer would have to wait for is queued, and
-/// `cb` fires later, through the callback vector, once the submission task
-/// handed it over (see the module docs, "`send_cb` tries the producer
-/// first").
+/// [`kafka_producer_Producer_send_cb`]: when both serializers are built-in,
+/// the producer is tried on the calling thread first, without waiting, and
+/// `cb` fires inside this call, on the calling thread, with the future when
+/// the producer takes the record at once and with the error when it refuses
+/// it (a closed producer among the refusals); a record the producer would
+/// have to wait for is queued, and `cb` fires later, through the callback
+/// vector, once the submission task handed it over. When either serializer
+/// is a C implementation, every record is queued that way, so a C serializer
+/// is never invoked or waited for on the calling thread: an asynchronous one
+/// may report from it after this call returned (see the module docs,
+/// "`send_cb` tries the producer first").
 ///
 /// When `cb` receives an error, `callback` may still fire later, exactly
 /// once, if the record had reached the accumulator, as for
@@ -1635,7 +1670,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
-/// handle.
+/// handle (consumed).
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Every path through the
@@ -1649,7 +1684,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     cb: kafka_producer_Producer_send_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
@@ -1670,6 +1705,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
         // over yet, as `complete_send_now` requires.
         Err(error) => return unsafe { complete_send_now(cb, opaque, Err(error)) },
     };
+    if !client.tries_send_inline {
+        // A C serializer is waited for on the runtime, by the submission task,
+        // never on this thread (see the module docs, "`send_cb` tries the
+        // producer first").
+        return queue_send(client, record.clone(), callback, completion, cb, opaque);
+    }
     // Tried first whatever the queue holds: a queued record does not hold this
     // one back (see the module docs, "`send_cb` tries the producer first").
     let taken = record.clone();
@@ -1698,7 +1739,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
 fn queue_send(
     client: &Arc<Client>,
     record: GenericRecord,
-    callback: Option<Callback>,
+    callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
     cb: kafka_producer_Producer_send_cb_t,
     opaque: *mut c_void,
@@ -1755,18 +1796,18 @@ unsafe fn complete_send_now(
 ///
 /// # Safety
 ///
-/// `callback` must be null or a live handle.
+/// `callback` must be null or a live handle, consumed here.
 unsafe fn delivery_callback(
     client: &Arc<Client>,
-    callback: *const kafka_producer_Callback_t,
-) -> Option<(Callback, KafkaFutureImpl<RecordMetadata>)> {
+    callback: *mut kafka_producer_Callback_t,
+) -> Option<(Box<dyn Callback>, KafkaFutureImpl<RecordMetadata>)> {
     if callback.is_null() {
         return None;
     }
     let completion = KafkaFutureImpl::new();
-    // SAFETY: Per this function's `# Safety`, `callback` is a live handle, since it is not null, as
-    // `callback_registration` requires; the registration is read only within this statement.
-    let callback = unsafe { callback_registration(callback) }.into_callback(
+    // SAFETY: Per this function's `# Safety`, `callback` is a live handle, since it is not null, which
+    // the caller does not use again, as `take_callback` requires.
+    let callback = unsafe { take_callback(callback) }.into_callback(
         Arc::clone(&client.queue),
         Arc::clone(&client.results),
         completion.clone(),
@@ -2337,7 +2378,7 @@ mod tests {
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_get_cb,
         kafka_common_KafkaFuture_get_with_timeout, kafka_common_KafkaFuture_t,
     };
-    use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
+    use crate::ffi::producer::callback::kafka_producer_Callback_new;
     use crate::ffi::producer::mock_producer::{
         kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_closed,
         kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_history, kafka_producer_MockProducer_t,
@@ -2633,13 +2674,14 @@ mod tests {
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             let mut err = std::ptr::null_mut();
-            let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
             let future = Future(match with_callback {
-                true => kafka_producer_Producer_send_with_callback(view, record, callback, &mut err),
+                true => {
+                    let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
+                    kafka_producer_Producer_send_with_callback(view, record, callback, &mut err)
+                },
                 false => kafka_producer_Producer_send(view, record, &mut err),
             });
             assert!(err.is_null());
-            kafka_producer_Callback_destroy(callback);
             let outcome = |error: *mut kafka_common_Error_t| {
                 assert!(!error.is_null(), "the record never completes");
                 // A non-null `error` is owned by the caller; freed once.

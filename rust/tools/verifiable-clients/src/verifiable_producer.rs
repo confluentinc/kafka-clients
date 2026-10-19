@@ -353,19 +353,18 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
         let cb_value = value.clone();
         let cb_topic = self.topic.clone();
         let num_acked = Arc::clone(&self.num_acked);
-        let callback: Callback =
-            Box::new(
-                move |record_metadata: Option<&RecordMetadata>, error: Option<&Error>| match error {
-                    None => {
-                        num_acked.fetch_add(1, Ordering::AcqRel);
-                        let record_metadata = record_metadata.expect("Expected non-null recordMetadata object.");
-                        print_json(&SuccessfulSend::new(cb_key, cb_value, record_metadata));
-                    },
-                    Some(e) => {
-                        print_json(&FailedSend::from_error(cb_key, cb_value, cb_topic, e));
-                    },
+        let callback: Box<dyn Callback> = Box::new(
+            move |record_metadata: Option<&RecordMetadata>, error: Option<&Error>| match error {
+                None => {
+                    num_acked.fetch_add(1, Ordering::AcqRel);
+                    let record_metadata = record_metadata.expect("Expected non-null recordMetadata object.");
+                    print_json(&SuccessfulSend::new(cb_key, cb_value, record_metadata));
                 },
-            );
+                Some(e) => {
+                    print_json(&FailedSend::from_error(cb_key, cb_value, cb_topic, e));
+                },
+            },
+        );
 
         // Java 293-300 wraps producer.send in try/catch: a synchronous failure
         // (buffer exhaustion, closed producer, ...) prints a FailedSend here.

@@ -388,11 +388,8 @@ mod tests {
     fn null_methods_are_the_java_default_and_invokers_reach_a_rust_reporter() {
         let silent = kafka_common_metrics_MetricsReporter_new(ptr::null_mut(), None, None, None, None);
         let metrics = Metrics::new();
-        let metric = box_kafka_metric(metrics.add_metric_if_absent(
-            metrics.metric_name("m", "g"),
-            None,
-            crate::common::metrics::MetricValueProvider::Measurable(Box::new(Avg::new())),
-        ));
+        let metric =
+            box_kafka_metric(metrics.add_metric_if_absent(metrics.metric_name("m", "g"), None, Box::new(Avg::new())));
         // SAFETY: Test code: `silent` and `handle` are owned reporter handles, each destroyed once,
         // at the end of its use; `list` is a view list over `metric`, an owned metric handle; both
         // are destroyed once, after the last call reading them.

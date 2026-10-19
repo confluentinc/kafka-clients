@@ -805,8 +805,11 @@ impl CommitRequestManager {
     /// pass-through to the existing `maybe_auto_commit_async` driver.
     ///
     /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
-    /// `AssignmentChange` events so the auto-commit interval is honoured at
-    /// event-dispatch time rather than only inside the bg-task `poll`.
+    /// `AssignmentChange` events, its only callers, as in Java: since
+    /// KAFKA-18641 the auto-commit on the interval fires only from the
+    /// application's poll, never from the background task's
+    /// [`Self::poll_with_coordinator`], so it commits only records the
+    /// application has had the chance to process.
     /// Takes `&self` (not `&mut self`) because all mutation flows through
     /// the interior `Arc<CommitRequestManagerInner>` `Mutex` slots. The
     /// shape change is required for Phase-12 production wire-up where the
@@ -1485,9 +1488,12 @@ impl CommitRequestManager {
             return self.drain_pending_offset_commit_requests();
         }
 
-        // Auto-commit firing — drain timer.
-        self.maybe_auto_commit_async(current_time_ms);
-
+        // No auto-commit here: since KAFKA-18641 Java's `poll` only sends what
+        // is already queued. The auto-commit on the interval is enqueued by
+        // `update_timer_and_maybe_commit`, from the application's poll
+        // (`AsyncPoll`) and `AssignmentChange` events; firing it from this
+        // background timer would commit the positions of records the
+        // application is still processing, and lose them on a crash.
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if !guard.pending.has_unsent_requests() {
             return PollResult::empty();
@@ -1565,6 +1571,24 @@ impl CommitRequestManager {
         PollResult::new(next_poll, to_send)
     }
 
+    /// If auto-commit is enabled, and the auto-commit interval has expired,
+    /// this will generate and enqueue a request to commit all consumed
+    /// offsets, and will reset the auto-commit timer to the interval. The
+    /// request will be sent on the next call to
+    /// [`Self::poll_with_coordinator`].
+    ///
+    /// If the request completes with a retriable error, this will reset the
+    /// auto-commit timer with the exponential backoff. If it fails with a
+    /// non-retriable error, no action is taken, so the next commit will be
+    /// generated when the interval expires.
+    ///
+    /// This will not generate a new commit request if a previous one hasn't
+    /// received a response. In that case, the next auto-commit request will
+    /// be sent on the next call to poll, after a response for the in-flight
+    /// is received.
+    ///
+    /// Reached only from [`Self::update_timer_and_maybe_commit`], as Java's
+    /// private `maybeAutoCommitAsync` is since KAFKA-18641.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeAutoCommitAsync")]
     fn maybe_auto_commit_async(&self, current_time_ms: i64) {
         // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
@@ -4714,11 +4738,12 @@ mod tests {
     /// STALE_MEMBER_EPOCH and increasing epochs.
     #[tokio::test(flavor = "current_thread")]
     async fn last_epoch_sent_on_commit() {
-        // Auto-commit enabled, very long interval (avoid interval auto-commits).
-        let manager = make_manager(0, true);
+        // Enable auto-commit but with very long interval to avoid triggering
+        // auto-commits on the interval and just test the auto-commits
+        // triggered before revocation (Java: `create(true, Integer.MAX_VALUE)`).
+        let (manager, subs) = make_manager_with_subs_interval(0, true, i64::from(i32::MAX));
         let coordinator = Arc::new(coordinator_with_node());
         manager.set_coordinator(Arc::clone(&coordinator));
-        let subs = manager_subscriptions(&manager);
         let tp = topic_partition("topic", 1);
         {
             let mut s = subs.lock().unwrap();
@@ -4753,6 +4778,12 @@ mod tests {
         unsent
             .handler()
             .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
+        // Java handles the response synchronously inside `onComplete`, so the
+        // retry decision reads the member epoch of that moment (2, valid).
+        // The Rust retry driver is a spawned task: let it handle the response
+        // before the epoch update below, or it would read the empty epoch and
+        // give up (STALE_MEMBER_EPOCH without a valid epoch is not retried).
+        tokio::task::yield_now().await;
         assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch + 1));
 
         // Receive empty epoch. Next sent request carries no epoch.
@@ -4909,6 +4940,43 @@ mod tests {
         unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
     }
 
+    /// KAFKA-18641 (COMMENTS.1.md Issue 5): `poll` never auto-commits. Once
+    /// the interval has elapsed, polling alone (the background task's
+    /// `run_once`) sends nothing, however often it runs; only
+    /// `update_timer_and_maybe_commit` (the `AsyncPoll` and
+    /// `AssignmentChange` events, so the application's own `poll()`) enqueues
+    /// the auto-commit, which the next `poll` then sends. Committing from the
+    /// background timer would commit the positions of records the
+    /// application is still processing, and lose them on a crash.
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_alone_never_auto_commits() {
+        let (manager, subs) = make_manager_with_subs_interval(0, true, 100);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 1);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+
+        for now in [0, 100, 200, 5_000] {
+            assert!(
+                manager.poll_with_coordinator(&coordinator, now).unsent_requests.is_empty(),
+                "poll at {now} ms must not auto-commit on its own"
+            );
+        }
+
+        manager.update_timer_and_maybe_commit(5_000);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 5_000);
+        assert_eq!(poll_result.unsent_requests.len(), 1, "the auto-commit is sent once enqueued");
+        let unsent = poll_result.unsent_requests.into_iter().next().unwrap();
+        assert_eq!(
+            *unsent.request_builder().expect("builder present").api_key(),
+            ApiKeys::OFFSET_COMMIT
+        );
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+    }
+
     /// `testPollEnsureCorrectInflightRequestBufferSize`: 2 commits + 2 fetches
     /// produce 4 unsent requests in one poll, 2 inflight fetches, both builder
     /// types present; after responses the inflight buffer drains to 0.
@@ -5000,13 +5068,6 @@ mod tests {
         );
         assert!(guard.pending.unsent_offset_fetches.is_empty());
         assert!(guard.pending.inflight_offset_fetches.is_empty());
-    }
-
-    /// Helper for `last_epoch_sent_on_commit`: returns the manager's
-    /// subscription-state handle. The `make_manager` ctor does not expose it,
-    /// so reach through `inner`.
-    fn manager_subscriptions(manager: &CommitRequestManager) -> Arc<Mutex<SubscriptionState>> {
-        Arc::clone(&manager.inner.subscriptions)
     }
 
     /// Poll repeatedly (advancing `now_ms` each iteration past the re-queued

@@ -47,7 +47,7 @@ impl ByteArrayDeserializer {
 }
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -56,19 +56,19 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_deserialize_bytes() {
+    #[tokio::test]
+    async fn test_deserialize_bytes() {
         let deserializer = ByteArrayDeserializer::new();
         let data = b"my bytes";
-        let result = deserializer.deserialize("topic", data.as_slice()).unwrap();
+        let result = deserializer.deserialize("topic", data.as_slice()).await.unwrap();
         assert_eq!(result, b"my bytes".to_vec());
     }
 
-    #[test]
-    fn test_deserialize_empty() {
+    #[tokio::test]
+    async fn test_deserialize_empty() {
         let deserializer = ByteArrayDeserializer::new();
         let data: &[u8] = &[];
-        let result = deserializer.deserialize("topic", data).unwrap();
+        let result = deserializer.deserialize("topic", data).await.unwrap();
         assert_eq!(result, Vec::<u8>::new());
     }
 }

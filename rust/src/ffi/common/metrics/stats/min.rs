@@ -19,6 +19,7 @@
 use crate::common::metrics::stats::Min;
 use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_t;
 use crate::ffi::common::metrics::measurable_stat::kafka_common_metrics_MeasurableStat_t;
+use crate::ffi::common::metrics::metric_value_provider::kafka_common_metrics_MetricValueProvider_t;
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::ffi_guard;
@@ -80,6 +81,23 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Min__as_Measurable(
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable()
+}
+
+/// The stat as the `MetricValueProvider` interface (Java's `Measurable`
+/// extends it): a borrowed view valid as long as the handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_Min__as_MetricValueProvider(
+    self_: *const kafka_common_metrics_stats_Min_t,
+) -> *const kafka_common_metrics_MetricValueProvider_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
+    unsafe { handle(self_) }.as_metric_value_provider()
 }
 
 /// The stat as the `MeasurableStat` interface (what

@@ -87,22 +87,19 @@ where
     V: Send + 'static,
 {
     /// See [`Consumer::assignment`].
-    fn assignment(&self) -> HashSet<TopicPartition>;
+    fn assignment(&mut self) -> HashSet<TopicPartition>;
 
     /// See [`Consumer::subscription`].
-    fn subscription(&self) -> HashSet<String>;
+    fn subscription(&mut self) -> HashSet<String>;
 
     /// See [`Consumer::paused`].
-    fn paused(&self) -> HashSet<TopicPartition>;
+    fn paused(&mut self) -> HashSet<TopicPartition>;
 
     /// See [`Consumer::group_metadata`].
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-
-    /// See [`Consumer::client_id`].
-    fn client_id(&self) -> &str;
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// See [`Consumer::current_lag`].
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
+    fn current_lag<'a>(&'a mut self, topic_partition: &'a TopicPartition) -> BoxFuture<'a, Result<Option<i64>, Error>>;
 
     /// See [`Consumer::metrics`].
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
@@ -299,28 +296,24 @@ where
     V: Send + 'static,
     C: Consumer<K, V>,
 {
-    fn assignment(&self) -> HashSet<TopicPartition> {
+    fn assignment(&mut self) -> HashSet<TopicPartition> {
         Consumer::assignment(self)
     }
 
-    fn subscription(&self) -> HashSet<String> {
+    fn subscription(&mut self) -> HashSet<String> {
         Consumer::subscription(self)
     }
 
-    fn paused(&self) -> HashSet<TopicPartition> {
+    fn paused(&mut self) -> HashSet<TopicPartition> {
         Consumer::paused(self)
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         Consumer::group_metadata(self)
     }
 
-    fn client_id(&self) -> &str {
-        Consumer::client_id(self)
-    }
-
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        Consumer::current_lag(self, topic_partition)
+    fn current_lag<'a>(&'a mut self, topic_partition: &'a TopicPartition) -> BoxFuture<'a, Result<Option<i64>, Error>> {
+        Box::pin(Consumer::current_lag(self, topic_partition))
     }
 
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
@@ -565,28 +558,24 @@ where
     K: Send + 'static,
     V: Send + 'static,
 {
-    fn assignment(&self) -> HashSet<TopicPartition> {
+    fn assignment(&mut self) -> HashSet<TopicPartition> {
         DynConsumer::assignment(self)
     }
 
-    fn subscription(&self) -> HashSet<String> {
+    fn subscription(&mut self) -> HashSet<String> {
         DynConsumer::subscription(self)
     }
 
-    fn paused(&self) -> HashSet<TopicPartition> {
+    fn paused(&mut self) -> HashSet<TopicPartition> {
         DynConsumer::paused(self)
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         DynConsumer::group_metadata(self)
     }
 
-    fn client_id(&self) -> &str {
-        DynConsumer::client_id(self)
-    }
-
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        DynConsumer::current_lag(self, topic_partition)
+    async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        DynConsumer::current_lag(self, topic_partition).await
     }
 
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
@@ -842,6 +831,17 @@ mod tests {
         Consumer::position(consumer, partition).await.expect("position")
     }
 
+    /// A boxed consumer keeps the `Send + !Sync` shape of the consumers it
+    /// holds (`consumer-threading.md` §2).
+    #[test]
+    fn dyn_consumer_is_send_and_not_sync() {
+        use crate::test_thread_safety::{is_send, is_sync};
+        assert!(is_send!(dyn DynConsumer<String, String>));
+        assert!(!is_sync!(dyn DynConsumer<String, String>));
+        assert!(is_send!(Box<dyn DynConsumer<String, String>>));
+        assert!(!is_sync!(Box<dyn DynConsumer<String, String>>));
+    }
+
     #[tokio::test]
     async fn test_different_consumers_in_one_vec() {
         let mut first = mock();
@@ -854,8 +854,8 @@ mod tests {
             }
         }
 
-        assert_eq!(HashSet::from([tp(0)]), Consumer::assignment(&first));
-        assert_eq!(HashSet::from([tp(1)]), Consumer::assignment(&second));
+        assert_eq!(HashSet::from([tp(0)]), Consumer::assignment(&mut first));
+        assert_eq!(HashSet::from([tp(1)]), Consumer::assignment(&mut second));
     }
 
     #[tokio::test]
@@ -864,7 +864,7 @@ mod tests {
 
         for consumer in &mut consumers {
             DynConsumer::assign(&mut **consumer, vec![tp(0)]).await.expect("assign");
-            assert_eq!(HashSet::from([tp(0)]), DynConsumer::assignment(&**consumer));
+            assert_eq!(HashSet::from([tp(0)]), DynConsumer::assignment(&mut **consumer));
             DynConsumer::close(&mut **consumer).await.expect("close");
         }
     }
@@ -879,7 +879,7 @@ mod tests {
         // Through the `Consumer` impl on `dyn DynConsumer`, including the
         // methods whose borrowed argument makes them `async fn`.
         assert_eq!(5, seek_and_position(&mut *boxed, &tp(0)).await);
-        assert_eq!(HashSet::from([tp(0)]), Consumer::assignment(&*boxed));
+        assert_eq!(HashSet::from([tp(0)]), Consumer::assignment(&mut *boxed));
     }
 
     #[tokio::test]
