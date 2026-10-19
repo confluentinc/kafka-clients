@@ -20,9 +20,9 @@ point it calls has a ``_cb`` completion form in the FFI header:
 ``subscribe``, ``assign``, ``unsubscribe``, ``poll``, ``commit``,
 ``commit_nowait``, ``seek``, ``seek_to_beginning`` / ``seek_to_end``,
 ``position``, ``committed``, ``partitions_for``, ``list_topics``, ``pause`` /
-``resume``, ``offsets_for_times``, ``beginning_offsets`` / ``end_offsets`` and
-``close``; every other method is a plain ``def`` (``assignment()``,
-``subscription()``, ``metrics()``, ``paused()``, ``current_lag()``,
+``resume``, ``offsets_for_times``, ``beginning_offsets`` / ``end_offsets``,
+``current_lag`` and ``close``; every other method is a plain ``def``
+(``assignment()``, ``subscription()``, ``metrics()``, ``paused()``,
 ``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
 there and may be ``async def``.
@@ -269,11 +269,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.end_offsets`."""
         return await self._a_end_offsets(partitions, timeout)
 
-    def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
-        """See :meth:`Consumer.current_lag`. Its entry point,
-        ``kafka_consumer_Consumer_current_lag``, has no ``_cb`` form, so it
-        is a plain ``def``."""
-        return self._c_current_lag(topic_partition)
+    async def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
+        """See :meth:`Consumer.current_lag`. Its entry point has a ``_cb``
+        form, ``kafka_consumer_Consumer_current_lag_cb``, so it is awaited."""
+        return await self._a_current_lag(topic_partition)
 
     def group_metadata(self) -> ConsumerGroupMetadata:
         """See :meth:`Consumer.group_metadata`."""
@@ -378,6 +377,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
         return await self._run_async(*self._position_spec(partition, timeout_ms))
+
+    async def _a_current_lag(self, topic_partition: TopicPartition) -> int | None:
+        if self._in_callback():
+            in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
+            return in_callback
+        lag: int | None = await self._run_async(*self._current_lag_spec(topic_partition))
+        return lag
 
     async def _a_committed(self, partitions: Iterable[TopicPartition],
                            timeout: Duration | None = None

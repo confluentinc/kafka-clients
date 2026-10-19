@@ -426,7 +426,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         """Get the consumer's current lag on the partition, from the locally
         cached end offset; ``None`` if the lag is not known, for example when
         the consumer has not yet fetched the partition (Java's
-        ``OptionalLong.empty()``)."""
+        ``OptionalLong.empty()``). When the end offset is not known yet, the
+        call also asks the broker for it, so a later call can answer; it waits
+        for the consumer's background task, as Java's ``currentLag`` does.
+
+        Raises ``IllegalStateError`` if the partition is not assigned to this
+        consumer."""
         return self._c_current_lag(topic_partition)
 
     def group_metadata(self) -> ConsumerGroupMetadata:
@@ -555,6 +560,13 @@ class Consumer(Generic[K, V], _ConsumerState):
                 "committed", partition_list)
             return committed
         return self._run_sync(*self._committed_spec(partition_list, timeout_ms))
+
+    def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
+        if self._in_callback():
+            in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
+            return in_callback
+        lag: int | None = self._run_sync(*self._current_lag_spec(topic_partition))
+        return lag
 
     def _c_partitions_for(self, topic: str, timeout: Duration | None = None
                           ) -> list[PartitionInfo]:

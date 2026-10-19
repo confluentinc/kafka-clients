@@ -4336,7 +4336,7 @@ static PyObject* py_Consumer_wakeup(PyObject* self, PyObject* args) {
 // ---- sync state reads -------------------------------------------------------
 //
 // Each returns (value | None, err | None), as poll does: assignment,
-// subscription, paused, current_lag and group_metadata fail with
+// subscription, paused and group_metadata fail with
 // LOCAL_CONCURRENT_MODIFICATION while another call holds the consumer (Java's
 // acquire() throws ConcurrentModificationException); metrics, which Java reads
 // without acquire(), answers directly.
@@ -4431,26 +4431,6 @@ static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     PyObject* id = consumer_from_handle(h)->client_id;
     return Py_NewRef(id != NULL ? id : Py_None);
-}
-
-// Consumer_current_lag(handle, topic, partition) -> (int | None, err | None),
-// None for an empty lag (-1)
-static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; const char* topic; int partition;
-    if (!PyArg_ParseTuple(args, "Ksi", &h, &topic, &partition)) return NULL;
-    kafka_common_TopicPartition_t* tp = NULL;
-    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    int64_t lag = -1;
-    kafka_common_Error_t* err = (lag = kafka_consumer_Consumer_current_lag(consumer_self(h), tp, &ffi_err), ffi_take(&ffi_err));
-    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err)));
-    if (err != NULL) return cvalue_error(Py_None, err);
-    if (lag < 0) return cvalue_error(Py_None, NULL);
-    PyObject* value = PyLong_FromLongLong((long long)lag);
-    if (value == NULL) return NULL;
-    PyObject* ret = cvalue_error(value, NULL);
-    Py_DECREF(value);
-    return ret;
 }
 
 // ---- `_cb` completion trampolines ------------------------------------------
@@ -4916,6 +4896,53 @@ DEF_SEEK_OPS(Consumer, kafka_consumer_Consumer_t*, consumer_self,
 DEF_POSITION_OPS(Consumer_position, kafka_consumer_Consumer_t*, consumer_self,
                  kafka_consumer_Consumer_position, kafka_consumer_Consumer_position_with_timeout,
                  kafka_consumer_Consumer_position_cb, kafka_consumer_Consumer_position_with_timeout_cb)
+
+// Shape: current_lag(self, tp) -> lag, -1 for Java's empty OptionalLong.
+// py(h, topic, partition) -> (int, err | None) / py_cb(h, topic, partition, cb)
+// with cb(int, err | None); Python reads -1 as None. The consumer has only the
+// `_cb` twin here (its sync class waits on it); the ConsumerHandle has only the
+// blocking form, which a listener calls from inside the consumer's own waiting
+// call.
+#define DEF_CURRENT_LAG_OP(pyname, SELF_T, SELF_FN, OP)                                 \
+static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
+    kafka_common_Error_t *ffi_err = NULL;                                               \
+    unsigned long long h; const char* topic; int partition;                             \
+    if (!PyArg_ParseTuple(args, "Ksi", &h, &topic, &partition)) return NULL;            \
+    kafka_common_TopicPartition_t* tp = NULL;                                           \
+    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
+    SELF_T s = SELF_FN(h);                                                              \
+    int64_t lag = -1;                                                                   \
+    kafka_common_Error_t* err = NULL;                                                   \
+    Py_BEGIN_ALLOW_THREADS                                                              \
+    lag = OP(s, tp, &err);                                                              \
+    Py_END_ALLOW_THREADS                                                                \
+    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
+    PyObject* value = PyLong_FromLongLong((long long)(err ? -1 : lag));                 \
+    if (value == NULL) { if (err) ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
+    PyObject* ret = cvalue_error(value, err);                                           \
+    Py_DECREF(value);                                                                   \
+    return ret;                                                                         \
+}
+
+#define DEF_CURRENT_LAG_CB_OP(pyname, SELF_T, SELF_FN, OP_CB)                           \
+static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
+    kafka_common_Error_t *ffi_err = NULL;                                               \
+    unsigned long long h; const char* topic; int partition; PyObject* cb;               \
+    if (!PyArg_ParseTuple(args, "KsiO", &h, &topic, &partition, &cb)) return NULL;      \
+    kafka_common_TopicPartition_t* tp = NULL;                                           \
+    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);                                               \
+    if (ctx == NULL) { ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
+    SELF_T s = SELF_FN(h);                                                              \
+    Py_BEGIN_ALLOW_THREADS                                                              \
+    OP_CB(s, tp, consumer_i64_cb, ctx);                                                 \
+    Py_END_ALLOW_THREADS                                                                \
+    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
+    Py_RETURN_NONE;                                                                     \
+}
+
+DEF_CURRENT_LAG_CB_OP(Consumer_current_lag_cb, kafka_consumer_Consumer_t*, consumer_self,
+                      kafka_consumer_Consumer_current_lag_cb)
 
 DEF_COMMIT_SYNC_OPS(Consumer_commit_sync, kafka_consumer_Consumer_t*, consumer_self,
                     kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_commit_sync_with_timeout,
@@ -5558,6 +5585,9 @@ DEF_SEEK_OPS(ConsumerHandle, HANDLE_T, handle_self,
 DEF_POSITION_OPS(ConsumerHandle_position, HANDLE_T, handle_self,
                  kafka_consumer_ConsumerHandle_position, kafka_consumer_ConsumerHandle_position_with_timeout,
                  kafka_consumer_ConsumerHandle_position_cb, kafka_consumer_ConsumerHandle_position_with_timeout_cb)
+
+DEF_CURRENT_LAG_OP(ConsumerHandle_current_lag, HANDLE_T, handle_self,
+                   kafka_consumer_ConsumerHandle_current_lag)
 
 DEF_TPLIST_MAP_OPS_NT(ConsumerHandle_committed, HANDLE_T, handle_self,
                       kafka_consumer_ConsumerHandle_committed, kafka_consumer_ConsumerHandle_committed_cb, oam_map_to_py)
@@ -10881,7 +10911,6 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS, "Metrics snapshot as list[dict] with name/group/description/tags/value"},
     {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
     {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "client.id from the consumer's ConsumerConfig, or None for a mock"},
-    {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "(lag int | None, err | None)"},
     {"Consumer_poll", py_Consumer_poll, METH_VARARGS, "poll(h, timeout_ms) -> (ConsumerRecords | None, err | None)"},
     {"Consumer_poll_cb", py_Consumer_poll_cb, METH_VARARGS, "poll twin; cb(ConsumerRecords | None, err | None)"},
     {"Consumer_subscribe", py_Consumer_subscribe, METH_VARARGS, "subscribe(h, topics, listener_adapter | None) -> err | None"},
@@ -10912,6 +10941,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_commit_async_cb", py_Consumer_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
     {"Consumer_position", py_Consumer_position, METH_VARARGS, "position(h, topic, partition, timeout_ms) -> (int, err | None)"},
     {"Consumer_position_cb", py_Consumer_position_cb, METH_VARARGS, "position twin; cb(int, err | None)"},
+    {"Consumer_current_lag_cb", py_Consumer_current_lag_cb, METH_VARARGS, "current_lag twin; cb(int, err | None), -1 for an empty lag"},
     {"Consumer_committed", py_Consumer_committed, METH_VARARGS, "committed(h, [(topic, partition)], timeout_ms) -> (dict | None, err | None)"},
     {"Consumer_committed_cb", py_Consumer_committed_cb, METH_VARARGS, "committed twin; cb(dict | None, err | None)"},
     {"Consumer_beginning_offsets", py_Consumer_beginning_offsets, METH_VARARGS, "beginning_offsets(h, [(topic, partition)], timeout_ms) -> (dict | None, err | None)"},
@@ -10951,6 +10981,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_resume", py_ConsumerHandle_resume, METH_VARARGS, "resume(hh, tps) -> err | None"},
     {"ConsumerHandle_resume_cb", py_ConsumerHandle_resume_cb, METH_VARARGS, "resume twin; cb(err | None)"},
     {"ConsumerHandle_position", py_ConsumerHandle_position, METH_VARARGS, "position(hh, topic, partition, timeout_ms) -> (int, err | None)"},
+    {"ConsumerHandle_current_lag", py_ConsumerHandle_current_lag, METH_VARARGS, "current_lag(hh, topic, partition) -> (int, err | None), -1 for an empty lag"},
     {"ConsumerHandle_position_cb", py_ConsumerHandle_position_cb, METH_VARARGS, "position twin; cb(int, err | None)"},
     {"ConsumerHandle_committed", py_ConsumerHandle_committed, METH_VARARGS, "committed(hh, tps) -> (dict | None, err | None)"},
     {"ConsumerHandle_committed_cb", py_ConsumerHandle_committed_cb, METH_VARARGS, "committed twin; cb(dict | None, err | None)"},

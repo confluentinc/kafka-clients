@@ -211,6 +211,12 @@ _CLOSING = "closing"
 _CLOSED = "closed"
 
 
+def _lag_or_none(lag: int) -> int | None:
+    """``current_lag``'s value from the FFI: ``-1`` is Java's empty
+    ``OptionalLong``."""
+    return None if lag < 0 else lag
+
+
 def raise_if_error(error: int) -> None:
     """Raise the typed error of a plain FFI entry point's result handle."""
     if error:
@@ -1416,6 +1422,12 @@ class _ConsumerState:
         return self._value_spec(_lib.Consumer_position_cb, int, partition.topic(),
                                 partition.partition(), timeout_ms, wakeable=True)
 
+    def _current_lag_spec(self, topic_partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
+        # Java's currentLag waits through addAndGet without setActiveTask, so
+        # wakeup() does not end it: not wakeable. -1 is the empty OptionalLong.
+        return self._value_spec(_lib.Consumer_current_lag_cb, _lag_or_none,
+                                topic_partition.topic(), topic_partition.partition())
+
     def _committed_spec(self, partitions: list[TopicPartition], timeout_ms: int = _NO_TIMEOUT
                         ) -> tuple[Any, Any, Any, bool]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndMetadata | None]:
@@ -1501,12 +1513,6 @@ class _ConsumerState:
         # in flight.
         raw = self._call(_lib.Consumer_metrics)
         return to_metrics_map(raw)
-
-    def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
-        with self._use() as h:
-            lag: int | None = self._read(_lib.Consumer_current_lag(
-                h, topic_partition.topic(), topic_partition.partition()))
-        return lag
 
     def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
         """Java's ``assign()`` argument checks: a null collection raises after
@@ -1682,6 +1688,12 @@ class _ConsumerState:
                     handle, partition.topic(), partition.partition(), timeout_ms)
             raise_if_error(error)
             return int(position)
+        if op == "current_lag":
+            (partition,) = args
+            lag, error = _lib.ConsumerHandle_current_lag(
+                handle, partition.topic(), partition.partition())
+            raise_if_error(error)
+            return _lag_or_none(lag)
         if op == "committed":
             (partitions,) = args
             raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions))

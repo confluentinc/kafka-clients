@@ -1130,8 +1130,8 @@ def test_offset_of_paused_partitions(kafka_broker: Any) -> None:
 
 
 def test_list_offset_should_update_subscriptions(kafka_broker: Any) -> None:
-    # Java also asserts currentLag(tp0) == 40; current_lag() always returns None
-    # (Rust-core gap 3), so that half is not asserted.
+    # Java seeks to 50 over 90 records and asserts currentLag(tp0) == 40; here
+    # 1 over 3, so the end offset end_offsets() stored gives a lag of 2.
     topic = _topic(kafka_broker, ["a", "b", "c"])
     tp = TopicPartition(topic=topic, partition=0)
     configs = _configs(kafka_broker)
@@ -1141,6 +1141,7 @@ def test_list_offset_should_update_subscriptions(kafka_broker: Any) -> None:
         consumer.assign(partitions={tp})
         consumer.seek(partition=tp, offset=1)
         assert consumer.end_offsets(partitions={tp}) == {tp: 3}
+        assert consumer.current_lag(topic_partition=tp) == 2
     finally:
         consumer.close(option=CloseOptions.timeout(0))
 
