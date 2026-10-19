@@ -28,11 +28,36 @@ Java (on the trait they are declared as returning `impl Future + Send`, see
     `async fn close_with_options(...)` (Java's `@Deprecated close(Duration)`
     is not translated — pass `CloseOptions::new_timeout(..)` instead)
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
+  - `async fn current_lag(&mut self, ..) -> Result<Option<i64>, Error>`:
+    Java's `currentLag` is `addAndGet(CurrentLagEvent)`, a wait on the
+    background thread, so it is async and fallible like `position`
 
 Java methods that do not block remain synchronous:
 
-  - `assignment()`, `subscription()`, `paused()`, `metrics()`,
-    `group_metadata()`, `wakeup()`
+  - `assignment()`, `subscription()`, `paused()`, `group_metadata()` take
+    `&mut self`
+  - `metrics()`, `wakeup()` and the Rust-only `handle()` take `&self`
+
+The receiver follows Java's guard, not whether the method reads or writes.
+Every Java consumer method except `metrics()` and `wakeup()` starts with
+`acquireAndEnsureOpen()`, which throws `ConcurrentModificationException` when
+another thread is inside the consumer; `&mut self` is the type-level form of
+that guard, so the getters take it too. It is also forward compatibility
+(CLAUDE.md §3): a Java getter that gains a side effect (`currentLag` became
+`addAndGet(CurrentLagEvent)`) would otherwise force a breaking `&self` ->
+`&mut self` change. `metrics()` and `wakeup()` are unguarded in Java
+(`wakeup()` is cross-thread by design), and `handle()` hands out the
+`ConsumerHandle` (§31, §41), the one cross-thread path into the consumer.
+`cargo xtask lint-custom` (`check-consumer-receiver`) fails on any other
+`Consumer` / `DynConsumer` method taking `&self`.
+
+Misuse of the sync getters is a programming bug, so it panics with Java's
+message instead of returning a `Result` (the precedent is "precondition
+throws stay panics"): a closed consumer panics with
+`"This consumer has already been closed."`, and `group_metadata()` without
+`group.id` with `InvalidGroupIdException`'s message. Each getter documents its
+panic under `# Panics`. `current_lag` is already async and fallible, so on a
+closed consumer it returns `Err(IllegalStateError)` instead.
 
 `clientId()` is package-private on Java's `KafkaConsumer` and absent from the
 `Consumer` interface, so it is not on the Rust trait and has no C binding.
@@ -105,14 +130,21 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
             -> impl Future<Output = Result<(), Error>> + Send;
         // ... other methods that block in Java ...
 
-        // Methods that do not block in Java stay sync.
-        fn assignment(&self) -> HashSet<TopicPartition>;
-        fn subscription(&self) -> HashSet<String>;
-        fn paused(&self) -> HashSet<TopicPartition>;
-        fn wakeup(&self);
+        fn current_lag(&mut self, topic_partition: &TopicPartition)
+            -> impl Future<Output = Result<Option<i64>, Error>> + Send;
+
+        // Methods that do not block in Java stay sync. The ones Java guards
+        // with `acquireAndEnsureOpen()` take `&mut self` and panic on misuse
+        // (§1); the unguarded ones take `&self`.
+        fn assignment(&mut self) -> HashSet<TopicPartition>;
+        fn subscription(&mut self) -> HashSet<String>;
+        fn paused(&mut self) -> HashSet<TopicPartition>;
         // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
         // its constructors; it becomes an interface in Kafka 5.0).
-        fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
+        fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
+        fn metrics(&self) -> /* ... */;
+        fn wakeup(&self);
+        fn handle(&self) -> ConsumerHandle;
     }
 
     // Sealed; blanket-implemented for every `C: Consumer<K, V>`. Each async
@@ -124,6 +156,9 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
     // (`KafkaConsumer.java:615`); the Rust struct has the same shape.
     pub struct KafkaConsumer<K, V> {
         delegate: AsyncKafkaConsumer<K, V>,
+        // Drops `Sync`, keeps `Send`: the type-level form of Java's
+        // `acquire()` guard (see "Thread-safety" below).
+        not_sync: PhantomData<Cell<()>>,
     }
 
     impl<K, V> KafkaConsumer<K, V> {
@@ -172,6 +207,21 @@ Implementations:
     what a Java interface gives for free: holding different implementations
     behind one type (`Vec<Box<dyn DynConsumer<K, V>>>`), as the C FFI does for
     its handle, which holds either a `KafkaConsumer` or a `MockConsumer`.
+
+**Thread-safety.** `KafkaConsumer` and `MockConsumer` (and so
+`dyn DynConsumer`) are `Send + !Sync`; `ConsumerHandle` is `Send + Sync`.
+Java's consumer is single-threaded and enforces it at runtime with
+`acquire()`; Rust enforces it at compile time. `&mut self` on the guarded
+methods (§1) rules out concurrent calls through one reference, and `!Sync`
+rules out sharing `&KafkaConsumer` across threads, so an accidental `Sync`
+(every field happening to be `Sync`) cannot let the `&self` methods race the
+others. `KafkaConsumer` holds a zero-sized `PhantomData<Cell<()>>` marker for
+this; no new dependency. A task that must reach the consumer from another
+thread (to wake it, or from a listener) goes through `consumer.handle()`.
+Unit tests in `kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs`
+pin the auto traits through the `test_thread_safety` probe, two
+`compile_fail` doc tests on `KafkaConsumer` pin `!Sync` and the `&mut self`
+getter, and `check-consumer-receiver` (§1) pins the receivers.
 
 When the classic protocol is added, `KafkaConsumer`'s field becomes a private
 enum over the two delegates and `KafkaConsumer::new` gains a new arm; the
