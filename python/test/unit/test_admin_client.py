@@ -75,6 +75,8 @@ UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 CLOSED = "Cannot accept new calls when AdminClient is closing."
 CREATE_TIMED_OUT = "Timed out waiting for a node assignment. Call: createTopics"
 LIST_TIMED_OUT = "Timed out waiting for a node assignment. Call: listTopics"
+# A call close() aborts: Java's AdminClientRunnable TimeoutException.
+LIST_ABORTED = "The AdminClient thread has exited. Call: listTopics"
 PUMP_THREAD = "kafka-admin-client-thread"
 SHORT = 300
 
@@ -257,15 +259,14 @@ def test_close_twice_and_negative_timeout() -> None:
 
 def test_close_aborts_calls_in_flight() -> None:
     """``close(timeout=0)`` aborts the call in flight (Java: with a
-    ``TimeoutException``): its future fails, and stays readable after the client
-    is freed (the future owns its handle)."""
+    ``TimeoutException`` naming the call): its future fails, and stays readable
+    after the client is freed (the future owns its handle)."""
     admin = _admin()
     result = admin.list_topics(options=ListTopicsOptions(timeout_ms=20000))
     started = time.monotonic()
     admin.close(timeout=0)
     assert time.monotonic() - started < 10
-    cause = failure(result.names())
-    assert isinstance(cause, KafkaError)
+    assert str(assert_future_throws(result.names(), KafkaTimeoutError)) == LIST_ABORTED
     assert result.names().is_done()
 
 
@@ -277,7 +278,7 @@ def test_close_waits_for_calls_in_flight() -> None:
     names = result.names()
     admin.close()
     assert names.is_done()
-    assert type(failure(names)) is KafkaTimeoutError
+    assert str(assert_future_throws(names, KafkaTimeoutError)) == LIST_TIMED_OUT
 
 
 def test_close_fires_pending_deliveries() -> None:
@@ -293,7 +294,8 @@ def test_close_fires_pending_deliveries() -> None:
     admin.close(timeout=0)
     waiter.join(10)
     assert not waiter.is_alive()
-    assert len(seen) == 1 and isinstance(seen[0], KafkaError)
+    assert len(seen) == 1
+    assert type(seen[0]) is KafkaTimeoutError and str(seen[0]) == LIST_ABORTED
 
 
 # ---- create_topics / list_topics against an unreachable broker ---------------
@@ -445,11 +447,11 @@ def test_dependants_run_on_the_pump_thread() -> None:
             seen["sibling"] = failure(result.names_to_listings(), timeout=1)
 
         dependant = result.names_to_listings().when_complete(action=action)
-        assert type(failure(dependant)) is KafkaTimeoutError
-        assert type(failure(names)) is KafkaTimeoutError
+        assert str(assert_future_throws(dependant, KafkaTimeoutError)) == LIST_TIMED_OUT
+        assert str(assert_future_throws(names, KafkaTimeoutError)) == LIST_TIMED_OUT
         assert seen["thread"].name == PUMP_THREAD and seen["thread"].daemon
-        assert type(seen["error"]) is KafkaTimeoutError
-        assert type(seen["sibling"]) is KafkaTimeoutError
+        for error in (seen["error"], seen["sibling"]):
+            assert type(error) is KafkaTimeoutError and str(error) == LIST_TIMED_OUT
 
 
 def test_one_pump_thread_per_client() -> None:
@@ -481,10 +483,12 @@ def test_calls_from_many_threads() -> None:
     def call(i: int) -> None:
         try:
             if i % 2:
-                failure(admin.list_topics(options=ListTopicsOptions(timeout_ms=SHORT)).names())
+                future = admin.list_topics(options=ListTopicsOptions(timeout_ms=SHORT)).names()
+                assert str(assert_future_throws(future, KafkaTimeoutError)) == LIST_TIMED_OUT
             else:
-                failure(admin.create_topics(new_topics=[_topic(f"t{i}")],
-                                            options=CreateTopicsOptions(timeout_ms=SHORT)).all())
+                future = admin.create_topics(new_topics=[_topic(f"t{i}")],
+                                             options=CreateTopicsOptions(timeout_ms=SHORT)).all()
+                assert str(assert_future_throws(future, KafkaTimeoutError)) == CREATE_TIMED_OUT
         except BaseException as e:  # noqa: BLE001 - collected for the assertion
             errors.append(e)
 
@@ -533,7 +537,7 @@ def test_ctrl_c_ends_a_get_at_once() -> None:
         assert _with_sigint(0.2, names.get) < 5
         assert not names.is_done()
         admin.close(timeout=0)
-        assert isinstance(failure(names), KafkaError)
+        assert str(assert_future_throws(names, KafkaTimeoutError)) == LIST_ABORTED
 
 
 def test_ctrl_c_during_close_re_raises_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -553,6 +557,7 @@ def test_ctrl_c_during_close_re_raises_at_once(monkeypatch: pytest.MonkeyPatch) 
     assert not destroyed.is_set()
     assert destroyed.wait(10)
     assert names.is_done()
+    assert str(assert_future_throws(names, KafkaTimeoutError)) == LIST_TIMED_OUT
 
 
 # ---- the async peers --------------------------------------------------------
@@ -647,7 +652,8 @@ async def test_async_cancelling_the_waiting_task_leaves_the_future() -> None:
     assert time.monotonic() - started < 2
     assert not names.is_cancelled()
     await admin.close(timeout=0)
-    assert isinstance(await asyncio.wait_for(_cause_of(names), 10), KafkaError)
+    cause = await asyncio.wait_for(_cause_of(names), 10)
+    assert type(cause) is KafkaTimeoutError and str(cause) == LIST_ABORTED
 
 
 async def _cause_of(future: Any) -> BaseException | None:
