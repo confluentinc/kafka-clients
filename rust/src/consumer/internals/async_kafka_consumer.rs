@@ -6716,13 +6716,10 @@ where
         // (Java line 1545) so wakeup is inert in this path —
         // `enable_wakeup=false`. §31: still routes through the drain
         // helper so the bg-task rebalance-listener handshake is serviced
-        // on the caller's task — without that, a bg task blocked awaiting
-        // a `RebalanceListenerCallbackNeeded` ack (see
-        // `AbstractMembershipManager::invoke_rebalance_callback`) would
-        // never unblock and `network_thread_close.await_join()` (Step 8)
-        // would hang forever. Java's KIP-848 reconcile chains via
-        // `CompletableFuture` and never parks the bg thread on the ack, so
-        // Java has no equivalent shutdown dependency on draining here.
+        // on the caller's task — a `RebalanceListenerCallbackNeeded` the bg
+        // task stored (a reconcile, a release, or an unsubscribe leave
+        // waiting in PREPARE_LEAVING) must be acked before that membership
+        // transition, and so the leave this event waits for, can complete.
         //
         // `submit_and_drain_for_close` runs the drain with
         // `skip_rebalance_callback=true`: any pending §31
@@ -10627,8 +10624,8 @@ mod tests {
         // Fake bg task: waits for a CommitSync envelope, posts a
         // `RebalanceListenerCallbackNeeded` to the bg channel and
         // awaits its ack BEFORE completing the commit. This is exactly
-        // the order that the Java/Rust bg task's
-        // `invoke_rebalance_callback` would see.
+        // the order the bg task's §31 handshake
+        // (`enqueue_rebalance_callback` plus the stored ack) would see.
         let bg_event_tx = handles.bg_event_tx.clone();
         let completer = tokio::spawn(async move {
             // 1. Pull the CommitSync envelope.
@@ -10691,7 +10688,7 @@ mod tests {
     // `testRebalanceListenerCallbackResultBlocksReconciliation`. They
     // exercise the cross-task handshake from
     // `process_background_events` (app side) ↔
-    // `invoke_rebalance_callback` (bg side).
+    // `enqueue_rebalance_callback` + the stored ack (bg side).
 
     /// §31 Test A: `commit_sync()` called from inside
     /// `on_partitions_revoked` must succeed.
@@ -10858,7 +10855,7 @@ mod tests {
         *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
 
         // Post a `RebalanceListenerCallbackNeeded` event mimicking
-        // the bg task's `invoke_rebalance_callback`.
+        // the bg task's `enqueue_rebalance_callback`.
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         handles
             .bg_event_tx
