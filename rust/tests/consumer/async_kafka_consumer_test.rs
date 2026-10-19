@@ -36,6 +36,8 @@
 //! a real broker.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
@@ -51,6 +53,23 @@ struct StringDeserializer;
 impl Deserializer<String> for StringDeserializer {
     async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+    }
+}
+
+/// A [`StringDeserializer`] that counts its `close` calls, for the
+/// constructor-failure test below (Java's `closeQuietly` of the deserializers
+/// in the constructor's `catch`).
+struct CloseCountingDeserializer {
+    closes: Arc<AtomicUsize>,
+}
+
+impl Deserializer<String> for CloseCountingDeserializer {
+    async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, Error> {
+        StringDeserializer.deserialize(topic, data).await
+    }
+
+    async fn close(&mut self) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -322,6 +341,10 @@ async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
 /// synchronously in the constructor, so an unresolvable host fails
 /// construction with the `ConfigException` wrapped in the constructor's
 /// `KafkaException`, and no consumer instance is created.
+///
+/// The constructor's `catch` also runs `close(Duration.ZERO, LEAVE_GROUP,
+/// true)` (`AsyncKafkaConsumer.java:596-602`), which closes the deserializers
+/// it had already wrapped (`:1679`, KAFKA-2121): each is closed exactly once.
 #[tokio::test(flavor = "multi_thread")]
 #[doc(
     alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
@@ -338,10 +361,17 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
     // `bootstrap.resolve.timeout.ms` stays at its default of 0, asserted by the
     // crate's `consumer_config::tests::test_bootstrap_resolve_timeout_ms`.
     let config = ConsumerConfig::new(&props).unwrap();
-    let error =
-        KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
-            .err()
-            .expect("construction must fail");
+    let key_closes = Arc::new(AtomicUsize::new(0));
+    let value_closes = Arc::new(AtomicUsize::new(0));
+    let error = KafkaConsumer::<String, String>::new(
+        config,
+        Box::new(CloseCountingDeserializer { closes: Arc::clone(&key_closes) }),
+        Box::new(CloseCountingDeserializer { closes: Arc::clone(&value_closes) }),
+    )
+    .err()
+    .expect("construction must fail");
+    assert_eq!(key_closes.load(Ordering::SeqCst), 1, "the key deserializer is closed once");
+    assert_eq!(value_closes.load(Ordering::SeqCst), 1, "the value deserializer is closed once");
     assert_eq!(error.message(), "Failed to construct kafka consumer");
     let cause: &Error = std::error::Error::source(&error)
         .and_then(|e| e.downcast_ref::<Error>())

@@ -2739,6 +2739,79 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub positions_validator: Arc<PositionsValidator>,
 }
 
+/// Closes the consumer's deserializers when construction fails after they were
+/// wrapped, as the `catch (Throwable t)` of Java's constructor does
+/// (`AsyncKafkaConsumer.java:596-602`): it calls `close(Duration.ZERO,
+/// LEAVE_GROUP, true)`, whose `closeQuietly(deserializers, "consumer
+/// deserializers", firstException)` (`:1679`) closes them and only logs a
+/// failure, since `swallowException` is `true`.
+///
+/// Rust-only (DoD #7): an RAII stand-in for that `catch`. `new_inner` returns
+/// through many `?`s after the wrap; holding the deserializers in this guard
+/// covers every one of them, and any step added later. The guard is declared
+/// before every other component built after the wrap, so on an error those are
+/// dropped first and the guard's `Arc` is the only one left when it closes the
+/// deserializers. Nothing else of Java's `close(Duration.ZERO, ..)` applies:
+/// the background task is spawned by the infallible `with_components`, so no
+/// task or socket exists on any error path, and the rest is released on drop.
+///
+/// `new` is synchronous and [`Deserializers::close`] is async. The close is
+/// polled once on the constructor's task, which completes it for any
+/// deserializer whose `close` does not wait. One that does wait is finished on
+/// the ambient Tokio runtime; without one, it cannot be driven and is logged.
+struct CloseDeserializersOnError<K: 'static, V: 'static> {
+    deserializers: Option<Arc<Deserializers<K, V>>>,
+}
+
+impl<K, V> CloseDeserializersOnError<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn new(deserializers: Arc<Deserializers<K, V>>) -> Self {
+        Self { deserializers: Some(deserializers) }
+    }
+
+    /// Construction succeeded: hands the deserializers on, so nothing closes
+    /// them here.
+    fn disarm(mut self) -> Arc<Deserializers<K, V>> {
+        self.deserializers.take().expect("the guard is disarmed once")
+    }
+}
+
+impl<K: 'static, V: 'static> Drop for CloseDeserializersOnError<K, V> {
+    fn drop(&mut self) {
+        use futures_util::FutureExt;
+
+        let Some(deserializers) = self.deserializers.take() else {
+            return;
+        };
+        let Some(mut deserializers) = Arc::into_inner(deserializers) else {
+            // Unreachable: every clone belongs to a component built after the
+            // guard, all of which are dropped before it.
+            log::error!("Failed to close consumer deserializers: they are still shared");
+            return;
+        };
+        let mut close = Box::pin(async move {
+            if let Err(error) = deserializers.close().await {
+                // Java's `closeQuietly` (`Utils.java:1131`).
+                log::error!("Failed to close consumer deserializers: {error}");
+            }
+        });
+        if close.as_mut().now_or_never().is_some() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(close);
+            },
+            Err(_) => log::error!(
+                "Failed to close consumer deserializers: their close is pending and no Tokio runtime can finish it"
+            ),
+        }
+    }
+}
+
 impl<K, V> AsyncKafkaConsumer<K, V>
 where
     K: Send + Sync + 'static,
@@ -2801,10 +2874,12 @@ where
     /// reproduces that; [`Self::new_inner`] holds the body.
     ///
     /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
-    /// release partially-built resources (KAFKA-2121) — has no counterpart
-    /// here: every fallible step in `new_inner` precedes the `tokio::spawn`,
-    /// which happens inside the infallible `with_components`, so no
-    /// resource needing shutdown exists yet on any error path.
+    /// release partially-built resources (KAFKA-2121) — closes the
+    /// deserializers once they are wrapped (see `CloseDeserializersOnError`).
+    /// The `tokio::spawn` of the background task happens inside the
+    /// infallible `with_components`, so no task or socket needs shutting down
+    /// on any error path.
+    ///
     /// # Java's no-deserializer constructors are deliberately not translated
     ///
     /// Java's public entry point is `KafkaConsumer`, which has four
@@ -2930,8 +3005,11 @@ where
             Arc::new(Mutex::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
 
         // Java line 410 — `deserializers = new Deserializers<>(...)`.
-        let deserializers: Arc<Deserializers<K, V>> =
-            Arc::new(Deserializers::new(key_deserializer, value_deserializer));
+        // From here on, a failed construction closes them (Java's catch,
+        // `AsyncKafkaConsumer.java:596-602`); see `CloseDeserializersOnError`.
+        // Declared before every later component, so it is dropped after them.
+        let deserializers =
+            CloseDeserializersOnError::new(Arc::new(Deserializers::new(key_deserializer, value_deserializer)));
 
         // Java line 412-414 — `clusterResourceListeners`. Phase-11
         // deferral keeps notifier wiring as a no-op (`ClusterResourceListeners::new()`).
@@ -3613,7 +3691,8 @@ where
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             fetch_config,
-            deserializers,
+            // Every fallible step is behind us.
+            deserializers.disarm(),
             Arc::clone(&fetch_metrics_manager),
             Arc::clone(&time),
         ));
