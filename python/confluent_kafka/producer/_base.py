@@ -64,6 +64,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import MISSING
+
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 # The slice waits live in the shared ``_wait`` module; re-exported for the producers.
@@ -213,11 +215,32 @@ def group_metadata_handle(group_metadata: ConsumerGroupMetadata) -> object:
     return native
 
 
-def close_timeout_ms(timeout: Duration | None) -> int | None:
-    """``close(Duration)``'s timeout in milliseconds (``None`` for ``close()``);
-    a negative one raises ``IllegalArgumentError`` with Java's message before
-    anything else, as ``KafkaProducer.close(Duration, boolean)`` does."""
-    return None if timeout is None else duration_to_ms(timeout, default_ms=0)
+def close_timeout_ms(timeout: Duration) -> int | None:
+    """``close(Duration)``'s timeout in milliseconds (``None`` for ``close()``,
+    the timeout left out, ``MISSING``); a negative one raises
+    ``IllegalArgumentError`` with Java's message before anything else, as
+    ``KafkaProducer.close(Duration, boolean)`` does, and a ``None`` is Java's
+    null ``Duration``, whose ``timeout.toMillis()`` throws (``TypeError``)."""
+    if timeout is MISSING:
+        return None
+    if timeout is None:
+        raise TypeError("timeout must not be None")
+    return duration_to_ms(timeout, default_ms=0)
+
+
+def check_record(record: object) -> None:
+    """``send(null)``: Java's ``doSend`` reads ``record.topic()`` after the
+    closed check (``KafkaProducer.java:1069``), a ``NullPointerException``
+    (``TypeError``, CLAUDE.md, Types)."""
+    if record is None:
+        raise TypeError("record must not be None")
+
+
+def check_offsets(offsets: object) -> None:
+    """``sendOffsetsToTransaction(null, groupMetadata)``: Java's
+    ``offsets.isEmpty()`` after the group-metadata and closed checks."""
+    if offsets is None:
+        raise TypeError("offsets must not be None")
 
 
 def serialize(serializer: Serializer[Any], topic: str, data: object,

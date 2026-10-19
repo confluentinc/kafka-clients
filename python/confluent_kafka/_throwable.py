@@ -30,7 +30,7 @@ import warnings
 from collections.abc import Collection, Iterable, Mapping
 from typing import Any, TypeVar, cast
 
-from ._args import UNSET
+from ._args import MISSING
 
 __all__ = [
     "cause_message",
@@ -94,8 +94,8 @@ def cause_message(cause: BaseException | None) -> str | None:
 
 
 def kwargs(**given: Any) -> dict[str, Any]:
-    """The constructor arguments to rebuild from, ``UNSET`` ones left out."""
-    return {k: v for k, v in given.items() if v is not UNSET}
+    """The constructor arguments to rebuild from, ``MISSING`` ones left out."""
+    return {k: v for k, v in given.items() if v is not MISSING}
 
 
 def rebuild(cls: type[BaseException], arguments: dict[str, Any]) -> BaseException:
@@ -166,9 +166,9 @@ _I = TypeVar("_I", bound="Iterable[Any] | None")
 
 def materialize(value: _I) -> _I:
     """An ``Iterable`` argument read once, as Java's ``Set.copyOf`` does: a
-    collection (or ``None``, ``UNSET``) as it is, any other iterable (a
+    collection (or ``None``, ``MISSING``) as it is, any other iterable (a
     generator) as a tuple of its elements, in order."""
-    if value is None or value is UNSET or isinstance(value, Collection):
+    if value is None or value is MISSING or isinstance(value, Collection):
         return value
     return cast(_I, tuple(value))
 

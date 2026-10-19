@@ -19,7 +19,7 @@ Java's three constructors are one keyword-only constructor matched by
 ``(topic, partition, offset, key, value)`` passes ``NO_TIMESTAMP``,
 ``NO_TIMESTAMP_TYPE``, ``NULL_SIZE``, empty headers and no leader epoch to the
 11-argument form, which passes no delivery count to the full form. Each of
-those parameters defaults to ``UNSET``, so an explicit value, ``None``
+those parameters defaults to ``MISSING``, so an explicit value, ``None``
 included, is given and selects a form that takes it. The record
 is covariant in ``K`` and ``V``; the stubs bind a ``None`` key or value to
 ``Never``. Java defines no ``equals`` / ``hashCode``, so neither does this.
@@ -31,7 +31,7 @@ import sys
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common.headers import Headers, _hand_out, _headers_to_string, _read_headers
 from confluent_kafka.common.timestamp_type import TimestampType
@@ -132,11 +132,11 @@ class ConsumerRecord(Generic[K_co, V_co]):
                        "headers": (), "leader_epoch": None, "delivery_count": None}),
     )
     def __init__(self, *, topic: str, partition: int, offset: int,
-                 timestamp: int = UNSET, timestamp_type: TimestampType = UNSET,
-                 serialized_key_size: int = UNSET, serialized_value_size: int = UNSET,
-                 key: Any, value: Any, headers: _WrittenHeaders = UNSET,
-                 leader_epoch: int | None = UNSET,
-                 delivery_count: int | None = UNSET) -> None:
+                 timestamp: int = MISSING, timestamp_type: TimestampType = MISSING,
+                 serialized_key_size: int = MISSING, serialized_value_size: int = MISSING,
+                 key: Any, value: Any, headers: _WrittenHeaders = MISSING,
+                 leader_epoch: int | None = MISSING,
+                 delivery_count: int | None = MISSING) -> None:
         """Creates a record to be received from a specified topic and
         partition: its offset, timestamp and timestamp type, the lengths of the
         serialized key and value, the key (``None`` is allowed) and value, the

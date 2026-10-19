@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Generic, TypeVar, overload
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_record import ConsumerRecord
@@ -54,7 +54,14 @@ class ConsumerRecords(Generic[K, V]):
                  records: Mapping[TopicPartition, Sequence[ConsumerRecord[K, V]]],
                  next_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None:
         """The records by partition, and the next offsets and metadata of the
-        partitions whose position the poll advanced."""
+        partitions whose position the poll advanced. A ``None`` ``next_offsets``
+        raises ``TypeError``, as Java's ``Map.copyOf(nextOffsets)``; so does a
+        ``None`` ``records``, which Java stores and dereferences at its first
+        use *(Python copies it here)*."""
+        if next_offsets is None:
+            raise TypeError("next_offsets must not be None")
+        if records is None:
+            raise TypeError("records must not be None")
         self._records: dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]] = {
             tp: tuple(recs) for tp, recs in records.items()}
         self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = dict(next_offsets)
@@ -65,12 +72,17 @@ class ConsumerRecords(Generic[K, V]):
     def records(self, *, topic: str) -> list[ConsumerRecord[K, V]]: ...
 
     @java_forms(Form("partition"), Form("topic"))
-    def records(self, *, partition: TopicPartition | None = None,
-                topic: str | None = None) -> list[ConsumerRecord[K, V]]:
-        """Get just the records for the given partition, or for the given
-        topic."""
-        if partition is not None:
-            return list(self._records.get(partition, ()))
+    def records(self, *, partition: TopicPartition | None = MISSING,
+                topic: str = MISSING) -> list[ConsumerRecord[K, V]]:
+        """Get just the records for the given partition (none for a ``None``
+        one, as Java's map lookup), or for the given topic (``None`` raises
+        Java's ``IllegalArgumentError``)."""
+        if partition is not MISSING:
+            return list(self._records.get(partition, ()))  # type: ignore[arg-type]
+        if topic is None:
+            from confluent_kafka.illegal_argument_error import IllegalArgumentError
+
+            raise IllegalArgumentError(message="Topic must be non-None.")
         result: list[ConsumerRecord[K, V]] = []
         for tp, recs in self._records.items():
             if tp.topic() == topic:

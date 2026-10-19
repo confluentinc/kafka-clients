@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET, java_forms
+from confluent_kafka._args import MISSING, java_forms, reject_str
 from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
@@ -97,23 +97,27 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return self._c_subscription()
 
     @overload
+    async def subscribe(self, *, topics: Iterable[str]) -> None: ...
+    @overload
     async def subscribe(self, *, topics: Iterable[str],
-                        callback: ConsumerRebalanceListener | None = None) -> None: ...
+                        callback: ConsumerRebalanceListener) -> None: ...
     @overload
     async def subscribe(self, *, pattern: SubscriptionPattern,
-                        callback: ConsumerRebalanceListener | None = None) -> None: ...
+                        callback: ConsumerRebalanceListener) -> None: ...
+    @overload
+    async def subscribe(self, *, pattern: SubscriptionPattern) -> None: ...
 
     @java_forms(*SUBSCRIBE_FORMS)
-    async def subscribe(self, *, topics: Iterable[str] | None = None,
-                        pattern: SubscriptionPattern | None = None,
-                        callback: ConsumerRebalanceListener | None = None) -> None:
+    async def subscribe(self, *, topics: Iterable[str] = MISSING,
+                        pattern: SubscriptionPattern = MISSING,
+                        callback: ConsumerRebalanceListener = MISSING) -> None:
         """See :meth:`Consumer.subscribe`. The listener's methods may be
         ``async def``; they are awaited on the event loop. A call a listener
         makes back into the consumer (``await consumer.commit()``, ``seek()``,
         ``position()``, …) runs synchronously through the core's
         ``ConsumerHandle``'s plain entry points, inside the call delivering the
         listener, so it blocks the event loop for its duration."""
-        if topics is not None:
+        if topics is not MISSING:
             await self._a_subscribe_topics(topics, callback)
         else:
             await self._a_subscribe_pattern(pattern, callback)
@@ -130,8 +134,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.poll`."""
         return await self._a_poll(timeout)
 
-    async def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                     timeout: Duration | None = None) -> None:
+    async def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
+                     timeout: Duration = MISSING) -> None:
         """See :meth:`Consumer.commit` (Java's ``commitSync``)."""
         await self._a_commit(offsets, timeout)
 
@@ -149,11 +153,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     async def commit_nowait(self, *,
-                            offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
+                            offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
                             callback: OffsetCommitCallback
                             | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
                                         Exception | None], Awaitable[None]]
-                            | None = UNSET) -> None:
+                            | None = MISSING) -> None:
         """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``).
 
         It is ``async def`` because its entry point,
@@ -201,8 +205,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                    offset_and_metadata: OffsetAndMetadata) -> None: ...
 
     @java_forms(*SEEK_FORMS)
-    async def seek(self, *, partition: TopicPartition, offset: int | None = None,
-                   offset_and_metadata: OffsetAndMetadata | None = None) -> None:
+    async def seek(self, *, partition: TopicPartition, offset: int = MISSING,
+                   offset_and_metadata: OffsetAndMetadata = MISSING) -> None:
         """See :meth:`Consumer.seek` (Java waits for the background thread to
         apply it, ``addAndGet``)."""
         await self._a_seek(partition, offset, offset_and_metadata)
@@ -216,12 +220,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._a_seek_to_end(partitions)
 
     async def position(self, *, partition: TopicPartition,
-                       timeout: Duration | None = None) -> int:
+                       timeout: Duration = MISSING) -> int:
         """See :meth:`Consumer.position`."""
         return await self._a_position(partition, timeout)
 
     async def committed(self, *, partitions: Iterable[TopicPartition],
-                        timeout: Duration | None = None
+                        timeout: Duration = MISSING
                         ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         """See :meth:`Consumer.committed`."""
         return await self._a_committed(partitions, timeout)
@@ -231,12 +235,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``acquire()``, so it answers while a call is in flight."""
         return self._c_metrics()
 
-    async def partitions_for(self, *, topic: str, timeout: Duration | None = None
+    async def partitions_for(self, *, topic: str, timeout: Duration = MISSING
                              ) -> list[PartitionInfo]:
         """See :meth:`Consumer.partitions_for`."""
         return await self._a_partitions_for(topic, timeout)
 
-    async def list_topics(self, *, timeout: Duration | None = None
+    async def list_topics(self, *, timeout: Duration = MISSING
                           ) -> dict[str, list[PartitionInfo]]:
         """See :meth:`Consumer.list_topics`."""
         return await self._a_list_topics(timeout)
@@ -254,18 +258,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._a_resume(partitions)
 
     async def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
-                                timeout: Duration | None = None
+                                timeout: Duration = MISSING
                                 ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         """See :meth:`Consumer.offsets_for_times`."""
         return await self._a_offsets_for_times(timestamps_to_search, timeout)
 
     async def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
-                                timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                                timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """See :meth:`Consumer.beginning_offsets`."""
         return await self._a_beginning_offsets(partitions, timeout)
 
     async def end_offsets(self, *, partitions: Iterable[TopicPartition],
-                          timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                          timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """See :meth:`Consumer.end_offsets`."""
         return await self._a_end_offsets(partitions, timeout)
 
@@ -278,7 +282,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.group_metadata`."""
         return self._c_group_metadata()
 
-    async def close(self, *, option: CloseOptions | None = None) -> None:
+    async def close(self, *, option: CloseOptions = MISSING) -> None:
         """See :meth:`Consumer.close`."""
         await self._a_close(option)
 
@@ -294,21 +298,25 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     # ---- the FFI implementations of the waiting calls ------------------------
     async def _a_subscribe_topics(self, topics: Iterable[str],
-                                  callback: ConsumerRebalanceListener | None) -> None:
+                                  callback: ConsumerRebalanceListener) -> None:
+        reject_str("topics", topics)  # the shape check precedes the others
+        listener = self._subscribe_listener(callback)
+        self._check_not_null("subscribe_topics", topics)
         topic_list = blank_null_topics(topics)
-        previous, self._listener = self._listener, callback
+        previous, self._listener = self._listener, listener
         try:
-            await self._run_async(*self._subscribe_topics_spec(topic_list, callback))
+            await self._run_async(*self._subscribe_topics_spec(topic_list, listener))
         except BaseException:
             self._listener = previous
             raise
 
-    async def _a_subscribe_pattern(self, pattern: SubscriptionPattern | None,
-                                   callback: ConsumerRebalanceListener | None) -> None:
-        assert pattern is not None
-        previous, self._listener = self._listener, callback
+    async def _a_subscribe_pattern(self, pattern: SubscriptionPattern,
+                                   callback: ConsumerRebalanceListener) -> None:
+        listener = self._subscribe_listener(callback)
+        self._check_not_null("subscribe_pattern", pattern)
+        previous, self._listener = self._listener, listener
         try:
-            await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(), callback))
+            await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(), listener))
         except BaseException:
             self._listener = previous
             raise
@@ -349,20 +357,22 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             raise result.error
         return result.records
 
-    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
-                        timeout: Duration | None = None) -> None:
+    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                        timeout: Duration = MISSING) -> None:
+        offsets = self._offsets_arg(offsets)
         timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
             self._reentrant_use("commit", offsets)
             return
         await self._run_async(*self._commit_spec(offsets, timeout_ms))
 
-    async def _a_seek(self, partition: TopicPartition, offset: int | None,
-                      offset_and_metadata: OffsetAndMetadata | None) -> None:
+    async def _a_seek(self, partition: TopicPartition, offset: int,
+                      offset_and_metadata: OffsetAndMetadata) -> None:
+        to, oam = self._seek_args(partition, offset, offset_and_metadata)
         if self._in_callback():
-            self._reentrant_use("seek", partition, offset, offset_and_metadata)
+            self._reentrant_use("seek", partition, to, oam)
             return
-        await self._run_async(*self._seek_spec(partition, offset, offset_and_metadata))
+        await self._run_async(*self._seek_spec(partition, to, oam))
 
     async def _a_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
         await self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_cb, partitions)
@@ -371,7 +381,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
     async def _a_position(self, partition: TopicPartition,
-                          timeout: Duration | None = None) -> int:
+                          timeout: Duration = MISSING) -> int:
+        self._check_position_partition(partition)
         timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
@@ -379,6 +390,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._run_async(*self._position_spec(partition, timeout_ms))
 
     async def _a_current_lag(self, topic_partition: TopicPartition) -> int | None:
+        self._check_not_null("current_lag", topic_partition)
         if self._in_callback():
             in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
             return in_callback
@@ -386,8 +398,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return lag
 
     async def _a_committed(self, partitions: Iterable[TopicPartition],
-                           timeout: Duration | None = None
+                           timeout: Duration = MISSING
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+        self._check_committed_timeout(partitions, timeout)
         timeout_ms = self._timeout_ms(timeout, group=True)
         self._check_committed_partitions(partitions)
         partition_list = list(partitions)
@@ -397,13 +410,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             return committed
         return await self._run_async(*self._committed_spec(partition_list, timeout_ms))
 
-    async def _a_partitions_for(self, topic: str, timeout: Duration | None = None
+    async def _a_partitions_for(self, topic: str, timeout: Duration = MISSING
                                 ) -> list[PartitionInfo]:
         timeout_ms = self._timeout_ms(timeout)
-        self._check_not_null("partitions_for", topic)
+        self._check_partitions_for_topic(topic, timeout_ms)
         return await self._run_async(*self._partitions_for_spec(topic, timeout_ms))
 
-    async def _a_list_topics(self, timeout: Duration | None = None
+    async def _a_list_topics(self, timeout: Duration = MISSING
                              ) -> dict[str, list[PartitionInfo]]:
         return await self._run_async(*self._list_topics_spec(self._timeout_ms(timeout)))
 
@@ -414,7 +427,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
-                                   timeout: Duration | None = None
+                                   timeout: Duration = MISSING
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         self._check_not_null("offsets_for_times", timestamps_to_search)
         timeout_ms = self._timeout_ms(timeout)
@@ -426,7 +439,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._run_async(*self._offsets_for_times_spec(timestamps, timeout_ms))
 
     async def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
-                            timeout: Duration | None) -> dict[TopicPartition, int]:
+                            timeout: Duration) -> dict[TopicPartition, int]:
         self._check_not_null(op, partitions)
         timeout_ms = self._timeout_ms(timeout)
         partition_list = list(partitions)
@@ -436,18 +449,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._run_async(*self._long_offsets_spec(fn, partition_list, timeout_ms))
 
     async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition],
-                                   timeout: Duration | None = None
+                                   timeout: Duration = MISSING
                                    ) -> dict[TopicPartition, int]:
         return await self._long_offsets("beginning_offsets",
                                         _lib.Consumer_beginning_offsets_cb, partitions, timeout)
 
     async def _a_end_offsets(self, partitions: Iterable[TopicPartition],
-                             timeout: Duration | None = None
+                             timeout: Duration = MISSING
                              ) -> dict[TopicPartition, int]:
         return await self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb,
                                         partitions, timeout)
 
-    async def _a_close(self, option: CloseOptions | None) -> None:
+    async def _a_close(self, option: CloseOptions) -> None:
         if self._is_closed():
             return
         timeout_ms, operation = close_args(option)
@@ -597,6 +610,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         if self._in_callback():
             _ConsumerState._c_commit_nowait(self, offsets, callback)
             return
+        offsets = self._offsets_arg(offsets)
         with self._use():
             spec = None if offsets is None else offsets_to_spec(offsets)
             adapter = self._wrap_commit_callback(

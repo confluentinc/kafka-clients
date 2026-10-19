@@ -289,7 +289,10 @@ def test_close_with_calls_in_flight(timeout: float | None) -> None:
     created = admin.create_topics(new_topics=[_topic("a")],
                                   options=CreateTopicsOptions(timeout_ms=call_timeout_ms))
     started = time.monotonic()
-    admin.close(timeout=timeout)
+    if timeout is None:  # left out: Java's close(), which waits without limit
+        admin.close()
+    else:
+        admin.close(timeout=timeout)
     elapsed = time.monotonic() - started
     names, all_created = listed.names(), created.all()
     assert names.is_done() and all_created.is_done()
@@ -312,7 +315,10 @@ async def test_async_close_with_calls_in_flight(timeout: float | None) -> None:
     admin = AsyncAdmin.create(configs=UNREACHABLE)
     listed = _list(admin, GRACE if timeout is None else LONG)
     started = time.monotonic()
-    await admin.close(timeout=timeout)
+    if timeout is None:  # left out: Java's close()
+        await admin.close()
+    else:
+        await admin.close(timeout=timeout)
     elapsed = time.monotonic() - started
     cause = await async_assert_future_throws(listed.names(), KafkaTimeoutError)
     if timeout is None:

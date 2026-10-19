@@ -218,12 +218,11 @@ def test_subscription() -> None:
 
 
 def test_subscription_on_null_topic_collection() -> None:
-    # Java's subscribe((List) null) throws IllegalArgumentException; an omitted
-    # (None) topics matches no Java overload.
+    # Java's subscribe((List) null) throws IllegalArgumentException: a None is
+    # Java's null, so (topics) with a null collection (Signatures).
     with new_consumer() as consumer, pytest.raises(IllegalArgumentError) as e:
-        consumer.subscribe(topics=None)
-    assert str(e.value) == ("subscribe() takes one of (topics), (topics, callback), "
-                            "(pattern, callback), (pattern); got ()")
+        consumer.subscribe(topics=None)  # type: ignore[arg-type]
+    assert str(e.value) == "Topic collection to subscribe to cannot be None"
 
 
 def test_subscription_on_empty_topic() -> None:

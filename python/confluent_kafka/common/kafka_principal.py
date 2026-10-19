@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import ClassVar, overload
 
+from confluent_kafka._args import MISSING
 
 __all__ = ["KafkaPrincipal"]
 
@@ -70,7 +71,9 @@ class KafkaPrincipal:
     __slots__ = ("_principal_type", "_name", "_token_authenticated")
 
     def __init__(self, *, principal_type: str, name: str,
-                 token_authenticated: bool = False) -> None:
+                 token_authenticated: bool = MISSING) -> None:
+        if token_authenticated is MISSING:
+            token_authenticated = False  # Java's (principalType, name) passes false
         if principal_type is None:
             raise TypeError("principal_type must not be None")
         self._principal_type = principal_type
@@ -104,9 +107,11 @@ class KafkaPrincipal:
     @overload
     def token_authenticated(self, *, token_authenticated: bool) -> None: ...
 
-    def token_authenticated(self, *, token_authenticated: bool | None = None) -> bool | None:
-        if token_authenticated is None:
+    def token_authenticated(self, *, token_authenticated: bool = MISSING) -> bool | None:
+        if token_authenticated is MISSING:
             return self._token_authenticated
+        if token_authenticated is None:  # a boolean: Java cannot pass null
+            raise TypeError("token_authenticated must not be None")
         self._token_authenticated = token_authenticated
         return None
 

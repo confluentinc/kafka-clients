@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common import Uuid
 
@@ -63,8 +63,8 @@ class TopicDescription:
                 Form("name", "internal", "partitions", "authorized_operations", "topic_id",
                      defaults={"authorized_operations": (), "topic_id": Uuid.ZERO_UUID}))
     def __init__(self, *, name: str, internal: bool, partitions: Sequence[TopicPartitionInfo],
-                 authorized_operations: Iterable[AclOperation] | None = UNSET,
-                 topic_id: Uuid = UNSET) -> None:
+                 authorized_operations: Iterable[AclOperation] | None = MISSING,
+                 topic_id: Uuid = MISSING) -> None:
         """Create an instance with the specified parameters.
 
         ``name``: the topic name; ``internal``: whether the topic is internal to

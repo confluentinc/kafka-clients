@@ -271,7 +271,7 @@ def _consumer_family_types(c: object = None) -> None:
     assert_type(kc.offsets_for_times(timestamps_to_search={tp: 0}, timeout=1.0),
                 "dict[TopicPartition, OffsetAndTimestamp | None]")
     assert_type(kc.beginning_offsets(partitions=[tp], timeout=1.0), "dict[TopicPartition, int]")
-    assert_type(kc.end_offsets(partitions=[tp], timeout=None), "dict[TopicPartition, int]")
+    assert_type(kc.end_offsets(partitions=[tp], timeout=2.0), "dict[TopicPartition, int]")
     # The overload stubs accept each Java form.
     kc.subscribe(topics=["t"])
     kc.subscribe(pattern=SubscriptionPattern(pattern="t.*"))

@@ -61,7 +61,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from confluent_kafka._args import reject_str
+from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
@@ -104,6 +104,21 @@ _LONG_MAX = (1 << 63) - 1
 
 def _seconds(timeout: Duration) -> float:
     return timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout)
+
+
+def _require(name: str, value: object) -> None:
+    """A ``None`` Java's mock dereferences: Python's ``TypeError`` naming the
+    parameter (CLAUDE.md, Python Binding Conventions, Types)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+
+
+def _mock_listener(callback: Any) -> ConsumerRebalanceListener | None:
+    """``subscribe``'s listener in Java's mock: a ``None`` is refused first
+    (``MockConsumer.java:200,220``); left out (``MISSING``) is no listener."""
+    if callback is None:
+        raise IllegalArgumentError(message="RebalanceListener cannot be None")
+    return None if callback is MISSING else callback
 
 
 def _no_coroutine(result: object, what: str, requires: str = "an AsyncMockConsumer") -> None:
@@ -187,6 +202,7 @@ class MockConsumerCore(Generic[K, V]):
                                     list[TopicPartition]]:
         """``rebalance``'s first half: the new assignment, the added and the
         removed partitions; the buffered records are cleared."""
+        _require("new_assignment", new_assignment)
         new_list = list(new_assignment)
         old_assignment = self._subscriptions.assigned_partitions()
         new_set = set(new_list)
@@ -238,6 +254,7 @@ class MockConsumerCore(Generic[K, V]):
         be assigned, and the partitions that remain; the lost partitions'
         buffered records are cleared."""
         current_assignment = self._subscriptions.assigned_partitions()
+        _require("partitions_lost", partitions_lost)
         lost = set(partitions_lost)
         not_assigned = [x for x in lost if x not in current_assignment]
         if not_assigned:
@@ -284,29 +301,36 @@ class MockConsumerCore(Generic[K, V]):
             return self._subscriptions.subscription()
 
     def _c_subscribe_topics(self, topics: Iterable[str],
-                          callback: ConsumerRebalanceListener | None) -> None:
-        """Java's private ``subscribe(Collection, Optional)``."""
+                          callback: ConsumerRebalanceListener) -> None:
+        """Java's private ``subscribe(Collection, Optional)``, after the
+        listener's null check; a ``None`` collection is Java's
+        ``new HashSet<>(null)``."""
         reject_str("topics", topics)
+        listener = _mock_listener(callback)
         with self._lock:
             self._ensure_not_closed()
             self._committed_offsets.clear()
-            self._subscriptions.subscribe(set(topics), callback)
+            _require("topics", topics)
+            self._subscriptions.subscribe(set(topics), listener)
 
-    def _c_subscribe_pattern(self, pattern: SubscriptionPattern | None,
-                           callback: ConsumerRebalanceListener | None) -> None:
-        """Java's private ``subscribe(SubscriptionPattern, Optional)``."""
+    def _c_subscribe_pattern(self, pattern: SubscriptionPattern,
+                           callback: ConsumerRebalanceListener) -> None:
+        """Java's private ``subscribe(SubscriptionPattern, Optional)``, after the
+        listener's null check."""
+        listener = _mock_listener(callback)
         if pattern is None or str(pattern) == "":
             raise IllegalArgumentError(
                 message="Topic pattern cannot be " + ("None" if pattern is None else "empty"))
         with self._lock:
             self._ensure_not_closed()
             self._committed_offsets.clear()
-            self._subscriptions.subscribe_pattern(pattern, callback)
+            self._subscriptions.subscribe_pattern(pattern, listener)
 
     def _c_assign(self, partitions: Iterable[TopicPartition]) -> None:
         with self._lock:
             self._ensure_not_closed()
             self._committed_offsets.clear()
+            _require("partitions", partitions)
             self._subscriptions.assign_from_user(set(partitions))
 
     def _c_unsubscribe(self) -> None:
@@ -318,7 +342,8 @@ class MockConsumerCore(Generic[K, V]):
     def _c_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         with self._lock:
             self._ensure_not_closed()
-            self._last_poll_timeout = _seconds(timeout)
+            # Java's mock stores the Duration as given, a null one included.
+            self._last_poll_timeout = None if timeout is None else _seconds(timeout)
             # Lock around the task, so a task may schedule the next one.
             with self._poll_tasks_lock:
                 task = self._poll_tasks.popleft() if self._poll_tasks else None
@@ -390,35 +415,50 @@ class MockConsumerCore(Generic[K, V]):
         with self._lock:
             _no_coroutine(self._commit_async_body(offsets, callback), "OffsetCommitCallback")
 
-    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
-                  timeout: Duration | None = None) -> None:
+    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                  timeout: Duration = MISSING) -> None:
         """Java's ``commitSync()`` / ``commitSync(Map)``; its ``Duration``
-        overloads ignore the ``timeout``, as Java's mock does."""
+        overloads ignore the ``timeout``, a null one included, as Java's mock
+        does; a ``None`` map reaches ``committed.putAll(null)`` after the closed
+        check."""
         with self._lock:
-            self._c_commit_async(self._subscriptions.all_consumed() if offsets is None else offsets,
-                               None)
+            if offsets is None:
+                self._ensure_not_closed()
+                _require("offsets", offsets)
+            self._c_commit_async(
+                self._subscriptions.all_consumed() if offsets is MISSING else offsets, None)
 
-    def _c_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+    def _c_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                        callback: Callable[..., object] | None) -> None:
         """Java's ``commitAsync()`` / ``commitAsync(callback)`` /
         ``commitAsync(offsets, callback)``."""
         with self._lock:
-            if offsets is None:
-                self._ensure_not_closed()
-                offsets = self._subscriptions.all_consumed()
-            self._c_commit_async(offsets, callback)
+            self._c_commit_async(self._nowait_offsets(offsets), callback)
 
-    def _c_seek(self, partition: TopicPartition, offset: int | None,
-              offset_and_metadata: OffsetAndMetadata | None) -> None:
+    def _nowait_offsets(self, offsets: Any) -> Mapping[TopicPartition, OffsetAndMetadata]:
+        """``commitAsync``'s offsets: left out, every consumed offset (after the
+        closed check); a ``None`` reaches ``committed.putAll(null)``, after it."""
+        if offsets is MISSING:
+            self._ensure_not_closed()
+            return self._subscriptions.all_consumed()
+        if offsets is None:
+            self._ensure_not_closed()
+            _require("offsets", offsets)
+        return offsets  # type: ignore[no-any-return]
+
+    def _c_seek(self, partition: TopicPartition, offset: int,
+              offset_and_metadata: OffsetAndMetadata) -> None:
+        if offset is None:  # a long: Java cannot pass null
+            raise TypeError("offset must not be None")
         with self._lock:
             self._ensure_not_closed()
-            if offset_and_metadata is not None:
+            if offset_and_metadata is not MISSING:
+                _require("offset_and_metadata", offset_and_metadata)
                 offset = offset_and_metadata.offset()
-            assert offset is not None
             self._subscriptions.seek(partition, offset)
 
     def _c_committed(self, partitions: Iterable[TopicPartition],
-                     timeout: Duration | None = None
+                     timeout: Duration = MISSING
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         """Java's ``committed(Set)``: only the partitions with a committed offset;
         an unassigned one reports offset 0. The ``Duration`` overload ignores
@@ -426,11 +466,12 @@ class MockConsumerCore(Generic[K, V]):
         below)."""
         with self._lock:
             self._ensure_not_closed()
+            _require("partitions", partitions)
             return {tp: (self._committed_offsets[tp] if self._subscriptions.is_assigned(tp)
                          else OffsetAndMetadata(offset=0))
                     for tp in partitions if tp in self._committed_offsets}
 
-    def _c_position(self, partition: TopicPartition, timeout: Duration | None = None) -> int:
+    def _c_position(self, partition: TopicPartition, timeout: Duration = MISSING) -> int:
         with self._lock:
             self._ensure_not_closed()
             if not self._subscriptions.is_assigned(partition):
@@ -446,12 +487,14 @@ class MockConsumerCore(Generic[K, V]):
     def _c_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
         with self._lock:
             self._ensure_not_closed()
+            _require("partitions", partitions)
             self._subscriptions.request_offset_reset_partitions(
                 list(partitions), AutoOffsetResetStrategy.EARLIEST)
 
     def _c_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
         with self._lock:
             self._ensure_not_closed()
+            _require("partitions", partitions)
             self._subscriptions.request_offset_reset_partitions(
                 list(partitions), AutoOffsetResetStrategy.LATEST)
 
@@ -460,13 +503,13 @@ class MockConsumerCore(Generic[K, V]):
             self._ensure_not_closed()
             return {}
 
-    def _c_partitions_for(self, topic: str, timeout: Duration | None = None
+    def _c_partitions_for(self, topic: str, timeout: Duration = MISSING
                           ) -> list[PartitionInfo]:
         with self._lock:
             self._ensure_not_closed()
             return list(self._partitions.get(topic, []))
 
-    def _c_list_topics(self, timeout: Duration | None = None) -> dict[str, list[PartitionInfo]]:
+    def _c_list_topics(self, timeout: Duration = MISSING) -> dict[str, list[PartitionInfo]]:
         with self._lock:
             self._ensure_not_closed()
             return {topic: list(partitions) for topic, partitions in self._partitions.items()}
@@ -477,18 +520,20 @@ class MockConsumerCore(Generic[K, V]):
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
         with self._lock:
+            _require("partitions", partitions)
             for partition in partitions:
                 self._subscriptions.pause(partition)
                 self._paused_partitions.add(partition)
 
     def _c_resume(self, partitions: Iterable[TopicPartition]) -> None:
         with self._lock:
+            _require("partitions", partitions)
             for partition in partitions:
                 self._subscriptions.resume(partition)
                 self._paused_partitions.discard(partition)
 
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
-                             timeout: Duration | None = None
+                             timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
         # yet.") (MockConsumer.java:611), inside its synchronized body.
@@ -502,6 +547,7 @@ class MockConsumerCore(Generic[K, V]):
                 exception, self._offsets_exception = self._offsets_exception, None
                 raise exception
             result: dict[TopicPartition, int] = {}
+            _require("partitions", partitions)
             for tp in partitions:
                 offset = offsets.get(tp)
                 if offset is None:
@@ -511,11 +557,11 @@ class MockConsumerCore(Generic[K, V]):
             return result
 
     def _c_beginning_offsets(self, partitions: Iterable[TopicPartition],
-                             timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                             timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         return self._offsets_of(partitions, self._beginning_offsets, "a beginning")
 
     def _c_end_offsets(self, partitions: Iterable[TopicPartition],
-                       timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                       timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         return self._offsets_of(partitions, self._end_offsets, "an end")
 
     def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
@@ -529,10 +575,10 @@ class MockConsumerCore(Generic[K, V]):
         return ConsumerGroupMetadata._of(group_id="dummy.group.id", generation_id=1,
                                          member_id="1", group_instance_id=None)
 
-    def _c_close(self, option: CloseOptions | None) -> None:
+    def _c_close(self, option: CloseOptions) -> None:
         """Java's ``close()`` / ``close(CloseOptions)``, both of which only mark
-        the mock closed; the callbacks it holds are released (Threads and
-        callbacks)."""
+        the mock closed, a null ``option`` included (it is never read); the
+        callbacks it holds are released (Threads and callbacks)."""
         with self._lock:
             self._mock_closed = True
             self._subscriptions.release_rebalance_listener()
@@ -544,11 +590,11 @@ class MockConsumerCore(Generic[K, V]):
 
     # ---- the async peer's waiting methods: the same body ----------------------
     async def _a_subscribe_topics(self, topics: Iterable[str],
-                                  callback: ConsumerRebalanceListener | None) -> None:
+                                  callback: ConsumerRebalanceListener) -> None:
         self._c_subscribe_topics(topics, callback)
 
-    async def _a_subscribe_pattern(self, pattern: SubscriptionPattern | None,
-                                   callback: ConsumerRebalanceListener | None) -> None:
+    async def _a_subscribe_pattern(self, pattern: SubscriptionPattern,
+                                   callback: ConsumerRebalanceListener) -> None:
         self._c_subscribe_pattern(pattern, callback)
 
     async def _a_assign(self, partitions: Iterable[TopicPartition]) -> None:
@@ -560,12 +606,12 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         return self._c_poll(timeout)
 
-    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
-                        timeout: Duration | None = None) -> None:
+    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                        timeout: Duration = MISSING) -> None:
         self._c_commit(offsets, timeout)
 
-    async def _a_seek(self, partition: TopicPartition, offset: int | None,
-                      offset_and_metadata: OffsetAndMetadata | None) -> None:
+    async def _a_seek(self, partition: TopicPartition, offset: int,
+                      offset_and_metadata: OffsetAndMetadata) -> None:
         self._c_seek(partition, offset, offset_and_metadata)
 
     async def _a_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
@@ -575,22 +621,22 @@ class MockConsumerCore(Generic[K, V]):
         self._c_seek_to_end(partitions)
 
     async def _a_position(self, partition: TopicPartition,
-                          timeout: Duration | None = None) -> int:
+                          timeout: Duration = MISSING) -> int:
         return self._c_position(partition, timeout)
 
     async def _a_current_lag(self, topic_partition: TopicPartition) -> int | None:
         return self._c_current_lag(topic_partition)
 
     async def _a_committed(self, partitions: Iterable[TopicPartition],
-                           timeout: Duration | None = None
+                           timeout: Duration = MISSING
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         return self._c_committed(partitions, timeout)
 
-    async def _a_partitions_for(self, topic: str, timeout: Duration | None = None
+    async def _a_partitions_for(self, topic: str, timeout: Duration = MISSING
                                 ) -> list[PartitionInfo]:
         return self._c_partitions_for(topic, timeout)
 
-    async def _a_list_topics(self, timeout: Duration | None = None
+    async def _a_list_topics(self, timeout: Duration = MISSING
                              ) -> dict[str, list[PartitionInfo]]:
         return self._c_list_topics(timeout)
 
@@ -601,21 +647,21 @@ class MockConsumerCore(Generic[K, V]):
         self._c_resume(partitions)
 
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
-                                   timeout: Duration | None = None
+                                   timeout: Duration = MISSING
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         return self._c_offsets_for_times(timestamps_to_search, timeout)
 
     async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition],
-                                   timeout: Duration | None = None
+                                   timeout: Duration = MISSING
                                    ) -> dict[TopicPartition, int]:
         return self._c_beginning_offsets(partitions, timeout)
 
     async def _a_end_offsets(self, partitions: Iterable[TopicPartition],
-                             timeout: Duration | None = None
+                             timeout: Duration = MISSING
                              ) -> dict[TopicPartition, int]:
         return self._c_end_offsets(partitions, timeout)
 
-    async def _a_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+    async def _a_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                                callback: Callable[..., object] | None) -> None:
         """Async ``commitAsync()`` / ``commitAsync(callback)`` /
         ``commitAsync(offsets, callback)``: Java's body, an ``async def``
@@ -624,10 +670,7 @@ class MockConsumerCore(Generic[K, V]):
         returns (``_Monitor``); an exception it raises, ``CancelledError``
         included, propagates."""
         with self._lock:
-            if offsets is None:
-                self._ensure_not_closed()
-                offsets = self._subscriptions.all_consumed()
-            result = self._commit_async_body(offsets, callback)
+            result = self._commit_async_body(self._nowait_offsets(offsets), callback)
             if not inspect.isawaitable(result):
                 return
             previous, self._lock.owner = self._lock.owner, _current_task()
@@ -636,7 +679,7 @@ class MockConsumerCore(Generic[K, V]):
         finally:
             self._lock.owner = previous
 
-    async def _a_close(self, option: CloseOptions | None) -> None:
+    async def _a_close(self, option: CloseOptions) -> None:
         self._c_close(option)
 
     # ---- the Java mock's own methods ------------------------------------------
@@ -646,6 +689,7 @@ class MockConsumerCore(Generic[K, V]):
         assigned to the consumer."""
         with self._lock:
             self._ensure_not_closed()
+            _require("record", record)
             tp = TopicPartition(topic=record.topic(), partition=record.partition())
             if tp not in self._subscriptions.assigned_partitions():
                 raise IllegalStateError(
@@ -676,14 +720,17 @@ class MockConsumerCore(Generic[K, V]):
 
     def update_beginning_offsets(self, *, new_offsets: Mapping[TopicPartition, int]) -> None:
         with self._lock:
+            _require("new_offsets", new_offsets)
             self._beginning_offsets.update(new_offsets)
 
     def update_end_offsets(self, *, new_offsets: Mapping[TopicPartition, int]) -> None:
         with self._lock:
+            _require("new_offsets", new_offsets)
             self._end_offsets.update(new_offsets)
 
     def update_duration_offsets(self, *, new_offsets: Mapping[TopicPartition, int]) -> None:
         with self._lock:
+            _require("new_offsets", new_offsets)
             self._duration_reset_offsets.update(new_offsets)
 
     def update_partitions(self, *, topic: str, partitions: Sequence[PartitionInfo]) -> None:
@@ -749,4 +796,4 @@ class MockConsumerCore(Generic[K, V]):
                             "seek to timestamp")
         else:
             raise NoOffsetForPartitionError(partition=tp)
-        self._c_seek(tp, offset, None)
+        self._c_seek(tp, offset, MISSING)

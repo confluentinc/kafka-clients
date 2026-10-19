@@ -18,7 +18,7 @@ Java's six constructors are one keyword-only constructor matched by
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the given
 arguments must be one of them, and the shorter ones delegate to the longest,
 passing ``null`` for what they leave out. ``partition``, ``timestamp``, ``key``
-and ``headers`` default to ``UNSET``, so an explicit ``None`` (or ``()``) is
+and ``headers`` default to ``MISSING``, so an explicit ``None`` (or ``()``) is
 given: ``ProducerRecord(topic=…, partition=0, key=None, value=…)`` is Java's
 ``(topic, partition, key, value)`` with a null key, ``(topic, partition, value)``
 without the key is rejected, and so is ``(topic, timestamp=None, value)``.
@@ -35,7 +35,7 @@ import sys
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common.headers import (
     Headers,
@@ -163,9 +163,9 @@ class ProducerRecord(Generic[K_co, V_co]):
     def __init__(self: ProducerRecord[Never, _V], *, topic: str, value: _V) -> None: ...
 
     @java_forms(*_FORMS)
-    def __init__(self, *, topic: str, partition: int | None = UNSET,
-                 timestamp: int | None = UNSET, key: Any = UNSET, value: Any,
-                 headers: _WrittenHeaders = UNSET) -> None:
+    def __init__(self, *, topic: str, partition: int | None = MISSING,
+                 timestamp: int | None = MISSING, key: Any = MISSING, value: Any,
+                 headers: _WrittenHeaders = MISSING) -> None:
         """Creates a record to be sent to a topic, and optionally to a
         partition, with a timestamp in milliseconds since epoch (if ``None``,
         the producer assigns it), a key, the value and the headers."""

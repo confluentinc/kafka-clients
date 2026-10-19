@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 
 from ._values import optional_str
@@ -72,8 +72,8 @@ class LogDirDescription:
                                "is_cordoned": False}))
     def __init__(self, *, error: ApiError | None,
                  replica_infos: Mapping[TopicPartition, ReplicaInfo],
-                 total_bytes: int = UNSET, usable_bytes: int = UNSET,
-                 is_cordoned: bool = UNSET) -> None:
+                 total_bytes: int = MISSING, usable_bytes: int = MISSING,
+                 is_cordoned: bool = MISSING) -> None:
         self._error = error
         self._replica_infos = dict(replica_infos)
         self._total_bytes = None if total_bytes == _UNKNOWN_VOLUME_BYTES else total_bytes

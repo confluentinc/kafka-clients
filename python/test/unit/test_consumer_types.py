@@ -426,11 +426,41 @@ def test_records_by_partition() -> None:
 
 
 def test_records_by_null_topic() -> None:
-    # Java's records(null) throws "Topic must be non-null."; in Python a None
-    # topic is not given, so java_forms rejects the call naming both forms.
+    # Java's records(null) throws "Topic must be non-null."; a None is Java's
+    # null, and Java's message reads None (Types).
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecords.empty().records(topic=None)  # type: ignore[call-overload]
-    assert str(exc.value) == "records() takes one of (partition), (topic); got ()"
+    assert str(exc.value) == "Topic must be non-None."
+
+
+def test_records_by_null_partition_is_an_empty_list() -> None:
+    # Java's records((TopicPartition) null): the map lookup finds nothing.
+    tp = TopicPartition(topic="t", partition=0)
+    rec = ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=b"v")
+    records = ConsumerRecords(records={tp: [rec]}, next_offsets={})
+    assert records.records(partition=None) == []
+
+
+def test_records_with_both_or_neither_is_rejected() -> None:
+    records = ConsumerRecords.empty()
+    for kwargs in ({}, {"partition": None, "topic": None}):
+        with pytest.raises(IllegalArgumentError) as exc:
+            records.records(**kwargs)  # type: ignore[call-overload]
+        assert str(exc.value).startswith("records() takes one of (partition), (topic); got (")
+
+
+def test_records_constructor_null_maps() -> None:
+    # Java's Map.copyOf(nextOffsets) throws on a null; a null records map is
+    # stored by Java and fails at its first use, here at construction.
+    with pytest.raises(TypeError) as exc:
+        ConsumerRecords(records={}, next_offsets=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "next_offsets must not be None"
+    with pytest.raises(TypeError) as exc:
+        ConsumerRecords(records=None, next_offsets=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "next_offsets must not be None"
+    with pytest.raises(TypeError) as exc:
+        ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
+    assert str(exc.value) == "records must not be None"
 
 
 def test_records_by_topic() -> None:

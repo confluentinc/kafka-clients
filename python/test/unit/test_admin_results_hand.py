@@ -48,6 +48,7 @@ from confluent_kafka.admin import (
     UserScramCredentialsDescription,
 )
 from confluent_kafka import ExecutionError
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.admin._internals import (
     _CoordinatorKey,
@@ -791,7 +792,11 @@ class TestListConsumerGroupOffsetsResult:
             result = ListConsumerGroupOffsetsResult._new(
                 futures={_CoordinatorKey.by_group_id(group_id="g"): future}, kind=kind)
             assert result.partitions_to_offset_and_metadata() is future
-            assert result.partitions_to_offset_and_metadata(group_id=None) is future
+            # An explicit None is Java's partitionsToOffsetAndMetadata(null): not requested.
+            with pytest.raises(IllegalArgumentError) as info:
+                result.partitions_to_offset_and_metadata(group_id=None)
+            assert str(info.value) == "Offsets for consumer group 'None' were not requested."
+            assert result.partitions_to_offset_and_metadata(group_id=MISSING) is future
             assert result.partitions_to_offset_and_metadata(group_id="g") is future
             assert _value(result.all()) == {"g": offsets}
         _run_kind(kind, body)

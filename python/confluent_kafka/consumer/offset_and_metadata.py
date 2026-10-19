@@ -19,11 +19,11 @@ Java's three constructors ``(offset, leaderEpoch, metadata)``,
 by ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
 ``(offset, metadata)`` passes ``Optional.empty()`` as the leader epoch, and
 ``(offset)`` passes ``""`` as the metadata of ``(offset, metadata)``. Both
-``leader_epoch`` and ``metadata`` default to ``UNSET``, so an explicit value is
+``leader_epoch`` and ``metadata`` default to ``MISSING``, so an explicit value is
 given: ``(offset, leader_epoch, metadata)`` with ``leader_epoch=None`` is Java's
 three-argument constructor with ``Optional.empty()``, while ``(offset,
-leader_epoch)`` without ``metadata`` is rejected, as in Java. The stubs are
-``(offset, leader_epoch, metadata)`` and ``(offset, metadata="")``.
+leader_epoch)`` without ``metadata`` is rejected, as in Java. A ``None``
+``metadata`` is Java's null, stored as ``""``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from __future__ import annotations
 import functools
 from typing import Any, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -62,12 +62,12 @@ class OffsetAndMetadata:
         Form("offset", "metadata", defaults={"metadata": ""}),
         Form("offset"),
     )
-    def __init__(self, *, offset: int, leader_epoch: int | None = UNSET,
-                 metadata: str = UNSET) -> None:
+    def __init__(self, *, offset: int, leader_epoch: int | None = MISSING,
+                 metadata: str | None = MISSING) -> None:
         """Construct a new ``OffsetAndMetadata`` object for committing through
         ``KafkaConsumer``: the offset to be committed, the optional leader
         epoch of the last consumed record, and non-null metadata (empty when
-        not given)."""
+        left out)."""
         if offset < 0:
             raise IllegalArgumentError(message="Invalid negative offset")
         self._offset = offset

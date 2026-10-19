@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.common.kafka_principal import KafkaPrincipal
 
@@ -46,12 +47,14 @@ class TokenInformation:
                  "_max_timestamp", "_expiry_timestamp", "_token_id")
 
     def __init__(self, *, token_id: str, owner: KafkaPrincipal,
-                 token_requester: KafkaPrincipal | None = None,
+                 token_requester: KafkaPrincipal = MISSING,
                  renewers: Iterable[KafkaPrincipal], issue_timestamp: int, max_timestamp: int,
                  expiry_timestamp: int) -> None:
         self._token_id = token_id
         self._owner = owner
-        self._token_requester = owner if token_requester is None else token_requester
+        # Java's shorter constructor passes the owner as the token requester;
+        # a None is Java's null, stored as given.
+        self._token_requester = owner if token_requester is MISSING else token_requester
         self._renewers = tuple(renewers)
         self._issue_timestamp = issue_timestamp
         self._max_timestamp = max_timestamp

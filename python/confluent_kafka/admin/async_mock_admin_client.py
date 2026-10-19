@@ -37,7 +37,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
 
-from confluent_kafka._args import UNSET, java_forms
+from confluent_kafka._args import MISSING, java_forms
+from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Async
 from confluent_kafka.admin._mock_core import MockAdminClientBuilderCore, MockAdminClientCore
 from confluent_kafka.admin.async_admin import AsyncAdmin
@@ -243,8 +244,8 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
     def __init__(self, *, brokers: Sequence[Node], controller: Node) -> None: ...
 
     @java_forms(*_INIT_FORMS)
-    def __init__(self, *, brokers: Sequence[Node] | None = None,
-                 controller: Node | None = None) -> None:
+    def __init__(self, *, brokers: Sequence[Node] | None = MISSING,
+                 controller: Node | None = MISSING) -> None:
         """See :meth:`MockAdminClient.__init__`."""
         AsyncAdmin.__init__(self)
         self._init_two(brokers, controller)
@@ -270,7 +271,7 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
             default_group_configs=default_group_configs)
         return client
 
-    async def close(self, *, timeout: Duration | None = None) -> None:
+    async def close(self, *, timeout: Duration | None = MISSING) -> None:
         """Does nothing, as Java's mock (no check of ``timeout`` either)."""
         self._close()
 
@@ -281,7 +282,7 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         await self.close()
 
     def create_topics(self, *, new_topics: Iterable[NewTopic],
-                      options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Async]:
+                      options: CreateTopicsOptions | None = MISSING) -> CreateTopicsResult[Async]:
         """See :meth:`MockAdminClient.create_topics`."""
         return self._create_topics(new_topics)
 
@@ -295,12 +296,15 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
                             ) -> DeleteTopicsResult[Async]: ...
 
     def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
-                            options: DeleteTopicsOptions | None = None
+                            options: DeleteTopicsOptions | None = MISSING
                             ) -> DeleteTopicsResult[Async]:
         """See :meth:`MockAdminClient.delete_topics`."""
+        if topics is None:  # the shape check: Java's compiler rejects deleteTopics(null)
+            raise _conversions.ambiguous_none("delete_topics", "topics",
+                                              ("Iterable[str]", "TopicCollection"))
         return self._delete_topics(topics)
 
-    def list_topics(self, *, options: ListTopicsOptions | None = None
+    def list_topics(self, *, options: ListTopicsOptions | None = MISSING
                     ) -> ListTopicsResult[Async]:
         """See :meth:`MockAdminClient.list_topics`."""
         return self._list_topics()
@@ -315,106 +319,106 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
                               ) -> DescribeTopicsResult[Async]: ...
 
     @java_forms(*_DESCRIBE_TOPICS_FORMS)
-    def describe_topics(self, *, topic_names: Iterable[str] | None = None,
-                              topics: TopicCollection | None = None,
-                              options: DescribeTopicsOptions | None = None
+    def describe_topics(self, *, topic_names: Iterable[str] | None = MISSING,
+                              topics: TopicCollection | None = MISSING,
+                              options: DescribeTopicsOptions | None = MISSING
                               ) -> DescribeTopicsResult[Async]:
         """See :meth:`MockAdminClient.describe_topics`."""
         return self._describe_topics(topic_names, topics)
 
-    def describe_cluster(self, *, options: DescribeClusterOptions | None = None
+    def describe_cluster(self, *, options: DescribeClusterOptions | None = MISSING
                                ) -> DescribeClusterResult[Async]:
         """See :meth:`MockAdminClient.describe_cluster`."""
         return self._describe_cluster()
 
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                      options: DescribeAclsOptions | None = None
+                      options: DescribeAclsOptions | None = MISSING
                       ) -> DescribeAclsResult[Async]:
         """See :meth:`MockAdminClient.describe_acls`."""
         return self._describe_acls(filter)
 
     def create_acls(self, *, acls: Iterable[AclBinding],
-                    options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
+                    options: CreateAclsOptions | None = MISSING) -> CreateAclsResult[Async]:
         """See :meth:`MockAdminClient.create_acls`."""
         return self._create_acls(acls)
 
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                    options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
+                    options: DeleteAclsOptions | None = MISSING) -> DeleteAclsResult[Async]:
         """See :meth:`MockAdminClient.delete_acls`."""
         return self._delete_acls(filters)
 
     def describe_configs(self, *, resources: Iterable[ConfigResource],
-                               options: DescribeConfigsOptions | None = None
+                               options: DescribeConfigsOptions | None = MISSING
                                ) -> DescribeConfigsResult[Async]:
         """See :meth:`MockAdminClient.describe_configs`."""
         return self._describe_configs(resources)
 
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-            options: AlterConfigsOptions | None = None) -> AlterConfigsResult[Async]:
+            options: AlterConfigsOptions | None = MISSING) -> AlterConfigsResult[Async]:
         """See :meth:`MockAdminClient.incremental_alter_configs`."""
         return self._incremental_alter_configs(configs)
 
     def alter_replica_log_dirs(
         self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
-        options: AlterReplicaLogDirsOptions | None = None
+        options: AlterReplicaLogDirsOptions | None = MISSING
     ) -> AlterReplicaLogDirsResult[Async]:
         """See :meth:`MockAdminClient.alter_replica_log_dirs`."""
         return self._alter_replica_log_dirs(replica_assignment)
 
     def describe_log_dirs(self, *, brokers: Iterable[int],
-                                options: DescribeLogDirsOptions | None = None
+                                options: DescribeLogDirsOptions | None = MISSING
                                 ) -> DescribeLogDirsResult[Async]:
         """See :meth:`MockAdminClient.describe_log_dirs`."""
         return self._describe_log_dirs(brokers)
 
     def describe_replica_log_dirs(self, *, replicas: Iterable[TopicPartitionReplica],
-                                        options: DescribeReplicaLogDirsOptions | None = None
+                                        options: DescribeReplicaLogDirsOptions | None = MISSING
                                         ) -> DescribeReplicaLogDirsResult[Async]:
         """See :meth:`MockAdminClient.describe_replica_log_dirs`."""
         return self._describe_replica_log_dirs(replicas)
 
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
-                                options: CreatePartitionsOptions | None = None
+                                options: CreatePartitionsOptions | None = MISSING
                                 ) -> CreatePartitionsResult[Async]:
         """See :meth:`MockAdminClient.create_partitions`."""
         return self._create_partitions(new_partitions)
 
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                             options: DeleteRecordsOptions | None = None
+                             options: DeleteRecordsOptions | None = MISSING
                              ) -> DeleteRecordsResult[Async]:
         """See :meth:`MockAdminClient.delete_records`."""
         return self._delete_records(records_to_delete)
 
-    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = MISSING
                                 ) -> CreateDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.create_delegation_token`."""
         return self._create_delegation_token(
-            options if options is not None else CreateDelegationTokenOptions())
+            _conversions.options_or_new(options, CreateDelegationTokenOptions))
 
     def renew_delegation_token(self, *, hmac: bytes,
-                               options: RenewDelegationTokenOptions | None = None
+                               options: RenewDelegationTokenOptions | None = MISSING
                                ) -> RenewDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.renew_delegation_token`."""
         return self._renew_delegation_token(
-            hmac, options if options is not None else RenewDelegationTokenOptions())
+            hmac, _conversions.options_or_new(options, RenewDelegationTokenOptions))
 
     def expire_delegation_token(self, *, hmac: bytes,
-                                options: ExpireDelegationTokenOptions | None = None
+                                options: ExpireDelegationTokenOptions | None = MISSING
                                 ) -> ExpireDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.expire_delegation_token`."""
         return self._expire_delegation_token(
-            hmac, options if options is not None else ExpireDelegationTokenOptions())
+            hmac, _conversions.options_or_new(options, ExpireDelegationTokenOptions))
 
     def describe_delegation_token(self, *,
-                                  options: DescribeDelegationTokenOptions | None = None
+                                  options: DescribeDelegationTokenOptions | None = MISSING
                                   ) -> DescribeDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.describe_delegation_token`."""
         return self._describe_delegation_token(
-            options if options is not None else DescribeDelegationTokenOptions())
+            _conversions.options_or_new(options, DescribeDelegationTokenOptions))
 
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                 options: DescribeConsumerGroupsOptions | None = None
+                                 options: DescribeConsumerGroupsOptions | None = MISSING
                                  ) -> DescribeConsumerGroupsResult[Async]:
         """See :meth:`MockAdminClient.describe_consumer_groups`."""
         return self._describe_consumer_groups(group_ids)
@@ -431,54 +435,58 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
 
     @java_forms(*_LIST_CONSUMER_GROUP_OFFSETS_FORMS)
     def list_consumer_group_offsets(
-        self, *, group_id: str | None = None,
-        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = None,
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *, group_id: str | None = MISSING,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = MISSING,
+        options: ListConsumerGroupOffsetsOptions | None = MISSING
     ) -> ListConsumerGroupOffsetsResult[Async]:
         """See :meth:`MockAdminClient.list_consumer_group_offsets`."""
-        if group_specs is None:
-            assert group_id is not None  # java_forms: one or the other
-            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}
-        return self._list_consumer_group_offsets(group_specs)
+        if group_specs is MISSING:  # java_forms: one or the other
+            # Admin.listConsumerGroupOffsets(groupId, options): singletonMap, a None
+            # group id included.
+            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}  # type: ignore[dict-item]
+        return self._list_consumer_group_offsets(group_specs)  # type: ignore[arg-type]
 
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                               options: DeleteConsumerGroupsOptions | None = None
+                               options: DeleteConsumerGroupsOptions | None = MISSING
                                ) -> DeleteConsumerGroupsResult[Async]:
         """See :meth:`MockAdminClient.delete_consumer_groups`."""
         return self._delete_consumer_groups(group_ids)
 
     def delete_consumer_group_offsets(self, *, group_id: str,
                                       partitions: Iterable[TopicPartition],
-                                      options: DeleteConsumerGroupOffsetsOptions | None = None
+                                      options: DeleteConsumerGroupOffsetsOptions | None = MISSING
                                       ) -> DeleteConsumerGroupOffsetsResult[Async]:
         """See :meth:`MockAdminClient.delete_consumer_group_offsets`."""
         return self._delete_consumer_group_offsets(group_id, partitions)
 
     def list_groups(
-        self, *, options: ListGroupsOptions | None = None
+        self, *, options: ListGroupsOptions | None = MISSING
     ) -> ListGroupsResult[Async]:
         """See :meth:`MockAdminClient.list_groups`."""
         return self._list_groups()
 
     def elect_leaders(self, *, election_type: ElectionType,
                             partitions: Iterable[TopicPartition] | None,
-                            options: ElectLeadersOptions | None = None
+                            options: ElectLeadersOptions | None = MISSING
                             ) -> ElectLeadersResult[Async]:
         """See :meth:`MockAdminClient.elect_leaders`."""
         return self._elect_leaders(election_type, partitions)
 
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-            options: AlterPartitionReassignmentsOptions | None = None
+            options: AlterPartitionReassignmentsOptions | None = MISSING
             ) -> AlterPartitionReassignmentsResult[Async]:
         """See :meth:`MockAdminClient.alter_partition_reassignments`."""
         return self._alter_partition_reassignments(reassignments)
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] | None = None,
-            options: ListPartitionReassignmentsOptions | None = None
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
+            options: ListPartitionReassignmentsOptions | None = MISSING
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`MockAdminClient.list_partition_reassignments`."""
+        if partitions is MISSING:  # Java's listPartitionReassignments(options): Optional.empty()
+            return self._list_partition_reassignments(None)
+        _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
         return self._list_partition_reassignments(partitions)
 
     def remove_members_from_consumer_group(
@@ -489,24 +497,24 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
 
     def alter_consumer_group_offsets(self, *, group_id: str,
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                     options: AlterConsumerGroupOffsetsOptions | None = None
+                                     options: AlterConsumerGroupOffsetsOptions | None = MISSING
                                      ) -> AlterConsumerGroupOffsetsResult[Async]:
         """See :meth:`MockAdminClient.alter_consumer_group_offsets`."""
         return self._alter_consumer_group_offsets(group_id, offsets)
 
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                           options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Async]:
+                           options: ListOffsetsOptions | None = MISSING) -> ListOffsetsResult[Async]:
         """See :meth:`MockAdminClient.list_offsets`."""
         return self._list_offsets(topic_partition_offsets)
 
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                               options: DescribeClientQuotasOptions | None = None
+                               options: DescribeClientQuotasOptions | None = MISSING
                                ) -> DescribeClientQuotasResult[Async]:
         """See :meth:`MockAdminClient.describe_client_quotas`."""
         return self._describe_client_quotas(filter)
 
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                            options: AlterClientQuotasOptions | None = None
+                            options: AlterClientQuotasOptions | None = MISSING
                             ) -> AlterClientQuotasResult[Async]:
         """See :meth:`MockAdminClient.alter_client_quotas`."""
         return self._alter_client_quotas(entries)
@@ -522,64 +530,65 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
 
     @java_forms(*_DESCRIBE_USER_SCRAM_CREDENTIALS_FORMS)
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None = UNSET,
-            options: DescribeUserScramCredentialsOptions | None = None
+            self, *, users: Sequence[str] | None = MISSING,
+            options: DescribeUserScramCredentialsOptions | None = MISSING
     ) -> DescribeUserScramCredentialsResult[Async]:
         """See :meth:`MockAdminClient.describe_user_scram_credentials`."""
-        return self._describe_user_scram_credentials(None if users is UNSET else users)
+        return self._describe_user_scram_credentials(None if users is MISSING else users)
 
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
-            options: AlterUserScramCredentialsOptions | None = None
+            options: AlterUserScramCredentialsOptions | None = MISSING
     ) -> AlterUserScramCredentialsResult[Async]:
         """See :meth:`MockAdminClient.alter_user_scram_credentials`."""
         return self._alter_user_scram_credentials(alterations)
 
-    def describe_features(self, *, options: DescribeFeaturesOptions | None = None
+    def describe_features(self, *, options: DescribeFeaturesOptions | None = MISSING
                           ) -> DescribeFeaturesResult[Async]:
         """See :meth:`MockAdminClient.describe_features`."""
         return self._describe_features()
 
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                        options: UpdateFeaturesOptions | None = None
+                        options: UpdateFeaturesOptions | None = MISSING
                         ) -> UpdateFeaturesResult[Async]:
         """See :meth:`MockAdminClient.update_features`."""
-        if options is None:
+        if options is MISSING:
             options = UpdateFeaturesOptions()
-        return self._update_features(feature_updates, options.validate_only())
+        return self._update_features(feature_updates, options)
 
     def unregister_controller(self, *, controller_id: int,
-                              options: UnregisterControllerOptions | None = None
+                              options: UnregisterControllerOptions | None = MISSING
                               ) -> UnregisterControllerResult[Async]:
         """A completed future when the mock uses a raft controller, else one failed
         with ``UnsupportedVersionError("")``, as Java's mock."""
+        _conversions.non_null(controller_id, "controller_id")  # Java's int parameter
         return self._unregister_controller(controller_id)
 
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                           options: DescribeProducersOptions | None = None
+                           options: DescribeProducersOptions | None = MISSING
                            ) -> DescribeProducersResult[Async]:
         """See :meth:`MockAdminClient.describe_producers`."""
         return self._describe_producers(partitions)
 
     def describe_transactions(self, *, transactional_ids: Iterable[str],
-                              options: DescribeTransactionsOptions | None = None
+                              options: DescribeTransactionsOptions | None = MISSING
                               ) -> DescribeTransactionsResult[Async]:
         """See :meth:`MockAdminClient.describe_transactions`."""
         return self._describe_transactions(transactional_ids)
 
     def abort_transaction(self, *, spec: AbortTransactionSpec,
-                          options: AbortTransactionOptions | None = None
+                          options: AbortTransactionOptions | None = MISSING
                           ) -> AbortTransactionResult[Async]:
         """See :meth:`MockAdminClient.abort_transaction`."""
         return self._abort_transaction(spec)
 
-    def list_transactions(self, *, options: ListTransactionsOptions | None = None
+    def list_transactions(self, *, options: ListTransactionsOptions | None = MISSING
                           ) -> ListTransactionsResult[Async]:
         """See :meth:`MockAdminClient.list_transactions`."""
         return self._list_transactions()
 
     def fence_producers(self, *, transactional_ids: Iterable[str],
-                        options: FenceProducersOptions | None = None
+                        options: FenceProducersOptions | None = MISSING
                         ) -> FenceProducersResult[Async]:
         """See :meth:`MockAdminClient.fence_producers`."""
         return self._fence_producers(transactional_ids)
@@ -593,20 +602,20 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
 
     @java_forms(*_LIST_CONFIG_RESOURCES_FORMS)
     def list_config_resources(self, *,
-                                    config_resource_types: Iterable[ConfigResource.Type] = UNSET,
-                                    options: ListConfigResourcesOptions | None = None
+                                    config_resource_types: Iterable[ConfigResource.Type] = MISSING,
+                                    options: ListConfigResourcesOptions | None = MISSING
                                     ) -> ListConfigResourcesResult[Async]:
         """See :meth:`MockAdminClient.list_config_resources`."""
         return self._list_config_resources(config_resource_types)
 
     def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                options: DescribeClassicGroupsOptions | None = None
+                                options: DescribeClassicGroupsOptions | None = MISSING
                                 ) -> DescribeClassicGroupsResult[Async]:
         """See :meth:`MockAdminClient.describe_classic_groups`."""
         return self._describe_classic_groups(group_ids)
 
     def force_terminate_transaction(self, *, transactional_id: str,
-                                    options: TerminateTransactionOptions | None = None
+                                    options: TerminateTransactionOptions | None = MISSING
                                     ) -> TerminateTransactionResult[Async]:
         """See :meth:`MockAdminClient.force_terminate_transaction`."""
         return self._force_terminate_transaction(transactional_id)

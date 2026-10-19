@@ -32,6 +32,7 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, overload
 
+from confluent_kafka._args import MISSING
 
 from .user_scram_credential_alteration import UserScramCredentialAlteration
 
@@ -77,18 +78,26 @@ class UserScramCredentialUpsertion(UserScramCredentialAlteration):
                  salt: bytes) -> None: ...
 
     def __init__(self, *, user: str, credential_info: ScramCredentialInfo,
-                 password: str | bytes, salt: bytes | None = None) -> None:
+                 password: str | bytes, salt: bytes = MISSING) -> None:
         """``user``: the user for which the credential is to be
         updated/inserted; ``credential_info``: the mechanism and iterations to
         be used; ``password``: the password; ``salt``: the salt to be used, a
-        random salt when it is not given."""
-        if isinstance(password, str):
-            if salt is not None:
+        random salt when it is left out (Java's ``generateRandomSalt()``). Each
+        ``None`` raises ``TypeError``, as Java's ``Objects.requireNonNull`` does,
+        in Java's order; a ``None`` password without a salt matches both the
+        ``String`` and the ``byte[]`` constructor, which Java's compiler rejects."""
+        if salt is not MISSING:
+            if isinstance(password, str):
                 raise TypeError(
                     "UserScramCredentialUpsertion() takes a bytes password with a salt; "
                     "got a str password")
+        elif password is None:
+            from confluent_kafka.admin._conversions import ambiguous_none
+
+            raise ambiguous_none("UserScramCredentialUpsertion", "password", ("str", "bytes"))
+        if isinstance(password, str):
             password = password.encode("utf_8")
-        if salt is None:
+        if salt is MISSING:
             salt = _generate_random_salt()
         if user is None:
             raise TypeError("user must not be None")
@@ -97,6 +106,8 @@ class UserScramCredentialUpsertion(UserScramCredentialAlteration):
             raise TypeError("credential_info must not be None")
         if password is None:
             raise TypeError("password must not be None")
+        if salt is None:
+            raise TypeError("salt must not be None")
         self._info = credential_info
         self._password = bytes(password)
         self._salt = bytes(salt)
