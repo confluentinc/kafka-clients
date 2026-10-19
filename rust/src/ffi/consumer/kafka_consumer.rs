@@ -233,29 +233,18 @@ mod tests {
     /// A C deserializer's calls go through `ArcDeserializer`, whose futures
     /// (awaiting the Tokio mutex, then the `FfiDeserializer` variant's future)
     /// must fit `InlineFuture`'s buffer, or every record would box one: for a
-    /// built-in, a synchronous C implementation (a blocking-pool task) and an
-    /// asynchronous one (a pending report).
+    /// built-in and a C implementation (a pending report).
     #[test]
     fn arc_deserializer_futures_are_stored_inline() {
         use std::ffi::{c_char, c_void};
 
         use crate::common::serialization::InlineFuture;
-        use crate::ffi::common::kafka_common_Error_t;
         use crate::ffi::common::serialization::deserializer::{
-            DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_new,
-            kafka_common_serialization_Deserializer_new_async,
+            DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_new_async,
         };
         use crate::ffi::common::serialization::string_deserializer::GenericStringDeserializer;
 
         // Never called: the futures are only built.
-        unsafe extern "C" fn sync_fn(
-            _: *mut c_void,
-            _: *const c_char,
-            _: kafka_Bytes_t,
-            _: *mut *mut kafka_common_Error_t,
-        ) -> *mut c_void {
-            std::ptr::null_mut()
-        }
         unsafe extern "C" fn async_fn(_: *mut c_void, _: *const c_char, _: kafka_Bytes_t, _: i64) {}
 
         let built_in = ArcDeserializer(DeserializerInner::view(Arc::new(tokio::sync::Mutex::new(
@@ -263,29 +252,19 @@ mod tests {
         ))));
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // consumer's `Arc` frees it.
-        let (sync, asynchronous) = unsafe {
-            (
-                ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new(
-                    std::ptr::null_mut(),
-                    sync_fn,
-                    None,
-                    None,
-                    None,
-                    None,
-                ))),
-                ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new_async(
-                    std::ptr::null_mut(),
-                    async_fn,
-                    None,
-                    None,
-                    None,
-                    None,
-                ))),
-            )
+        let asynchronous = unsafe {
+            ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new_async(
+                std::ptr::null_mut(),
+                async_fn,
+                None,
+                None,
+                None,
+                None,
+            )))
         };
         let headers = RecordHeaders::new();
         let data = Bytes::from_static(b"v");
-        for (kind, deserializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
+        for (kind, deserializer) in [("built-in", &built_in), ("C", &asynchronous)] {
             let future = Deserializer::deserialize(deserializer, "t", &data);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),

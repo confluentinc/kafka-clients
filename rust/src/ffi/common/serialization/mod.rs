@@ -20,8 +20,8 @@
 //! holds as a [`GenericValue`] and never reads. What the pointer means is the
 //! business of the implementation on each side:
 //!
-//!   - a C implementation registered with `Serializer_new` /
-//!     `Deserializer_new` decides it, and a `void *` a C deserializer
+//!   - a C implementation registered with `Serializer_new_async` /
+//!     `Deserializer_new_async` decides it, and a `void *` a C deserializer
 //!     produces is owned by the C side, never freed by Rust;
 //!   - each built-in class documents its representation: `StringSerializer`
 //!     reads a NUL-terminated `const char *`, `ByteArraySerializer` a
@@ -43,17 +43,14 @@
 //! is Tokio's: a consumer holds it across the await of the deserializer's
 //! future.
 //!
-//! A C implementation is registered in one of two modes:
-//!
-//!   - `_new` takes the synchronous `_fn_t`s, which return their result. A
-//!     client calls them on Tokio's blocking pool and awaits the task, so a
-//!     slow implementation holds no runtime worker; the invokers call them on
-//!     their calling thread.
-//!   - `_new_async` takes the `_async_fn_t`s, which return `void` and report
-//!     their result later, from any thread, through the handle's
-//!     `__set_callback_result` with the `callback_id` they were given. The
-//!     handle keeps the pending calls in its own [`CallbackResults`], and a
-//!     client awaits the report without holding any thread.
+//! A C implementation is registered with `_new_async`, which takes the
+//! `_async_fn_t`s: each returns `void` and reports its result later, from any
+//! thread, through the handle's `__set_callback_result` with the
+//! `callback_id` it was given. The handle keeps the pending calls in its own
+//! [`CallbackResults`], and a client awaits the report without holding any
+//! thread. There is no synchronous form: a C function returning its result
+//! would hold the thread it runs on, which a client's future cannot give it
+//! without blocking its runtime.
 //!
 //! The built-ins are always-ready futures; the invokers drive every future on
 //! the calling thread, parking it while a report is awaited
@@ -61,7 +58,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_void};
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
@@ -76,7 +73,6 @@ use crate::ffi::callback_result::{CallbackResults, KeepAlive, ResultSink, WaitRe
 use crate::ffi::common::header::internals::record_headers::{
     RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t,
 };
-use crate::ffi::common::panic_error;
 use crate::ffi::common::serialization::deserializer::{
     DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_t,
 };
@@ -205,8 +201,8 @@ impl DeserializerHandle {
 /// The output of a serde future that a blocking invoker drives on the
 /// calling thread, polled once.
 ///
-/// Every serde a C caller can reach completes in its first poll (the C
-/// implementations are called synchronously, the built-ins never wait), so a
+/// The built-in classes complete in their first poll (they never wait; a C
+/// implementation is waited for with `block_on_thread` instead), so a
 /// pending future is reported as an error rather than waited for.
 pub(crate) fn ready<F: Future>(future: F) -> Result<F::Output, Error> {
     future
@@ -262,20 +258,6 @@ pub(crate) fn block_on_thread<F: Future>(future: F) -> F::Output {
         }
         thread::park();
     }
-}
-
-/// Where a synchronous C implementation (`_new`) runs.
-///
-/// Has no Java counterpart (`definition-of-done.md` §7): Java calls a
-/// serializer on the calling thread, which may block; a Rust future must not
-/// block its runtime worker, so a client moves the call to the blocking pool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Dispatch {
-    /// On Tokio's blocking pool, awaited; on the calling thread when there is
-    /// no runtime. What a client's future does.
-    Blocking,
-    /// On the calling thread. What the blocking invokers do.
-    Inline,
 }
 
 /// The arguments an asynchronous C implementation (`_new_async`) reads until
@@ -429,72 +411,14 @@ impl Data<'_> {
             Data::Bytes(bytes) => bytes,
         }
     }
-
-    /// An owned buffer for a call on the blocking pool.
-    pub(crate) fn to_bytes(self) -> Bytes {
-        match self {
-            Data::Slice(slice) => Bytes::copy_from_slice(slice),
-            Data::Bytes(bytes) => bytes.clone(),
-        }
-    }
 }
 
 /// The registry of an asynchronous C implementation's pending calls.
 pub(crate) type Results = CallbackResults<CallArgs>;
 
-/// The future of a C implementation's call.
-///
-/// Has no Java counterpart (`definition-of-done.md` §7): a hand-written
-/// future rather than an `async` block, so that a serde's future stays small
-/// enough for `InlineFuture`.
-pub(crate) enum Call<'a, R> {
-    /// The result, known when the call was made (an inline call). The error
-    /// is boxed so that it does not size every pending call: a failure
-    /// allocates, a success does not.
-    Done(Option<Result<R, Box<Error>>>),
-    /// A synchronous implementation running on the blocking pool.
-    Task(tokio::task::JoinHandle<Result<R, Error>>),
-    /// An asynchronous implementation's pending report.
-    Wait(WaitReport<'a, CallArgs, R>),
-}
-
-impl<R: Unpin> Future for Call<'_, R> {
-    type Output = Result<R, Error>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Call::Done(result) => Poll::Ready(match result.take() {
-                Some(result) => result.map_err(|error| *error),
-                None => Err(Error::local_illegal_state("The serde call was already completed")),
-            }),
-            Call::Task(task) => Pin::new(task).poll(cx).map(|joined| match joined {
-                Ok(result) => result,
-                Err(error) => Err(match error.try_into_panic() {
-                    Ok(payload) => panic_error("a C serde's blocking call", payload.as_ref()),
-                    Err(_) => Error::local_illegal_state("A C serde's blocking call was cancelled"),
-                }),
-            }),
-            Call::Wait(wait) => Pin::new(wait).poll(cx),
-        }
-    }
-}
-
-/// Runs `call` where `dispatch` says: inline, or on the blocking pool when a
-/// runtime is there.
-pub(crate) fn dispatch<'a, R: Send + 'static>(
-    dispatch: Dispatch,
-    call: impl FnOnce() -> Result<R, Error> + Send + 'static,
-) -> Call<'a, R> {
-    match (dispatch, tokio::runtime::Handle::try_current()) {
-        (Dispatch::Blocking, Ok(handle)) => Call::Task(handle.spawn_blocking(call)),
-        _ => Call::Done(Some(call().map_err(Box::new))),
-    }
-}
-
-/// A `void *` the C side owns, carried to the blocking pool.
-pub(crate) fn send_ptr<T>(ptr: *const T) -> SendPtr {
-    SendPtr(ptr.cast_mut().cast::<c_void>())
-}
+/// The future of a C implementation's call: its pending report, converted
+/// by the method's `finish` function.
+pub(crate) type Report<'a, R> = WaitReport<'a, CallArgs, R>;
 
 /// The owned map a C `configure` reads: sorted by key, since Java's map is
 /// unordered and index addressing through the C map is not.

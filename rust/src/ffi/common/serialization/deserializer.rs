@@ -20,23 +20,22 @@
 //! the implementation produces. A `void *` a C implementation
 //! produces is owned by the C side and never freed by Rust; what a built-in
 //! class produces is documented by that class. The `kafka_Bytes_t` arrays an
-//! implementation receives are borrowed until it returns (synchronous mode)
-//! or reports (asynchronous mode), and `data == NULL` is read as an empty
-//! array: the Rust trait takes a slice, never Java's `null`.
+//! implementation receives are borrowed until it reports, and
+//! `data == NULL` is read as an empty array: the Rust trait takes a slice,
+//! never Java's `null`.
 //!
 //! `configure` and `close` take `&mut self`, so a handle guards its
 //! implementation with a Tokio mutex, and the two invokers take a `*mut`
 //! handle.
 //!
-//! A C implementation is registered synchronous
-//! ([`kafka_common_serialization_Deserializer_new`]: a consumer calls it on
-//! Tokio's blocking pool) or asynchronous
-//! ([`kafka_common_serialization_Deserializer_new_async`]: it reports through
-//! [`kafka_common_serialization_Deserializer__set_callback_result`]). The
-//! blocking invokers call a synchronous one on their calling thread and park
-//! that thread until an asynchronous one reports; the `_cb` twins fire their
-//! completion on the calling thread, or, for an asynchronous implementation,
-//! on the thread that reports.
+//! A C implementation is registered with
+//! [`kafka_common_serialization_Deserializer_new_async`]: each of its
+//! functions returns at once and reports through
+//! [`kafka_common_serialization_Deserializer__set_callback_result`], so a
+//! consumer awaits the report without holding any thread. The blocking
+//! invokers park their calling thread until a C implementation reports; the
+//! `_cb` twins fire their completion on the thread that reports, or, for a
+//! built-in class or a Java default, on the calling thread.
 
 #![expect(non_camel_case_types)]
 
@@ -59,8 +58,8 @@ use crate::ffi::common::serialization::byte_array_deserializer::GenericByteArray
 use crate::ffi::common::serialization::bytes_deserializer::GenericBytesDeserializer;
 use crate::ffi::common::serialization::string_deserializer::GenericStringDeserializer;
 use crate::ffi::common::serialization::{
-    Call, CallArgs, Data, Dispatch, OpaqueCb, Results, block_on_thread, build_configs, dispatch, lock_blocking,
-    log_failure, opaque_sink, read_configs, ready, send_ptr,
+    CallArgs, Data, OpaqueCb, Report, Results, block_on_thread, build_configs, lock_blocking, log_failure, opaque_sink,
+    read_configs, ready,
 };
 use crate::ffi::common::{
     box_error, deliver_panic_opaque, deliver_panic_value, deliver_value, kafka_common_Error_t, run_inline, take_error,
@@ -87,7 +86,6 @@ pub struct kafka_common_serialization_Deserializer_t {
 /// `&mut self` methods (`configure`, `close`) need.
 pub(crate) enum FfiDeserializer {
     /// A C implementation registered with
-    /// [`kafka_common_serialization_Deserializer_new`] or
     /// [`kafka_common_serialization_Deserializer_new_async`].
     C(CDeserializer),
     /// `kafka_common_serialization_StringDeserializer_t`.
@@ -143,9 +141,8 @@ impl Deserializer<GenericValue> for FfiDeserializer {
 }
 
 impl FfiDeserializer {
-    /// `method` for a blocking invoker: a C implementation runs on the
-    /// calling thread (synchronous) or is waited for there (asynchronous),
-    /// a built-in completes at once.
+    /// `method` for a blocking invoker: a C implementation is waited for on
+    /// the calling thread, a built-in completes at once.
     fn invoke(
         &self,
         method: Method,
@@ -154,9 +151,7 @@ impl FfiDeserializer {
         data: Data<'_>,
     ) -> Result<GenericValue, Error> {
         match self {
-            FfiDeserializer::C(deserializer) => {
-                block_on_thread(deserializer.start(Dispatch::Inline, method, topic, headers, data))
-            },
+            FfiDeserializer::C(deserializer) => block_on_thread(deserializer.start(method, topic, headers, data)),
             other => ready(async {
                 match (method, data) {
                     (Method::Deserialize, data) => other.deserialize(topic, data.as_slice()).await,
@@ -180,58 +175,6 @@ impl FfiDeserializer {
 
 /// What a deserializer handle guards its implementation with.
 pub(crate) type Locked = tokio::sync::Mutex<FfiDeserializer>;
-
-/// `T deserialize(String topic, byte[] data)` of a synchronous C
-/// implementation: `topic` and `data` are borrowed for the call; the
-/// `void *` it returns is owned by the C side. On failure it stores an owned
-/// error in `*out_err`, which points at `NULL` on entry, and its return value
-/// is ignored.
-pub type kafka_common_serialization_Deserializer_deserialize_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    topic: *const c_char,
-    data: kafka_Bytes_t,
-    out_err: *mut *mut kafka_common_Error_t,
-) -> *mut c_void;
-
-/// `T deserialize(String topic, Headers headers, byte[] data)` of a
-/// synchronous C implementation; `headers` are the record's own headers,
-/// read-only and borrowed for the call.
-/// `NULL` is the Java default: `deserialize(topic, data)`.
-pub type kafka_common_serialization_Deserializer_deserialize_with_headers_fn_t = Option<
-    unsafe extern "C" fn(
-        self_: *mut c_void,
-        topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
-        data: kafka_Bytes_t,
-        out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void,
->;
-
-/// `T deserialize(String topic, Headers headers, ByteBuffer data)` of a
-/// synchronous C implementation (KIP-863), the overload a consumer calls for
-/// every fetched key and value; `headers` are the record's own headers,
-/// read-only, and `data` the record's bytes, both borrowed for the call. `NULL` is the Java default:
-/// `deserialize(topic, headers, data)`.
-pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_fn_t = Option<
-    unsafe extern "C" fn(
-        self_: *mut c_void,
-        topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
-        data: kafka_Bytes_t,
-        out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void,
->;
-
-/// `configure(Map<String, ?> configs, boolean isKey)` of a synchronous C
-/// implementation: `configs` maps NUL-terminated keys to NUL-terminated
-/// values, sorted by key and borrowed for the call. `NULL` is the Java
-/// default: nothing.
-pub type kafka_common_serialization_Deserializer_configure_fn_t =
-    Option<unsafe extern "C" fn(self_: *mut c_void, configs: *const kafka_Map_t, is_key: i8)>;
-
-/// `close()` of a synchronous C implementation. `NULL` is the Java default:
-/// nothing.
-pub type kafka_common_serialization_Deserializer_close_fn_t = Option<unsafe extern "C" fn(self_: *mut c_void)>;
 
 /// `T deserialize(String topic, byte[] data)` of an asynchronous C
 /// implementation: returns at once and reports the `void *` value (owned by
@@ -274,8 +217,8 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_
 >;
 
 /// `configure(Map<String, ?> configs, boolean isKey)` of an asynchronous C
-/// implementation: `configs` is as for the synchronous form, valid until it
-/// reports, with a `NULL` result (an error it reports is logged). `NULL` is
+/// implementation: `configs` maps NUL-terminated keys to NUL-terminated
+/// values, sorted by key, valid until it reports, with a `NULL` result (an error it reports is logged). `NULL` is
 /// the Java default: nothing.
 pub type kafka_common_serialization_Deserializer_configure_async_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void, configs: *const kafka_Map_t, is_key: i8, callback_id: i64)>;
@@ -286,8 +229,8 @@ pub type kafka_common_serialization_Deserializer_close_async_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void, callback_id: i64)>;
 
 /// What a [`kafka_common_serialization_Deserializer_t`] points at: the
-/// implementation behind its mutex, who owns the handle, and, for an
-/// asynchronous C implementation, the registry its reports go to, reached
+/// implementation behind its mutex, who owns the handle, and, for a C
+/// implementation, the registry its reports go to, reached
 /// without the mutex, which a consumer holds while it awaits a report.
 ///
 /// Lives in an `Arc`: the handle is `Arc::into_raw` (owned) or the `Arc` a
@@ -296,7 +239,7 @@ pub type kafka_common_serialization_Deserializer_close_async_fn_t =
 /// client is destroyed.
 pub(crate) struct DeserializerInner {
     imp: Arc<Locked>,
-    /// `true` for a handle the C caller owns (`_new`, `_new_async`), `false`
+    /// `true` for a handle the C caller owns (`_new_async`), `false`
     /// for the view a class handle caches (`__as_Deserializer`).
     owned: bool,
     results: Option<Arc<Results>>,
@@ -383,16 +326,6 @@ pub(crate) enum Method {
     WithHeadersBytes,
 }
 
-/// The functions of a synchronous C implementation.
-#[derive(Clone, Copy)]
-struct SyncFns {
-    deserialize: kafka_common_serialization_Deserializer_deserialize_fn_t,
-    deserialize_with_headers: kafka_common_serialization_Deserializer_deserialize_with_headers_fn_t,
-    deserialize_with_headers_bytes: kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_fn_t,
-    configure: kafka_common_serialization_Deserializer_configure_fn_t,
-    close: kafka_common_serialization_Deserializer_close_fn_t,
-}
-
 /// The functions of an asynchronous C implementation.
 #[derive(Clone, Copy)]
 struct AsyncFns {
@@ -403,24 +336,18 @@ struct AsyncFns {
     close: kafka_common_serialization_Deserializer_close_async_fn_t,
 }
 
-/// How a C implementation is called.
-enum Mode {
-    /// [`kafka_common_serialization_Deserializer_new`].
-    Sync(SyncFns),
-    /// [`kafka_common_serialization_Deserializer_new_async`], with the
-    /// registry its reports go to, shared with its handle.
-    Async(AsyncFns, Arc<Results>),
-}
-
-/// A C implementation of [`Deserializer`]; a null optional method is the
+/// A C implementation of [`Deserializer`], registered with
+/// [`kafka_common_serialization_Deserializer_new_async`], with the registry
+/// its reports go to, shared with its handle; a null optional method is the
 /// Java default.
 pub(crate) struct CDeserializer {
     self_: *mut c_void,
-    mode: Mode,
+    fns: AsyncFns,
+    results: Arc<Results>,
 }
 
 // SAFETY: `self_` and the function pointers are what the C caller registered through
-// `kafka_common_serialization_Deserializer_new` or `_new_async`: the C user is responsible for the
+// `kafka_common_serialization_Deserializer_new_async`: the C user is responsible for the
 // thread-safety of `self_`, which those functions' rustdoc states, and the function pointers are
 // trivially shareable; the registry is `Send`. `CDeserializer` itself never dereferences `self_`;
 // it only passes it back to the functions registered with it.
@@ -430,23 +357,6 @@ unsafe impl Send for CDeserializer {}
 // registry; the C user is responsible for the thread-safety of `self_` across the threads that call
 // it, as the registering functions' rustdoc states.
 unsafe impl Sync for CDeserializer {}
-
-/// Reads a C implementation's result: the error it stored, or the `void *`
-/// it returned.
-///
-/// # Safety
-///
-/// `error` must be null or an owned error.
-unsafe fn collect(error: *mut kafka_common_Error_t, out: *mut c_void) -> Result<GenericValue, Error> {
-    // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle, the
-    // `box_error` handle of a `kafka_common_Error_*` constructor or a fallible FFI function that
-    // the C implementation handed over, not yet destroyed, as `take_error` requires; it is consumed
-    // here.
-    match unsafe { take_error(error) } {
-        Some(error) => Err(error),
-        None => Ok(GenericValue::new(out)),
-    }
-}
 
 /// The C function a method resolves to, Java's defaults applied.
 enum Target<P, H> {
@@ -483,181 +393,75 @@ fn finish_unit(_: &mut CallArgs, result: Result<*mut c_void, Error>) -> Result<(
 fn no_convert(_: &mut CallArgs, _: *mut c_void) {}
 
 impl CDeserializer {
-    /// Whether the implementation was registered with `_new_async`.
-    fn is_async(&self) -> bool {
-        matches!(self.mode, Mode::Async(..))
-    }
-
-    /// Starts `method`. A synchronous implementation runs where `dispatch`
-    /// says, owning copies of the arguments when it leaves the calling
-    /// thread; an asynchronous one is called at once, its arguments kept in
-    /// the registry slot until it reports.
+    /// Starts `method`: the implementation is called at once, its arguments
+    /// kept in the registry slot until it reports.
     pub(crate) fn start(
         &self,
-        dispatch_to: Dispatch,
         method: Method,
         topic: &str,
         headers: &RecordHeaders,
         data: Data<'_>,
-    ) -> Call<'_, GenericValue> {
-        let self_ = SendPtr(self.self_);
-        match &self.mode {
-            Mode::Sync(fns) => {
-                let topic = owned_c_string(topic);
-                let data = data.to_bytes();
-                match resolve(
-                    method,
-                    fns.deserialize,
-                    fns.deserialize_with_headers,
-                    fns.deserialize_with_headers_bytes,
-                ) {
-                    Target::Plain(function) => dispatch(dispatch_to, move || {
-                        let mut error = ptr::null_mut();
-                        // SAFETY: `function` and `self_` are the pair the C caller registered together
-                        // through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
-                        // caller keep `self_` alive until every call made through the handle has
-                        // returned. The arguments are borrowed for the call, as the `_fn_t` rustdoc
-                        // states: `topic` and `data` are owned by this closure, and `out_err` is a
-                        // local slot pointing at null.
-                        let out = unsafe {
-                            function(self_.get(), topic.as_ptr(), kafka_Bytes_t::from_slice(&data), &raw mut error)
-                        };
-                        // SAFETY: `error` is what the C function stored in its slot: null or an owned
-                        // error handle, as its `_fn_t` rustdoc states and `collect` requires.
-                        unsafe { collect(error, out) }
-                    }),
-                    Target::Headers(function) => {
-                        let headers = RecordHeadersInner::new(headers.clone());
-                        dispatch(dispatch_to, move || {
-                            let mut error = ptr::null_mut();
-                            // SAFETY: As for the plain form; `headers` is owned by this closure, which
-                            // does not move it during the call.
-                            let out = unsafe {
-                                function(
-                                    self_.get(),
-                                    topic.as_ptr(),
-                                    headers.as_ptr(),
-                                    kafka_Bytes_t::from_slice(&data),
-                                    &raw mut error,
-                                )
-                            };
-                            // SAFETY: As for the plain form.
-                            unsafe { collect(error, out) }
-                        })
-                    },
-                }
-            },
-            Mode::Async(fns, results) => {
-                let target = resolve(
-                    method,
-                    fns.deserialize,
-                    fns.deserialize_with_headers,
-                    fns.deserialize_with_headers_bytes,
-                );
-                let with_headers = matches!(target, Target::Headers(_));
-                let (id, (topic, headers, data)) = results.register_waiting(no_convert, |args| {
-                    let headers = if with_headers {
-                        args.share_headers(headers)
-                    } else {
-                        ptr::null()
-                    };
-                    (args.set_topic(topic), headers, args.set_data(data))
-                });
-                // SAFETY: The function and `self_` are the pair the C caller registered together
-                // through `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the
-                // caller keep `self_` alive until every call made through the handle has reported.
-                // `topic`, `headers` and `data` point into the registry slot's `CallArgs`, which the
-                // slot keeps until the report for `id`, as the `_async_fn_t` rustdoc states, even if
-                // the returned future is dropped first. The registry's lock is not held, so the
-                // implementation may report during the call.
-                unsafe {
-                    match target {
-                        Target::Plain(function) => function(self_.get(), topic, data, id),
-                        Target::Headers(function) => function(self_.get(), topic, headers, data, id),
-                    }
-                }
-                Call::Wait(WaitReport::new(results, id, finish_value))
-            },
+    ) -> Report<'_, GenericValue> {
+        let fns = &self.fns;
+        let target = resolve(
+            method,
+            fns.deserialize,
+            fns.deserialize_with_headers,
+            fns.deserialize_with_headers_bytes,
+        );
+        let with_headers = matches!(target, Target::Headers(_));
+        let (id, (topic, headers, data)) = self.results.register_waiting(no_convert, |args| {
+            let headers = if with_headers {
+                args.share_headers(headers)
+            } else {
+                ptr::null()
+            };
+            (args.set_topic(topic), headers, args.set_data(data))
+        });
+        // SAFETY: The function and `self_` are the pair the C caller registered together through
+        // `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller keep
+        // `self_` alive until every call made through the handle has reported. `topic`, `headers`
+        // and `data` point into the registry slot's `CallArgs`, which the slot keeps until the
+        // report for `id`, as the `_async_fn_t` rustdoc states, even if the returned future is
+        // dropped first. The registry's lock is not held, so the implementation may report during
+        // the call.
+        unsafe {
+            match target {
+                Target::Plain(function) => function(self.self_, topic, data, id),
+                Target::Headers(function) => function(self.self_, topic, headers, data, id),
+            }
         }
+        WaitReport::new(&self.results, id, finish_value)
     }
 
     /// Starts `configure`; `None` when the method is the Java default.
-    fn start_configure(
-        &self,
-        dispatch_to: Dispatch,
-        configs: &HashMap<String, String>,
-        is_key: bool,
-    ) -> Option<Call<'_, ()>> {
-        let self_ = SendPtr(self.self_);
-        let is_key = i8::from(is_key);
-        match &self.mode {
-            Mode::Sync(fns) => {
-                let configure = fns.configure?;
-                let configs = send_ptr(build_configs(configs));
-                Some(dispatch(dispatch_to, move || {
-                    let configs = configs.get().cast::<kafka_Map_t>();
-                    // SAFETY: `configure` and `self_` are the pair the C caller registered together
-                    // through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
-                    // caller keep `self_` alive until every call made through the handle has
-                    // returned. `configs` is the owned map `build_configs` built, borrowed by the call
-                    // as the `_fn_t` rustdoc states, and destroyed once the call returns.
-                    unsafe { configure(self_.get(), configs, is_key) };
-                    // SAFETY: `configs` is the owned map built above, not yet destroyed; the C
-                    // `configure` only borrowed it for its call.
-                    unsafe { kafka_Map_destroy(configs) };
-                    Ok(())
-                }))
-            },
-            Mode::Async(fns, results) => {
-                let configure = fns.configure?;
-                let configs = build_configs(configs);
-                let (id, ()) = results.register_waiting(no_convert, |args| args.set_configs(configs));
-                // SAFETY: `configure` and `self_` are the pair the C caller registered together
-                // through `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the
-                // caller keep `self_` alive until every call made through the handle has reported.
-                // `configs` is owned by the registry slot until the report for `id`, as the
-                // `_async_fn_t` rustdoc states.
-                unsafe { configure(self_.get(), configs, is_key, id) };
-                Some(Call::Wait(WaitReport::new(results, id, finish_unit)))
-            },
-        }
+    fn start_configure(&self, configs: &HashMap<String, String>, is_key: bool) -> Option<Report<'_, ()>> {
+        let configure = self.fns.configure?;
+        let configs = build_configs(configs);
+        let (id, ()) = self.results.register_waiting(no_convert, |args| args.set_configs(configs));
+        // SAFETY: `configure` and `self_` are the pair the C caller registered together through
+        // `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller keep
+        // `self_` alive until every call made through the handle has reported. `configs` is owned by
+        // the registry slot until the report for `id`, as the `_async_fn_t` rustdoc states.
+        unsafe { configure(self.self_, configs, i8::from(is_key), id) };
+        Some(WaitReport::new(&self.results, id, finish_unit))
     }
 
     /// Starts `close`; `None` when the method is the Java default.
-    fn start_close(&self, dispatch_to: Dispatch) -> Option<Call<'_, ()>> {
-        let self_ = SendPtr(self.self_);
-        match &self.mode {
-            Mode::Sync(fns) => {
-                let close = fns.close?;
-                Some(dispatch(dispatch_to, move || {
-                    // SAFETY: `close` and `self_` are the pair the C caller registered together
-                    // through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
-                    // caller keep `self_` alive until every call made through the handle has
-                    // returned.
-                    unsafe { close(self_.get()) };
-                    Ok(())
-                }))
-            },
-            Mode::Async(fns, results) => {
-                let close = fns.close?;
-                let (id, ()) = results.register_waiting(no_convert, |_| ());
-                // SAFETY: `close` and `self_` are the pair the C caller registered together through
-                // `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller
-                // keep `self_` alive until every call made through the handle has reported.
-                unsafe { close(self_.get(), id) };
-                Some(Call::Wait(WaitReport::new(results, id, finish_unit)))
-            },
-        }
+    fn start_close(&self) -> Option<Report<'_, ()>> {
+        let close = self.fns.close?;
+        let (id, ()) = self.results.register_waiting(no_convert, |_| ());
+        // SAFETY: `close` and `self_` are the pair the C caller registered together through
+        // `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller keep
+        // `self_` alive until every call made through the handle has reported.
+        unsafe { close(self.self_, id) };
+        Some(WaitReport::new(&self.results, id, finish_unit))
     }
 
-    /// Starts `method` for a `_cb` twin, on an asynchronous implementation:
-    /// `sink` receives the report on the reporting thread, and owns the
-    /// arguments C reads until then.
-    #[expect(clippy::too_many_arguments)]
+    /// Starts `method` for a `_cb` twin: `sink` receives the report on the
+    /// reporting thread, and owns the arguments C reads until then.
     fn start_with_sink(
         &self,
-        results: &Results,
-        fns: AsyncFns,
         method: Method,
         topic: &str,
         headers: &RecordHeaders,
@@ -674,7 +478,8 @@ impl CDeserializer {
             // The arguments the implementation read, released once it reported.
             drop((topic, headers, data));
         });
-        let id = results.register(sink);
+        let id = self.results.register(sink);
+        let fns = &self.fns;
         // SAFETY: The function and `self.self_` are the pair the C caller registered together
         // through `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller
         // keep `self_` alive until every call made through the handle has reported. The arguments
@@ -693,7 +498,7 @@ impl CDeserializer {
     }
 }
 
-// Each method returns the `Call` future itself rather than awaiting it in an
+// Each method returns the `WaitReport` future itself rather than awaiting it in an
 // `async fn`, so the consumer's wrapper stays within `InlineFuture`'s buffer.
 impl Deserializer<GenericValue> for CDeserializer {
     fn deserialize<'a>(
@@ -701,13 +506,7 @@ impl Deserializer<GenericValue> for CDeserializer {
         topic: &'a str,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(
-            Dispatch::Blocking,
-            Method::Deserialize,
-            topic,
-            &EMPTY_HEADERS,
-            Data::Slice(data),
-        )
+        self.start(Method::Deserialize, topic, &EMPTY_HEADERS, Data::Slice(data))
     }
 
     fn deserialize_with_headers<'a>(
@@ -716,7 +515,7 @@ impl Deserializer<GenericValue> for CDeserializer {
         headers: &'a RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(Dispatch::Blocking, Method::WithHeaders, topic, headers, Data::Slice(data))
+        self.start(Method::WithHeaders, topic, headers, Data::Slice(data))
     }
 
     fn deserialize_with_headers_bytes<'a>(
@@ -725,17 +524,17 @@ impl Deserializer<GenericValue> for CDeserializer {
         headers: &'a RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(Dispatch::Blocking, Method::WithHeadersBytes, topic, headers, Data::Bytes(data))
+        self.start(Method::WithHeadersBytes, topic, headers, Data::Bytes(data))
     }
 
     async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        if let Some(call) = self.start_configure(Dispatch::Blocking, configs, is_key) {
+        if let Some(call) = self.start_configure(configs, is_key) {
             log_failure("configure", "deserializer", call.await);
         }
     }
 
     async fn close(&mut self) {
-        if let Some(call) = self.start_close(Dispatch::Blocking) {
+        if let Some(call) = self.start_close() {
             log_failure("close", "deserializer", call.await);
         }
     }
@@ -744,41 +543,6 @@ impl Deserializer<GenericValue> for CDeserializer {
 /// The headers of a method that takes none: never read, since a plain
 /// method never reaches a header-taking C function.
 static EMPTY_HEADERS: std::sync::LazyLock<RecordHeaders> = std::sync::LazyLock::new(RecordHeaders::new);
-
-/// Registers a synchronous C implementation of `Deserializer`; `deserialize`
-/// is required, the other pointers may be `NULL` for the Java default. The
-/// caller owns `self_` and keeps it alive until the handle is destroyed with
-/// [`kafka_common_serialization_Deserializer_destroy`] or, once a client
-/// consumed it, until that client is destroyed, and in any case until every
-/// call made through the handle has returned. The functions are called one at
-/// a time, under the handle's lock, but from whichever thread makes the call,
-/// so the C caller is responsible for `self_` being usable from any thread. A
-/// consumer calls them on Tokio's blocking pool, so a slow implementation
-/// holds no runtime worker; the invokers call them on their calling thread.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub extern "C" fn kafka_common_serialization_Deserializer_new(
-    self_: *mut c_void,
-    deserialize: kafka_common_serialization_Deserializer_deserialize_fn_t,
-    deserialize_with_headers: kafka_common_serialization_Deserializer_deserialize_with_headers_fn_t,
-    deserialize_with_headers_bytes: kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_fn_t,
-    configure: kafka_common_serialization_Deserializer_configure_fn_t,
-    close: kafka_common_serialization_Deserializer_close_fn_t,
-) -> *mut kafka_common_serialization_Deserializer_t {
-    DeserializerInner::owned(
-        FfiDeserializer::C(CDeserializer {
-            self_,
-            mode: Mode::Sync(SyncFns {
-                deserialize,
-                deserialize_with_headers,
-                deserialize_with_headers_bytes,
-                configure,
-                close,
-            }),
-        }),
-        None,
-    )
-}
 
 /// Registers an asynchronous C implementation of `Deserializer`;
 /// `deserialize` is required, the other pointers may be `NULL` for the Java
@@ -808,24 +572,25 @@ pub extern "C" fn kafka_common_serialization_Deserializer_new_async(
     DeserializerInner::owned(
         FfiDeserializer::C(CDeserializer {
             self_,
-            mode: Mode::Async(
-                AsyncFns {
-                    deserialize,
-                    deserialize_with_headers,
-                    deserialize_with_headers_bytes,
-                    configure,
-                    close,
-                },
-                Arc::clone(&results),
-            ),
+            fns: AsyncFns {
+                deserialize,
+                deserialize_with_headers,
+                deserialize_with_headers_bytes,
+                configure,
+                close,
+            },
+            results: Arc::clone(&results),
         }),
         Some(results),
     )
 }
 
-/// Whether the handle stands for an asynchronous C implementation
-/// ([`kafka_common_serialization_Deserializer_new_async`]): 1, else 0, which
-/// includes a built-in class's view.
+/// Whether the handle stands for an asynchronous implementation, one that
+/// reports through
+/// [`kafka_common_serialization_Deserializer__set_callback_result`]: 1 for a C
+/// implementation ([`kafka_common_serialization_Deserializer_new_async`], the
+/// only way to register one), 0 for a built-in class's view, which completes
+/// within the call.
 ///
 /// # Safety
 ///
@@ -847,7 +612,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer__is_async(
 /// from any thread, during the call or later, even after a client consumed
 /// the handle (until that client is destroyed). A report for an unknown id,
 /// or a second one for the same id, is ignored and its error freed; so is any
-/// report on a handle that is not asynchronous.
+/// report on a built-in class's view.
 ///
 /// # Safety
 ///
@@ -893,9 +658,8 @@ unsafe fn slice<'a>(data: kafka_Bytes_t) -> &'a [u8] {
     unsafe { data.as_slice() }.unwrap_or(&[])
 }
 
-/// Runs `method` through a blocking invoker: a synchronous C implementation
-/// on the calling thread, an asynchronous one waited for there, under the
-/// handle's lock.
+/// Runs `method` through a blocking invoker: a C implementation waited for
+/// on the calling thread, under the handle's lock.
 ///
 /// # Safety
 ///
@@ -921,10 +685,9 @@ unsafe fn invoke(
     deserializer.invoke(method, topic, headers, data)
 }
 
-/// The `_cb` form of `method`: a synchronous C implementation or a built-in
-/// runs on the calling thread and `deliver` runs there; an asynchronous
-/// implementation is called at once and `deliver` runs on the thread that
-/// reports.
+/// The `_cb` form of `method`: a built-in class runs on the calling thread
+/// and `deliver` runs there; a C implementation is called at once and
+/// `deliver` runs on the thread that reports.
 ///
 /// # Safety
 ///
@@ -941,11 +704,8 @@ unsafe fn invoke_cb(
     // `deserializer_ref` requires; it stays alive for this call, and the guard on its mutex is
     // released before return.
     let deserializer = lock_blocking(unsafe { deserializer_ref(self_) }.imp());
-    if let FfiDeserializer::C(c) = &*deserializer
-        && let Mode::Async(fns, results) = &c.mode
-    {
-        let (fns, results) = (*fns, Arc::clone(results));
-        c.start_with_sink(&results, fns, method, topic, headers, data, deliver);
+    if let FfiDeserializer::C(c) = &*deserializer {
+        c.start_with_sink(method, topic, headers, data, deliver);
         return;
     }
     let result = if method == Method::WithHeadersBytes {
@@ -979,8 +739,7 @@ fn value_sink(cb: ValueCompletion, opaque: *mut c_void) -> impl FnOnce(Result<*m
 /// `T deserialize(String topic, byte[] data)`: `data` is borrowed for the
 /// call, `data.data == NULL` read as an empty array. Returns the
 /// implementation's `void *`; on failure stores the owned error in
-/// `*out_err` and returns `NULL`. Blocks until an asynchronous
-/// implementation reports.
+/// `*out_err` and returns `NULL`. Blocks until a C implementation reports.
 ///
 /// # Safety
 ///
@@ -1012,10 +771,9 @@ pub type kafka_common_serialization_Deserializer_deserialize_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// Non-blocking [`kafka_common_serialization_Deserializer_deserialize`]:
-/// `cb` receives the value or an owned error, with `opaque`. A synchronous
-/// implementation or a built-in runs on the calling thread and `cb` fires
-/// there before this returns; an asynchronous implementation is called at
-/// once and `cb` fires on the thread that reports (a deserializer has no
+/// `cb` receives the value or an owned error, with `opaque`. A built-in class
+/// runs on the calling thread and `cb` fires there before this returns; a C
+/// implementation is called at once and `cb` fires on the thread that reports (a deserializer has no
 /// callbacks vector to queue on). The arguments are copied.
 ///
 /// # Safety
@@ -1207,7 +965,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 unsafe fn invoke_void(
     self_: *const kafka_common_serialization_Deserializer_t,
     what: &str,
-    start: impl FnOnce(&CDeserializer) -> Option<Call<'_, ()>>,
+    start: impl FnOnce(&CDeserializer) -> Option<Report<'_, ()>>,
     builtin: impl AsyncFnOnce(&mut FfiDeserializer),
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
@@ -1226,7 +984,7 @@ unsafe fn invoke_void(
 
 /// `configure(Map<String, ?> configs, boolean isKey)`: `configs` maps
 /// NUL-terminated keys to NUL-terminated values, copied during the call.
-/// Blocks until an asynchronous implementation reports; a failure is logged.
+/// Blocks until a C implementation reports; a failure is logged.
 ///
 /// # Safety
 ///
@@ -1247,7 +1005,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
         invoke_void(
             self_,
             "configure",
-            |c| c.start_configure(Dispatch::Inline, &configs, is_key != 0),
+            |c| c.start_configure(&configs, is_key != 0),
             async |d| d.configure(&configs, is_key != 0).await,
         )
     }
@@ -1258,8 +1016,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
 pub type kafka_common_serialization_Deserializer_configure_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
 
 /// Non-blocking [`kafka_common_serialization_Deserializer_configure`]: `cb`
-/// fires with `opaque` on the calling thread, or, for an asynchronous
-/// implementation, on the thread that reports. A failure is logged.
+/// fires with `opaque` on the calling thread, or, for a C implementation's
+/// own `configure`, on the thread that reports. A failure is logged.
 ///
 /// # Safety
 ///
@@ -1289,7 +1047,6 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure_cb(
             |c| {
                 c.start_configure_with_sink(&configs, is_key != 0, opaque_sink("configure", "deserializer", cb, opaque))
             },
-            |c| c.start_configure(Dispatch::Inline, &configs, is_key != 0),
             async |d| d.configure(&configs, is_key != 0).await,
             cb,
             opaque,
@@ -1297,7 +1054,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure_cb(
     }
 }
 
-/// `close()`. Blocks until an asynchronous implementation reports; a
+/// `close()`. Blocks until a C implementation reports; a
 /// failure is logged.
 ///
 /// # Safety
@@ -1309,7 +1066,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
     self_: *mut kafka_common_serialization_Deserializer_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle.
-    unsafe { invoke_void(self_, "close", |c| c.start_close(Dispatch::Inline), async |d| d.close().await) }
+    unsafe { invoke_void(self_, "close", CDeserializer::start_close, async |d| d.close().await) }
 }
 
 /// Completion of [`kafka_common_serialization_Deserializer_close_cb`]:
@@ -1339,7 +1096,6 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close_cb(
             self_,
             "close",
             |c| c.start_close_with_sink(opaque_sink("close", "deserializer", cb, opaque)),
-            |c| c.start_close(Dispatch::Inline),
             async |d| d.close().await,
             cb,
             opaque,
@@ -1347,10 +1103,10 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close_cb(
     }
 }
 
-/// The `_cb` form of a `void` method: an asynchronous implementation is
-/// started with `with_sink`, which fires `cb` when it reports (`false` for
-/// the Java default, fired here); otherwise the method runs as for
-/// [`invoke_void`] and `cb` fires on the calling thread.
+/// The `_cb` form of a `void` method: a C implementation is started with
+/// `with_sink`, which fires `cb` when it reports (`false` for the Java
+/// default, fired here); a built-in class runs as for [`invoke_void`] and
+/// `cb` fires on the calling thread.
 ///
 /// # Safety
 ///
@@ -1359,7 +1115,6 @@ unsafe fn invoke_void_cb(
     self_: *const kafka_common_serialization_Deserializer_t,
     what: &str,
     with_sink: impl FnOnce(&CDeserializer) -> bool,
-    start: impl FnOnce(&CDeserializer) -> Option<Call<'_, ()>>,
     builtin: impl AsyncFnOnce(&mut FfiDeserializer),
     cb: OpaqueCb,
     opaque: *mut c_void,
@@ -1368,14 +1123,9 @@ unsafe fn invoke_void_cb(
     // `deserializer_ref` requires.
     let mut deserializer = lock_blocking(unsafe { deserializer_ref(self_) }.imp());
     match &mut *deserializer {
-        FfiDeserializer::C(c) if c.is_async() => {
+        FfiDeserializer::C(c) => {
             if with_sink(c) {
                 return;
-            }
-        },
-        FfiDeserializer::C(c) => {
-            if let Some(call) = start(c) {
-                log_failure(what, "deserializer", block_on_thread(call));
             }
         },
         other => log_failure(what, "deserializer", ready(builtin(other))),
@@ -1387,14 +1137,14 @@ unsafe fn invoke_void_cb(
 }
 
 impl CDeserializer {
-    /// `configure` for the `_cb` twin of an asynchronous implementation:
-    /// `false` for the Java default, `sink` dropped unfired.
+    /// `configure` for the `_cb` twin: `false` for the Java default, `sink`
+    /// dropped unfired.
     fn start_configure_with_sink(&self, configs: &HashMap<String, String>, is_key: bool, sink: ResultSink) -> bool {
-        let Mode::Async(AsyncFns { configure: Some(configure), .. }, results) = &self.mode else {
+        let Some(configure) = self.fns.configure else {
             return false;
         };
         let configs = SendPtr(build_configs(configs).cast());
-        let id = results.register(Box::new(move |result| {
+        let id = self.results.register(Box::new(move |result| {
             sink(result);
             // SAFETY: `configs` is the owned map built above, read by the implementation until it
             // reported, which is now; destroyed once, here.
@@ -1407,13 +1157,13 @@ impl CDeserializer {
         true
     }
 
-    /// `close` for the `_cb` twin of an asynchronous implementation: `false`
-    /// for the Java default, `sink` dropped unfired.
+    /// `close` for the `_cb` twin: `false` for the Java default, `sink`
+    /// dropped unfired.
     fn start_close_with_sink(&self, sink: ResultSink) -> bool {
-        let Mode::Async(AsyncFns { close: Some(close), .. }, results) = &self.mode else {
+        let Some(close) = self.fns.close else {
             return false;
         };
-        let id = results.register(sink);
+        let id = self.results.register(sink);
         // SAFETY: `close` and `self.self_` are the pair the C caller registered together through
         // `kafka_common_serialization_Deserializer_new_async`.
         unsafe { close(self.self_, id) };
@@ -1456,107 +1206,13 @@ mod tests {
     use crate::ffi::common::{
         kafka_common_Error_destroy, kafka_common_Error_message, kafka_common_Error_serialization,
     };
-    use crate::ffi::util::{
-        into_c_string, kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value,
-        kafka_string_destroy,
-    };
+    use crate::ffi::util::{into_c_string, kafka_Map_new, kafka_Map_size, kafka_string_destroy};
 
-    // A C deserializer producing an owned `char *` with the bytes
-    // upper-cased, logging what it was asked.
-    #[derive(Default)]
-    struct Upper {
-        calls: Mutex<Vec<String>>,
-    }
-    fn upper<'a>(self_: *mut c_void) -> &'a Upper {
-        // SAFETY: Test code: `self_` is the `&imp` the tests register, which outlives every call
-        // that passes it back.
-        unsafe { &*(self_ as *const Upper) }
-    }
-    fn log(self_: *mut c_void, entry: String) {
-        upper(self_).calls.lock().unwrap().push(entry);
-    }
     fn text(data: kafka_Bytes_t) -> String {
         // SAFETY: Test code: `data` is a view the invoker built over a live slice, read during the
         // call.
         String::from_utf8(unsafe { slice(data) }.to_vec()).unwrap()
     }
-    fn write_upper(data: kafka_Bytes_t, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void {
-        let text = text(data);
-        if text == "fail" {
-            let message = CString::new("cannot deserialize fail").unwrap();
-            // SAFETY: Test code: `message` outlives the constructor, which copies it; `out_err` is
-            // the valid slot pointing at null the invoker passes, and the error stored there is
-            // handed to Rust, which consumes it.
-            unsafe { *out_err = kafka_common_Error_serialization(message.as_ptr()) };
-            return ptr::null_mut();
-        }
-        into_c_string(&text.to_uppercase()) as *mut c_void
-    }
-    unsafe extern "C" fn c_deserialize(
-        self_: *mut c_void,
-        topic: *const c_char,
-        data: kafka_Bytes_t,
-        out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void {
-        log(
-            self_,
-            format!(
-                "deserialize {} {}",
-                // SAFETY: Test code: `topic` is the `CString` the invoker passes, alive for the
-                // call.
-                unsafe { CStr::from_ptr(topic) }.to_str().unwrap(),
-                text(data)
-            ),
-        );
-        write_upper(data, out_err)
-    }
-    unsafe extern "C" fn c_deserialize_with_headers(
-        self_: *mut c_void,
-        _topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
-        data: kafka_Bytes_t,
-        out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void {
-        // SAFETY: Test code: `headers` is the record-headers copy the invoker passes, alive and
-        // unchanged for the call.
-        let has_k = unsafe { record_headers_ref(headers) }.last_header("k").is_some();
-        log(self_, format!("deserialize_with_headers k={has_k}"));
-        write_upper(data, out_err)
-    }
-    unsafe extern "C" fn c_deserialize_with_headers_bytes(
-        self_: *mut c_void,
-        _topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
-        data: kafka_Bytes_t,
-        out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void {
-        // SAFETY: Test code: `headers` is the record-headers copy the invoker passes, alive and
-        // unchanged for the call.
-        let has_k = unsafe { record_headers_ref(headers) }.last_header("k").is_some();
-        log(self_, format!("deserialize_with_headers_bytes {} k={has_k}", text(data)));
-        write_upper(data, out_err)
-    }
-    unsafe extern "C" fn c_configure(self_: *mut c_void, configs: *const kafka_Map_t, is_key: i8) {
-        // SAFETY: Test code: `configs` is the map the invoker passes, alive and unchanged for the
-        // call, whose keys and values are NUL-terminated strings.
-        let entries: Vec<String> = (0..unsafe { kafka_Map_size(configs) })
-            // SAFETY: Test code: `configs` is the map the invoker passes, alive and unchanged for
-            // the call, and `i` is below its size, so each key and value is a NUL-terminated
-            // string.
-            .map(|i| unsafe {
-                format!(
-                    "{}={}",
-                    CStr::from_ptr(kafka_Map_key(configs, i) as *const c_char).to_str().unwrap(),
-                    CStr::from_ptr(kafka_Map_value(configs, i) as *const c_char).to_str().unwrap()
-                )
-            })
-            .collect();
-        log(self_, format!("configure {} is_key={is_key}", entries.join(",")));
-    }
-    unsafe extern "C" fn c_close(self_: *mut c_void) {
-        log(self_, "close".to_string());
-    }
-
     unsafe fn take_string(out: *mut c_void) -> String {
         // SAFETY: Test code: `out` is an owned `char *` a C deserializer of these tests returned from
         // `into_c_string`, read before `kafka_string_destroy` frees it once.
@@ -1565,173 +1221,6 @@ mod tests {
         // not used after this call.
         unsafe { kafka_string_destroy(out as *mut c_char) };
         s
-    }
-
-    #[test]
-    fn c_deserializer_is_reached_through_the_invokers() {
-        let imp = Upper::default();
-        let handle = kafka_common_serialization_Deserializer_new(
-            &imp as *const Upper as *mut c_void,
-            c_deserialize,
-            Some(c_deserialize_with_headers),
-            Some(c_deserialize_with_headers_bytes),
-            Some(c_configure),
-            Some(c_close),
-        );
-        let topic = CString::new("t").unwrap();
-        let mut record_headers = RecordHeaders::new();
-        record_headers.add_with_key_value("k", Some(b"v")).unwrap();
-        let headers = box_record_headers(record_headers);
-        // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Deserializer_new` and
-        // is destroyed once, at the end; `imp` outlives it; `headers` comes from
-        // `box_record_headers` and is destroyed once, after the last call reading it; `topic` and
-        // the arrays outlive the calls reading them; `err` is a valid slot pointing at null, left
-        // null by every call (asserted), and every value returned is an owned string
-        // that `take_string` frees once; `map` comes from `kafka_Map_new`, borrows the `CString`s,
-        // which outlive it, and is destroyed once.
-        unsafe {
-            let mut err = ptr::null_mut();
-            let out = kafka_common_serialization_Deserializer_deserialize(
-                handle,
-                topic.as_ptr(),
-                kafka_Bytes_t::from_slice(b"hello"),
-                &raw mut err,
-            );
-            assert!(err.is_null());
-            assert_eq!(take_string(out), "HELLO");
-
-            let out = kafka_common_serialization_Deserializer_deserialize_with_headers(
-                handle,
-                topic.as_ptr(),
-                headers,
-                kafka_Bytes_t::from_slice(b"hello"),
-                &raw mut err,
-            );
-            assert!(err.is_null());
-            assert_eq!(take_string(out), "HELLO");
-
-            let out = kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
-                handle,
-                topic.as_ptr(),
-                headers,
-                kafka_Bytes_t::from_slice(b"world"),
-                &raw mut err,
-            );
-            assert!(err.is_null());
-            assert_eq!(take_string(out), "WORLD");
-
-            // Null data is an empty array.
-            let out = kafka_common_serialization_Deserializer_deserialize(
-                handle,
-                topic.as_ptr(),
-                kafka_Bytes_t::NULL,
-                &raw mut err,
-            );
-            assert!(err.is_null());
-            assert_eq!(take_string(out), "");
-
-            let map = kafka_Map_new();
-            let (k1, v1) = (CString::new("zeta").unwrap(), CString::new("1").unwrap());
-            let (k2, v2) = (CString::new("alpha").unwrap(), CString::new("2").unwrap());
-            kafka_Map_put(map, k1.as_ptr() as *mut c_void, v1.as_ptr() as *mut c_void);
-            kafka_Map_put(map, k2.as_ptr() as *mut c_void, v2.as_ptr() as *mut c_void);
-            kafka_common_serialization_Deserializer_configure(handle, map, 1);
-            kafka_Map_destroy(map);
-            kafka_common_serialization_Deserializer_close(handle);
-
-            kafka_common_header_internals_RecordHeaders_destroy(headers);
-            kafka_common_serialization_Deserializer_destroy(handle);
-            kafka_common_serialization_Deserializer_destroy(ptr::null_mut());
-        }
-        assert_eq!(
-            *imp.calls.lock().unwrap(),
-            [
-                "deserialize t hello",
-                "deserialize_with_headers k=true",
-                "deserialize_with_headers_bytes world k=true",
-                "deserialize t ",
-                "configure alpha=2,zeta=1 is_key=1",
-                "close",
-            ]
-        );
-    }
-
-    #[test]
-    fn c_error_is_stored_owned_and_null_optional_methods_are_the_java_default() {
-        let imp = Upper::default();
-        let handle = kafka_common_serialization_Deserializer_new(
-            &imp as *const Upper as *mut c_void,
-            c_deserialize,
-            None,
-            None,
-            None,
-            None,
-        );
-        let topic = CString::new("t").unwrap();
-        let headers = box_record_headers(RecordHeaders::new());
-        // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Deserializer_new` and
-        // is destroyed once, at the end; `imp` outlives it; `headers` comes from
-        // `box_record_headers` and is destroyed once, after the last call reading it; `topic` and
-        // the arrays outlive the calls reading them; `err` is a valid slot pointing at null before
-        // every call (reset after each error is destroyed), every value returned is an
-        // owned string that `take_string` frees once, and each error is destroyed once, after it is
-        // read.
-        unsafe {
-            let mut err = ptr::null_mut();
-            let out = kafka_common_serialization_Deserializer_deserialize(
-                handle,
-                topic.as_ptr(),
-                kafka_Bytes_t::from_slice(b"fail"),
-                &raw mut err,
-            );
-            assert!(!err.is_null());
-            assert_eq!(
-                CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
-                "cannot deserialize fail"
-            );
-            assert!(out.is_null(), "a failure returns NULL");
-            kafka_common_Error_destroy(err);
-            err = ptr::null_mut();
-
-            // Every optional method falls back to `deserialize`; one call at
-            // a time, since each one owns the string it returns.
-            let err_slot = &raw mut err;
-            let fallbacks: [&dyn Fn() -> *mut c_void; 2] = [
-                &|| {
-                    kafka_common_serialization_Deserializer_deserialize_with_headers(
-                        handle,
-                        topic.as_ptr(),
-                        headers,
-                        kafka_Bytes_t::from_slice(b"ok"),
-                        err_slot,
-                    )
-                },
-                &|| {
-                    kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
-                        handle,
-                        topic.as_ptr(),
-                        headers,
-                        kafka_Bytes_t::from_slice(b"ok"),
-                        err_slot,
-                    )
-                },
-            ];
-            for fallback in fallbacks {
-                let out = fallback();
-                assert!(err.is_null());
-                assert_eq!(take_string(out), "OK");
-            }
-            // No-ops: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(handle, ptr::null(), 0);
-            kafka_common_serialization_Deserializer_close(handle);
-
-            kafka_common_header_internals_RecordHeaders_destroy(headers);
-            kafka_common_serialization_Deserializer_destroy(handle);
-        }
-        assert_eq!(
-            *imp.calls.lock().unwrap(),
-            ["deserialize t fail", "deserialize t ok", "deserialize t ok"]
-        );
     }
 
     /// A call an asynchronous C deserializer of these tests was handed: the
@@ -2282,12 +1771,63 @@ mod tests {
         }
     }
 
+    /// Every optional method left `NULL` is Java's default: the two header
+    /// forms fall back to `deserialize(topic, data)`, `configure` and `close`
+    /// do nothing.
     #[test]
-    fn is_async_tells_the_modes_apart() {
+    fn null_optional_methods_are_the_java_default() {
+        let imp = AsyncUpper::new(true);
+        let handle = kafka_common_serialization_Deserializer_new_async(
+            &imp as *const AsyncUpper as *mut c_void,
+            async_deserialize,
+            None,
+            None,
+            None,
+            None,
+        );
+        imp.handle.store(handle, std::sync::atomic::Ordering::SeqCst);
+        let topic = CString::new("t").unwrap();
+        let headers = box_record_headers(RecordHeaders::new());
+        // SAFETY: Test code: `handle` comes from `_new_async` and is destroyed once, at the end,
+        // after every report; `imp` outlives it; `headers` is destroyed once, after the last call
+        // reading it; `topic` and the arrays outlive the calls; `err` is a valid slot pointing at
+        // null, left null by every call (asserted), and every value returned is an owned string
+        // `take_string` frees once.
+        unsafe {
+            let mut err = ptr::null_mut();
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers(
+                handle,
+                topic.as_ptr(),
+                headers,
+                kafka_Bytes_t::from_slice(b"one"),
+                &raw mut err,
+            );
+            assert!(err.is_null());
+            assert_eq!(take_string(out), "ONE");
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
+                handle,
+                topic.as_ptr(),
+                headers,
+                kafka_Bytes_t::from_slice(b"two"),
+                &raw mut err,
+            );
+            assert!(err.is_null());
+            assert_eq!(take_string(out), "TWO");
+            // No-ops: nothing to observe, nothing crashes.
+            kafka_common_serialization_Deserializer_configure(handle, ptr::null(), 0);
+            kafka_common_serialization_Deserializer_close(handle);
+
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
+            kafka_common_serialization_Deserializer_destroy(handle);
+            kafka_common_serialization_Deserializer_destroy(ptr::null_mut());
+        }
+        assert_eq!(*imp.calls.lock().unwrap(), ["t one", "t two"]);
+    }
+
+    #[test]
+    fn is_async_is_one_for_a_c_deserializer_and_zero_for_a_built_in() {
         let asynchronous = AsyncUpper::new(true);
         let async_handle = asynchronous.register();
-        let sync_handle =
-            kafka_common_serialization_Deserializer_new(ptr::null_mut(), c_deserialize, None, None, None, None);
         let class = crate::ffi::common::serialization::DeserializerHandle::boxed(FfiDeserializer::String(
             GenericStringDeserializer::default(),
         ));
@@ -2296,125 +1836,18 @@ mod tests {
         unsafe {
             let view = (*class).as_deserializer();
             assert_eq!(kafka_common_serialization_Deserializer__is_async(async_handle), 1);
-            assert_eq!(kafka_common_serialization_Deserializer__is_async(sync_handle), 0);
             assert_eq!(kafka_common_serialization_Deserializer__is_async(view), 0, "a built-in's view");
-            // A report on a handle that is not asynchronous is ignored, its error freed.
+            // A report on a built-in's view is ignored, its error freed.
             let message = CString::new("ignored").unwrap();
             kafka_common_serialization_Deserializer__set_callback_result(
-                sync_handle,
+                view,
                 1,
                 ptr::null_mut(),
                 kafka_common_Error_serialization(message.as_ptr()),
             );
             kafka_common_serialization_Deserializer_destroy(async_handle);
-            kafka_common_serialization_Deserializer_destroy(sync_handle);
             crate::ffi::common::serialization::DeserializerHandle::destroy(class);
         }
-    }
-
-    /// A synchronous C deserializer recording the thread it runs on, and,
-    /// when `gate` is set, waiting for it before reading its arguments.
-    #[derive(Default)]
-    struct ThreadRecorder {
-        threads: Mutex<Vec<std::thread::ThreadId>>,
-        gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-        read: Mutex<Option<std::sync::mpsc::Sender<String>>>,
-    }
-
-    unsafe extern "C" fn record_thread(
-        self_: *mut c_void,
-        topic: *const c_char,
-        data: kafka_Bytes_t,
-        _out_err: *mut *mut kafka_common_Error_t,
-    ) -> *mut c_void {
-        // SAFETY: Test code: `self_` is the `&ThreadRecorder` the tests register, which outlives
-        // every call.
-        let recorder = unsafe { &*(self_ as *const ThreadRecorder) };
-        recorder.threads.lock().unwrap().push(std::thread::current().id());
-        let gate = recorder.gate.lock().unwrap().take();
-        if let Some(gate) = gate {
-            gate.recv().unwrap();
-            // SAFETY: Test code: the arguments are borrowed for the call, which has not returned.
-            let topic = unsafe { CStr::from_ptr(topic) };
-            let read = format!("{} {}", topic.to_str().unwrap(), text(data));
-            recorder.read.lock().unwrap().take().unwrap().send(read).unwrap();
-        }
-        ptr::null_mut()
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn sync_c_deserializer_runs_on_the_blocking_pool() {
-        let recorder = ThreadRecorder::default();
-        let handle = kafka_common_serialization_Deserializer_new(
-            &recorder as *const ThreadRecorder as *mut c_void,
-            record_thread,
-            None,
-            None,
-            None,
-            None,
-        );
-        // SAFETY: Test code: the handle is valid until destroyed at the end.
-        let inner = unsafe { deserializer_ref(handle) };
-        {
-            let guard = inner.imp().lock().await;
-            Deserializer::deserialize(&*guard, "t", b"x").await.unwrap();
-        }
-        let topic = CString::new("t").unwrap();
-        let mut err = ptr::null_mut();
-        // SAFETY: Test code: the handle is valid; `topic` and the data outlive the call; `err` is a
-        // valid slot pointing at null, left null (the function returns a null value).
-        let out = unsafe {
-            kafka_common_serialization_Deserializer_deserialize(
-                handle,
-                topic.as_ptr(),
-                kafka_Bytes_t::from_slice(b"y"),
-                &raw mut err,
-            )
-        };
-        assert!(out.is_null() && err.is_null());
-        // SAFETY: Test code: every call returned; the handle is destroyed once.
-        unsafe { kafka_common_serialization_Deserializer_destroy(handle) };
-        let here = std::thread::current().id();
-        let threads = recorder.threads.lock().unwrap().clone();
-        assert_ne!(threads[0], here, "a consumer's call runs on the blocking pool");
-        assert_eq!(threads[1], here, "the blocking invoker runs on its calling thread");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_dropped_sync_call_keeps_its_arguments_until_it_returns() {
-        let recorder = ThreadRecorder::default();
-        let (release, gate) = std::sync::mpsc::channel();
-        let (read_tx, read_rx) = std::sync::mpsc::channel();
-        *recorder.gate.lock().unwrap() = Some(gate);
-        *recorder.read.lock().unwrap() = Some(read_tx);
-        let handle = kafka_common_serialization_Deserializer_new(
-            &recorder as *const ThreadRecorder as *mut c_void,
-            record_thread,
-            None,
-            None,
-            None,
-            None,
-        );
-        // SAFETY: Test code: the handle is valid until destroyed at the end.
-        let inner = unsafe { deserializer_ref(handle) };
-        {
-            let guard = inner.imp().lock().await;
-            let topic = String::from("topic");
-            let data = b"keep".to_vec();
-            let mut future = Box::pin(Deserializer::deserialize(&*guard, &topic, &data));
-            assert!(poll_once(future.as_mut()).is_pending(), "the C function waits for its gate");
-            drop(future);
-            drop((topic, data));
-        }
-        release.send(()).unwrap();
-        let read = tokio::task::spawn_blocking(move || read_rx.recv_timeout(std::time::Duration::from_secs(10)))
-            .await
-            .unwrap()
-            .unwrap();
-        // SAFETY: Test code: the call returned (it sent what it read last); the handle is destroyed
-        // once.
-        unsafe { kafka_common_serialization_Deserializer_destroy(handle) };
-        assert_eq!(read, "topic keep");
     }
 
     #[test]

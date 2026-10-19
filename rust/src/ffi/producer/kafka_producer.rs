@@ -590,28 +590,18 @@ mod tests {
 
     /// A C serializer's calls go through `ArcSerializer`, whose futures must
     /// fit `InlineFuture`'s buffer, or every record would box one: for a
-    /// built-in, a synchronous C implementation (a blocking-pool task) and an
-    /// asynchronous one (a pending report).
+    /// built-in and a C implementation (a pending report).
     #[test]
     fn arc_serializer_futures_are_stored_inline() {
         use std::ffi::c_void;
 
         use crate::common::serialization::InlineFuture;
-        use crate::ffi::common::kafka_common_Error_t;
         use crate::ffi::common::serialization::serializer::{
-            FfiSerializer, kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
+            FfiSerializer, kafka_common_serialization_Serializer_new_async,
         };
         use crate::ffi::common::serialization::string_serializer::GenericStringSerializer;
 
         // Never called: the futures are only built.
-        unsafe extern "C" fn sync_fn(
-            _: *mut c_void,
-            _: *const std::ffi::c_char,
-            _: *const c_void,
-            _: *mut *mut kafka_common_Error_t,
-        ) -> kafka_Bytes_t {
-            kafka_Bytes_t::NULL
-        }
         unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
 
         let built_in = ArcSerializer(SerializerInner::view(Arc::new(FfiSerializer::String(
@@ -619,24 +609,17 @@ mod tests {
         ))));
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // producer's `Arc` frees it.
-        let (sync, asynchronous) = unsafe {
-            (
-                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new(
-                    std::ptr::null_mut(),
-                    sync_fn,
-                    None,
-                ))),
-                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
-                    std::ptr::null_mut(),
-                    async_fn,
-                    None,
-                    None,
-                    None,
-                ))),
-            )
+        let asynchronous = unsafe {
+            ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
+                std::ptr::null_mut(),
+                async_fn,
+                None,
+                None,
+                None,
+            )))
         };
         let mut headers = RecordHeaders::new();
-        for (kind, serializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
+        for (kind, serializer) in [("built-in", &built_in), ("C", &asynchronous)] {
             let future = Serializer::serialize(serializer, "t", None);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
@@ -695,27 +678,17 @@ mod tests {
 
     /// `send_cb` tries the producer on the calling thread only when neither
     /// serializer is a C implementation (COMMENTS.1 Issue 1): a `NULL` handle
-    /// and a built-in class keep the fast path, a C implementation, sync or
-    /// async, sends every record through the submission task.
+    /// and a built-in class keep the fast path, a C implementation sends
+    /// every record through the submission task.
     #[test]
     fn send_cb_tries_inline_only_without_a_c_serializer() {
-        use crate::ffi::common::serialization::serializer::{
-            kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
-        };
+        use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_new_async;
         use crate::ffi::common::serialization::string_serializer::{
             kafka_common_serialization_StringSerializer__as_Serializer,
             kafka_common_serialization_StringSerializer_destroy, kafka_common_serialization_StringSerializer_new,
         };
 
         // Never called: no record is sent.
-        unsafe extern "C" fn sync_fn(
-            _: *mut c_void,
-            _: *const std::ffi::c_char,
-            _: *const c_void,
-            _: *mut *mut kafka_common_Error_t,
-        ) -> kafka_Bytes_t {
-            kafka_Bytes_t::NULL
-        }
         unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
 
         let props = box_string_map([("bootstrap.servers", "127.0.0.1:1")]);
@@ -735,13 +708,13 @@ mod tests {
                 ("NULL", std::ptr::null_mut(), std::ptr::null_mut(), true),
                 ("built-in", built_in, built_in, true),
                 (
-                    "sync C key",
-                    kafka_common_serialization_Serializer_new(std::ptr::null_mut(), sync_fn, None),
+                    "C key",
+                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
                     std::ptr::null_mut(),
                     false,
                 ),
                 (
-                    "async C value",
+                    "C value",
                     built_in,
                     kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
                     false,

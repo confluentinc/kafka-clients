@@ -164,10 +164,9 @@
 //! When either serializer is a C implementation, the calling thread does not
 //! try the producer: a serializer registered with
 //! `kafka_common_serialization_Serializer_new_async` may report from the very
-//! thread that called `send_cb` (a single-threaded event loop), and one
-//! registered with `_new` runs on the blocking pool, so `try_send`, which
-//! awaits both serializers, would block the caller until they are done, or
-//! forever. Every record then goes to the submission task, which awaits the
+//! thread that called `send_cb` (a single-threaded event loop), so
+//! `try_send`, which awaits both serializers, would block the caller until
+//! they are done, or forever. Every record then goes to the submission task, which awaits the
 //! serializers on the runtime, and `cb` fires later, through the callback
 //! vector. The choice is made once, when the producer is built.
 //!

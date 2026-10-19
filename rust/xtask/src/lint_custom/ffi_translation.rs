@@ -110,9 +110,9 @@
 //!     `_new` parameter is always the bare typedef name (cbindgen does not
 //!     see through `Option<alias>` in a signature); an async method's
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`,
-//!     except on a dual-mode interface ([`DUAL_MODE_INTERFACES`]), whose
-//!     `_fn_t`s keep the synchronous form and which adds `_new_async` with
-//!     one reported-form `_async_fn_t` per method, `__is_async` and its own
+//!     except on an async-only interface ([`ASYNC_ONLY_INTERFACES`]), which
+//!     has no `_new` and no `_fn_t`s but `_new_async` with one reported-form
+//!     `_async_fn_t` per method, `__is_async` and its own
 //!     `__set_callback_result`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
@@ -216,25 +216,23 @@ fn is_reported(prefix: &str) -> bool {
     REPORTED_INTERFACES.iter().any(|r| r.prefix == prefix)
 }
 
-/// Interfaces a C implementation registers in one of two modes, fixed at
-/// construction: `<prefix>_new` takes the synchronous `_fn_t`s (the value
-/// returned, the error stored in `out_err`), whose functions Rust runs on a
-/// blocking task; `<prefix>_new_async` takes the `_async_fn_t`s in the
-/// reported form of an async method (`void`, a trailing `callback_id`),
-/// whose implementation reports through the interface's own
-/// `<prefix>__set_callback_result(self, callback_id, result, error)`, and
-/// `<prefix>__is_async(self)` tells the two apart. These are the serdes,
-/// called once per key and per value: a C serde that blocks must not stall
-/// the client's runtime, and one that waits on its own I/O must not hold a
-/// thread, so C chooses (CLAUDE.md §4 "Traits", §11).
-const DUAL_MODE_INTERFACES: &[&str] = &[
+/// Interfaces a C implementation registers only in the reported form:
+/// `<prefix>_new_async` takes one `_async_fn_t` per method, each returning
+/// nothing and taking a trailing `callback_id`, and the implementation
+/// reports through the interface's own
+/// `<prefix>__set_callback_result(self, callback_id, result, error)`;
+/// `<prefix>__is_async(self)` tells a C implementation from a built-in
+/// class's view. There is no `<prefix>_new` and no synchronous `_fn_t`: a C
+/// function returning its result would hold a thread for every key and value
+/// it waits on. These are the serdes (CLAUDE.md §4 "Traits", §11).
+const ASYNC_ONLY_INTERFACES: &[&str] = &[
     "kafka_common_serialization_Serializer",
     "kafka_common_serialization_Deserializer",
 ];
 
-/// Whether the interface with C prefix `prefix` is dual-mode.
-fn is_dual_mode(prefix: &str) -> bool {
-    DUAL_MODE_INTERFACES.contains(&prefix)
+/// Whether the interface with C prefix `prefix` is async-only.
+fn is_async_only(prefix: &str) -> bool {
+    ASYNC_ONLY_INTERFACES.contains(&prefix)
 }
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
@@ -2245,10 +2243,10 @@ fn expect_method(
 }
 
 /// Adds the C interface of an accepted trait: `_new` and one `_fn_t` per
-/// method (CLAUDE.md §4 rule 3). A dual-mode interface
-/// ([`DUAL_MODE_INTERFACES`]) also has `_new_async` taking one `_async_fn_t`
-/// per method, `__is_async` and `__set_callback_result`, and its `_fn_t`s
-/// keep the synchronous form whether the Rust method is async or not.
+/// method (CLAUDE.md §4 rule 3). An async-only interface
+/// ([`ASYNC_ONLY_INTERFACES`]) has instead `_new_async` taking one
+/// reported-form `_async_fn_t` per method, async in Rust or not,
+/// `__is_async` and `__set_callback_result`.
 fn expect_interface<'a>(
     out: &mut Expectations,
     mapper_for: &dyn Fn(&syn::Signature) -> Mapper<'a>,
@@ -2256,7 +2254,7 @@ fn expect_interface<'a>(
     methods: &[RustMethod],
     file: &str,
 ) {
-    let dual = is_dual_mode(prefix);
+    let async_only = is_async_only(prefix);
     let mut new_params = vec![Param::new("self", "*mut c_void".to_string())];
     let mut new_async_params = new_params.clone();
     for m in methods {
@@ -2298,10 +2296,7 @@ fn expect_interface<'a>(
         };
         if failed {
             // Reported once, on the invoker, by `expect_method`.
-            out.add(fn_t, Shape::Unknown, file);
-            if dual {
-                out.add(async_fn_t, Shape::Unknown, file);
-            }
+            out.add(if async_only { async_fn_t } else { fn_t }, Shape::Unknown, file);
             continue;
         }
         // The synchronous form: the value returned, the error stored in `out_err`.
@@ -2317,8 +2312,7 @@ fn expect_interface<'a>(
         // The reported form: the result reported through `__set_callback_result`.
         let mut reported_sig = Sig { params, ret: None };
         reported_sig.params.push(Param::new("callback_id", "i64".to_string()));
-        if dual {
-            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+        if async_only {
             out.add(async_fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
         } else if is_async || is_reported(prefix) {
             out.add(fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
@@ -2327,12 +2321,13 @@ fn expect_interface<'a>(
         }
     }
     let handle = format!("*mut {prefix}_t");
-    out.add(
-        format!("{prefix}_new"),
-        Shape::Fn(Sig { params: new_params, ret: Some(handle.clone()) }),
-        file,
-    );
-    if dual {
+    if !async_only {
+        out.add(
+            format!("{prefix}_new"),
+            Shape::Fn(Sig { params: new_params, ret: Some(handle) }),
+            file,
+        );
+    } else {
         out.add(
             format!("{prefix}_new_async"),
             Shape::Fn(Sig { params: new_async_params, ret: Some(handle) }),
@@ -3710,7 +3705,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dual_mode_interface_expects_both_constructors() {
+    fn test_async_only_interface_expects_only_the_reported_constructor() {
         let rust = r#"
             pub mod common {
                 pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3727,15 +3722,18 @@ mod tests {
                 }
             }
         "#;
-        let findings = run("dual-mode", rust, "");
+        let findings = run("async-only", rust, "");
         let prefix = "kafka_common_serialization_Deserializer";
-        assert_eq!(
-            detail(&findings, &format!("missing {prefix}_deserialize_fn_t")),
-            format!(
-                "expected `type {prefix}_deserialize_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: *const \
-                 c_char, data: kafka_Bytes_t, out_err: *mut *mut kafka_common_Error_t) -> *mut c_char`"
-            )
-        );
+        for absent in [
+            format!("{prefix}_new"),
+            format!("{prefix}_deserialize_fn_t"),
+            format!("{prefix}_close_fn_t"),
+        ] {
+            assert!(
+                !keys(&findings).contains(&format!("missing {absent}").as_str()),
+                "{absent} is not expected: {findings:?}"
+            );
+        }
         assert_eq!(
             detail(&findings, &format!("missing {prefix}_deserialize_async_fn_t")),
             format!(
