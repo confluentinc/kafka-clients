@@ -20,11 +20,15 @@ Java's tests translated: ``ProducerRecordTest`` and ``RecordMetadataTest``
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 
-from confluent_kafka import IllegalArgumentError
+from confluent_kafka import ExecutionError, IllegalArgumentError, TimeoutError
 from confluent_kafka.common import TopicPartition
-from confluent_kafka.producer import ProducerRecord, RecordMetadata
+from confluent_kafka.common.errors import CorruptRecordError
+from confluent_kafka.producer import AsyncMockProducer, MockProducer, ProducerRecord, RecordMetadata
 
 # --------------------------------------------------------------------------- #
 # ProducerRecord: ProducerRecordTest
@@ -257,3 +261,114 @@ def test_record_metadata_from_ffi_is_what_the_constructor_builds() -> None:
                        "has_timestamp", "serialized_key_size", "serialized_value_size"):
             assert getattr(made, getter)() == getattr(built, getter)(), getter
         assert str(made) == str(built)
+
+
+# --------------------------------------------------------------------------- #
+# RecordSendTest: the future a send returns. Java drives a ProduceRequestResult
+# and a FutureRecordMetadata directly (internals the binding does not have);
+# here the MockProducer stands in, with auto_complete=False so a send's future
+# completes only when complete_next() / error_next() completes the request, as
+# ProduceRequestResult.done() does. The offset is the mock's (0 for the first
+# record of the partition) where Java checks baseOffset + relOffset.
+# --------------------------------------------------------------------------- #
+
+_SEND_TP = TopicPartition(topic="test", partition=0)
+
+
+def _record() -> ProducerRecord[bytes, bytes]:
+    return ProducerRecord(topic=_SEND_TP.topic(), partition=_SEND_TP.partition(), key=None,
+                          value=b"v")
+
+
+def _complete_later(producer: MockProducer[bytes, bytes], error: Exception | None,
+                    delay: float) -> threading.Thread:
+    """Java's ``asyncRequest``: a thread completes the request after ``delay``."""
+    def run() -> None:
+        import time
+        time.sleep(delay)
+        if error is None:
+            producer.complete_next()
+        else:
+            producer.error_next(e=error)
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def test_record_send_timeout() -> None:
+    """``RecordSendTest.testTimeout``: waiting on a request that never completes
+    times out; once completed, ``get()`` answers with the offset."""
+    producer: MockProducer[bytes, bytes] = MockProducer(auto_complete=False, partitioner=None)
+    future = producer.send(record=_record())
+    assert not future.is_done(), "Request is not completed"
+    with pytest.raises(TimeoutError):
+        future.get(timeout=0.005)
+    assert producer.complete_next()
+    assert future.is_done()
+    assert future.get().offset() == 0
+    producer.close()
+
+
+def test_record_send_error() -> None:
+    """``RecordSendTest.testError``: an asynchronous request eventually throws the
+    right exception, boxed in ``ExecutionError``."""
+    producer: MockProducer[bytes, bytes] = MockProducer(auto_complete=False, partitioner=None)
+    future = producer.send(record=_record())
+    error = CorruptRecordError()
+    thread = _complete_later(producer, error, 0.05)
+    with pytest.raises(ExecutionError) as info:
+        future.get()
+    assert info.value.__cause__ is error
+    thread.join()
+    producer.close()
+
+
+def test_record_send_blocking() -> None:
+    """``RecordSendTest.testBlocking``: an asynchronous request eventually returns
+    the right offset."""
+    producer: MockProducer[bytes, bytes] = MockProducer(auto_complete=False, partitioner=None)
+    future = producer.send(record=_record())
+    thread = _complete_later(producer, None, 0.05)
+    assert future.get().offset() == 0
+    thread.join()
+    producer.close()
+
+
+async def test_async_record_send_timeout() -> None:
+    """``testTimeout`` on the asyncio mock: the awaited ``get()`` times out, then
+    answers once the request completes."""
+    producer: AsyncMockProducer[bytes, bytes] = AsyncMockProducer(auto_complete=False,
+                                                                  partitioner=None)
+    future = await producer.send(record=_record())
+    assert not future.is_done(), "Request is not completed"
+    with pytest.raises(TimeoutError):
+        await future.get(timeout=0.005)
+    assert producer.complete_next()
+    assert future.is_done()
+    assert (await future.get()).offset() == 0
+    await producer.close()
+
+
+async def test_async_record_send_error() -> None:
+    """``testError`` on the asyncio mock: the request is completed with an error
+    after 50 ms, on the loop (Java's thread)."""
+    producer: AsyncMockProducer[bytes, bytes] = AsyncMockProducer(auto_complete=False,
+                                                                  partitioner=None)
+    future = await producer.send(record=_record())
+    error = CorruptRecordError()
+    asyncio.get_running_loop().call_later(0.05, lambda: producer.error_next(e=error))
+    with pytest.raises(ExecutionError) as info:
+        await future.get()
+    assert info.value.__cause__ is error
+    await producer.close()
+
+
+async def test_async_record_send_blocking() -> None:
+    """``testBlocking`` on the asyncio mock: the awaited ``get()`` returns the offset
+    once the request completes, 50 ms later."""
+    producer: AsyncMockProducer[bytes, bytes] = AsyncMockProducer(auto_complete=False,
+                                                                  partitioner=None)
+    future = await producer.send(record=_record())
+    asyncio.get_running_loop().call_later(0.05, producer.complete_next)
+    assert (await future.get()).offset() == 0
+    await producer.close()
