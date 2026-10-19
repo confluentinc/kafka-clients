@@ -2425,11 +2425,35 @@ mod tests {
         tokio::sync::oneshot::Sender<Result<(), Error>>,
         crate::common::internals::KafkaFutureImpl<()>,
     ) {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        let (thread, membership, subs, tx, mut bg_rx) = make_thread_with_member_in_group();
+        let leave = membership.leave_group(0).unwrap();
+        assert_eq!(membership.state(), MemberState::PrepareLeaving);
+        let ack = match bg_rx.try_recv().expect("revoked callback enqueued").event {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        (thread, membership, subs, tx, bg_rx, ack, leave)
+    }
+
+    /// A thread with a heartbeat manager (coordinator known) and a member in
+    /// the group (epoch 5) owning `t-0` with a listener registered. Returns
+    /// the thread, the membership manager, the subscription state, the
+    /// application-event sender and the background-event receiver (kept
+    /// alive).
+    #[expect(clippy::type_complexity)]
+    fn make_thread_with_member_in_group() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+        mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
         use crate::consumer::ConsumerRebalanceListener;
         use crate::consumer::internals::ConsumerHeartbeatRequestManager;
         use crate::consumer::internals::CoordinatorRequestManager;
-        use crate::consumer::internals::MemberState;
-        use crate::consumer::internals::events::BackgroundEvent;
 
         struct NoopListener;
         #[async_trait::async_trait]
@@ -2454,7 +2478,7 @@ mod tests {
                 .unwrap();
         }
         let metadata = make_metadata(&config, subs.clone());
-        let (bg_tx, mut bg_rx) = mpsc::unbounded_channel();
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(bg_tx));
         let membership = Arc::new(ConsumerMembershipManager::new(
             "g".to_string(),
@@ -2508,13 +2532,7 @@ mod tests {
 
         membership.transition_to_joining().unwrap();
         membership.abstract_mm.inner.lock().unwrap().update_member_epoch(5);
-        let leave = membership.leave_group(0).unwrap();
-        assert_eq!(membership.state(), MemberState::PrepareLeaving);
-        let ack = match bg_rx.try_recv().expect("revoked callback enqueued").event {
-            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
-            other => panic!("unexpected event: {other:?}"),
-        };
-        (thread, membership, subs, tx, bg_rx, ack, leave)
+        (thread, membership, subs, tx, bg_rx)
     }
 
     /// C2-01 (Critic 1 item 1): an `unsubscribe()` leave waiting in
@@ -2545,6 +2563,50 @@ mod tests {
         assert_eq!(membership.member_epoch(), -1);
         assert!(!membership.has_pending_leave_callback());
         assert!(!leave.is_done(), "the leave completes only on the leave heartbeat's response");
+    }
+
+    /// Audit finding C1-17: a `LeaveGroupOnClose` whose deadline has already
+    /// passed (`close(Duration::ZERO)`) is still processed — the member
+    /// leaves and the leave heartbeat is built and handed to the network
+    /// client — and the reaper then expires the event in the same
+    /// `run_once`, so the waiting `close()` proceeds after one iteration.
+    /// Java's `runOnce` processes the application events before
+    /// `applicationEventReaper.reap(currentTimeMs)`.
+    #[tokio::test]
+    async fn run_once_processes_then_reaps_an_expired_leave_group_on_close() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, tx, _bg_rx) = make_thread_with_member_in_group();
+        let now_ms = thread.time.milliseconds();
+        let (handle, mut rx, _) = CompletableEvent::make_completable_event::<()>(now_ms);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::LeaveGroupOnClose {
+                handle,
+                membership_operation: GroupMembershipOperation::Default,
+            },
+            enqueued_ms: now_ms,
+        })
+        .expect("send ok");
+
+        thread.run_once().await;
+
+        assert_eq!(
+            membership.state(),
+            MemberState::Unsubscribed,
+            "the expired LeaveGroupOnClose must still be processed and its leave heartbeat built"
+        );
+        assert_eq!(membership.member_epoch(), -1, "the leave heartbeat carries the leave epoch");
+        assert!(
+            thread.network_client_delegate.lock().await.has_any_pending_requests(),
+            "the leave heartbeat must have been handed to the network client"
+        );
+        match rx.try_recv().expect("the reaper must complete the event in the same run_once") {
+            // Java: "{event} was {pastDueMs} ms past its expiration of {deadlineMs}".
+            Err(err @ Error::Timeout(_)) => assert!(
+                err.to_string().ends_with(&format!(" was 0 ms past its expiration of {now_ms}")),
+                "unexpected reaper message: {err}"
+            ),
+            other => panic!("expected the reaper's timeout, got {other:?}"),
+        }
     }
 
     /// C2-01 (Critic 1 R2-1): the leave's callback ack is applied in queue

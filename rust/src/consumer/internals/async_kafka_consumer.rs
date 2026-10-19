@@ -4786,41 +4786,75 @@ where
         .await
     }
 
-    /// Close-path variant of [`Self::submit_and_drain`].
+    /// Close-path variant of [`Self::submit_and_drain`], used by
+    /// `leave_group_on_close`.
     ///
-    /// Identical to `submit_and_drain` (enqueue the event, then drain the
-    /// background-event channel while awaiting the completion handle) with
-    /// two close-specific differences:
+    /// Enqueues the event, then drains the background-event channel while
+    /// awaiting the completion handle, with these close-specific differences:
     ///
-    ///   - `enable_wakeup` is always `false` — close has already disabled
-    ///     wakeups (`wakeup_trigger.disable()`).
+    ///   - Wakeups are not observed — close has already disabled them
+    ///     (`wakeup_trigger.disable()`).
     ///   - Pending §31 rebalance-listener callbacks are NOT invoked while
     ///     draining; the ack is answered with `Ok(())` so the bg task
     ///     unblocks for shutdown (`skip_rebalance_callback = true`). Java
     ///     never invokes `on_partitions_assigned` during `close()`.
+    ///   - The wait is NOT bounded by the event's `deadline_ms`. Java's
+    ///     `addAndGet` blocks on an unbounded `ConsumerUtils.getResult(future)`
+    ///     (`ApplicationEventHandler.addAndGet`): the event's future is
+    ///     completed by the network thread — by its processing, by the reaper
+    ///     with a `TimeoutException` once `deadline_ms` has passed
+    ///     (`ConsumerNetworkThread.runOnce` processes the queue before it
+    ///     reaps), or on shutdown. Returning at `deadline_ms` here instead
+    ///     lets `close(Duration::ZERO)` stop the bg task before it has
+    ///     processed the event, so the member never leaves the group.
+    ///   - Deliberate deviation: Java has no bound at all, so a network
+    ///     thread stuck inside one iteration hangs `close()`. Here the wait
+    ///     gives up at `deadline_ms + request.timeout.ms` with an
+    ///     `Error::Timeout`. With a healthy bg loop the reaper completes the
+    ///     event first, so the backstop changes nothing there.
     ///
-    /// See `leave_group_on_close` for why the drain (and not a plain
-    /// event-result wait) is required here.
+    /// Returns `Ok(None)` when the bg task dropped the completion sender
+    /// without completing it (it has shut down): there is nothing left to
+    /// wait for.
     async fn submit_and_drain_for_close<T: Send + 'static>(
         &mut self,
         event: ApplicationEvent,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
-    ) -> Result<T, Error> {
+    ) -> Result<Option<T>, Error> {
+        use tokio::sync::oneshot::error::TryRecvError;
+
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
-        self.process_background_events_until_inner::<T>(
-            receiver,
-            deadline_ms,
-            |_| false,
-            timeout_msg,
-            /* enable_wakeup = */ false,
-            /* skip_rebalance_callback = */ true,
-            /* skip_assignment_events = */ true,
-            /* result_first_on_entry = */ true,
-        )
-        .await
+        let backstop_deadline_ms = deadline_ms.saturating_add(self.config.request_timeout_ms() as i64);
+        loop {
+            let had_events = self
+                .process_background_events_inner(
+                    /* skip_rebalance_callback = */ true, /* skip_assignment_events = */ true,
+                )
+                .await?;
+            match receiver.try_recv() {
+                Ok(result) => return result.map(Some),
+                Err(TryRecvError::Closed) => return Ok(None),
+                Err(TryRecvError::Empty) => {},
+            }
+            let remaining = self.remaining_ms(backstop_deadline_ms);
+            if remaining <= 0 {
+                return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+            }
+            // As in `process_background_events_until_inner`: when no
+            // background event was processed, wait (at most 100 ms) for the
+            // result before draining again.
+            if !had_events {
+                let wait = Duration::from_millis(std::cmp::min(remaining, 100) as u64);
+                match tokio::time::timeout(wait, &mut receiver).await {
+                    Ok(Ok(result)) => return result.map(Some),
+                    Ok(Err(_recv_err)) => return Ok(None),
+                    Err(_elapsed) => {},
+                }
+            }
+        }
     }
 
     /// Returns the milliseconds remaining until the supplied deadline,
@@ -6710,7 +6744,10 @@ where
         }
 
         log::debug!("Leaving the consumer group during consumer close");
-        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
+        // The erased handle is not kept: once the bg task drops every clone of
+        // the handle without completing it, the wait below sees that and
+        // proceeds instead of waiting out its backstop.
+        let (handle, receiver, _) = CompletableEvent::make_completable_event::<()>(deadline_ms);
         // Java's `leaveGroupOnClose` does NOT call `setActiveTask` and
         // close has already called `wakeup_trigger.disable()`
         // (Java line 1545) so wakeup is inert in this path —
@@ -6738,10 +6775,22 @@ where
             )
             .await;
         match result {
-            Ok(()) => {
+            Ok(Some(())) => {
                 log::info!("Completed leaving the group");
                 Ok(())
             },
+            Ok(None) => {
+                // The bg task ended without completing the event (Java's
+                // shutdown fails it with a `TimeoutException`, handled
+                // below); there is nothing left to wait for.
+                log::warn!(
+                    "Consumer attempted to leave the group but the background task ended before completing it. \
+                     It will proceed to close."
+                );
+                Ok(())
+            },
+            // The reaper expired the event at its deadline, or the backstop in
+            // `submit_and_drain_for_close` gave up.
             Err(Error::Timeout(_)) => {
                 // Java's `catch (TimeoutException) { log.warn(...) }` —
                 // close proceeds.
@@ -13088,6 +13137,295 @@ mod tests {
         // Java: `ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS = 30_000`.
         use crate::consumer::internals::ConsumerUtils;
         close_leaves_group_for_timeout_inner(ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64).await;
+    }
+
+    /// A fake bg task serving the close-path events: commits complete at
+    /// once, and each `LeaveGroupOnClose` handle is passed to `on_leave`,
+    /// which decides when (and whether) the "network thread" completes it.
+    fn spawn_close_path_drainer<F, Fut>(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        on_leave: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(crate::consumer::internals::events::CompletableEventHandle<()>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => on_leave(handle).await,
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        })
+    }
+
+    /// Audit finding C1-17: `close(Duration::ZERO)` must not shut the
+    /// background task down before it has processed `LeaveGroupOnClose`.
+    ///
+    /// Java's `leaveGroupOnClose` calls `applicationEventHandler.addAndGet(..)`,
+    /// which blocks on an unbounded `ConsumerUtils.getResult(future)`: the
+    /// future is completed only by the network thread, which processes the
+    /// event (member -> LEAVING) before its reaper expires it at the (already
+    /// passed) deadline. So the member is LEAVING before
+    /// `applicationEventHandler.close(..)` stops the network thread, and
+    /// `cleanup()` sends the leave heartbeat even with a 0 ms budget.
+    ///
+    /// The fake bg task here processes the event one ~20 ms "iteration" after
+    /// it is enqueued and then expires it, as the reaper does.
+    #[tokio::test]
+    async fn close_with_zero_timeout_waits_for_bg_to_process_leave_group_on_close() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        // `Some(signalled?)` captured when the fake bg task processes the event.
+        let signalled_at_processing: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_processing = Arc::clone(&signalled_at_processing);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_processing = Arc::clone(&at_processing);
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                at_processing
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete_with_error(Error::timeout("LeaveGroupOnClose was 20 ms past its expiration"));
+            }
+        });
+
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: an expired leave only logs a warning, as in Java");
+        drainer.abort();
+
+        let signalled = signalled_at_processing
+            .lock()
+            .unwrap()
+            .expect("the bg task must have processed LeaveGroupOnClose");
+        assert!(
+            !signalled,
+            "Java: close(Duration.ZERO) blocks in addAndGet(LeaveGroupOnCloseEvent) until the network \
+             thread has processed (or reaped) the event, so the member is LEAVING before the network \
+             thread is closed; Rust signalled the bg task to shut down before LeaveGroupOnClose was processed"
+        );
+        assert!(
+            handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0,
+            "close must still signal the bg task to shut down"
+        );
+    }
+
+    /// With a close timeout, `close()` waits for the leave heartbeat's
+    /// response (the event's completion), then proceeds — Java's
+    /// `addAndGet` returning and `log.info("Completed leaving the group")`.
+    #[tokio::test]
+    async fn close_with_timeout_waits_for_leave_group_on_close_completion() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        let signalled_at_completion: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_completion = Arc::clone(&signalled_at_completion);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_completion = Arc::clone(&at_completion);
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                at_completion
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete(());
+            }
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect("close ok");
+        let elapsed = started.elapsed();
+        drainer.abort();
+
+        assert_eq!(
+            *signalled_at_completion.lock().unwrap(),
+            Some(false),
+            "close must wait for the LeaveGroupOnClose completion before shutting the bg task down"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close must return once the leave completes, not wait out the close timeout; took {elapsed:?}"
+        );
+    }
+
+    /// Deliberate deviation from Java (whose wait is unbounded): if the bg
+    /// task is alive but never completes `LeaveGroupOnClose` — its reaper
+    /// would otherwise expire it at the event deadline — `close()` gives up at
+    /// the event deadline + `request.timeout.ms` and proceeds, instead of
+    /// hanging.
+    #[tokio::test]
+    async fn close_leave_group_wait_gives_up_at_deadline_plus_request_timeout() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 300;
+        // Keep every handle alive and uncompleted: a stuck bg iteration.
+        let held: Arc<Mutex<Vec<crate::consumer::internals::events::CompletableEventHandle<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let held_by_bg = Arc::clone(&held);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            held_by_bg.lock().unwrap().push(handle);
+            async {}
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: the backstop only logs the leave warning");
+        let elapsed = started.elapsed();
+        drainer.abort();
+
+        assert_eq!(held.lock().unwrap().len(), 1, "LeaveGroupOnClose must have been submitted");
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "close must keep waiting for the bg task past the (already expired) event deadline \
+             until deadline + request.timeout.ms (300 ms); returned after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the backstop must bound the wait at about deadline + request.timeout.ms; took {elapsed:?}"
+        );
+        assert!(handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+    }
+
+    /// The bg task drops `LeaveGroupOnClose`'s completion sender without
+    /// completing it (it shut down): `close()` proceeds without an error, as
+    /// Java's close does when the network thread's shutdown fails the event
+    /// with a `TimeoutException`.
+    #[tokio::test]
+    async fn close_proceeds_when_bg_task_drops_leave_group_on_close() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, |handle| {
+            drop(handle);
+            async {}
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect("close ok: a bg task that ended without completing the leave does not fail close");
+        let elapsed = started.elapsed();
+        drainer.abort();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close must not wait for a gone bg task; took {elapsed:?}"
+        );
+    }
+
+    /// The bg task is already gone when `close()` starts: there is nothing to
+    /// wait for, so close returns at once. Java's `add` throws
+    /// `KafkaException` from `ensureNetworkThreadAlive()` and close rethrows
+    /// the first error as "Failed to close kafka consumer".
+    #[tokio::test]
+    async fn close_returns_at_once_when_bg_task_is_already_gone() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        drop(handles.app_event_rx);
+
+        let started = std::time::Instant::now();
+        let err = consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect_err("Java: close() rethrows the dead-thread KafkaException");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "close must not wait for a gone bg task; took {elapsed:?}"
+        );
+        assert_eq!(err.to_string(), "Failed to close kafka consumer");
+    }
+
+    /// With the real background task, `close(Duration::ZERO)` returns once
+    /// the bg reaper expires `LeaveGroupOnClose` at its (already passed)
+    /// deadline, within about one bg iteration, not after the
+    /// `request.timeout.ms` (30 s) backstop. The member joins through a fake
+    /// group coordinator that never answers the leave heartbeat, so the leave
+    /// cannot complete by a response, and since the coordinator is known the
+    /// heartbeat is sent rather than skipped (`onHeartbeatRequestSkipped`
+    /// would complete the leave at once). The reaper's timeout is therefore
+    /// the only way the event completes. Java: `ConsumerNetworkThread.runOnce`
+    /// processes the event (building the leave heartbeat) before it reaps it,
+    /// and `leaveGroupOnClose` then logs "couldn't complete it within" and
+    /// proceeds.
+    #[test]
+    fn close_with_zero_timeout_returns_when_the_bg_reaper_expires_the_leave() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::{CloseOptions, Consumer, KafkaConsumer};
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "topic";
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let (elapsed, epochs_at_close, epochs_after_close) = runtime.block_on(async move {
+            let broker = FakeBroker::start_with_group_coordinator("fake-cluster", TOPIC).await;
+            let props = HashMap::from([
+                (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), broker.bootstrap()),
+                (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+                (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+            ]);
+            let mut consumer = KafkaConsumer::<String, String>::new(
+                ConsumerConfig::new(&props).unwrap(),
+                Box::new(StringDeserializer),
+                Box::new(StringDeserializer),
+            )
+            .expect("consumer");
+            consumer
+                .subscribe_with_topics(vec![TOPIC.to_string()])
+                .await
+                .expect("subscribe");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while consumer.group_metadata().generation_id() != 1 && tokio::time::Instant::now() < deadline {
+                consumer.poll(Duration::from_millis(50)).await.expect("poll");
+            }
+            assert_eq!(
+                1,
+                consumer.group_metadata().generation_id(),
+                "the member must join the fake coordinator first; heartbeats: {:?}",
+                broker.heartbeat_epochs()
+            );
+            let epochs_at_close = broker.heartbeat_epochs();
+            let started = std::time::Instant::now();
+            consumer
+                .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+                .await
+                .expect("close");
+            let elapsed = started.elapsed();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !broker.heartbeat_epochs().contains(&-1) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (elapsed, epochs_at_close, broker.heartbeat_epochs())
+        });
+        assert!(
+            !epochs_at_close.contains(&-1),
+            "no leave heartbeat before close: {epochs_at_close:?}"
+        );
+        assert!(
+            epochs_after_close.contains(&-1),
+            "Java: the network thread processes LeaveGroupOnClose before reaping it, so the leave \
+             heartbeat (epoch -1) is sent even with a zero timeout; heartbeats: {epochs_after_close:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close(Duration.ZERO) must return when the reaper expires LeaveGroupOnClose, not after the \
+             request.timeout.ms backstop; took {elapsed:?}"
+        );
     }
 
     /// Java: `testVerifyApplicationEventOnShutdown` (Java line 683-691).
