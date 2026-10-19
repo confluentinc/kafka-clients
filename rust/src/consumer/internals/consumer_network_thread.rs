@@ -1058,8 +1058,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
     /// Java: `run()`. Wraps `run_once` in a loop guarded by `running`
     /// and the wakeup-token shutdown signal, and calls `cleanup` on
-    /// exit. Intended to be spawned via `tokio::spawn` from the Phase
-    /// 11 consumer constructor.
+    /// exit. Production runs it through [`Self::spawn_dedicated`], on the
+    /// `kafka-consumer-io` OS thread's single-thread runtime.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
         use futures_util::FutureExt;
@@ -1072,8 +1072,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
             // { log.error(...) }` — swallow and continue, so a failing
             // iteration neither ends the task nor skips `cleanup()`. Without
-            // this boundary a panic would unwind out of the spawned task, which
-            // Tokio turns into task termination, not Java's swallow-and-continue.
+            // this boundary a panic would unwind out of `block_on` on the
+            // dedicated thread and end that OS thread (and the consumer's bg
+            // loop with it), not Java's swallow-and-continue.
             if let Err(payload) = std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
                 log::error!(
                     "Unexpected error caught in consumer network task: {}",
@@ -1089,6 +1090,34 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             }
         }
         self.cleanup().await;
+    }
+
+    /// Runs [`Self::run`] on a dedicated `std::thread` named
+    /// `kafka-consumer-io` that hosts its own `current_thread` Tokio runtime,
+    /// and returns the receiver that fires once `run` (loop plus `cleanup`)
+    /// has returned, together with the OS thread handle.
+    ///
+    /// The Rust analog of Java starting this `KafkaThread` subclass, whose
+    /// body is `run()`. Production and tests both go through `run`, so the
+    /// per-iteration catch of `ConsumerNetworkThread.run()` applies to the
+    /// production loop too.
+    pub(crate) fn spawn_dedicated(self) -> (tokio::sync::oneshot::Receiver<()>, std::thread::JoinHandle<()>) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build consumer io runtime");
+                rt.block_on(self.run());
+                // Signal the close path that the bg loop + `cleanup()`
+                // have finished. Errors (receiver dropped before close)
+                // are benign — `await_join` treats them as a clean exit.
+                let _ = done_tx.send(());
+            })
+            .expect("spawn consumer io thread");
+        (done_rx, thread_handle)
     }
 }
 
@@ -2204,6 +2233,97 @@ mod tests {
             "the loop must run again after the panicking iteration"
         );
         assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
+    }
+
+    /// Request manager that panics on the first `poll` (or on every `poll`
+    /// when `always_panic`) and counts calls, without touching the running
+    /// flag, so the test decides when the loop stops.
+    struct CountingPanickingRequestManager {
+        always_panic: bool,
+        poll_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestManager for CountingPanickingRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 || self.always_panic {
+                panic!("request manager failure");
+            }
+            PollResult::with_time_until_next_poll_ms(10)
+        }
+
+        fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+            10
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// Starts the thread the way the production consumer does
+    /// (`spawn_dedicated`, a `kafka-consumer-io` OS thread), waits for at
+    /// least `min_polls` manager polls, then stops it like `close()` does
+    /// (clear the running flag) and asserts `done` fires, the OS thread exits
+    /// and `cleanup()` ran.
+    async fn assert_dedicated_thread_survives_panics(always_panic: bool, min_polls: usize) {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let manager = CountingPanickingRequestManager {
+            always_panic,
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let running = fixture.thread.running_handle();
+        let (done_rx, thread_handle) = fixture.thread.spawn_dedicated();
+
+        let start = std::time::Instant::now();
+        while poll_calls.load(Ordering::SeqCst) < min_polls
+            && !thread_handle.is_finished()
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let finished_early = thread_handle.is_finished();
+        let polls = poll_calls.load(Ordering::SeqCst);
+        running.store(false, Ordering::Release);
+        let done = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        let joined = tokio::task::spawn_blocking(move || thread_handle.join())
+            .await
+            .expect("join task");
+
+        assert!(
+            !finished_early && polls >= min_polls,
+            "Java: the network thread logs the error and keeps running; Rust: thread finished early={finished_early}, \
+             manager polls={polls}"
+        );
+        assert!(
+            matches!(done, Ok(Ok(()))),
+            "the dedicated thread must signal done after the loop exits, got {done:?}"
+        );
+        assert!(joined.is_ok(), "the dedicated OS thread must exit cleanly");
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
+    }
+
+    /// Audit C1-22. The production consumer runs the loop on the dedicated
+    /// `kafka-consumer-io` thread; Java's `ConsumerNetworkThread.run()`
+    /// catches every `runOnce()` failure, logs "Unexpected error caught in
+    /// consumer network thread" and keeps looping, with `cleanup()` in the
+    /// `finally`. One panicking iteration must not end that thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_survives_a_panicking_iteration() {
+        assert_dedicated_thread_survives_panics(false, 3).await;
+    }
+
+    /// Every iteration panics (e.g. a poisoned lock keeps failing). Java just
+    /// keeps looping; the Rust loop yields after each caught panic, so the
+    /// running-flag check is still reached and stopping the thread still
+    /// runs `cleanup()` and fires `done`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_stops_and_cleans_up_when_every_iteration_panics() {
+        assert_dedicated_thread_survives_panics(true, 3).await;
     }
 
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when

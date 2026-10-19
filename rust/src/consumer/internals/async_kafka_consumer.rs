@@ -3311,7 +3311,7 @@ where
             .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
         // Capture the running-flag + wakeup handles before moving
-        // `network_thread` into `tokio::spawn`. The erased closures
+        // `network_thread` into `spawn_dedicated`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
         let (signal_close_fn, wakeup_fn) = build_close_handle_fns(
@@ -3351,29 +3351,14 @@ where
         // poll-timeout timers. The §10 network-poll-to-completion
         // (cancel-safety), the §11 `Selector`/`Notify` wakeup, and the
         // §31 listener/commit callbacks (which run on the APP task — the
-        // bg only enqueues + awaits the oneshot) are all unaffected by
+        // bg only enqueues the callback event, stores the ack receiver and
+        // `try_recv`s it on later iterations) are all unaffected by
         // moving the bg loop onto a `current_thread` runtime.
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-        let thread_handle = std::thread::Builder::new()
-            .name("kafka-consumer-io".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build consumer io runtime");
-                rt.block_on(async move {
-                    let mut thread = network_thread;
-                    while thread.is_running() {
-                        thread.run_once().await;
-                    }
-                    thread.cleanup().await;
-                });
-                // Signal the close path that the bg loop + `cleanup()`
-                // have finished. Errors (receiver dropped before close)
-                // are benign — `await_join` treats them as a clean exit.
-                let _ = done_tx.send(());
-            })
-            .expect("spawn consumer io thread");
+        //
+        // The loop is `ConsumerNetworkThread::run`, which carries Java's
+        // per-iteration `catch (Throwable)`: a panicking iteration is logged
+        // and the loop continues, and `cleanup()` still runs on exit.
+        let (done_rx, thread_handle) = network_thread.spawn_dedicated();
 
         let network_thread_close =
             NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
