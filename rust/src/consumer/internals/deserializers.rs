@@ -177,8 +177,18 @@ mod tests {
     use crate::common::serialization::Deserializer;
     use crate::common::serialization::StringDeserializer;
 
-    /// A deserializer whose `close` panics with the given message.
-    struct PanickingOnClose(&'static str);
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A deserializer whose `close` counts the call, then panics with the given
+    /// message.
+    struct PanickingOnClose(&'static str, Arc<AtomicUsize>);
+
+    impl PanickingOnClose {
+        fn new(message: &'static str) -> Self {
+            Self(message, Arc::new(AtomicUsize::new(0)))
+        }
+    }
 
     impl Deserializer<String> for PanickingOnClose {
         async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
@@ -186,6 +196,7 @@ mod tests {
         }
 
         async fn close(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
             panic!("{}", self.0);
         }
     }
@@ -199,11 +210,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_reports_the_first_failure_after_closing_both() {
-        let mut deserializers: Deserializers<String, String> = Deserializers::new(
-            Box::new(PanickingOnClose("key close failed")),
-            Box::new(PanickingOnClose("value close failed")),
-        );
+        let key = PanickingOnClose::new("key close failed");
+        let value = PanickingOnClose::new("value close failed");
+        let (key_closes, value_closes) = (Arc::clone(&key.1), Arc::clone(&value.1));
+        let mut deserializers: Deserializers<String, String> = Deserializers::new(Box::new(key), Box::new(value));
         let error = deserializers.close().await.expect_err("both closes panicked");
+        // Java's `Utils.closeQuietly` keeps going after the key failure: both
+        // deserializers are closed exactly once.
+        assert_eq!(1, key_closes.load(Ordering::SeqCst));
+        assert_eq!(1, value_closes.load(Ordering::SeqCst));
         assert!(error.is_kafka_error());
         assert_eq!("Failed to close deserializers", error.message());
         let source = std::error::Error::source(&error).expect("the first failure is the source");
@@ -214,7 +229,7 @@ mod tests {
     async fn test_close_reports_a_value_failure() {
         let mut deserializers: Deserializers<String, String> = Deserializers::new(
             Box::new(StringDeserializer::new()),
-            Box::new(PanickingOnClose("value close failed")),
+            Box::new(PanickingOnClose::new("value close failed")),
         );
         let error = deserializers.close().await.expect_err("the value close panicked");
         assert_eq!("Failed to close deserializers", error.message());
