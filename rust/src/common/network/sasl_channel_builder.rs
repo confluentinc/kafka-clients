@@ -126,8 +126,7 @@ impl SaslChannelBuilder {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "SASL mechanism '{}' is not supported by this client: only {SASL_PLAIN_MECHANISM} is implemented, \
-                     so any other mechanism would send the password as a PLAIN token",
+                    "SASL mechanism '{}' is not supported by this client: only {SASL_PLAIN_MECHANISM} is implemented",
                     sasl_config.mechanism
                 ),
             ));
@@ -371,10 +370,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{mechanism:?} must be rejected"))
                 .to_string();
             assert_eq!(
-                format!(
-                    "SASL mechanism '{mechanism}' is not supported by this client: only PLAIN is implemented, \
-                     so any other mechanism would send the password as a PLAIN token"
-                ),
+                format!("SASL mechanism '{mechanism}' is not supported by this client: only PLAIN is implemented"),
                 message
             );
             assert!(!message.contains("alice-secret"));
