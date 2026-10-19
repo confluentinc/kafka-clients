@@ -596,12 +596,14 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
 ///
 /// The second scenario for `describe_cluster`. `includeFencedBrokers` is
 /// KIP-1073's `DescribeCluster` v2 flag (`DescribeClusterOptions.includeFencedBrokers`,
-/// sent as `IncludeFencedBrokers`), which also switches the request to the
-/// broker-registration view the controller answers with fenced brokers
-/// included. On a healthy cluster no broker is fenced, so the option must leave
-/// the node set and the controller exactly as the default call reports them; a
-/// backend that dropped the flag passes this half, and the `is_fenced` half of
-/// the wire is asserted by the scenario that carries it.
+/// sent as `IncludeFencedBrokers`), which makes the answering broker include
+/// fenced brokers (`KafkaApis.handleDescribeCluster`). On a healthy cluster no
+/// broker is fenced, so the option must leave the node set and the controller
+/// exactly as the default call reports them (on this single-broker pool the
+/// reported controller is that one broker), and every node must cross with
+/// Java's `Node.isFenced() == false`. The `true` arm needs a stopped broker,
+/// which a pooled cluster must not have:
+/// [`describe_cluster_reports_a_fenced_broker`] reaches it on a dedicated one.
 async fn describe_cluster_with_fenced_brokers_and_timeout<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -629,6 +631,13 @@ async fn describe_cluster_with_fenced_brokers_and_timeout<F: AdminBackendFactory
         ids(&default_view.nodes),
         "{backend} backend: a healthy cluster has no fenced broker, so includeFencedBrokers adds none"
     );
+    for node in with_fenced.nodes.iter().chain(&default_view.nodes) {
+        assert!(
+            !node.is_fenced(),
+            "{backend} backend: node {} of a healthy cluster is not fenced",
+            node.id()
+        );
+    }
     for node in &with_fenced.nodes {
         assert!(
             !node.host().is_empty() && node.port() > 0,
@@ -790,6 +799,66 @@ async fn list_config_resources_broker_only_with_timeout<F: AdminBackendFactory>(
     ctx.cleanup().await;
 }
 
+/// Translated from Java's `AdminMetadataTest.testListNodesWithFencedBroker`
+/// (`clients-integration-tests`): on a dedicated KRaft cluster (three brokers,
+/// one controller) the highest broker id is shut down; once the controller has
+/// fenced it, the default `describeCluster` stops listing it, and
+/// `describeCluster(includeFencedBrokers = true)` lists all three with
+/// `isFenced()` true for that broker only. This is the scenario that reaches
+/// the wire's `Node.is_fenced = true` on every backend.
+///
+/// A dedicated cluster per arm (`ClusterConfig::kraft_dedicated` is never
+/// pooled), because a stopped broker must not leak into other scenarios.
+async fn describe_cluster_reports_a_fenced_broker<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    ctx.cluster().wait_for_ready_brokers().await;
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let broker_ids = ctx.cluster().broker_ids();
+    let total_brokers = broker_ids.len();
+    let fenced_broker_id = *broker_ids.iter().max().expect("the cluster has brokers");
+    ctx.cluster().shutdown_broker(fenced_broker_id).await;
+
+    // It takes a few seconds for a broker to get fenced after being stopped, so
+    // retry until only the non-fenced brokers are returned (Java: 20 s).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let listed = admin.describe_cluster(DescribeClusterOptions::new()).await;
+        if listed.as_ref().is_ok_and(|d| d.nodes.len() == total_brokers - 1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{backend} backend: timed out waiting for broker {fenced_broker_id} to be fenced, last answer {:?}",
+            listed.map(|d| d.nodes.iter().map(|n| n.id()).collect::<Vec<_>>())
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // List nodes again but this time include the fenced broker.
+    let nodes = admin
+        .describe_cluster(DescribeClusterOptions::new().set_include_fenced_brokers(true))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe cluster with fenced brokers: {e}"))
+        .nodes;
+    assert_eq!(nodes.len(), total_brokers, "{backend} backend: {nodes:?}");
+    for node in &nodes {
+        assert_eq!(
+            node.is_fenced(),
+            node.id() == fenced_broker_id,
+            "{backend} backend: only broker {fenced_broker_id} is fenced, got node {} is_fenced={}",
+            node.id(),
+            node.is_fenced()
+        );
+    }
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_describe_cluster_returns_nodes_controller_and_id,
     describe_cluster_returns_nodes_controller_and_id
@@ -825,4 +894,9 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_list_config_resources_broker_only_with_timeout,
     list_config_resources_broker_only_with_timeout
+);
+multilanguage_admin_test!(
+    test_describe_cluster_reports_a_fenced_broker,
+    describe_cluster_reports_a_fenced_broker,
+    crate::common::cluster_config::ClusterConfig::kraft_dedicated(3, 1)
 );

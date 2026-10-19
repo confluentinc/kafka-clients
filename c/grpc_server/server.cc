@@ -1493,6 +1493,9 @@ void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   dst->set_port(kafka_common_Node_port(node));
   const char* rack = kafka_common_Node_rack(node);  // nullptr when Java's rack is null
   if (rack != nullptr) dst->set_rack(rack);
+  // Java's isFenced() (KIP-1073); false for every node but a fenced broker a
+  // describeCluster(includeFencedBrokers) reports.
+  dst->set_is_fenced(kafka_common_Node_is_fenced(node) != 0);
 }
 
 // Converts every `kafka_common_Node_t *` of an owned list into the proto node
@@ -4957,6 +4960,8 @@ class AdminServiceImpl final : public AdminService::Service {
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
     if (usable >= 0) dst->set_usable_bytes(usable);
+    // Java's isCordoned() (KIP-1066).
+    dst->set_is_cordoned(kafka_admin_LogDirDescription_is_cordoned(description) != 0);
     OwnedMap replicas(kafka_admin_LogDirDescription_replica_infos(description));
     const int32_t n = replicas ? kafka_Map_size(replicas.get()) : 0;
     for (int32_t i = 0; i < n; i++) {

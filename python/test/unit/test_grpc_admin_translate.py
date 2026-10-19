@@ -651,3 +651,24 @@ def test_async_server_send_awaits_the_future_with_get():
     resp = asyncio.run(run())
     assert not resp.HasField("error"), resp.error
     assert resp.metadata.topic == "t"
+
+
+def test_node_is_fenced_crosses_the_wire():
+    # Java's Node.isFenced() (KIP-1073): a real cluster never reports a fenced
+    # broker to the pooled multilanguage scenarios, so the true arm is pinned here.
+    fenced = tr._node_to_proto(Node(id=1, host="h", port=9092, rack=None, is_fenced=True))
+    assert fenced.is_fenced
+    assert fenced.id == 1 and not fenced.HasField("rack")
+    assert not tr._node_to_proto(Node(id=2, host="h", port=9092)).is_fenced
+
+
+def test_log_dir_is_cordoned_crosses_the_wire():
+    # Java's LogDirDescription.isCordoned() (KIP-1066), both arms.
+    cordoned = tr._admin_log_dir_description_to_proto(ka.LogDirDescription(
+        error=None, replica_infos={}, total_bytes=10, usable_bytes=5, is_cordoned=True))
+    assert cordoned.is_cordoned
+    assert cordoned.total_bytes == 10 and cordoned.usable_bytes == 5
+    plain = tr._admin_log_dir_description_to_proto(ka.LogDirDescription(
+        error=None, replica_infos={}))
+    assert not plain.is_cordoned
+    assert not plain.HasField("total_bytes") and not plain.HasField("usable_bytes")

@@ -386,6 +386,13 @@ async fn describe_log_dirs_unknown_broker_and_replica<F: AdminBackendFactory>(ct
         !dirs.is_empty(),
         "{backend} backend: the live broker reports at least one log directory"
     );
+    // KIP-1066's `isCordoned()`: `IsCordoned` arrived with DescribeLogDirs v5
+    // in Kafka 4.3.0 (KAFKA-19774), so the default 4.2.0 broker cannot report a
+    // cordoned dir and every one must cross as false. The `true` arm is pinned
+    // by the Python translation's unit test.
+    for (path, description) in dirs {
+        assert!(!description.is_cordoned(), "{backend} backend: log dir {path} is not cordoned");
+    }
     let err = described[&unknown_broker]
         .as_ref()
         .expect_err(&format!("{backend} backend: broker {unknown_broker} does not exist"));
