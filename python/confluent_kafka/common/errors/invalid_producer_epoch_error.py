@@ -46,7 +46,7 @@ class InvalidProducerEpochError(ApplicationRecoverableError):
     def __init__(
         self,
         *,
-        message: str,
+        message: str | None,
     ) -> None:
         _throwable.init(self, message, None)
         self._java_kwargs = _throwable.kwargs(message=message)

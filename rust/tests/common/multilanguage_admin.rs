@@ -499,21 +499,28 @@ impl MultilanguageAdmin {
                 ReplicaInfo::new(replica.size, replica.offset_lag, replica.is_future),
             );
         }
-        // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `with_total_bytes_usable_bytes` is the
-        // four-argument one. Java has no constructor for one present and the
-        // other absent, and no broker sends that, so the mixed case is a
+        // The five-argument Java constructor, the one `DescribeLogDirsResponse`
+        // builds: an absent volume size is its `UNKNOWN_VOLUME_BYTES` (-1),
+        // which the constructor maps back to an empty `OptionalLong`, and
+        // `isCordoned` crosses as is. (The constant itself is in the
+        // crate-private `common::requests`, hence the literal.) Java has no way to report one size
+        // without the other, and no broker sends that, so the mixed case is a
         // protocol error rather than a guess.
+        let unknown = -1;
         match (description.total_bytes, description.usable_bytes) {
-            (None, None) => Ok(LogDirDescription::new(
+            (None, None) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
+                unknown,
+                unknown,
+                description.is_cordoned,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
                 usable,
+                description.is_cordoned,
             )),
             (total, usable) => Err(self.protocol_error(format!(
                 "LogDirDescription reported totalBytes={} and usableBytes={}; Java has no constructor for one \
@@ -973,7 +980,7 @@ fn new_partitions_to_proto(topic: &str, new_partitions: &NewPartitions) -> proto
 }
 
 fn node_from_proto(node: proto::Node) -> Node {
-    Node::with_rack(node.id, node.host, node.port, node.rack)
+    Node::with_rack_is_fenced(node.id, node.host, node.port, node.rack, node.is_fenced)
 }
 
 /// Rebuilds a [`TopicPartitionInfo`], preserving whether the broker reported

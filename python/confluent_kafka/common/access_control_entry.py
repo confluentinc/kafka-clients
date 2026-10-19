@@ -26,7 +26,6 @@ from confluent_kafka.common.access_control_entry_filter import AccessControlEntr
 from confluent_kafka.common.acl_operation import AclOperation
 from confluent_kafka.common.acl_permission_type import AclPermissionType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["AccessControlEntry"]
 
@@ -48,15 +47,15 @@ class AccessControlEntry:
         operation), ``permission_type`` a non-null permission type (ANY is not
         an allowed type)."""
         if principal is None:
-            raise NullPointerError()
+            raise TypeError("principal must not be None")
         if host is None:
-            raise NullPointerError()
+            raise TypeError("host must not be None")
         if operation is None:
-            raise NullPointerError()
+            raise TypeError("operation must not be None")
         if operation is AclOperation.ANY:
             raise IllegalArgumentError(message="operation must not be ANY")
         if permission_type is None:
-            raise NullPointerError()
+            raise TypeError("permission_type must not be None")
         if permission_type is AclPermissionType.ANY:
             raise IllegalArgumentError(message="permissionType must not be ANY")
         self._data = _AccessControlEntryData(principal=principal, host=host, operation=operation,

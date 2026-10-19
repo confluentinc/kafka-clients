@@ -16,20 +16,20 @@
 ``org.apache.kafka.clients.admin.ClassicGroupDescription``.
 
 Java's six-argument constructor passes ``Set.of()`` as the authorized
-operations to the seven-argument one, so the two are one constructor whose
-``authorized_operations`` defaults to ``()`` (CLAUDE.md, Python Binding
-Conventions, Signatures); every combination of the keywords is a Java
-constructor, so there is no ``java_forms``. A ``None`` given to the public
-constructor is "not given", so it cannot hold Java's ``null`` ("not known");
-the client builds a description from core data through the private ``_new``,
-which takes the seven-argument constructor's parameters and stores ``None`` as
-Java's ``null``.
+operations to the seven-argument one, so the two are one constructor, one stub
+each, whose ``authorized_operations`` left out is ``()`` (CLAUDE.md, Python
+Binding Conventions, Signatures); every combination of the keywords is a Java
+constructor, so there is no ``java_forms``. An explicit ``None`` is Java's
+``null`` ("not known"), stored as given. The client builds a description from
+core data through the private ``_new``, the seven-argument constructor.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
+
+from confluent_kafka._args import MISSING
 
 from confluent_kafka._java import java_str
 
@@ -52,12 +52,22 @@ class ClassicGroupDescription:
     __slots__ = ("_group_id", "_protocol", "_protocol_data", "_members", "_state",
                  "_coordinator", "_authorized_operations")
 
+    @overload
+    def __init__(self, *, group_id: str | None, protocol: str, protocol_data: str | None,
+                 members: Iterable[MemberDescription] | None, state: ClassicGroupState,
+                 coordinator: Node | None) -> None: ...
+    @overload
     def __init__(self, *, group_id: str | None, protocol: str, protocol_data: str | None,
                  members: Iterable[MemberDescription] | None, state: ClassicGroupState,
                  coordinator: Node | None,
-                 authorized_operations: Iterable[AclOperation] | None = ()) -> None:
-        if authorized_operations is None:
-            authorized_operations = ()  # not given: the six-argument form's Set.of()
+                 authorized_operations: Iterable[AclOperation] | None) -> None: ...
+
+    def __init__(self, *, group_id: str | None, protocol: str, protocol_data: str | None,
+                 members: Iterable[MemberDescription] | None, state: ClassicGroupState,
+                 coordinator: Node | None,
+                 authorized_operations: Iterable[AclOperation] | None = MISSING) -> None:
+        if authorized_operations is MISSING:
+            authorized_operations = ()  # the six-argument form's Set.of()
         self._init(group_id, protocol, protocol_data, members, state, coordinator,
                    authorized_operations)
 

@@ -25,6 +25,7 @@ import builtins
 from typing import Any, ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 
 __all__ = ["TimeoutError"]
 
@@ -39,9 +40,9 @@ class TimeoutError(builtins.TimeoutError):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = MISSING,
     ) -> None:
-        _throwable.init(self, message, None)
+        _throwable.init(self, (None if message is MISSING else message), None)
         self._java_kwargs = _throwable.kwargs(message=message)
 
     def __str__(self) -> str:

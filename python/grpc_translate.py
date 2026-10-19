@@ -48,8 +48,10 @@ from confluent_kafka.common import KafkaError  # noqa: E402
 # ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
 from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
+    CloseOptions,
     ConsumerRebalanceListener,
     OffsetAndMetadata,
+    SubscriptionPattern,
 )
 from confluent_kafka.producer import ProducerRecord  # noqa: E402
 # The admin client is the new ``confluent_kafka.admin`` package: keyword-only
@@ -265,9 +267,12 @@ def _node_to_proto(node):
     if node is None:
         return None
     rack = _member(node, "rack")
+    # Java's Node.isFenced() (KIP-1073); a node from partition metadata or a
+    # coordinator lookup is never fenced.
     return pb.Node(id=_member(node, "id"), host=_member(node, "host"),
                    port=_member(node, "port"),
-                   rack=rack if rack is not None else None)
+                   rack=rack if rack is not None else None,
+                   is_fenced=bool(_member(node, "is_fenced")))
 
 
 def _partition_info_to_proto(info):
@@ -380,6 +385,47 @@ def _group_metadata_to_proto(group_metadata):
     )
 
 
+def _consumer_timeout(request):
+    """The optional ``timeout_ms`` of a ConsumerService request as the keyword
+    arguments of the binding's timed overload: ``{"timeout": seconds}``, or ``{}``
+    when absent, which leaves the argument out and selects the Java overload
+    without a ``Duration`` (a ``None`` would be Java's null ``Duration``)."""
+    return {"timeout": request.timeout_ms / 1000.0} if request.HasField("timeout_ms") else {}
+
+
+def _consumer_subscribe_kwargs(request, listener):
+    """SubscribeRequest -> the keyword arguments of ``Consumer.subscribe``:
+    ``pattern`` (a ``SubscriptionPattern``, Java's ``subscribe(SubscriptionPattern
+    [, listener])``) when the request carries one, else ``topics``."""
+    kwargs: dict = ({"pattern": SubscriptionPattern(pattern=request.pattern)}
+                    if request.HasField("pattern") else {"topics": list(request.topics)})
+    # No listener: the argument is left out (Java's one-argument overload); a
+    # None would be Java's subscribe(..., null), which Java rejects.
+    if listener is not None:
+        kwargs["callback"] = listener
+    return kwargs
+
+
+def _consumer_close_options(request):
+    """ConsumerCloseRequest -> the keyword arguments of ``close``:
+    ``{"option": CloseOptions}`` for Java's ``close(CloseOptions)``, or ``{}`` for
+    the no-argument ``close()`` (a ``None`` option would be Java's null). The
+    operation crosses as its enum constant name; the timeout is optional."""
+    if not request.HasField("group_membership_operation"):
+        return {}
+    operation = CloseOptions.GroupMembershipOperation[request.group_membership_operation]
+    if request.HasField("close_timeout_ms"):
+        return {"option": CloseOptions(operation=operation,
+                                       timeout=request.close_timeout_ms / 1000.0)}
+    return {"option": CloseOptions(operation=operation)}
+
+
+def _current_lag_response(lag):
+    """``current_lag()``'s ``int | None`` (Java's ``OptionalLong``) ->
+    CurrentLagResponse, absent ``lag`` for an empty one."""
+    return cpb.CurrentLagResponse() if lag is None else cpb.CurrentLagResponse(lag=lag)
+
+
 def _oam_to_proto(oam):
     # Shared by the consumer ``Committed`` handler and the admin group-offsets
     # response, both ``confluent_kafka.consumer.OffsetAndMetadata`` with method
@@ -436,12 +482,13 @@ def _record_to_proto(r):
 
     ``key()`` / ``value()`` are ``bytes`` deserializer output (the gRPC servers
     build byte-typed consumers), or ``None`` for a tombstone; ``headers()``
-    yields ``(str, memoryview)`` pairs; ``timestamp_type()`` is a
+    is a ``Headers`` of ``Header`` objects (``key()`` a ``str``, ``value()`` a
+    ``memoryview`` or ``None``); ``timestamp_type()`` is a
     ``TimestampType`` int-enum whose value is the proto's ``int32``."""
     key = bytes(r.key()) if r.key() is not None else None
     value = bytes(r.value()) if r.value() is not None else None
-    headers = [pb.Header(key=k, value=bytes(v) if v is not None else b"")
-               for (k, v) in r.headers()]
+    headers = [pb.Header(key=h.key(), value=bytes(v) if (v := h.value()) is not None else b"")
+               for h in r.headers()]
     leader_epoch = r.leader_epoch()
     return cpb.ConsumerRecord(
         topic=r.topic(),
@@ -1023,7 +1070,8 @@ def _admin_log_dir_description_to_proto(description):
     `error` is the log dir's own error (offline, unreadable): the broker
     answered, so it is *not* the per-broker error, which arrives as the entry's
     error arm instead of a value. `total_bytes` / `usable_bytes` are Java's
-    OptionalLong, absent when the broker did not report them."""
+    OptionalLong, absent when the broker did not report them; `is_cordoned` is
+    the KIP-1066 flag."""
     out = apb.LogDirDescription()
     if description.error() is not None:
         out.error.CopyFrom(_kafka_error_to_proto(description.error()))
@@ -1031,6 +1079,8 @@ def _admin_log_dir_description_to_proto(description):
         out.total_bytes = description.total_bytes()
     if description.usable_bytes() is not None:
         out.usable_bytes = description.usable_bytes()
+    # Java's isCordoned() (KIP-1066).
+    out.is_cordoned = bool(description.is_cordoned())
     for tp, info in description.replica_infos().items():
         out.replica_infos.append(apb.ReplicaInfoEntry(
             partition=cpb.TopicPartition(topic=tp.topic(), partition=tp.partition()),
@@ -2301,8 +2351,11 @@ class _AdminOps:
         return (yield from _collect(res.values()))
 
     def g_list_partition_reassignments(self, partitions, timeout=None):
+        # Absent partitions is Java's listPartitionReassignments(options), every
+        # reassignment: the argument is left out (a None is Java's null Set).
+        targets = {} if partitions is None else {"partitions": partitions}
         res = yield self._a.list_partition_reassignments(
-            partitions=partitions, options=_opts(ka.ListPartitionReassignmentsOptions, timeout))
+            **targets, options=_opts(ka.ListPartitionReassignmentsOptions, timeout))
         return (yield res.reassignments())
 
     def g_list_offsets(self, specs, timeout=None, isolation_level=0):

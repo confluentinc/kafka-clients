@@ -22,6 +22,7 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.
 from __future__ import annotations
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka.common.errors.refresh_retriable_error import RefreshRetriableError
 
 __all__ = ["InvalidMetadataError"]
@@ -40,16 +41,16 @@ class InvalidMetadataError(RefreshRetriableError):
     def __init__(
         self,
         *,
-        message: str | None = None,
-        cause: BaseException | None = None,
+        message: str | None = MISSING,
+        cause: BaseException | None = MISSING,
     ) -> None:
         if type(self) is InvalidMetadataError:
             raise TypeError(
                 "InvalidMetadataError is an abstract catch-only base; it is never raised directly"
             )
-        if message is not None:
-            _throwable.init(self, message, cause)
-        elif message is None and cause is not None:
+        if message is not MISSING:
+            _throwable.init(self, message, (None if cause is MISSING else cause))
+        elif message is MISSING and cause is not MISSING:
             _throwable.init(self, _throwable.cause_message(cause), cause)
         else:
             _throwable.init(self, None, None)

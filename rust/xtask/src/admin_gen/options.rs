@@ -837,7 +837,10 @@ impl Types<'_> {
 #[derive(Default)]
 struct Uses {
     any: bool,
-    unset: bool,
+    /// A parameter defaults to `_args.MISSING`.
+    missing: bool,
+    /// A setter takes a collection of `String`: `reject_str` guards it.
+    reject_str: bool,
     java_str: bool,
     copy_of: bool,
     illegal_argument: bool,
@@ -929,20 +932,25 @@ impl Renderer<'_> {
     }
 
     fn storage(&mut self, f: &Field) -> Result<Storage, Stop> {
-        let setters: Vec<Store> = self
+        let field_setters: Vec<Setter> = self
             .o
             .setters
             .iter()
             .chain(self.parent.setters.iter())
             .filter(|s| s.field == f.java)
-            .map(|s| s.store)
+            .cloned()
             .collect();
+        let setters: Vec<Store> = field_setters.iter().map(|s| s.store).collect();
+        // A setter that stores a non-nullable reference as given stores Java's null
+        // too (`renewers(null)`): the field can then hold `None`.
+        let stores_null = field_setters.iter().any(|s| self.stores_null_as_given(s));
         let init = f.init.as_deref();
         let ty = f.ty.as_str();
         let reference = !is_primitive(ty);
         // A `final` field without initializer is set by every constructor.
-        let nullable =
-            (reference && (init == Some("null") || (init.is_none() && !f.is_final))) || ty.starts_with("Optional");
+        let nullable = (reference && (init == Some("null") || (init.is_none() && !f.is_final)))
+            || ty.starts_with("Optional")
+            || stores_null;
         let st = |s: &Self, r: String| s.st(r);
         let (value, comment) = match init {
             None | Some("null") if reference => ("None".to_string(), None),
@@ -977,6 +985,15 @@ impl Renderer<'_> {
             pty.push_str(" | None");
         }
         Ok(Storage { ty: pty, init: value, comment, frozen, nullable })
+    }
+
+    /// Whether the setter stores a non-nullable reference argument as given, as
+    /// Java's `this.renewers = renewers` does: a `None` is then stored, as Java
+    /// stores `null`, and the read that dereferences it raises (CLAUDE.md, Python
+    /// Binding Conventions, Implementation over the FFI, exception 4: "a mock whose
+    /// Java NPE comes later raises it there").
+    fn stores_null_as_given(&self, s: &Setter) -> bool {
+        s.store == Store::AsGiven && !is_primitive(&s.param.ty) && !self.param_nullable(s)
     }
 
     /// CLAUDE.md, Signatures, Nullability: a Javadoc "Non-null" wins; else the
@@ -1014,12 +1031,59 @@ impl Renderer<'_> {
         Ok(t)
     }
 
+    /// The `reject_str` guard of a setter whose Java parameter is a collection of
+    /// `String` (CLAUDE.md, Python Binding Conventions, Signatures): a `str` would be
+    /// iterated by character. A nullable parameter keeps `None` as "not set".
+    fn str_guard(&mut self, s: &Setter, nullable: bool) -> Vec<String> {
+        let p = snake(&s.param.name);
+        if !matches!(s.param.ty.as_str(), "Set<String>" | "Collection<String>" | "List<String>") {
+            return Vec::new();
+        }
+        self.uses.reject_str = true;
+        if nullable {
+            vec![
+                format!("        if {p} is not None:"),
+                format!("            reject_str(\"{p}\", {p})"),
+            ]
+        } else {
+            vec![format!("        reject_str(\"{p}\", {p})")]
+        }
+    }
+
+    /// The setter's check of a `None` its Java body dereferences (CLAUDE.md,
+    /// Python Binding Conventions, Implementation over the FFI, exception 4;
+    /// Types: Python's `TypeError` naming the parameter): a primitive (Java
+    /// cannot pass null to it), `new HashSet<>(x)` and `OptionalInt.of(x)`. A
+    /// nullable argument keeps `None` as Java's meaning, and a reference the setter
+    /// stores as given (`renewers`) is stored, `None` included, as Java stores
+    /// `null`: the read that dereferences it raises (`stores_null_as_given`).
+    fn null_guard(&self, s: &Setter, nullable: bool) -> Vec<String> {
+        if nullable {
+            return Vec::new();
+        }
+        let p = snake(&s.param.name);
+        let why = if is_primitive(&s.param.ty) {
+            format!("a {}: Java cannot pass null", s.param.ty)
+        } else {
+            match s.store {
+                Store::NewHashSet => format!("new HashSet<>({}) on a null", s.param.name),
+                Store::OptionalOf => format!("OptionalInt.of({}) on a null", s.param.name),
+                // Stored as given, `None` included; `Set.copyOf` setters are nullable.
+                Store::AsGiven | Store::CopyOf => return Vec::new(),
+            }
+        };
+        vec![
+            format!("        if {p} is None:  # {why}"),
+            format!("            raise TypeError(\"{p} must not be None\")"),
+        ]
+    }
+
     /// The setter's Python store expression and its comment.
     fn store_expr(&mut self, s: &Setter) -> Result<(String, Option<String>), Stop> {
         let p = snake(&s.param.name);
         let f = self.field(&s.field).clone();
         let storage = self.storage(&f)?;
-        let nullable = self.param_nullable(s);
+        let nullable = self.param_nullable(s) || self.stores_null_as_given(s);
         let wrap = |conv: &str| {
             if nullable {
                 format!("None if {p} is None else {conv}({p})")
@@ -1037,7 +1101,7 @@ impl Renderer<'_> {
             Store::NewHashSet => (wrap(if storage.frozen { "frozenset" } else { "set" }), None),
             Store::CopyOf => {
                 self.uses.copy_of = true;
-                (format!("_copy_of({p})"), None)
+                (format!("_copy_of({p}, \"{p}\")"), None)
             },
         })
     }
@@ -1295,7 +1359,7 @@ impl Renderer<'_> {
                 for (f, s) in &kws {
                     let (base, nullable) = self.param_type(s)?;
                     let none = if nullable { " | None" } else { "" };
-                    items.push(format!("{}: {base}{none} = UNSET", f.py));
+                    items.push(format!("{}: {base}{none} = MISSING", f.py));
                     let call = wrap_signature(
                         12,
                         &format!("self.{}(", snake(&s.name)),
@@ -1304,9 +1368,9 @@ impl Renderer<'_> {
                         4,
                         0,
                     );
-                    calls.push(format!("        if {} is not UNSET:\n{call}", f.py));
+                    calls.push(format!("        if {} is not MISSING:\n{call}", f.py));
                 }
-                self.uses.unset = true;
+                self.uses.missing = true;
                 let head = wrap_signature(4, "def __init__(", &items, ") -> None:", 8, 0);
                 self.uses.note_py(&head);
                 let mut lines = vec![head, "        super().__init__()".to_string()];
@@ -1325,10 +1389,14 @@ impl Renderer<'_> {
                 };
                 self.uses.top_runtime.insert((file, c.clone()));
                 let p = snake(&param.name);
-                let items = ["self".to_string(), "*".to_string(), format!("{p}: {pt} = {c}.{k}")];
+                let items = ["self".to_string(), "*".to_string(), format!("{p}: {pt} = MISSING")];
+                self.uses.missing = true;
                 let head = wrap_signature(4, "def __init__(", &items, ") -> None:", 8, 0);
                 let mut lines = vec![head, "        super().__init__()".to_string()];
                 lines.extend(self.init_fields(Some(&field))?);
+                // Java's `()` passes this constant to the one-argument form.
+                lines.push(format!("        if {p} is MISSING:"));
+                lines.push(format!("            {p} = {c}.{k}"));
                 lines.push(format!("        self._{} = {p}", self.field(&field).py));
                 Ok(Some(lines.join("\n")))
             },
@@ -1337,15 +1405,18 @@ impl Renderer<'_> {
                 let p = snake(&param.name);
                 let f = self.field(&field).clone();
                 let elem = self.types.py(&f.ty, Dir::Out).map_err(|r| self.st(r))?;
-                let head = format!("    def __init__(self, *, {p}: {pt} | None = None) -> None:");
+                let head = format!("    def __init__(self, *, {p}: {pt} = MISSING) -> None:");
                 self.uses.note_py(&head);
                 self.uses.illegal_argument = true;
+                self.uses.missing = true;
                 let mut lines = vec![head, "        super().__init__()".to_string()];
                 lines.extend(self.init_fields(Some(&field))?);
                 lines.extend([
-                    format!("        if {p} is None:"),
+                    format!("        if {p} is MISSING:"),
                     format!("            self._{}: {elem} = set()  # Collections.emptySet()", f.py),
                     "            return".to_string(),
+                    format!("        if {p} is None:  # Java's {p}.isEmpty() on a null"),
+                    format!("            raise TypeError(\"{p} must not be None\")"),
                     format!("        copied = set({p})"),
                     "        if not copied:".to_string(),
                     format!("            raise IllegalArgumentError(message=\"{message}\")"),
@@ -1372,26 +1443,28 @@ impl Renderer<'_> {
                 self.uses.note_pyi(&s);
                 Ok(Some(s))
             },
-            Construction::Delegating { param, default: (c, k), .. } => {
+            Construction::Delegating { param, .. } => {
+                // One stub per Java constructor, `()` and `(isolationLevel)`
+                // (Signatures); what `()` passes is stated in the docstring.
                 let pt = self.types.py(&param.ty, Dir::In).map_err(|r| self.st(r))?;
+                self.uses.overload = true;
                 let items = [
                     "self".to_string(),
                     "*".to_string(),
-                    format!("{}: {pt} = {c}.{k}", snake(&param.name)),
+                    format!("{}: {pt}", snake(&param.name)),
                 ];
-                Ok(Some(wrap_signature(
-                    4,
-                    "def __init__(",
-                    &items,
-                    ") -> None: ...",
-                    8,
-                    STUB_SLACK,
+                let one = wrap_signature(4, "def __init__(", &items, ") -> None: ...", 8, STUB_SLACK);
+                Ok(Some(format!(
+                    "    @overload\n    def __init__(self) -> None: ...\n    @overload\n{one}"
                 )))
             },
             Construction::EmptyOrNonEmpty { param, .. } => {
+                // One stub per Java constructor, `()` and `(members)` (Signatures).
                 let pt = self.types.py(&param.ty, Dir::In).map_err(|r| self.st(r))?;
+                self.uses.overload = true;
                 let s = format!(
-                    "    def __init__(self, *, {}: {pt} | None = None) -> None: ...",
+                    "    @overload\n    def __init__(self) -> None: ...\n    @overload\n    \
+                     def __init__(self, *, {}: {pt}) -> None: ...",
                     snake(&param.name)
                 );
                 self.uses.note_pyi(&s);
@@ -1426,16 +1499,16 @@ impl Renderer<'_> {
                 let py = snake(&s.name);
                 let p = snake(&s.param.name);
                 let (base, nullable) = self.param_type(&s)?;
-                let default = if nullable { "UNSET" } else { "None" };
+                let none = if nullable { " | None" } else { "" };
                 self.uses.any = true;
-                self.uses.unset |= nullable;
+                self.uses.missing = true;
                 let head = wrap_signature(
                     4,
                     &format!("def {py}("),
                     &[
                         "self".to_string(),
                         "*".to_string(),
-                        format!("{p}: {base} | None = {default}"),
+                        format!("{p}: {base}{none} = MISSING"),
                     ],
                     ") -> Any:",
                     8,
@@ -1451,8 +1524,10 @@ impl Renderer<'_> {
                 };
                 let (store, comment) = self.store_expr(&s)?;
                 let comment = comment.map(|c| format!("  # {c}")).unwrap_or_default();
-                lines.push(format!("        if {p} is {default}:"));
+                lines.push(format!("        if {p} is MISSING:"));
                 lines.push(format!("            {read}"));
+                lines.extend(self.null_guard(&s, nullable));
+                lines.extend(self.str_guard(&s, nullable));
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
                 // What the setter stored (Java's copy of a collection, `Set.copyOf`,
                 // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
@@ -1485,6 +1560,8 @@ impl Renderer<'_> {
                 lines.extend(Self::comments(&s));
                 let (store, comment) = self.store_expr(&s)?;
                 let comment = comment.map(|c| format!("  # {c}")).unwrap_or_default();
+                lines.extend(self.null_guard(&s, nullable));
+                lines.extend(self.str_guard(&s, nullable));
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
                 // What the setter stored (Java's copy of a collection, `Set.copyOf`,
                 // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
@@ -1781,8 +1858,11 @@ impl Renderer<'_> {
         if self.uses.copy_of {
             imp.std("typing", "TypeVar");
         }
-        if self.uses.unset {
-            imp.first("confluent_kafka._args", "UNSET");
+        if self.uses.missing {
+            imp.first("confluent_kafka._args", "MISSING");
+        }
+        if self.uses.reject_str {
+            imp.first("confluent_kafka._args", "reject_str");
         }
         if self.uses.java_str {
             imp.first("confluent_kafka._java", "java_str");
@@ -1821,9 +1901,12 @@ impl Renderer<'_> {
         }
         if self.uses.copy_of {
             py.push_str(
-                "\n\ndef _copy_of(values: Iterable[_E] | None) -> frozenset[_E]:\n    \
-                 \"\"\"``(values == null || values.isEmpty()) ? Set.of() : Set.copyOf(values)``.\"\"\"\n    \
-                 if values is None:\n        return frozenset()\n    return frozenset(values)\n",
+                "\n\ndef _copy_of(values: Iterable[_E] | None, name: str) -> frozenset[_E]:\n    \
+                 \"\"\"``(values == null || values.isEmpty()) ? Set.of() : Set.copyOf(values)``;\n    \
+                 ``Set.copyOf`` throws on a null element (``TypeError`` naming ``name``).\"\"\"\n    \
+                 if values is None:\n        return frozenset()\n    copied = frozenset(values)\n    \
+                 if None in copied:\n        raise TypeError(f\"{name} must not contain None\")\n    \
+                 return copied\n",
             );
         }
         py.push_str(&format!("\n\nclass {cls}{base}:\n{}\n", self.class_doc()));

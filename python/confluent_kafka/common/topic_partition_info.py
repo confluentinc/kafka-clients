@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import overload
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common.node import Node
 
@@ -51,12 +51,11 @@ class TopicPartitionInfo:
     def __init__(self, *, partition: int, leader: Node | None, replicas: Sequence[Node],
                  isr: Sequence[Node]) -> None: ...
 
-    @java_forms(Form("partition", "leader", "replicas", "isr", "elr", "last_known_elr",
-                     defaults={"elr": None, "last_known_elr": None}),
+    @java_forms(Form("partition", "leader", "replicas", "isr", "elr", "last_known_elr"),
                 Form("partition", "leader", "replicas", "isr"))
     def __init__(self, *, partition: int, leader: Node | None, replicas: Sequence[Node],
-                 isr: Sequence[Node], elr: Sequence[Node] | None = None,
-                 last_known_elr: Sequence[Node] | None = None) -> None:
+                 isr: Sequence[Node], elr: Sequence[Node] = MISSING,
+                 last_known_elr: Sequence[Node] = MISSING) -> None:
         """Create an instance of this class with the provided parameters.
 
         ``partition`` is the partition id; ``leader`` the leader of the
@@ -64,14 +63,20 @@ class TopicPartitionInfo:
         the partition in the same order as the replica assignment (the
         preferred replica is the head of the list); ``isr`` the in-sync
         replicas; ``elr`` the eligible leader replicas; ``last_known_elr`` the
-        last known eligible leader replicas.
+        last known eligible leader replicas. The four-argument form leaves
+        ``elr`` and ``last_known_elr`` null, as Java's; a ``None`` list raises
+        ``TypeError``, Java's ``Collections.unmodifiableList(null)``.
         """
         self._partition = partition
         self._leader = leader
+        for name, value in (("replicas", replicas), ("isr", isr), ("elr", elr),
+                            ("last_known_elr", last_known_elr)):
+            if value is None:
+                raise TypeError(f"{name} must not be None")
         self._replicas = tuple(replicas)
         self._isr = tuple(isr)
-        self._elr = None if elr is None else tuple(elr)
-        self._last_known_elr = None if last_known_elr is None else tuple(last_known_elr)
+        self._elr = None if elr is MISSING else tuple(elr)
+        self._last_known_elr = None if last_known_elr is MISSING else tuple(last_known_elr)
 
     def partition(self) -> int:
         """Return the partition id."""

@@ -62,12 +62,13 @@ import logging
 import math
 import threading
 import weakref
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sized
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
@@ -82,7 +83,6 @@ from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._conversions import (
     offsets_to_spec, timestamps_to_spec, to_long_map, to_metrics_map,
@@ -120,24 +120,58 @@ _LONG_MAX = (1 << 63) - 1
 
 # Java's AsyncKafkaConsumer.acquireAndEnsureOpen() / acquire() messages.
 CLOSED_MESSAGE = "This consumer has already been closed."
+
+
+def _construct_failure(exc: Exception) -> BaseException:
+    """Java's ``KafkaException("Failed to construct kafka consumer", t)`` for a
+    deserializer the config route fails to build or configure."""
+    return KafkaError(message="Failed to construct kafka consumer", cause=exc)
 CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
 
 # The null checks of AsyncKafkaConsumer on an argument the FFI takes as a list
 # or a map, so a None cannot cross it (CLAUDE.md, Python Binding Conventions,
 # Implementation over the FFI, exception 4): pause / resume
 # (Objects.requireNonNull), offsetsForTimes, the private
-# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, and
-# the private beginningOrEndOffset; with whether Java checks before acquire()
-# (only the private seek does). assign's is _assign_partitions.
-_NULL_ARGUMENT: dict[str, tuple[type[NullPointerError] | type[IllegalArgumentError], str, bool]] = {
-    "pause": (NullPointerError, "The partitions to pause must be nonnull", False),
-    "resume": (NullPointerError, "The partitions to resume must be nonnull", False),
-    "offsets_for_times": (NullPointerError, "Timestamps to search cannot be null", False),
-    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be null", True),
-    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be null", True),
-    "beginning_offsets": (NullPointerError, "Partitions cannot be null", False),
-    "end_offsets": (NullPointerError, "Partitions cannot be null", False),
+# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, the
+# private beginningOrEndOffset, and the nulls committed and partitionsFor
+# dereference without a check; with whether Java checks before acquire()
+# (only the private seek does). assign's is _assign_partitions. Java's
+# NullPointerException is Python's TypeError naming the parameter, and Java's
+# "null" reads "None" (CLAUDE.md, Python Binding Conventions, Types).
+_NULL_ARGUMENT: dict[str, tuple[type[TypeError] | type[IllegalArgumentError], str, bool]] = {
+    "pause": (TypeError, "partitions must not be None", False),
+    "resume": (TypeError, "partitions must not be None", False),
+    "offsets_for_times": (TypeError, "timestamps_to_search must not be None", False),
+    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be None", True),
+    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be None", True),
+    "beginning_offsets": (TypeError, "partitions must not be None", False),
+    "end_offsets": (TypeError, "partitions must not be None", False),
+    # Java dereferences these with no check of its own: committed's
+    # partitions.isEmpty() and TopicMetadataEvent's Objects.requireNonNull(topic).
+    "committed": (TypeError, "partitions must not be None", False),
+    "partitions_for": (TypeError, "topic must not be None", False),
+    # subscribe(topics / pattern, listener): the listener's check precedes
+    # subscribeInternal / subscribeToRegex (AsyncKafkaConsumer.java:2152,2175),
+    # the topics' and the pattern's follow acquireAndEnsureOpen() (2289, 2269).
+    "subscribe_callback": (IllegalArgumentError, "RebalanceListener cannot be None", True),
+    "subscribe_topics": (IllegalArgumentError,
+                         "Topic collection to subscribe to cannot be None", False),
+    "subscribe_pattern": (IllegalArgumentError,
+                          "Topic pattern to subscribe to cannot be None", False),
+    # Java's commitSync(Map) / commitAsync(Map, callback) copy the map before
+    # acquire() (new HashMap<>(offsets), AsyncKafkaConsumer.java:1113,1801);
+    # seek(tp, OffsetAndMetadata) reads offsetAndMetadata.offset() first (1177);
+    # close(CloseOptions) reads option.timeout() first (1562).
+    "offsets": (TypeError, "offsets must not be None", True),
+    "offset_and_metadata": (TypeError, "offset_and_metadata must not be None", True),
+    "option": (TypeError, "option must not be None", True),
+    # currentLag: CurrentLagEvent's Objects.requireNonNull(partition) (CurrentLagEvent.java:34).
+    "current_lag": (TypeError, "topic_partition must not be None", False),
 }
+
+# Java's AsyncKafkaConsumer.position() message for a partition not assigned.
+POSITION_UNASSIGNED_MESSAGE = ("You can only check the position for partitions assigned to "
+                               "this consumer.")
 
 # Java's AsyncKafkaConsumer.throwIfGroupIdNotDefined() message.
 GROUP_ID_NOT_DEFINED_MESSAGE = ("To use the group management or offset commit APIs, you must "
@@ -303,17 +337,21 @@ def _duration_millis(timeout: Duration) -> int:
 def poll_timeout_ms(timeout: Duration) -> int:
     """``poll(Duration)``'s timeout in whole milliseconds (``_duration_millis``).
     A negative one raises Java's ``Timer`` message, ``Invalid negative timeout
-    -N``."""
+    -N``; a ``None`` is Java's null ``Duration``, which ``time.timer(timeout)``
+    dereferences (``TypeError``, CLAUDE.md, Types)."""
+    if timeout is None:
+        raise TypeError("timeout must not be None")
     millis = _duration_millis(timeout)
     if millis < 0:
         raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
     return millis
 
 
-def overload_timeout_ms(timeout: Duration | None, *, timer: bool) -> int:
+def overload_timeout_ms(timeout: Duration, *, timer: bool) -> int:
     """The ``timeout`` of a ``Duration`` overload in whole milliseconds
-    (``_duration_millis``), for its ``_with_timeout`` entry point; ``None``
-    (not given) is ``_NO_TIMEOUT``, the overload without it.
+    (``_duration_millis``), for its ``_with_timeout`` entry point; ``MISSING``
+    (left out) is ``_NO_TIMEOUT``, the overload without it, and ``None`` Java's
+    null ``Duration`` (``TypeError``).
 
     A negative one cannot cross the C extension, where a negative count selects
     the overload without the timeout (CLAUDE.md, Python Binding Conventions,
@@ -323,8 +361,10 @@ def overload_timeout_ms(timeout: Duration | None, *, timer: bool) -> int:
     ``commitSync``, ``position``), else with the message of the core's
     ``_with_timeout`` entry points, ``TIMEOUT_NEGATIVE_MESSAGE``, as Java's
     method makes no negative check of its own."""
-    if timeout is None:
+    if timeout is MISSING:
         return _NO_TIMEOUT
+    if timeout is None:
+        raise TypeError("timeout must not be None")
     millis = _duration_millis(timeout)
     if millis < 0:
         raise IllegalArgumentError(message=f"Invalid negative timeout {millis}" if timer
@@ -341,7 +381,8 @@ _BLANK_TOPIC_PARTITION = TopicPartition(topic="", partition=0)
 def blank_null_topics(topics: Iterable[str]) -> list[str]:
     """``subscribe(topics)``'s topics for the FFI, a ``None`` topic as ``""``
     (Java: ``isBlank(topic)`` → "Topic collection to subscribe to cannot
-    contain null or empty topic")."""
+    contain null or empty topic"). A ``str`` is refused (``reject_str``)."""
+    reject_str("topics", topics)
     return ["" if topic is None else topic for topic in topics]
 
 
@@ -364,13 +405,29 @@ def abandoned_call_wait_s(close_timeout_ms: int) -> float:
     return min(ABANDONED_CALL_END_S, close_timeout_ms / 1000.0)
 
 
-def close_args(option: CloseOptions | None) -> tuple[int, int]:
+def empty_input_timeout(collection: object, timeout: Any) -> Any:
+    """The ``timeout`` of ``committed`` / ``beginning_offsets`` / ``end_offsets``
+    / ``offsets_for_times`` for an empty input: Java returns the empty map
+    before it reads the ``Duration`` (``AsyncKafkaConsumer.java:1270-1272``,
+    ``1419``, ``1476``), so a ``None`` there is never dereferenced and the call
+    takes the overload without it, whose answer is the same empty map."""
+    if timeout is None and isinstance(collection, Sized) and len(collection) == 0:
+        return MISSING
+    return timeout
+
+
+def close_args(option: CloseOptions) -> tuple[int, int]:
     """``(timeout_ms, group-membership-operation code)`` for
     ``kafka_consumer_Consumer_close_with_options``: ``close(CloseOptions)``
     rejects a negative timeout (``AsyncKafkaConsumer.close(CloseOptions)``).
-    ``-1`` is the FFI's "no timeout set", the default close timeout."""
+    ``-1`` is the FFI's "no timeout set", the default close timeout. ``option``
+    left out (``MISSING``) is Java's ``close()``; a ``None`` is a null
+    ``CloseOptions``, whose ``option.timeout()`` Java dereferences first
+    (``TypeError``)."""
+    if option is None:
+        raise TypeError("option must not be None")
     timeout: Duration | None = None
-    if option is not None:
+    if option is not MISSING:
         timeout = option._timeout_getter()
         operation = option._group_membership_operation_getter()
     else:
@@ -564,10 +621,10 @@ class _ConsumerState:
             serde_configs[_CLIENT_ID] = _lib.Consumer_client_id(handle)
             key = cast("Deserializer[Any]", resolve_serde(
                 key_deserializer, serde_configs, _KEY_DESERIALIZER, is_key=True,
-                default=bytes_deserializer()))
+                default=bytes_deserializer(), construct_failure=_construct_failure))
             value = cast("Deserializer[Any]", resolve_serde(
                 value_deserializer, serde_configs, _VALUE_DESERIALIZER, is_key=False,
-                default=bytes_deserializer()))
+                default=bytes_deserializer(), construct_failure=_construct_failure))
         except BaseException:
             # The key deserializer built or given, and a given value one (one
             # the config route builds is built last, so nothing fails after it).
@@ -1521,14 +1578,16 @@ class _ConsumerState:
         if partitions is None:
             with self._use():
                 raise IllegalArgumentError(
-                    message="Topic partitions collection to assign to cannot be null")
+                    message="Topic partitions collection to assign to cannot be None")
         return blank_null_topic_partitions(partitions)
 
     def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
                     group: bool = False, handle_timed: bool = False) -> int:
         """``overload_timeout_ms`` for a ``Duration`` overload, in Java's order
         (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
-        Order); ``_NO_TIMEOUT`` when ``timeout`` is not given.
+        Order); ``_NO_TIMEOUT`` when ``timeout`` is left out (``MISSING``),
+        ``TypeError`` for a ``None``, Java's null ``Duration``, which Java
+        dereferences after ``acquire()``.
 
         The closed check comes first. Inside a callback, an overload whose
         ``ConsumerHandle`` form has no timeout (every one but ``position``,
@@ -1542,9 +1601,13 @@ class _ConsumerState:
         without a ``group.id`` raises ``InvalidGroupIdError`` where Java's body
         checks it before the timeout (``group``: ``commitSync``, ``committed``),
         then the negative timeout ``IllegalArgumentError``."""
-        if timeout is None:
+        if timeout is MISSING:
             return _NO_TIMEOUT
         self._check_open()
+        if timeout is None:
+            # Java's null Duration, dereferenced after acquire() (Order).
+            with self._use():
+                raise TypeError("timeout must not be None")
         if not handle_timed and self._in_callback():
             with self._use():
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -1562,11 +1625,114 @@ class _ConsumerState:
         checked = _NULL_ARGUMENT.get(op)
         if value is None and checked is not None:
             error, message, before_acquire = checked
+            raised = error(message) if issubclass(error, TypeError) else error(message=message)
             if before_acquire:
                 self._check_open()
-                raise error(message=message)
+                raise raised
             with self._use():
-                raise error(message=message)
+                raise raised
+
+    def _subscribe_listener(self, callback: Any) -> ConsumerRebalanceListener | None:
+        """``subscribe``'s listener: left out (``MISSING``) is Java's
+        ``Optional.empty()``, no listener; a ``None`` is Java's
+        ``subscribe(…, null)``, refused with "RebalanceListener cannot be None"
+        before ``subscribeInternal`` (after the closed check, Order)."""
+        if callback is None:
+            self._check_not_null("subscribe_callback", None)
+        return None if callback is MISSING else cast("ConsumerRebalanceListener", callback)
+
+    def _seek_args(self, partition: TopicPartition | None, offset: Any,
+                   offset_and_metadata: Any) -> tuple[int | None, OffsetAndMetadata | None]:
+        """``seek``'s argument checks in Java's order, then ``(offset,
+        offset_and_metadata)`` for the specs (``None`` for the one left out).
+
+        A ``None`` ``offset`` is no Java call (a ``long`` cannot be null), so
+        Python's ``TypeError``, first, as a wrong type. ``seek(tp,
+        OffsetAndMetadata)`` reads ``offsetAndMetadata.offset()`` first
+        (``TypeError`` after the closed check). A ``None`` partition reaches the
+        background, where ``subscriptions.seekUnvalidated(null, …)`` finds no
+        assignment (``IllegalStateError("No current assignment for partition
+        None")``), after the negative-offset check; with a leader epoch,
+        ``metadata.updateLastSeenEpochIfNewer(null, …)`` throws its
+        ``requireNonNull`` there first, which ``ConsumerUtils.getResult`` hands
+        the caller wrapped by ``maybeWrapAsKafkaException`` (only an
+        ``IllegalStateException`` passes unwrapped): Java's
+        ``new KafkaException(npe)``, a ``KafkaError`` caused by
+        ``TypeError("partition must not be None")``. The FFI takes the
+        partition's topic and number, so a ``None`` cannot cross it (exception
+        4)."""
+        if offset is None:
+            raise TypeError("offset must not be None")
+        if offset_and_metadata is not MISSING:
+            self._check_not_null("offset_and_metadata", offset_and_metadata)
+        if partition is None:
+            target = (offset if offset_and_metadata is MISSING
+                      else offset_and_metadata.offset())
+            self._check_open()
+            if target < 0:
+                raise IllegalArgumentError(message="seek offset must not be a negative number")
+            with self._use():
+                if (offset_and_metadata is not MISSING
+                        and offset_and_metadata.leader_epoch() is not None):
+                    raise KafkaError(cause=TypeError("partition must not be None"))
+                raise IllegalStateError(message="No current assignment for partition None")
+        return (None if offset is MISSING else offset,
+                None if offset_and_metadata is MISSING else offset_and_metadata)
+
+    def _check_position_partition(self, partition: TopicPartition | None) -> None:
+        """``position``: Java's ``subscriptions.isAssigned(null)`` is false, so a
+        ``None`` partition raises Java's message, after ``acquireAndEnsureOpen()``
+        and before the timeout is read."""
+        if partition is None:
+            self._check_open()
+            with self._use():
+                raise IllegalStateError(message=POSITION_UNASSIGNED_MESSAGE)
+
+    def _check_committed_timeout(self, partitions: object, timeout: object) -> None:
+        """``committed(partitions, null)``: after ``acquireAndEnsureOpen()``,
+        Java checks the group, dereferences ``partitions`` (an empty one returns
+        ``{}`` there, before the timeout is read: ``empty_input_timeout``), then
+        the null ``Duration`` (``calculateDeadlineMs``)."""
+        if timeout is None:
+            self._check_open()
+            with self._use():
+                if not self._group_id_defined:
+                    raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
+                if partitions is None:
+                    raise TypeError("partitions must not be None")
+                raise TypeError("timeout must not be None")
+
+    def _check_partitions_for_topic(self, topic: str | None, timeout_ms: int) -> None:
+        """``partitionsFor(null, timeout)``: the cluster has no partitions for a
+        null topic, so a zero timeout throws ``new TimeoutException()``; any
+        other reaches ``TopicMetadataEvent``'s ``Objects.requireNonNull(topic)``
+        (``TypeError``) (``AsyncKafkaConsumer.java:1311-1325``)."""
+        if topic is None and timeout_ms == 0:
+            from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeout
+
+            with self._use():
+                raise KafkaTimeout()
+        self._check_not_null("partitions_for", topic)
+
+    def _offsets_arg(self, offsets: Any) -> Any:
+        """The ``offsets`` of ``commit`` / ``commit_nowait`` for the specs:
+        ``None`` (all consumed) when left out (``MISSING``); a given ``None`` is
+        Java's null map, which ``new HashMap<>(offsets)`` dereferences before
+        ``acquire()``, so ``TypeError`` after the closed check (Order)."""
+        if offsets is MISSING:
+            return None
+        self._check_not_null("offsets", offsets)
+        return offsets
+
+    def _check_committed_partitions(self, partitions: object) -> None:
+        """Java's ``committed``: ``throwIfGroupIdNotDefined()`` precedes the
+        ``partitions.isEmpty()`` that throws on null, so a consumer without a
+        ``group.id`` reports the group first (the binding knows the group id)."""
+        if partitions is None and not self._group_id_defined:
+            with self._use():
+                pass
+            raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
+        self._check_not_null("committed", partitions)
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's
@@ -1603,6 +1769,7 @@ class _ConsumerState:
         no ``commitAsync(Map)``: given offsets without a callback are
         ``commitAsync(offsets, null)``, the ``_with_offsets_callback`` form
         with a no-op registration."""
+        offsets = self._offsets_arg(offsets)
         if self._in_callback():
             with self._use() as h:
                 spec = None if offsets is None else offsets_to_spec(offsets)

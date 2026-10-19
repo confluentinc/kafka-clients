@@ -26,7 +26,6 @@ from confluent_kafka._java import java_str
 from confluent_kafka.common.pattern_type import PatternType
 from confluent_kafka.common.resource_type import ResourceType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.common.resource_pattern import ResourcePattern
@@ -69,11 +68,11 @@ class ResourcePatternFilter:
         will match only patterns with the same type.
         """
         if resource_type is None:
-            raise NullPointerError(message="resourceType")
+            raise TypeError("resource_type must not be None")
         self._resource_type = resource_type
         self._name = name
         if pattern_type is None:
-            raise NullPointerError(message="patternType")
+            raise TypeError("pattern_type must not be None")
         self._pattern_type = pattern_type
 
     def is_unknown(self) -> bool:

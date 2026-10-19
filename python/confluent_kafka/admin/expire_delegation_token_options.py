@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["ExpireDelegationTokenOptions"]
@@ -41,16 +41,16 @@ class ExpireDelegationTokenOptions(AbstractOptions):
 
     __slots__ = ("_expiry_time_period_ms",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 expiry_time_period_ms: int = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 expiry_time_period_ms: int = MISSING) -> None:
         super().__init__()
         self._expiry_time_period_ms = -1
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if expiry_time_period_ms is not UNSET:
+        if expiry_time_period_ms is not MISSING:
             self.expiry_time_period_ms(expiry_time_period_ms=expiry_time_period_ms)
 
-    def expiry_time_period_ms(self, *, expiry_time_period_ms: int | None = None) -> Any:
+    def expiry_time_period_ms(self, *, expiry_time_period_ms: int = MISSING) -> Any:
         """With ``expiry_time_period_ms``: set it and return this object.
 
         Without: the current value.
@@ -60,8 +60,10 @@ class ExpireDelegationTokenOptions(AbstractOptions):
         min(now + expiryTimePeriodMs, maxTimestamp) ``expiryTimePeriodMs`` < 0: token
         will be expired immediately.
         """
-        if expiry_time_period_ms is None:
+        if expiry_time_period_ms is MISSING:
             return self._expiry_time_period_ms
+        if expiry_time_period_ms is None:  # a long: Java cannot pass null
+            raise TypeError("expiry_time_period_ms must not be None")
         self._expiry_time_period_ms = expiry_time_period_ms
         self._record("expiry_time_period_ms", self._expiry_time_period_ms)
         return self

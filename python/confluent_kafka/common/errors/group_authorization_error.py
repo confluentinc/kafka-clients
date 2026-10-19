@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.authorization_error import AuthorizationError
 
@@ -40,9 +41,11 @@ class GroupAuthorizationError(AuthorizationError):
     def __init__(
         self,
         *,
-        message: str,
-        group_id: str | None = None,
+        message: str | None,
+        group_id: str | None = MISSING,
     ) -> None:
+        if group_id is MISSING:
+            group_id = None
         _throwable.init(self, message, None)
         self._group_id = group_id
         self._java_kwargs = _throwable.kwargs(message=message, group_id=group_id)
