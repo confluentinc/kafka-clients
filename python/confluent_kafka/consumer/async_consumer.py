@@ -134,16 +134,27 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.poll`."""
         return await self._a_poll(timeout)
 
+    @overload
+    async def commit(self) -> None: ...
+    @overload
+    async def commit(self, *, timeout: Duration) -> None: ...
+    @overload
+    async def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None: ...
+    @overload
+    async def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                     timeout: Duration) -> None: ...
     async def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
                      timeout: Duration = MISSING) -> None:
         """See :meth:`Consumer.commit` (Java's ``commitSync``)."""
         await self._a_commit(offsets, timeout)
 
     @overload
+    async def commit_nowait(self) -> None: ...
+    @overload
     async def commit_nowait(self, *, callback: OffsetCommitCallback
                             | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
                                         Exception | None], Awaitable[None]]
-                            | None = None) -> None: ...
+                            | None) -> None: ...
     @overload
     async def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                             callback: OffsetCommitCallback
@@ -219,11 +230,21 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.seek_to_end`."""
         await self._a_seek_to_end(partitions)
 
+    @overload
+    async def position(self, *, partition: TopicPartition) -> int: ...
+    @overload
+    async def position(self, *, partition: TopicPartition, timeout: Duration) -> int: ...
     async def position(self, *, partition: TopicPartition,
                        timeout: Duration = MISSING) -> int:
         """See :meth:`Consumer.position`."""
         return await self._a_position(partition, timeout)
 
+    @overload
+    async def committed(self, *, partitions: Iterable[TopicPartition]
+                        ) -> dict[TopicPartition, OffsetAndMetadata | None]: ...
+    @overload
+    async def committed(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                        ) -> dict[TopicPartition, OffsetAndMetadata | None]: ...
     async def committed(self, *, partitions: Iterable[TopicPartition],
                         timeout: Duration = MISSING
                         ) -> dict[TopicPartition, OffsetAndMetadata | None]:
@@ -235,11 +256,19 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``acquire()``, so it answers while a call is in flight."""
         return self._c_metrics()
 
+    @overload
+    async def partitions_for(self, *, topic: str) -> list[PartitionInfo]: ...
+    @overload
+    async def partitions_for(self, *, topic: str, timeout: Duration) -> list[PartitionInfo]: ...
     async def partitions_for(self, *, topic: str, timeout: Duration = MISSING
                              ) -> list[PartitionInfo]:
         """See :meth:`Consumer.partitions_for`."""
         return await self._a_partitions_for(topic, timeout)
 
+    @overload
+    async def list_topics(self) -> dict[str, list[PartitionInfo]]: ...
+    @overload
+    async def list_topics(self, *, timeout: Duration) -> dict[str, list[PartitionInfo]]: ...
     async def list_topics(self, *, timeout: Duration = MISSING
                           ) -> dict[str, list[PartitionInfo]]:
         """See :meth:`Consumer.list_topics`."""
@@ -257,17 +286,35 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.resume`."""
         await self._a_resume(partitions)
 
+    @overload
+    async def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int]
+                                ) -> dict[TopicPartition, OffsetAndTimestamp | None]: ...
+    @overload
+    async def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
+                                timeout: Duration) -> dict[TopicPartition, OffsetAndTimestamp | None]: ...
     async def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
                                 timeout: Duration = MISSING
                                 ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         """See :meth:`Consumer.offsets_for_times`."""
         return await self._a_offsets_for_times(timestamps_to_search, timeout)
 
+    @overload
+    async def beginning_offsets(self, *, partitions: Iterable[TopicPartition]
+                                ) -> dict[TopicPartition, int]: ...
+    @overload
+    async def beginning_offsets(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                                ) -> dict[TopicPartition, int]: ...
     async def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
                                 timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """See :meth:`Consumer.beginning_offsets`."""
         return await self._a_beginning_offsets(partitions, timeout)
 
+    @overload
+    async def end_offsets(self, *, partitions: Iterable[TopicPartition]
+                          ) -> dict[TopicPartition, int]: ...
+    @overload
+    async def end_offsets(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                          ) -> dict[TopicPartition, int]: ...
     async def end_offsets(self, *, partitions: Iterable[TopicPartition],
                           timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """See :meth:`Consumer.end_offsets`."""
@@ -282,6 +329,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         """See :meth:`Consumer.group_metadata`."""
         return self._c_group_metadata()
 
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, option: CloseOptions) -> None: ...
     async def close(self, *, option: CloseOptions = MISSING) -> None:
         """See :meth:`Consumer.close`."""
         await self._a_close(option)

@@ -509,7 +509,7 @@ def test_signatures_show_missing() -> None:
     for cls in (Admin, AsyncAdmin, MockAdminClient, AsyncMockAdminClient):
         assert inspect.signature(cls.create_topics).parameters["options"].default is MISSING
         assert inspect.signature(cls.close).parameters["timeout"].default is MISSING
-    assert "options: 'CreateTopicsOptions | None' = MISSING" in str(
+    assert "options: 'CreateTopicsOptions' = MISSING" in str(
         inspect.signature(Admin.create_topics))
 
 

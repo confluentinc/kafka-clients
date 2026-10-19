@@ -24,7 +24,7 @@ Python Binding Conventions, Class family). Java's two
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, overload
 
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
@@ -58,6 +58,14 @@ class NewPartitions:
         partitions._new_assignments = (
             None if new_assignments is None else tuple(tuple(a) for a in new_assignments))
         return partitions
+
+    @overload
+    @staticmethod
+    def increase_to(*, total_count: int) -> NewPartitions: ...
+    @overload
+    @staticmethod
+    def increase_to(*, total_count: int,
+                    new_assignments: Sequence[Sequence[int]] | None) -> NewPartitions: ...
 
     @staticmethod
     def increase_to(*, total_count: int,

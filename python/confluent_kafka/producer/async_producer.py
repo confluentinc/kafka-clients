@@ -68,7 +68,7 @@ import socket
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -751,6 +751,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         await self._run_async(_lib.Producer_abort_transaction_cb, reports="EndTxn(false)")
 
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+                   ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
                    callback: _AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
@@ -929,6 +934,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, timeout: Duration) -> None: ...
     async def close(self, *, timeout: Duration = MISSING) -> None:
         """See :meth:`Producer.close`: it waits for the callbacks of the
         records sent before it, ``async def`` ones included. From an ``async

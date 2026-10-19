@@ -70,7 +70,7 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def partitions_to_offset_and_metadata(self, *, group_id: str | None = MISSING
+    def partitions_to_offset_and_metadata(self, *, group_id: str = MISSING
                                           ) -> KafkaFuture[_Offsets] | AsyncKafkaFuture[_Offsets]:
         """Return a future which yields a map of topic partitions to
         ``OffsetAndMetadata`` objects, for the specified group (``group_id``) or, with it

@@ -205,6 +205,15 @@ class Consumer(Generic[K, V], _ConsumerState):
         """
         return self._c_poll(timeout)
 
+    @overload
+    def commit(self) -> None: ...
+    @overload
+    def commit(self, *, timeout: Duration) -> None: ...
+    @overload
+    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None: ...
+    @overload
+    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata], timeout: Duration
+               ) -> None: ...
     def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
                timeout: Duration = MISSING) -> None:
         """Commit the offsets returned on the last ``poll()`` for all the
@@ -230,7 +239,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._c_commit(offsets, timeout)
 
     @overload
-    def commit_nowait(self, *, callback: OffsetCommitCallback | None = None) -> None: ...
+    def commit_nowait(self) -> None: ...
+    @overload
+    def commit_nowait(self, *, callback: OffsetCommitCallback | None) -> None: ...
     @overload
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                       callback: OffsetCommitCallback | None) -> None: ...
@@ -316,6 +327,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         currently assigned partitions."""
         self._c_seek_to_end(partitions)
 
+    @overload
+    def position(self, *, partition: TopicPartition) -> int: ...
+    @overload
+    def position(self, *, partition: TopicPartition, timeout: Duration) -> int: ...
     def position(self, *, partition: TopicPartition, timeout: Duration = MISSING) -> int:
         """Get the offset of the next record that will be fetched (if a record
         with that offset exists). This method may issue a remote call to the
@@ -330,6 +345,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         """
         return self._c_position(partition, timeout)
 
+    @overload
+    def committed(self, *, partitions: Iterable[TopicPartition]
+                  ) -> dict[TopicPartition, OffsetAndMetadata | None]: ...
+    @overload
+    def committed(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                  ) -> dict[TopicPartition, OffsetAndMetadata | None]: ...
     def committed(self, *, partitions: Iterable[TopicPartition],
                   timeout: Duration = MISSING
                   ) -> dict[TopicPartition, OffsetAndMetadata | None]:
@@ -350,6 +371,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         """Get the metrics kept by the consumer."""
         return self._c_metrics()
 
+    @overload
+    def partitions_for(self, *, topic: str) -> list[PartitionInfo]: ...
+    @overload
+    def partitions_for(self, *, topic: str, timeout: Duration) -> list[PartitionInfo]: ...
     def partitions_for(self, *, topic: str, timeout: Duration = MISSING
                        ) -> list[PartitionInfo]:
         """Get metadata about the partitions for a given topic. This method
@@ -363,6 +388,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``partitionsFor(null, timeout)`` does."""
         return self._c_partitions_for(topic, timeout)
 
+    @overload
+    def list_topics(self) -> dict[str, list[PartitionInfo]]: ...
+    @overload
+    def list_topics(self, *, timeout: Duration) -> dict[str, list[PartitionInfo]]: ...
     def list_topics(self, *, timeout: Duration = MISSING
                     ) -> dict[str, list[PartitionInfo]]:
         """Get metadata about partitions for all topics that the user is
@@ -391,6 +420,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         paused, this method is a no-op."""
         self._c_resume(partitions)
 
+    @overload
+    def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int]
+                          ) -> dict[TopicPartition, OffsetAndTimestamp | None]: ...
+    @overload
+    def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
+                          timeout: Duration) -> dict[TopicPartition, OffsetAndTimestamp | None]: ...
     def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
                           timeout: Duration = MISSING
                           ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
@@ -411,6 +446,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         """
         return self._c_offsets_for_times(timestamps_to_search, timeout)
 
+    @overload
+    def beginning_offsets(self, *, partitions: Iterable[TopicPartition]
+                          ) -> dict[TopicPartition, int]: ...
+    @overload
+    def beginning_offsets(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                          ) -> dict[TopicPartition, int]: ...
     def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
                           timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """Get the first offset for the given partitions. This method does not
@@ -422,6 +463,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         handle has no timed form; goes when it has)*."""
         return self._c_beginning_offsets(partitions, timeout)
 
+    @overload
+    def end_offsets(self, *, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]: ...
+    @overload
+    def end_offsets(self, *, partitions: Iterable[TopicPartition], timeout: Duration
+                    ) -> dict[TopicPartition, int]: ...
     def end_offsets(self, *, partitions: Iterable[TopicPartition],
                     timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """Get the end offsets for the given partitions: the offset of the
@@ -452,6 +498,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``InvalidGroupIdError`` if the consumer has no ``group.id``."""
         return self._c_group_metadata()
 
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, option: CloseOptions) -> None: ...
     def close(self, *, option: CloseOptions = MISSING) -> None:
         """Close the consumer, waiting up to the ``option``'s timeout (by
         default the default close timeout, 30 seconds) for any needed cleanup;

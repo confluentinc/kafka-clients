@@ -88,26 +88,46 @@ class ConsumerRecord(Generic[K_co, V_co]):
     def __init__(self: ConsumerRecord[Never, Never], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: None,
+                 value: None, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[_K, Never], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: _K,
+                 value: None, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[Never, _V], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: None,
+                 value: _V, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[_K, _V], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: _K,
+                 value: _V, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[Never, Never], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: None,
                  value: None, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[_K, Never], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: _K,
                  value: None, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[Never, _V], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: None,
                  value: _V, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[_K, _V], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: _K,
                  value: _V, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
 
     @java_forms(
         Form("topic", "partition", "offset", "key", "value"),

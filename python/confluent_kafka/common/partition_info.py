@@ -24,6 +24,8 @@ Conventions, Signatures), and the constructor fills it. Java's ``Node[]`` is ``t
 
 from __future__ import annotations
 
+from typing import overload
+
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 
@@ -41,6 +43,13 @@ class PartitionInfo:
     __slots__ = ("_topic", "_partition", "_leader", "_replicas",
                  "_in_sync_replicas", "_offline_replicas")
 
+    @overload
+    def __init__(self, *, topic: str, partition: int, leader: Node | None,
+                 replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...]) -> None: ...
+    @overload
+    def __init__(self, *, topic: str, partition: int, leader: Node | None,
+                 replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...],
+                 offline_replicas: tuple[Node, ...]) -> None: ...
     def __init__(self, *, topic: str, partition: int, leader: Node | None,
                  replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...],
                  offline_replicas: tuple[Node, ...] = MISSING) -> None:

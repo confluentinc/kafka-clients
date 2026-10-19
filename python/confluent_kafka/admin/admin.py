@@ -468,7 +468,12 @@ class Admin(_AdminState):
 
         return KafkaAdminClient._create_internal(configs=configs)
 
-    def close(self, *, timeout: Duration | None = MISSING) -> None:
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
+
+    def close(self, *, timeout: Duration = MISSING) -> None:
         """Close the Admin client and release all associated resources.
 
         The close operation has a grace period during which current operations
@@ -523,8 +528,14 @@ class Admin(_AdminState):
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    @overload
+    def create_topics(self, *, new_topics: Iterable[NewTopic]) -> CreateTopicsResult[Sync]: ...
+    @overload
     def create_topics(self, *, new_topics: Iterable[NewTopic],
-                      options: CreateTopicsOptions | None = MISSING) -> CreateTopicsResult[Sync]:
+                      options: CreateTopicsOptions) -> CreateTopicsResult[Sync]: ...
+
+    def create_topics(self, *, new_topics: Iterable[NewTopic],
+                      options: CreateTopicsOptions = MISSING) -> CreateTopicsResult[Sync]:
         """Create a batch of new topics.
 
         This operation is not transactional so it may succeed for some topics while
@@ -551,14 +562,18 @@ class Admin(_AdminState):
         return _conversions.create_topics_result(native, Sync, None)
 
     @overload
+    def delete_topics(self, *, topics: Iterable[str]) -> DeleteTopicsResult[Sync]: ...
+    @overload
     def delete_topics(self, *, topics: Iterable[str],
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Sync]: ...
+    @overload
+    def delete_topics(self, *, topics: TopicCollection) -> DeleteTopicsResult[Sync]: ...
     @overload
     def delete_topics(self, *, topics: TopicCollection,
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Sync]: ...
 
     def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
-                      options: DeleteTopicsOptions | None = MISSING) -> DeleteTopicsResult[Sync]:
+                      options: DeleteTopicsOptions = MISSING) -> DeleteTopicsResult[Sync]:
         """Delete a batch of topics.
 
         This operation is not transactional so it may succeed for some topics while
@@ -593,7 +608,12 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_topics_result(native, by_ids, Sync, None)
 
-    def list_topics(self, *, options: ListTopicsOptions | None = MISSING) -> ListTopicsResult[Sync]:
+    @overload
+    def list_topics(self) -> ListTopicsResult[Sync]: ...
+    @overload
+    def list_topics(self, *, options: ListTopicsOptions) -> ListTopicsResult[Sync]: ...
+
+    def list_topics(self, *, options: ListTopicsOptions = MISSING) -> ListTopicsResult[Sync]:
         """List the topics available in the cluster.
 
         ``options``: the options to use when listing the topics (Java's
@@ -606,19 +626,21 @@ class Admin(_AdminState):
         return _conversions.list_topics_result(native, Sync, None)
 
     @overload
+    def describe_topics(self, *, topic_names: Iterable[str]) -> DescribeTopicsResult[Sync]: ...
+    @overload
     def describe_topics(self, *, topic_names: Iterable[str],
-                        options: DescribeTopicsOptions | None = None
-                        ) -> DescribeTopicsResult[Sync]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Sync]: ...
+    @overload
+    def describe_topics(self, *, topics: TopicCollection) -> DescribeTopicsResult[Sync]: ...
     @overload
     def describe_topics(self, *, topics: TopicCollection,
-                        options: DescribeTopicsOptions | None = None
-                        ) -> DescribeTopicsResult[Sync]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Sync]: ...
 
     @java_forms(Form("topic_names"), Form("topic_names", "options"),
                 Form("topics"), Form("topics", "options"))
-    def describe_topics(self, *, topic_names: Iterable[str] | None = MISSING,
-                        topics: TopicCollection | None = MISSING,
-                        options: DescribeTopicsOptions | None = MISSING
+    def describe_topics(self, *, topic_names: Iterable[str] = MISSING,
+                        topics: TopicCollection = MISSING,
+                        options: DescribeTopicsOptions = MISSING
                         ) -> DescribeTopicsResult[Sync]:
         """Describe some topics in the cluster.
 
@@ -651,7 +673,13 @@ class Admin(_AdminState):
         return _conversions.describe_topics_result(
             native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Sync, None)
 
-    def describe_cluster(self, *, options: DescribeClusterOptions | None = MISSING
+    @overload
+    def describe_cluster(self) -> DescribeClusterResult[Sync]: ...
+    @overload
+    def describe_cluster(self, *,
+                         options: DescribeClusterOptions) -> DescribeClusterResult[Sync]: ...
+
+    def describe_cluster(self, *, options: DescribeClusterOptions = MISSING
                          ) -> DescribeClusterResult[Sync]:
         """Get information about the nodes in the cluster.
 
@@ -668,8 +696,14 @@ class Admin(_AdminState):
         native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
         return _conversions.describe_cluster_result(native, Sync, None)
 
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter) -> DescribeAclsResult[Sync]: ...
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter,
+                      options: DescribeAclsOptions) -> DescribeAclsResult[Sync]: ...
+
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                      options: DescribeAclsOptions | None = MISSING) -> DescribeAclsResult[Sync]:
+                      options: DescribeAclsOptions = MISSING) -> DescribeAclsResult[Sync]:
         """Lists access control lists (ACLs) according to the supplied filter.
 
         Note: it may take some time for changes made by ``create_acls`` or
@@ -688,8 +722,14 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_acls_result(native, Sync, None)
 
+    @overload
+    def create_acls(self, *, acls: Iterable[AclBinding]) -> CreateAclsResult[Sync]: ...
+    @overload
     def create_acls(self, *, acls: Iterable[AclBinding],
-                    options: CreateAclsOptions | None = MISSING) -> CreateAclsResult[Sync]:
+                    options: CreateAclsOptions) -> CreateAclsResult[Sync]: ...
+
+    def create_acls(self, *, acls: Iterable[AclBinding],
+                    options: CreateAclsOptions = MISSING) -> CreateAclsResult[Sync]:
         """Creates access control lists (ACLs) which are bound to specific resources.
 
         This operation is not transactional so it may succeed for some ACLs while fail
@@ -711,8 +751,14 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.create_acls_result(native, Sync, None)
 
+    @overload
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter]) -> DeleteAclsResult[Sync]: ...
+    @overload
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                    options: DeleteAclsOptions | None = MISSING) -> DeleteAclsResult[Sync]:
+                    options: DeleteAclsOptions) -> DeleteAclsResult[Sync]: ...
+
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter],
+                    options: DeleteAclsOptions = MISSING) -> DeleteAclsResult[Sync]:
         """Deletes access control lists (ACLs) according to the supplied filters.
 
         This operation is not transactional so it may succeed for some ACLs while fail
@@ -731,8 +777,15 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_acls_result(native, Sync, None)
 
+    @overload
+    def describe_configs(self, *,
+                         resources: Iterable[ConfigResource]) -> DescribeConfigsResult[Sync]: ...
+    @overload
     def describe_configs(self, *, resources: Iterable[ConfigResource],
-                         options: DescribeConfigsOptions | None = MISSING
+                         options: DescribeConfigsOptions) -> DescribeConfigsResult[Sync]: ...
+
+    def describe_configs(self, *, resources: Iterable[ConfigResource],
+                         options: DescribeConfigsOptions = MISSING
                          ) -> DescribeConfigsResult[Sync]:
         """Get the configuration for the specified resources.
 
@@ -772,9 +825,19 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_configs_result(native, Sync, None)
 
+    @overload
+    def incremental_alter_configs(
+        self, *,
+        configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+    ) -> AlterConfigsResult[Sync]: ...
+    @overload
+    def incremental_alter_configs(self, *,
+                                  configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+                                  options: AlterConfigsOptions) -> AlterConfigsResult[Sync]: ...
+
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-            options: AlterConfigsOptions | None = MISSING) -> AlterConfigsResult[Sync]:
+            options: AlterConfigsOptions = MISSING) -> AlterConfigsResult[Sync]:
         """Incrementally update the configuration for the specified resources.
 
         Updates are not transactional so they may succeed for some resources while
@@ -806,9 +869,21 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.incremental_alter_configs_result(native, Sync, None)
 
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+    ) -> AlterReplicaLogDirsResult[Sync]: ...
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+        options: AlterReplicaLogDirsOptions,
+    ) -> AlterReplicaLogDirsResult[Sync]: ...
+
     def alter_replica_log_dirs(
             self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
-            options: AlterReplicaLogDirsOptions | None = MISSING
+            options: AlterReplicaLogDirsOptions = MISSING
             ) -> AlterReplicaLogDirsResult[Sync]:
         """Change the log directory for the specified replicas. If the replica does
         not exist on the broker, the result shows REPLICA_NOT_AVAILABLE for the given
@@ -837,8 +912,14 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_replica_log_dirs_result(native, Sync, None)
 
+    @overload
+    def describe_log_dirs(self, *, brokers: Iterable[int]) -> DescribeLogDirsResult[Sync]: ...
+    @overload
     def describe_log_dirs(self, *, brokers: Iterable[int],
-                          options: DescribeLogDirsOptions | None = MISSING
+                          options: DescribeLogDirsOptions) -> DescribeLogDirsResult[Sync]: ...
+
+    def describe_log_dirs(self, *, brokers: Iterable[int],
+                          options: DescribeLogDirsOptions = MISSING
                           ) -> DescribeLogDirsResult[Sync]:
         """Query the information of all log directories on the given set of brokers.
 
@@ -856,9 +937,21 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_log_dirs_result(native, Sync, None)
 
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+    ) -> DescribeReplicaLogDirsResult[Sync]: ...
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> DescribeReplicaLogDirsResult[Sync]: ...
+
     def describe_replica_log_dirs(
             self, *, replicas: Iterable[TopicPartitionReplica],
-            options: DescribeReplicaLogDirsOptions | None = MISSING
+            options: DescribeReplicaLogDirsOptions = MISSING
             ) -> DescribeReplicaLogDirsResult[Sync]:
         """Query the replica log directory information for the specified replicas.
 
@@ -877,8 +970,17 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_replica_log_dirs_result(native, Sync, None)
 
+    @overload
+    def create_partitions(
+        self, *,
+        new_partitions: Mapping[str, NewPartitions],
+    ) -> CreatePartitionsResult[Sync]: ...
+    @overload
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
-                          options: CreatePartitionsOptions | None = MISSING
+                          options: CreatePartitionsOptions) -> CreatePartitionsResult[Sync]: ...
+
+    def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
+                          options: CreatePartitionsOptions = MISSING
                           ) -> CreatePartitionsResult[Sync]:
         """Increase the number of partitions of the topics given as the keys of
         ``new_partitions`` according to the corresponding values. **If partitions are
@@ -928,8 +1030,17 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.create_partitions_result(native, Sync, None)
 
+    @overload
+    def delete_records(
+        self, *,
+        records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+    ) -> DeleteRecordsResult[Sync]: ...
+    @overload
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                       options: DeleteRecordsOptions | None = MISSING
+                       options: DeleteRecordsOptions) -> DeleteRecordsResult[Sync]: ...
+
+    def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+                       options: DeleteRecordsOptions = MISSING
                        ) -> DeleteRecordsResult[Sync]:
         """Delete records whose offset is smaller than the given offset of the
         corresponding partition.
@@ -949,7 +1060,15 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_records_result(native, Sync, None)
 
-    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = MISSING
+    @overload
+    def create_delegation_token(self) -> CreateDelegationTokenResult[Sync]: ...
+    @overload
+    def create_delegation_token(
+        self, *,
+        options: CreateDelegationTokenOptions,
+    ) -> CreateDelegationTokenResult[Sync]: ...
+
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions = MISSING
                                 ) -> CreateDelegationTokenResult[Sync]:
         """Create a Delegation Token.
 
@@ -977,8 +1096,17 @@ class Admin(_AdminState):
                             _conversions.create_delegation_token_options(options))
         return _conversions.create_delegation_token_result(native, Sync, None)
 
+    @overload
+    def renew_delegation_token(self, *, hmac: bytes) -> RenewDelegationTokenResult[Sync]: ...
+    @overload
+    def renew_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult[Sync]: ...
+
     def renew_delegation_token(self, *, hmac: bytes,
-                               options: RenewDelegationTokenOptions | None = MISSING
+                               options: RenewDelegationTokenOptions = MISSING
                                ) -> RenewDelegationTokenResult[Sync]:
         """Renew a Delegation Token.
 
@@ -1010,8 +1138,17 @@ class Admin(_AdminState):
         native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
         return _conversions.renew_delegation_token_result(native, Sync, None)
 
+    @overload
+    def expire_delegation_token(self, *, hmac: bytes) -> ExpireDelegationTokenResult[Sync]: ...
+    @overload
+    def expire_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult[Sync]: ...
+
     def expire_delegation_token(self, *, hmac: bytes,
-                                options: ExpireDelegationTokenOptions | None = MISSING
+                                options: ExpireDelegationTokenOptions = MISSING
                                 ) -> ExpireDelegationTokenResult[Sync]:
         """Expire a Delegation Token.
 
@@ -1044,8 +1181,16 @@ class Admin(_AdminState):
         native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
         return _conversions.expire_delegation_token_result(native, Sync, None)
 
+    @overload
+    def describe_delegation_token(self) -> DescribeDelegationTokenResult[Sync]: ...
+    @overload
+    def describe_delegation_token(
+        self, *,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult[Sync]: ...
+
     def describe_delegation_token(self, *,
-                                  options: DescribeDelegationTokenOptions | None = MISSING
+                                  options: DescribeDelegationTokenOptions = MISSING
                                   ) -> DescribeDelegationTokenResult[Sync]:
         """Describe the Delegation Tokens.
 
@@ -1073,8 +1218,20 @@ class Admin(_AdminState):
                             _conversions.describe_delegation_token_options(options))
         return _conversions.describe_delegation_token_result(native, Sync, None)
 
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult[Sync]: ...
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+    ) -> DescribeConsumerGroupsResult[Sync]: ...
+
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                 options: DescribeConsumerGroupsOptions | None = MISSING
+                                 options: DescribeConsumerGroupsOptions = MISSING
                                  ) -> DescribeConsumerGroupsResult[Sync]:
         """Describe some consumer groups in the cluster.
 
@@ -1092,21 +1249,32 @@ class Admin(_AdminState):
         return _conversions.describe_consumer_groups_result(native, Sync, None)
 
     @overload
-    def list_consumer_group_offsets(self, *, group_id: str,
-                                    options: ListConsumerGroupOffsetsOptions | None = None
-                                    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    def list_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def list_consumer_group_offsets(self, *,
+                                    group_id: str) -> ListConsumerGroupOffsetsResult[Sync]: ...
     @overload
     def list_consumer_group_offsets(
-        self, *, group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def list_consumer_group_offsets(
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
     ) -> ListConsumerGroupOffsetsResult[Sync]: ...
 
     @java_forms(Form("group_id", "options"), Form("group_id"),
                 Form("group_specs", "options"), Form("group_specs"))
     def list_consumer_group_offsets(
-        self, *, group_id: str | None = MISSING,
-        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = MISSING,
-        options: ListConsumerGroupOffsetsOptions | None = MISSING
+        self, *, group_id: str = MISSING,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] = MISSING,
+        options: ListConsumerGroupOffsetsOptions = MISSING
     ) -> ListConsumerGroupOffsetsResult[Sync]:
         """List the consumer group offsets available in the cluster: of all
         partitions of the one group ``group_id``, or, for the specified consumer
@@ -1137,8 +1305,18 @@ class Admin(_AdminState):
         assert group_specs is not None  # the non_null above
         return _conversions.list_consumer_group_offsets_result(group_specs, native, Sync, None)
 
+    @overload
+    def delete_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult[Sync]: ...
+    @overload
+    def delete_consumer_groups(self, *,
+                               group_ids: Iterable[str]) -> DeleteConsumerGroupsResult[Sync]: ...
+
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                               options: DeleteConsumerGroupsOptions | None = MISSING
+                               options: DeleteConsumerGroupsOptions = MISSING
                                ) -> DeleteConsumerGroupsResult[Sync]:
         """Delete consumer groups from the cluster.
 
@@ -1155,9 +1333,23 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_consumer_groups_result(native, Sync, None)
 
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+    ) -> DeleteConsumerGroupOffsetsResult[Sync]: ...
+
     def delete_consumer_group_offsets(self, *, group_id: str,
                                       partitions: Iterable[TopicPartition],
-                                      options: DeleteConsumerGroupOffsetsOptions | None = MISSING
+                                      options: DeleteConsumerGroupOffsetsOptions = MISSING
                                       ) -> DeleteConsumerGroupOffsetsResult[Sync]:
         """Delete committed offsets for a set of partitions in a consumer group. This
         will succeed at the partition level only if the group is not actively
@@ -1179,7 +1371,12 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_consumer_group_offsets_result(tps, native, Sync, None)
 
-    def list_groups(self, *, options: ListGroupsOptions | None = MISSING) -> ListGroupsResult[Sync]:
+    @overload
+    def list_groups(self) -> ListGroupsResult[Sync]: ...
+    @overload
+    def list_groups(self, *, options: ListGroupsOptions) -> ListGroupsResult[Sync]: ...
+
+    def list_groups(self, *, options: ListGroupsOptions = MISSING) -> ListGroupsResult[Sync]:
         """List the groups available in the cluster.
 
         ``options``: the options to use when listing the groups (Java's
@@ -1191,9 +1388,17 @@ class Admin(_AdminState):
         native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
         return _conversions.list_groups_result(native, Sync, None)
 
+    @overload
+    def elect_leaders(self, *, election_type: ElectionType,
+                      partitions: Iterable[TopicPartition] | None) -> ElectLeadersResult[Sync]: ...
+    @overload
     def elect_leaders(self, *, election_type: ElectionType,
                       partitions: Iterable[TopicPartition] | None,
-                      options: ElectLeadersOptions | None = MISSING) -> ElectLeadersResult[Sync]:
+                      options: ElectLeadersOptions) -> ElectLeadersResult[Sync]: ...
+
+    def elect_leaders(self, *, election_type: ElectionType,
+                      partitions: Iterable[TopicPartition] | None,
+                      options: ElectLeadersOptions = MISSING) -> ElectLeadersResult[Sync]:
         """Elect a replica as leader for the given ``partitions``, or for all
         partitions if the argument to ``partitions`` is ``None``.
 
@@ -1236,9 +1441,21 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.elect_leaders_result(native, Sync, None)
 
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+    ) -> AlterPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+        options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult[Sync]: ...
+
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-            options: AlterPartitionReassignmentsOptions | None = MISSING
+            options: AlterPartitionReassignmentsOptions = MISSING
             ) -> AlterPartitionReassignmentsResult[Sync]:
         """Change the reassignments for one or more partitions. Providing ``None``
         (Java's ``Optional.empty()``) will **revert** the reassignment for the
@@ -1279,9 +1496,28 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_partition_reassignments_result(native, Sync, None)
 
+    @overload
+    def list_partition_reassignments(self) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
-            options: ListPartitionReassignmentsOptions | None = MISSING
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition],
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+
+    def list_partition_reassignments(
+            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Sync]:
         """List the current reassignments for the given partitions, or all of the
         current partition reassignments.
@@ -1305,13 +1541,13 @@ class Admin(_AdminState):
         ``new ListPartitionReassignmentsOptions()``). Returns the result.
         """
         self._check_not_closed()
-        if partitions is MISSING:
-            partitions = None  # Java's listPartitionReassignments(options): Optional.empty()
-        else:
+        targets: Iterable[TopicPartition] | None = None
+        if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
             _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
+            targets = partitions
         options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions)
         native = self._call(_lib.Admin_list_partition_reassignments,
-                            *_conversions.list_partition_reassignments_args(partitions),
+                            *_conversions.list_partition_reassignments_args(targets),
                             options._setters_ran())
         return _conversions.list_partition_reassignments_result(native, Sync, None)
 
@@ -1335,9 +1571,23 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.remove_members_from_consumer_group_result(options, native, Sync, None)
 
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+    ) -> AlterConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult[Sync]: ...
+
     def alter_consumer_group_offsets(self, *, group_id: str,
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                     options: AlterConsumerGroupOffsetsOptions | None = MISSING
+                                     options: AlterConsumerGroupOffsetsOptions = MISSING
                                      ) -> AlterConsumerGroupOffsetsResult[Sync]:
         """Alters offsets for the specified group. In order to succeed, the group
         must be empty.
@@ -1361,8 +1611,17 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_consumer_group_offsets_result(native, Sync, None)
 
+    @overload
+    def list_offsets(
+        self, *,
+        topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+    ) -> ListOffsetsResult[Sync]: ...
+    @overload
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                     options: ListOffsetsOptions | None = MISSING) -> ListOffsetsResult[Sync]:
+                     options: ListOffsetsOptions) -> ListOffsetsResult[Sync]: ...
+
+    def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+                     options: ListOffsetsOptions = MISSING) -> ListOffsetsResult[Sync]:
         """List offset for the specified partitions. This operation enables to find
         the beginning offset, end offset as well as the offset matching a timestamp
         in partitions.
@@ -1381,8 +1640,18 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.list_offsets_result(native, partitions, Sync, None)
 
+    @overload
+    def describe_client_quotas(self, *,
+                               filter: ClientQuotaFilter) -> DescribeClientQuotasResult[Sync]: ...
+    @overload
+    def describe_client_quotas(
+        self, *,
+        filter: ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult[Sync]: ...
+
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                               options: DescribeClientQuotasOptions | None = MISSING
+                               options: DescribeClientQuotasOptions = MISSING
                                ) -> DescribeClientQuotasResult[Sync]:
         """Describes all entities matching the provided filter that have at least one
         client quota configuration value defined.
@@ -1411,8 +1680,20 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_client_quotas_result(native, Sync, None)
 
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+    ) -> AlterClientQuotasResult[Sync]: ...
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult[Sync]: ...
+
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                            options: AlterClientQuotasOptions | None = MISSING
+                            options: AlterClientQuotasOptions = MISSING
                             ) -> AlterClientQuotasResult[Sync]:
         """Alters client quota configurations with the specified alterations.
 
@@ -1445,18 +1726,23 @@ class Admin(_AdminState):
         return _conversions.alter_client_quotas_result(native, Sync, None)
 
     @overload
-    def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
-                                        ) -> DescribeUserScramCredentialsResult[Sync]: ...
+    def describe_user_scram_credentials(self) -> DescribeUserScramCredentialsResult[Sync]: ...
     @overload
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None,
-            options: DescribeUserScramCredentialsOptions
+        self, *,
+        users: Sequence[str] | None,
+    ) -> DescribeUserScramCredentialsResult[Sync]: ...
+    @overload
+    def describe_user_scram_credentials(
+        self, *,
+        users: Sequence[str] | None,
+        options: DescribeUserScramCredentialsOptions,
     ) -> DescribeUserScramCredentialsResult[Sync]: ...
 
     @java_forms(Form(), Form("users"), Form("users", "options"))
     def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None = MISSING,
-            options: DescribeUserScramCredentialsOptions | None = MISSING
+            options: DescribeUserScramCredentialsOptions = MISSING
     ) -> DescribeUserScramCredentialsResult[Sync]:
         """Describe SASL/SCRAM credentials.
 
@@ -1491,9 +1777,21 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_user_scram_credentials_result(native, Sync, None)
 
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+    ) -> AlterUserScramCredentialsResult[Sync]: ...
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult[Sync]: ...
+
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
-            options: AlterUserScramCredentialsOptions | None = MISSING
+            options: AlterUserScramCredentialsOptions = MISSING
     ) -> AlterUserScramCredentialsResult[Sync]:
         """Alter SASL/SCRAM credentials.
 
@@ -1526,7 +1824,13 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.alter_user_scram_credentials_result(native, Sync, None)
 
-    def describe_features(self, *, options: DescribeFeaturesOptions | None = MISSING
+    @overload
+    def describe_features(self) -> DescribeFeaturesResult[Sync]: ...
+    @overload
+    def describe_features(self, *,
+                          options: DescribeFeaturesOptions) -> DescribeFeaturesResult[Sync]: ...
+
+    def describe_features(self, *, options: DescribeFeaturesOptions = MISSING
                           ) -> DescribeFeaturesResult[Sync]:
         """Describes finalized as well as supported features. The request is issued to
         any random broker.
@@ -1546,8 +1850,17 @@ class Admin(_AdminState):
         native = self._call(_lib.Admin_describe_features, options._setters_ran())
         return _conversions.describe_features_result(native, Sync, None)
 
+    @overload
+    def update_features(
+        self, *,
+        feature_updates: Mapping[str, FeatureUpdate],
+    ) -> UpdateFeaturesResult[Sync]: ...
+    @overload
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                        options: UpdateFeaturesOptions | None = MISSING
+                        options: UpdateFeaturesOptions) -> UpdateFeaturesResult[Sync]: ...
+
+    def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
+                        options: UpdateFeaturesOptions = MISSING
                         ) -> UpdateFeaturesResult[Sync]:
         """Applies specified updates to finalized features. This operation is not
         transactional so some updates may succeed while the rest may fail.
@@ -1608,8 +1921,17 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.update_features_result(native, Sync, None)
 
+    @overload
+    def unregister_controller(self, *, controller_id: int) -> UnregisterControllerResult[Sync]: ...
+    @overload
+    def unregister_controller(
+        self, *,
+        controller_id: int,
+        options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult[Sync]: ...
+
     def unregister_controller(self, *, controller_id: int,
-                              options: UnregisterControllerOptions | None = MISSING
+                              options: UnregisterControllerOptions = MISSING
                               ) -> UnregisterControllerResult[Sync]:
         """Unregister a controller.
 
@@ -1639,8 +1961,17 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.unregister_controller_result(native, Sync, None)
 
+    @overload
+    def describe_producers(
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> DescribeProducersResult[Sync]: ...
+    @overload
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                           options: DescribeProducersOptions | None = MISSING
+                           options: DescribeProducersOptions) -> DescribeProducersResult[Sync]: ...
+
+    def describe_producers(self, *, partitions: Iterable[TopicPartition],
+                           options: DescribeProducersOptions = MISSING
                            ) -> DescribeProducersResult[Sync]:
         """Describe active producer state on a set of topic partitions. Unless a
         specific broker is requested through ``DescribeProducersOptions.broker_id()``,
@@ -1658,8 +1989,20 @@ class Admin(_AdminState):
                             *_conversions.describe_producers_args(targets), options._setters_ran())
         return _conversions.describe_producers_result(native, Sync, None, targets)
 
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+    ) -> DescribeTransactionsResult[Sync]: ...
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+        options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult[Sync]: ...
+
     def describe_transactions(self, *, transactional_ids: Iterable[str],
-                              options: DescribeTransactionsOptions | None = MISSING
+                              options: DescribeTransactionsOptions = MISSING
                               ) -> DescribeTransactionsResult[Sync]:
         """Describe the state of a set of transactional IDs from the respective
         transaction coordinators, which are dynamically discovered.
@@ -1678,8 +2021,14 @@ class Admin(_AdminState):
                             *_conversions.describe_transactions_args(ids), options._setters_ran())
         return _conversions.describe_transactions_result(native, Sync, None, ids)
 
+    @overload
+    def abort_transaction(self, *, spec: AbortTransactionSpec) -> AbortTransactionResult[Sync]: ...
+    @overload
     def abort_transaction(self, *, spec: AbortTransactionSpec,
-                          options: AbortTransactionOptions | None = MISSING
+                          options: AbortTransactionOptions) -> AbortTransactionResult[Sync]: ...
+
+    def abort_transaction(self, *, spec: AbortTransactionSpec,
+                          options: AbortTransactionOptions = MISSING
                           ) -> AbortTransactionResult[Sync]:
         """Forcefully abort a transaction which is open on a topic partition. This will
         send a ``WriteTxnMarkers`` request to the partition leader in order to abort the
@@ -1697,7 +2046,13 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.abort_transaction_result(native, Sync, None, spec)
 
-    def list_transactions(self, *, options: ListTransactionsOptions | None = MISSING
+    @overload
+    def list_transactions(self) -> ListTransactionsResult[Sync]: ...
+    @overload
+    def list_transactions(self, *,
+                          options: ListTransactionsOptions) -> ListTransactionsResult[Sync]: ...
+
+    def list_transactions(self, *, options: ListTransactionsOptions = MISSING
                           ) -> ListTransactionsResult[Sync]:
         """List active transactions in the cluster. This will query all potential
         transaction coordinators in the cluster and collect the state of all
@@ -1716,8 +2071,15 @@ class Admin(_AdminState):
                             _conversions.list_transactions_options(options))
         return _conversions.list_transactions_result(native, Sync, None)
 
+    @overload
+    def fence_producers(self, *,
+                        transactional_ids: Iterable[str]) -> FenceProducersResult[Sync]: ...
+    @overload
     def fence_producers(self, *, transactional_ids: Iterable[str],
-                        options: FenceProducersOptions | None = MISSING
+                        options: FenceProducersOptions) -> FenceProducersResult[Sync]: ...
+
+    def fence_producers(self, *, transactional_ids: Iterable[str],
+                        options: FenceProducersOptions = MISSING
                         ) -> FenceProducersResult[Sync]:
         """Fence out all active producers that use any of the provided transactional
         IDs.
@@ -1737,9 +2099,11 @@ class Admin(_AdminState):
         return _conversions.fence_producers_result(native, Sync, None, ids)
 
     @overload
-    def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
-                              options: ListConfigResourcesOptions
-                              ) -> ListConfigResourcesResult[Sync]: ...
+    def list_config_resources(
+        self, *,
+        config_resource_types: Iterable[ConfigResource.Type],
+        options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult[Sync]: ...
     @overload
     def list_config_resources(self) -> ListConfigResourcesResult[Sync]: ...
 
@@ -1748,7 +2112,7 @@ class Admin(_AdminState):
                 Form())
     def list_config_resources(
             self, *, config_resource_types: Iterable[ConfigResource.Type] = MISSING,
-            options: ListConfigResourcesOptions | None = MISSING
+            options: ListConfigResourcesOptions = MISSING
             ) -> ListConfigResourcesResult[Sync]:
         """List the configuration resources available in the cluster which matches
         config resource type. If no config resource types are specified, all
@@ -1768,8 +2132,18 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.list_config_resources_result(native, Sync, None)
 
+    @overload
+    def describe_classic_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult[Sync]: ...
+    @overload
+    def describe_classic_groups(self, *,
+                                group_ids: Iterable[str]) -> DescribeClassicGroupsResult[Sync]: ...
+
     def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                options: DescribeClassicGroupsOptions | None = MISSING
+                                options: DescribeClassicGroupsOptions = MISSING
                                 ) -> DescribeClassicGroupsResult[Sync]:
         """Describe some classic groups in the cluster.
 
@@ -1786,8 +2160,18 @@ class Admin(_AdminState):
                             options._setters_ran())
         return _conversions.describe_classic_groups_result(native, Sync, None)
 
+    @overload
+    def force_terminate_transaction(self, *,
+                                    transactional_id: str) -> TerminateTransactionResult[Sync]: ...
+    @overload
+    def force_terminate_transaction(
+        self, *,
+        transactional_id: str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult[Sync]: ...
+
     def force_terminate_transaction(self, *, transactional_id: str,
-                                    options: TerminateTransactionOptions | None = MISSING
+                                    options: TerminateTransactionOptions = MISSING
                                     ) -> TerminateTransactionResult[Sync]:
         """Force terminate a transaction for the given transactional ID.
 

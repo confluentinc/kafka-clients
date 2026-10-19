@@ -968,3 +968,163 @@ def test_kafka_future_typing() -> None:
 
     _kafka_future_types()
     asyncio.run(_async_kafka_future_types())
+
+
+# ---- admin: one stub per Java overload (type-checked only; appended section) ----
+
+
+def _admin_stub_forms() -> None:
+    """Each Java overload of a few admin RPCs is a stub of its own, with no defaults
+    (CLAUDE.md, Signatures): the forms type-check and bind the result type. Never
+    called: the clients need a broker."""
+    from confluent_kafka.admin import (
+        Admin,
+        AsyncAdmin,
+        CreateTopicsOptions,
+        CreateTopicsResult,
+        DeleteTopicsOptions,
+        DeleteTopicsResult,
+        DescribeTopicsResult,
+        DescribeUserScramCredentialsOptions,
+        DescribeUserScramCredentialsResult,
+        ListConsumerGroupOffsetsResult,
+        ListConsumerGroupOffsetsSpec,
+        ListPartitionReassignmentsOptions,
+        ListPartitionReassignmentsResult,
+        ListTopicsResult,
+        MockAdminClient,
+        NewPartitions,
+        NewTopic,
+    )
+    from confluent_kafka.admin._futures import Async, Sync
+    from confluent_kafka.common import TopicCollection
+
+    admin = Admin.create(configs={})
+    topics = [NewTopic(name="t", num_partitions=1, replication_factor=1)]
+    assert_type(admin.create_topics(new_topics=topics), CreateTopicsResult[Sync])
+    assert_type(admin.create_topics(new_topics=topics, options=CreateTopicsOptions()),
+                CreateTopicsResult[Sync])
+    names = TopicCollection.of_topic_names(topics=["t"])
+    assert_type(admin.delete_topics(topics=["t"]), DeleteTopicsResult[Sync])
+    assert_type(admin.delete_topics(topics=names, options=DeleteTopicsOptions()),
+                DeleteTopicsResult[Sync])
+    assert_type(admin.describe_topics(topic_names=["t"]), DescribeTopicsResult[Sync])
+    assert_type(admin.describe_topics(topics=names), DescribeTopicsResult[Sync])
+    assert_type(admin.list_consumer_group_offsets(group_id="g"),
+                ListConsumerGroupOffsetsResult[Sync])
+    assert_type(admin.list_consumer_group_offsets(
+        group_specs={"g": ListConsumerGroupOffsetsSpec()}), ListConsumerGroupOffsetsResult[Sync])
+    assert_type(admin.list_partition_reassignments(), ListPartitionReassignmentsResult[Sync])
+    assert_type(admin.list_partition_reassignments(options=ListPartitionReassignmentsOptions()),
+                ListPartitionReassignmentsResult[Sync])
+    assert_type(admin.describe_user_scram_credentials(),
+                DescribeUserScramCredentialsResult[Sync])
+    assert_type(admin.describe_user_scram_credentials(
+        users=None, options=DescribeUserScramCredentialsOptions()),
+        DescribeUserScramCredentialsResult[Sync])
+    admin.close()
+    admin.close(timeout=1.0)
+    async_admin = AsyncAdmin.create(configs={})
+    assert_type(async_admin.create_topics(new_topics=topics), CreateTopicsResult[Async])
+    mock = MockAdminClient()
+    mock = MockAdminClient(brokers=[Node(id=0, host="h", port=1)],
+                           controller=Node(id=0, host="h", port=1))
+    assert_type(mock.list_topics(), ListTopicsResult[Sync])
+    assert_type(NewTopic(name="t", num_partitions=None, replication_factor=None), NewTopic)
+    assert_type(NewTopic(name="t", replicas_assignments={0: [1]}), NewTopic)
+    assert_type(NewPartitions.increase_to(total_count=2), NewPartitions)
+    assert_type(NewPartitions.increase_to(total_count=2, new_assignments=None), NewPartitions)
+
+
+def _one_stub_per_java_overload(c: object = None) -> None:
+    """Option B: one ``@overload`` stub per Java overload, no defaults; a
+    parameter Java rejects as null is ``T`` (mypy flags a ``None``), one Java
+    gives a meaning is ``T | None``.
+
+    Type-check-only (guarded early return; never runs the FFI)."""
+    if c is None:
+        return
+    from typing import Any
+
+    from confluent_kafka.common import KafkaPrincipal, PartitionInfo
+    from confluent_kafka.common.token_information import TokenInformation
+    from confluent_kafka.consumer import (
+        AsyncKafkaConsumer, CloseOptions, KafkaConsumer, OffsetAndTimestamp,
+    )
+    from confluent_kafka.producer import AsyncKafkaProducer, KafkaProducer
+
+    configs: dict[str, Any] = {"bootstrap.servers": "localhost:9092"}
+    tp = TopicPartition(topic="t", partition=0)
+    kc = KafkaConsumer(configs=configs)
+    # commitSync(), (Duration), (Map), (Map, Duration): four stubs.
+    assert_type(kc.commit(), None)
+    assert_type(kc.commit(timeout=1.0), None)
+    assert_type(kc.commit(offsets={tp: OffsetAndMetadata(offset=1)}), None)
+    assert_type(kc.commit(offsets={}, timeout=1.0), None)
+    # commitAsync(), (callback), (offsets, callback): a null callback is legal.
+    assert_type(kc.commit_nowait(), None)
+    assert_type(kc.commit_nowait(callback=None), None)
+    assert_type(kc.commit_nowait(offsets={}, callback=None), None)
+    # the timed lookups: two stubs each.
+    assert_type(kc.position(partition=tp), int)
+    assert_type(kc.position(partition=tp, timeout=1.0), int)
+    assert_type(kc.list_topics(), "dict[str, list[PartitionInfo]]")
+    assert_type(kc.list_topics(timeout=timedelta(seconds=1)), "dict[str, list[PartitionInfo]]")
+    assert_type(kc.offsets_for_times(timestamps_to_search={tp: 0}, timeout=1.0),
+                "dict[TopicPartition, OffsetAndTimestamp | None]")
+    # A None Java rejects is flagged by mypy (warn_unused_ignores proves it).
+    kc.close(option=None)  # type: ignore[call-overload]
+    kc.commit(offsets=None)  # type: ignore[call-overload]
+    kc.subscribe(topics=["t"], callback=None)  # type: ignore[call-overload]
+    kc.position(partition=tp, timeout=None)  # type: ignore[call-overload]
+    # close() and close(CloseOptions).
+    assert_type(kc.close(), None)
+    assert_type(kc.close(option=CloseOptions.timeout(timeout=1.0)), None)
+
+    async def peers() -> None:
+        ac = AsyncKafkaConsumer(configs=configs)
+        assert_type(await ac.commit(offsets={}, timeout=1.0), None)
+        assert_type(await ac.committed(partitions=[tp]),
+                    "dict[TopicPartition, OffsetAndMetadata | None]")
+        assert_type(await ac.close(), None)
+        ap = AsyncKafkaProducer(configs=configs)
+        assert_type(await ap.close(timeout=0.0), None)
+
+    del peers
+    kp = KafkaProducer(configs=configs)
+    record = ProducerRecord(topic="t", value=b"v")
+    kp.send(record=record)
+    kp.send(record=record, callback=None)
+    assert_type(kp.close(), None)
+    assert_type(kp.close(timeout=0.0), None)
+    kp.close(timeout=None)  # type: ignore[call-overload]
+    # Value classes: one stub per Java constructor.
+    assert_type(OffsetAndMetadata(offset=1), OffsetAndMetadata)
+    assert_type(OffsetAndMetadata(offset=1, metadata=None), OffsetAndMetadata)
+    assert_type(OffsetAndMetadata(offset=1, leader_epoch=None, metadata=""), OffsetAndMetadata)
+    assert_type(OffsetAndTimestamp(offset=1, timestamp=2), OffsetAndTimestamp)
+    assert_type(OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None), OffsetAndTimestamp)
+    node = Node(id=1, host="h", port=1)
+    assert_type(PartitionInfo(topic="t", partition=0, leader=None, replicas=(node,),
+                              in_sync_replicas=()), PartitionInfo)
+    assert_type(PartitionInfo(topic="t", partition=0, leader=node, replicas=(), in_sync_replicas=(),
+                              offline_replicas=()), PartitionInfo)
+    owner = KafkaPrincipal(principal_type="User", name="o")
+    assert_type(KafkaPrincipal(principal_type="User", name="o", token_authenticated=True),
+                KafkaPrincipal)
+    assert_type(TokenInformation(token_id="i", owner=owner, renewers=[], issue_timestamp=0,
+                                 max_timestamp=0, expiry_timestamp=0), TokenInformation)
+    assert_type(ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,
+                               timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=-1,
+                               serialized_value_size=-1, key=None, value=b"v", headers=(),
+                               leader_epoch=None),
+                "ConsumerRecord[Never, bytes]")
+    assert_type(ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,
+                               timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=-1,
+                               serialized_value_size=-1, key=b"k", value=b"v", headers=(),
+                               leader_epoch=None, delivery_count=None),
+                "ConsumerRecord[bytes, bytes]")
+
+
+def test_one_stub_per_java_overload_typing_imports() -> None:
+    _one_stub_per_java_overload()

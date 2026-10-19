@@ -66,7 +66,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from confluent_kafka import _throwable
 from confluent_kafka._args import MISSING
@@ -666,6 +666,10 @@ class KafkaFuture(_KafkaFutureBase[T]):
         request or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
+    @overload
+    def get(self) -> T: ...
+    @overload
+    def get(self, *, timeout: Duration) -> T: ...
     def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising
@@ -842,6 +846,10 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
         or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
+    @overload
+    async def get(self) -> T: ...
+    @overload
+    async def get(self, *, timeout: Duration) -> T: ...
     async def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising

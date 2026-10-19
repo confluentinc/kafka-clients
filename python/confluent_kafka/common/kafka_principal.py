@@ -70,6 +70,10 @@ class KafkaPrincipal:
 
     __slots__ = ("_principal_type", "_name", "_token_authenticated")
 
+    @overload
+    def __init__(self, *, principal_type: str, name: str) -> None: ...
+    @overload
+    def __init__(self, *, principal_type: str, name: str, token_authenticated: bool) -> None: ...
     def __init__(self, *, principal_type: str, name: str,
                  token_authenticated: bool = MISSING) -> None:
         if token_authenticated is MISSING:
