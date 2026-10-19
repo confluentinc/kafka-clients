@@ -2151,7 +2151,11 @@ impl<K, V> KafkaProducer<K, V> {
         .await
     }
 
-    /// The non-blocking form of `send`: the same path, except that it never waits.
+    /// The non-blocking form of `send`: the same path, except that it never waits
+    /// on metadata or on buffer memory. It still awaits the key and value
+    /// serializers, which complete at once when they are built-in but may wait
+    /// for an asynchronous implementation; the C FFI therefore runs it on the
+    /// calling thread only for a producer whose serializers are built-in.
     ///
     /// Java's `send` blocks for up to `max.block.ms` at two points before the
     /// record is appended — `waitOnMetadata` (`KafkaProducer.java:1069`) and
@@ -2174,8 +2178,8 @@ impl<K, V> KafkaProducer<K, V> {
     /// There is no Java counterpart (DoD #7), which is why it is crate-internal:
     /// the public surface stays Java's `send`. The C FFI's non-blocking send uses
     /// it as its fast path — append on the caller's own thread when the producer
-    /// is ready, and fall back to the submission queue, rather than stall the
-    /// caller, when it is not.
+    /// is ready and its serializers are built-in, and fall back to the
+    /// submission queue, rather than stall the caller, when it is not.
     pub(crate) async fn try_send(
         &self,
         record: ProducerRecord<K, V>,
