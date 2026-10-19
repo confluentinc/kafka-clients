@@ -79,6 +79,7 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(DynCompatible),
         Box::new(DynForwarding),
         Box::new(ConsumerHandleSurface),
+        Box::new(ConsumerReceiver),
         Box::new(SendFuture),
         Box::new(ErrorPredicate),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
@@ -3907,6 +3908,106 @@ impl Rule for ConsumerHandleSurface {
 }
 
 // ---------------------------------------------------------------------------
+// Rule: check-consumer-receiver
+// ---------------------------------------------------------------------------
+
+/// Checks that every `Consumer` / `DynConsumer` method takes `&mut self`,
+/// except `wakeup`, `metrics` and `handle` (`consumer-threading.md` §1–§2).
+///
+/// Java's `KafkaConsumer` is single-threaded: every method but `wakeup()` and
+/// `metrics()` runs `acquire()`, which throws `ConcurrentModificationException`
+/// when a second thread is inside the consumer. Rust enforces that at compile
+/// time: the consumer is `Send + !Sync`, and its methods take `&mut self`, so
+/// no two calls can overlap. A method taking `&self` would compile today and
+/// stay callable through a shared reference forever after, so an
+/// implementation that later needs to mutate state for it (Java adding
+/// `acquire()`-guarded work to a getter) could not, without a breaking change.
+/// The three exceptions are the methods meant to be reached while another call
+/// holds the consumer: `wakeup` (Java's cross-thread method), `metrics` (Java's
+/// unguarded read) and `handle` (the `Send + Sync` handle for callbacks and
+/// other tasks).
+///
+/// Scope: the public traits named `Consumer` and `DynConsumer`. Either missing
+/// is a finding, so the rule cannot silently check nothing.
+struct ConsumerReceiver;
+
+impl ConsumerReceiver {
+    /// The traits whose methods are checked.
+    const TRAITS: [&'static str; 2] = ["Consumer", "DynConsumer"];
+
+    /// The methods that take `&self`.
+    const SHARED: [&'static str; 3] = ["wakeup", "metrics", "handle"];
+
+    /// The receiver of `sig` as written: `&mut self`, `&self`, `self`, or
+    /// `None` for an associated function.
+    fn receiver(sig: &syn::Signature) -> Option<&'static str> {
+        sig.inputs.iter().find_map(|arg| match arg {
+            syn::FnArg::Receiver(r) => Some(match (&r.reference, &r.mutability) {
+                (Some(_), Some(_)) => "&mut self",
+                (Some(_), None) => "&self",
+                (None, _) => "self",
+            }),
+            syn::FnArg::Typed(_) => None,
+        })
+    }
+}
+
+impl Rule for ConsumerReceiver {
+    fn name(&self) -> &'static str {
+        "check-consumer-receiver"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for name in Self::TRAITS {
+            let found = krate.public_types().into_iter().find_map(|(path, ident)| {
+                if ident != name {
+                    return None;
+                }
+                match krate.type_item(&path, &ident) {
+                    syn::Item::Trait(t) => Some((krate.modules[&path].file.clone(), t)),
+                    _ => None,
+                }
+            });
+            let Some((file, t)) = found else {
+                findings.push(format!("no public trait `{name}`; the rule checks its method receivers"));
+                continue;
+            };
+            for item in &t.items {
+                let syn::TraitItem::Fn(f) = item else {
+                    continue;
+                };
+                checked += 1;
+                let method = f.sig.ident.to_string();
+                let expected = if Self::SHARED.contains(&method.as_str()) {
+                    "&self"
+                } else {
+                    "&mut self"
+                };
+                let actual = Self::receiver(&f.sig).unwrap_or("no receiver");
+                if actual != expected {
+                    findings.push(format!(
+                        "{}: `{name}::{method}` takes `{actual}`; it must take `{expected}`",
+                        file.display()
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   The consumer is single-threaded, as Java's `acquire()` makes it: every
+   `Consumer` / `DynConsumer` method takes `&mut self`, so the compiler rules
+   out two overlapping calls and a getter can later mutate state without a
+   breaking change. Only `wakeup`, `metrics` and `handle` take `&self`: they are
+   reached while another call holds the consumer (consumer-threading.md §1-§2).
+   A getter that cannot fail in Java's sense panics with Java's message instead
+   of taking `&self`."
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule: check-send-future
 // ---------------------------------------------------------------------------
 
@@ -6022,5 +6123,94 @@ mod functional_interface_trait_tests {
             ]
         );
         assert_eq!(checked, 7);
+    }
+}
+
+#[cfg(test)]
+mod consumer_receiver_tests {
+    use super::*;
+
+    /// The findings over `lib`, written to its own temp dir `name` because the
+    /// tests run in parallel, and the number of methods checked.
+    fn run(name: &str, lib: &str) -> (usize, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("xtask-consumer-receiver-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), lib).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = ConsumerReceiver.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        (checked, findings)
+    }
+
+    #[test]
+    fn test_mut_receivers_and_the_three_shared_methods_pass() {
+        let (checked, findings) = run(
+            "pass",
+            r#"
+            pub trait Consumer {
+                fn assignment(&mut self) -> Vec<i32>;
+                fn poll(&mut self) -> impl std::future::Future<Output = ()> + Send;
+                fn wakeup(&self);
+                fn metrics(&self) -> Vec<i32>;
+                fn handle(&self) -> i32;
+            }
+            pub trait DynConsumer {
+                fn assignment(&mut self) -> Vec<i32>;
+                fn wakeup(&self);
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert_eq!(checked, 7);
+    }
+
+    #[test]
+    fn test_shared_receiver_on_a_guarded_method_is_reported() {
+        let (_, findings) = run(
+            "shared",
+            r#"
+            pub trait Consumer {
+                fn assignment(&self) -> Vec<i32>;
+                fn current_lag(&self, partition: i32) -> Option<i64>;
+                fn wakeup(&self);
+            }
+            pub trait DynConsumer {
+                fn paused(&self) -> Vec<i32>;
+                fn wakeup(&mut self);
+                fn build() -> Self where Self: Sized;
+            }
+            "#,
+        );
+        let expected = [
+            "`Consumer::assignment` takes `&self`; it must take `&mut self`",
+            "`Consumer::current_lag` takes `&self`; it must take `&mut self`",
+            "`DynConsumer::paused` takes `&self`; it must take `&mut self`",
+            "`DynConsumer::wakeup` takes `&mut self`; it must take `&self`",
+            "`DynConsumer::build` takes `no receiver`; it must take `&mut self`",
+        ];
+        for e in expected {
+            assert!(findings.iter().any(|f| f.contains(e)), "missing `{e}` in {findings:#?}");
+        }
+        assert_eq!(findings.len(), expected.len(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_missing_or_private_trait_is_reported() {
+        let (_, findings) = run(
+            "missing",
+            r#"
+            pub trait Consumer {
+                fn assignment(&mut self) -> Vec<i32>;
+            }
+            pub(crate) trait DynConsumer {
+                fn paused(&self) -> Vec<i32>;
+            }
+            "#,
+        );
+        assert_eq!(
+            findings,
+            vec!["no public trait `DynConsumer`; the rule checks its method receivers".to_string()]
+        );
     }
 }
