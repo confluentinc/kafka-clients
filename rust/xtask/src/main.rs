@@ -2121,8 +2121,10 @@ fn print_help() {
   package-check   Package the crate as the crates.io publish does (without ffi-macros),
                   fail above 3 MiB, and build a fresh project depending on it
   api-compat      Compare the public surface with a release tag: the Rust API with
-                  cargo-semver-checks, the C ABI with libabigail's abidiff; a breaking
-                  change fails unless the Cargo.toml version allows it over the tag's
+                  cargo-semver-checks (default features), the C ABI with libabigail's
+                  abidiff (an added function passes, any other change is breaking) and
+                  the header's callback typedefs; a breaking change fails unless the
+                  Cargo.toml version allows it over the tag's
                     --baseline TAG (default $API_COMPAT_BASELINE, else the highest
                     vX.Y.Z tag not above the current version)
   bump-version    Set one version on the Rust crates released together, Cargo.lock and

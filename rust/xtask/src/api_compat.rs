@@ -24,8 +24,16 @@
 //! Both follow Cargo's semver rule: a breaking change passes only when the
 //! version in `Cargo.toml` allows one over the baseline's (a major bump, or a
 //! minor bump while the major is 0). `cargo semver-checks` applies the rule
-//! itself; for `abidiff` this module applies it to the "incompatible change"
-//! bit of its exit status.
+//! itself; for the C ABI this module applies it to every change `abidiff`
+//! reports. `abidiff` runs with `--no-added-syms`, so an added function or
+//! variable is no change; any change it still reports (exit-status bit 4 or 8:
+//! a removed function, a changed parameter or return type, a value struct's
+//! layout, a renumbered C enum) is breaking. libabigail sets bit 8 only for a
+//! few of these (a removed symbol, a soname or architecture change), so bit 4
+//! alone is not "compatible".
+//!
+//! The `_fn_t` / `_cb_t` function-pointer typedefs are compared in the C
+//! header instead, see [`function_pointer_typedefs`].
 //!
 //! The baseline is `--baseline <tag>`, else `$API_COMPAT_BASELINE`, else the
 //! highest `vX.Y.Z` tag whose version does not exceed the current one; for a
@@ -35,7 +43,7 @@
 //! (tags do not move, so an existing extraction is reused) and built there with
 //! the toolchain the tag pins.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,10 +67,13 @@ const HEADER: &str = "target/include/confluent_kafka.h";
 /// libabigail's `abidiff` exit-status bits (`abg-tools-utils.h`).
 const ABIDIFF_ERROR: i32 = 1;
 const ABIDIFF_USAGE_ERROR: i32 = 2;
-/// Set on any change, with [`ABIDIFF_ABI_INCOMPATIBLE_CHANGE`] or alone (an
-/// added function, a compatible type change); alone it passes.
-#[cfg(test)]
+/// Set on any change `abidiff` reports, with
+/// [`ABIDIFF_ABI_INCOMPATIBLE_CHANGE`] or alone. With `--no-added-syms` an
+/// addition is not reported, so alone it is a changed function, type or
+/// struct layout: breaking.
 const ABIDIFF_ABI_CHANGE: i32 = 4;
+/// Set, besides [`ABIDIFF_ABI_CHANGE`], for the changes libabigail is sure are
+/// incompatible (a removed symbol, a soname or architecture change).
 const ABIDIFF_ABI_INCOMPATIBLE_CHANGE: i32 = 8;
 
 /// A release version, `major.minor.patch`.
@@ -151,8 +162,9 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     require_tool("abidiff", &["--version"], "install libabigail (`apt install abigail-tools`)")?;
 
     let baseline_dir = extract_baseline(&tag)?;
-    let old = baseline_version(&baseline_dir)?;
-    println!("🔎 Comparing the public surface of {shown} with {tag} ({old})");
+    let old_package = baseline_version(&baseline_dir)?;
+    let old = release_of(old_package);
+    println!("🔎 Comparing the public surface of {shown} with {tag} ({old_package})");
 
     let rust = check_rust(&baseline_dir, old.allows_breaking_change_to(current))?;
     let c = check_c(&tag, &baseline_dir, old, current)?;
@@ -162,13 +174,15 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         match verdict {
             Verdict::Compatible => println!("✅ {surface}: compatible with {tag}"),
             Verdict::BreakingAllowed => {
-                println!("✅ {surface}: breaking changes since {tag}, allowed by the bump {old} → {shown}")
+                println!("✅ {surface}: breaking changes since {tag}, allowed by the bump {old_package} → {shown}")
             },
             Verdict::NotChecked => {
-                println!("✅ {surface}: not compared with {tag}, the bump {old} → {shown} allows breaking changes")
+                println!(
+                    "✅ {surface}: not compared with {tag}, the bump {old_package} → {shown} allows breaking changes"
+                )
             },
             Verdict::Breaking => {
-                eprintln!("❌ {surface}: breaking changes since {tag} that {shown} does not allow over {old}")
+                eprintln!("❌ {surface}: breaking changes since {tag} that {shown} does not allow over {old_package}")
             },
         }
     }
@@ -182,9 +196,11 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `cargo semver-checks` over the published surface: default features only,
-/// as `--only-explicit-features` without `--features` selects. Without the flag
-/// it would also enable features such as `ffi` that crates.io users do not get.
+/// `cargo semver-checks` over the published surface: the crate's default
+/// features, as a crates.io user without `features = [...]` gets them.
+/// Without `--default-features` it would also enable features such as `ffi`
+/// that such a user does not get; `--only-explicit-features` would drop the
+/// default ones, and the API behind them with it.
 fn check_rust(baseline_dir: &Path, breaking_allowed: bool) -> anyhow::Result<Verdict> {
     println!("\n🦀 Rust API (cargo semver-checks)");
     let status = child("cargo")
@@ -192,7 +208,7 @@ fn check_rust(baseline_dir: &Path, breaking_allowed: bool) -> anyhow::Result<Ver
             "semver-checks",
             "--package",
             crate::PACKAGE_NAME,
-            "--only-explicit-features",
+            "--default-features",
             "--baseline-root",
         ])
         .arg(baseline_dir)
@@ -210,7 +226,9 @@ fn check_rust(baseline_dir: &Path, breaking_allowed: bool) -> anyhow::Result<Ver
 }
 
 /// `abidiff` over the `ffi` shared library of the baseline and of the working
-/// tree, with the opaque handles suppressed (see [`opaque_handles`]).
+/// tree, with the opaque handles and the function-pointer wrappers suppressed
+/// (see [`opaque_handles`], [`suppression_file`]), plus the comparison of the
+/// function-pointer typedefs in the two headers that replaces the latter.
 fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> anyhow::Result<Verdict> {
     println!("\n🔧 C ABI (abidiff)");
     // The baseline builds in its own tree; the working tree where its other
@@ -228,11 +246,13 @@ fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> an
     let suppressions = PathBuf::from(API_COMPAT_DIR).join("opaque-handles.suppr");
     fs::write(&suppressions, suppression_file(&handles))?;
 
+    let typedef_changes = changed_function_pointer_typedefs(&old_header, &new_header);
+    for change in &typedef_changes {
+        println!("   {change}");
+    }
+
     let output = Command::new("abidiff")
-        .arg("--suppressions")
-        .arg(&suppressions)
-        .arg(&old_library)
-        .arg(&new_library)
+        .args(abidiff_args(&suppressions, &old_library, &new_library))
         .output()
         .context("running abidiff")?;
     let report_path = PathBuf::from(API_COMPAT_DIR).join(format!("abidiff-{tag}.txt"));
@@ -242,17 +262,33 @@ fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> an
     println!("   Report saved to {}", report_path.display());
 
     let code = output.status.code().context("abidiff was killed by a signal")?;
-    abidiff_verdict(code, old.allows_breaking_change_to(current))
+    c_verdict(code, !typedef_changes.is_empty(), old.allows_breaking_change_to(current))
 }
 
-/// Reads an `abidiff` exit status: a tool error fails the task, an
-/// incompatible change is breaking, any other change (an added function, a
-/// compatible type change) is not.
-fn abidiff_verdict(code: i32, breaking_allowed: bool) -> anyhow::Result<Verdict> {
+/// The `abidiff` command line. `--no-added-syms` leaves additions out of the
+/// report and of the exit status, so an added function passes and what is
+/// left is breaking (see [`c_verdict`]).
+fn abidiff_args(suppressions: &Path, old_library: &Path, new_library: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "--no-added-syms".into(),
+        "--suppressions".into(),
+        suppressions.into(),
+        old_library.into(),
+        new_library.into(),
+    ]
+}
+
+/// Reads an `abidiff` exit status and whether a function-pointer typedef
+/// changed in the header: a tool error fails the task; any change `abidiff`
+/// still reports with `--no-added-syms` ([`ABIDIFF_ABI_CHANGE`], with or
+/// without [`ABIDIFF_ABI_INCOMPATIBLE_CHANGE`]), or a changed typedef, is
+/// breaking; no change is compatible.
+fn c_verdict(code: i32, typedef_changed: bool, breaking_allowed: bool) -> anyhow::Result<Verdict> {
     if code & (ABIDIFF_ERROR | ABIDIFF_USAGE_ERROR) != 0 {
         anyhow::bail!("abidiff failed (exit status {code})");
     }
-    Ok(if code & ABIDIFF_ABI_INCOMPATIBLE_CHANGE == 0 {
+    let changed = code & (ABIDIFF_ABI_CHANGE | ABIDIFF_ABI_INCOMPATIBLE_CHANGE) != 0 || typedef_changed;
+    Ok(if !changed {
         Verdict::Compatible
     } else if breaking_allowed {
         Verdict::BreakingAllowed
@@ -308,14 +344,81 @@ fn opaque_handles(header: &str) -> BTreeSet<String> {
 }
 
 /// A libabigail suppression specification for `handles`, matching each name
-/// with or without a Rust path before it.
+/// with or without a Rust path before it, and for the function-pointer
+/// wrappers.
+///
+/// A C `_fn_t` is a Rust `Option<unsafe extern "C" fn(..)>` alias. rustc
+/// emits no DWARF typedef for an alias: `abidiff` sees the `Option<..>`
+/// struct, named after the Rust paths of its parameter types
+/// (`Option<unsafe extern "C" fn(*const confluent_kafka::ffi::..::kafka_X_t)>`),
+/// so moving a handle between Rust modules shows as a change of every function
+/// taking a callback. The wrappers are suppressed whatever their kind
+/// (no `type_kind`), and [`changed_function_pointer_typedefs`] compares their
+/// C declarations in the headers instead, so a changed callback signature is
+/// still breaking. The regular expression spells the quotes and spaces of
+/// `extern "C" ` as `.`, which libabigail's ini syntax leaves alone.
 fn suppression_file(handles: &BTreeSet<String>) -> String {
     let names: Vec<&str> = handles.iter().map(String::as_str).collect();
     format!(
         "# Opaque C handles: generated by `cargo xtask api-compat`.\n\
-         [suppress_type]\n  type_kind = struct\n  name_regexp = ^(.*::)?({})$\n",
+         [suppress_type]\n  type_kind = struct\n  name_regexp = ^(.*::)?({})$\n\
+         \n\
+         # Function-pointer typedefs, compared in the C header instead.\n\
+         [suppress_type]\n  name_regexp = ^(.*::)?Option<(unsafe.)?extern.....fn\n",
         names.join("|")
     )
+}
+
+/// The function-pointer typedefs a header declares, which cbindgen writes as
+/// `typedef RET (*NAME)(PARAMS);`, possibly over several lines: each name
+/// with its declaration, whitespace collapsed.
+fn function_pointer_typedefs(header: &str) -> BTreeMap<String, String> {
+    let mut typedefs = BTreeMap::new();
+    let mut statement: Option<String> = None;
+    for line in header.lines() {
+        let line = line.trim();
+        let text = match &mut statement {
+            Some(text) => text,
+            None if line.starts_with("typedef ")
+                && !["typedef struct", "typedef enum", "typedef union"]
+                    .iter()
+                    .any(|kind| line.starts_with(kind)) =>
+            {
+                statement.insert(String::new())
+            },
+            None => continue,
+        };
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(line);
+        if text.ends_with(';') {
+            let text = statement.take().unwrap_or_default();
+            let name = text
+                .split_once("(*")
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(name, _)| name.trim().to_string());
+            if let Some(name) = name {
+                typedefs.insert(name, text.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+        }
+    }
+    typedefs
+}
+
+/// The function-pointer typedefs of the old header that the new one changes
+/// or removes, as lines for the report. `abidiff` does not see them (see
+/// [`suppression_file`]); an added one is no change.
+fn changed_function_pointer_typedefs(old_header: &str, new_header: &str) -> Vec<String> {
+    let new = function_pointer_typedefs(new_header);
+    function_pointer_typedefs(old_header)
+        .into_iter()
+        .filter_map(|(name, old)| match new.get(&name) {
+            None => Some(format!("removed typedef {name}: {old}")),
+            Some(new) if *new != old => Some(format!("changed typedef {name}: {old} → {new}")),
+            Some(_) => None,
+        })
+        .collect()
 }
 
 /// The highest release tag `vX.Y.Z` not above `current`, or below it when the
@@ -372,18 +475,26 @@ fn current_version() -> anyhow::Result<(String, Version, bool)> {
     let text = crate::package_version()?;
     let version = PackageVersion::parse(&text)
         .with_context(|| format!("`{text}` is not a version `cargo xtask bump-version` writes"))?;
-    let (major, minor, patch) = version.release();
-    Ok((text, Version { major, minor, patch }, version.is_pre_release()))
+    Ok((text, release_of(version), version.is_pre_release()))
 }
 
-/// The `[package]` version in the baseline's `Cargo.toml`.
-fn baseline_version(dir: &Path) -> anyhow::Result<Version> {
+/// The `[package]` version in the baseline's `Cargo.toml`, a release or a
+/// pre-release.
+fn baseline_version(dir: &Path) -> anyhow::Result<PackageVersion> {
     let manifest = read(&dir.join("Cargo.toml"))?;
-    package_version_in(&manifest).context("the baseline Cargo.toml has no [package] version")
+    package_version_in(&manifest)
+        .context("the baseline Cargo.toml has no [package] version `cargo xtask bump-version` writes")
+}
+
+/// The `X.Y.Z` a version is, or is a pre-release of, which the semver rule
+/// reads.
+fn release_of(version: PackageVersion) -> Version {
+    let (major, minor, patch) = version.release();
+    Version { major, minor, patch }
 }
 
 /// The `version` key of the `[package]` table of a manifest.
-fn package_version_in(manifest: &str) -> Option<Version> {
+fn package_version_in(manifest: &str) -> Option<PackageVersion> {
     let mut in_package = false;
     for line in manifest.lines() {
         let line = line.trim();
@@ -392,7 +503,7 @@ fn package_version_in(manifest: &str) -> Option<Version> {
         } else if in_package {
             if let Some(value) = line.strip_prefix("version") {
                 let value = value.trim_start().strip_prefix('=')?.trim().trim_matches('"');
-                return Version::parse(value);
+                return PackageVersion::parse(value);
             }
         }
     }
@@ -518,21 +629,113 @@ typedef enum {
         assert_eq!(
             suppression_file(&handles),
             "# Opaque C handles: generated by `cargo xtask api-compat`.\n\
-             [suppress_type]\n  type_kind = struct\n  name_regexp = ^(.*::)?(kafka_a_t|kafka_b_t)$\n"
+             [suppress_type]\n  type_kind = struct\n  name_regexp = ^(.*::)?(kafka_a_t|kafka_b_t)$\n\
+             \n\
+             # Function-pointer typedefs, compared in the C header instead.\n\
+             [suppress_type]\n  name_regexp = ^(.*::)?Option<(unsafe.)?extern.....fn\n"
         );
+    }
+
+    const HEADER_V1: &str = "\
+/**
+ * A callback.
+ */
+typedef void (*kafka_a_cb_t)(void *opaque);
+
+typedef double (*kafka_m_measure_fn_t)(void *self_,
+                                       const kafka_c_t *config,
+                                       int64_t now);
+
+typedef int8_t (*kafka_gone_fn_t)(void *self_);
+
+typedef struct {
+  void (*field)(void *x);
+} kafka_v_t;
+
+typedef enum {
+  kafka_E_A,
+} kafka_E_e;
+";
+
+    #[test]
+    fn function_pointer_typedefs_are_read_over_several_lines() {
+        let typedefs = function_pointer_typedefs(HEADER_V1);
+        assert_eq!(
+            typedefs.into_iter().collect::<Vec<_>>(),
+            [
+                (
+                    "kafka_a_cb_t".to_string(),
+                    "typedef void (*kafka_a_cb_t)(void *opaque);".to_string()
+                ),
+                (
+                    "kafka_gone_fn_t".to_string(),
+                    "typedef int8_t (*kafka_gone_fn_t)(void *self_);".to_string()
+                ),
+                (
+                    "kafka_m_measure_fn_t".to_string(),
+                    "typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int64_t now);"
+                        .to_string()
+                ),
+            ]
+        );
+    }
+
+    /// A `_fn_t` change is suppressed in `abidiff` and caught in the header:
+    /// reformatting or adding one is no change, a changed signature or a
+    /// removed one is.
+    #[test]
+    fn function_pointer_typedef_changes_are_breaking() {
+        let reformatted = HEADER_V1.replace(
+            "(void *self_,\n                                       const kafka_c_t *config,",
+            "(void *self_, const kafka_c_t *config,",
+        );
+        let added = format!("{HEADER_V1}typedef void (*kafka_new_fn_t)(void *self_);\n");
+        assert!(changed_function_pointer_typedefs(HEADER_V1, HEADER_V1).is_empty());
+        assert!(changed_function_pointer_typedefs(HEADER_V1, &reformatted).is_empty());
+        assert!(changed_function_pointer_typedefs(HEADER_V1, &added).is_empty());
+
+        let changed = HEADER_V1
+            .replace("int64_t now);", "int32_t now);")
+            .replace("typedef int8_t (*kafka_gone_fn_t)(void *self_);\n", "");
+        assert_eq!(
+            changed_function_pointer_typedefs(HEADER_V1, &changed),
+            [
+                "removed typedef kafka_gone_fn_t: typedef int8_t (*kafka_gone_fn_t)(void *self_);",
+                "changed typedef kafka_m_measure_fn_t: \
+                 typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int64_t now); → \
+                 typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int32_t now);",
+            ]
+        );
+        // A changed typedef alone, with `abidiff` seeing nothing, is breaking.
+        assert_eq!(c_verdict(0, true, false).unwrap(), Verdict::Breaking);
+        assert_eq!(c_verdict(0, true, true).unwrap(), Verdict::BreakingAllowed);
+    }
+
+    #[test]
+    fn abidiff_runs_without_added_symbols() {
+        let args = abidiff_args(Path::new("s.suppr"), Path::new("old.so"), Path::new("new.so"));
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["--no-added-syms", "--suppressions", "s.suppr", "old.so", "new.so"]);
     }
 
     #[test]
     fn abidiff_exit_status_decides_the_verdict() {
-        assert_eq!(abidiff_verdict(0, false).unwrap(), Verdict::Compatible);
-        // Only additions or compatible changes.
-        assert_eq!(abidiff_verdict(ABIDIFF_ABI_CHANGE, false).unwrap(), Verdict::Compatible);
+        // No change, or only added symbols, which `--no-added-syms` leaves out
+        // of the exit status.
+        assert_eq!(c_verdict(0, false, false).unwrap(), Verdict::Compatible);
+        assert_eq!(c_verdict(0, false, true).unwrap(), Verdict::Compatible);
+        // A changed function (a parameter or return type, a struct layout, a
+        // renumbered enum) sets bit 4 alone: breaking.
+        assert_eq!(c_verdict(ABIDIFF_ABI_CHANGE, false, false).unwrap(), Verdict::Breaking);
+        assert_eq!(c_verdict(ABIDIFF_ABI_CHANGE, false, true).unwrap(), Verdict::BreakingAllowed);
+        // A removed function sets bit 8 too.
         let incompatible = ABIDIFF_ABI_CHANGE | ABIDIFF_ABI_INCOMPATIBLE_CHANGE;
-        assert_eq!(abidiff_verdict(incompatible, false).unwrap(), Verdict::Breaking);
-        assert_eq!(abidiff_verdict(incompatible, true).unwrap(), Verdict::BreakingAllowed);
-        let error = abidiff_verdict(ABIDIFF_ERROR, true).unwrap_err();
+        assert_eq!(c_verdict(incompatible, false, false).unwrap(), Verdict::Breaking);
+        assert_eq!(c_verdict(incompatible, false, true).unwrap(), Verdict::BreakingAllowed);
+        let error = c_verdict(ABIDIFF_ERROR, false, true).unwrap_err();
         assert_eq!(error.to_string(), "abidiff failed (exit status 1)");
-        assert!(abidiff_verdict(ABIDIFF_USAGE_ERROR, true).is_err());
+        let error = c_verdict(ABIDIFF_USAGE_ERROR | ABIDIFF_ABI_CHANGE, false, true).unwrap_err();
+        assert_eq!(error.to_string(), "abidiff failed (exit status 6)");
     }
 
     #[test]
@@ -551,7 +754,29 @@ version = \"0.1.1\"
 [dependencies]
 version = \"1.0.0\"
 ";
-        assert_eq!(package_version_in(manifest), Some(v("0.1.1")));
+        let version = package_version_in(manifest).unwrap();
+        assert_eq!(release_of(version), v("0.1.1"));
+        assert!(!version.is_pre_release());
         assert_eq!(package_version_in("[package]\nname = \"x\"\n"), None);
+        assert_eq!(package_version_in("[package]\nversion = \"0.2.0+build\"\n"), None);
+    }
+
+    /// A pre-release crate, as `bump-version` writes it, reads as its release
+    /// for the semver rule and compares with the release tag below it.
+    #[test]
+    fn a_beta_version_finds_its_baseline() {
+        let beta = package_version_in("[package]\nname = \"confluent-kafka\"\nversion = \"0.2.0-beta.1\"\n").unwrap();
+        assert!(beta.is_pre_release());
+        assert_eq!(release_of(beta), v("0.2.0"));
+        let tags = ["v0.0.0", "v0.1.0", "v0.1.1", "v0.2.0"];
+        assert_eq!(
+            select_baseline(tags.into_iter(), release_of(beta), beta.is_pre_release()).as_deref(),
+            Some("v0.1.1")
+        );
+        // 0.1.1 → 0.2.0-beta.1 may break, as 0.1.1 → 0.2.0 may.
+        assert!(v("0.1.1").allows_breaking_change_to(release_of(beta)));
+        // A baseline that is itself a beta reads as its release: 0.2.0-beta.1
+        // → 0.2.0 may not break.
+        assert!(!release_of(beta).allows_breaking_change_to(v("0.2.0")));
     }
 }
