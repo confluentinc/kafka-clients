@@ -1359,8 +1359,8 @@ fn throwable_effect(vals: &[PyVal]) -> anyhow::Result<Effect> {
 }
 
 /// Store a value in a field of Java type `ty`: collections and buffers are
-/// copied into their output form (a `set`, a `dict`, a `memoryview`, header
-/// tuples) unless the value is a constant.
+/// copied into their output form (a `set`, a `dict`, a `memoryview`, a
+/// `Headers`) unless the value is a constant.
 fn convert_for_field(ty: &str, v: PyVal) -> PyVal {
     if v.konst.is_some() || v.expr.starts_with("_throwable.") || v.expr.starts_with('{') {
         return v;
@@ -1830,6 +1830,7 @@ fn import_source(name: &str) -> Option<(&'static str, &'static str)> {
         "OffsetAndMetadata" => ("confluent_kafka.consumer.offset_and_metadata", "OffsetAndMetadata"),
         "KafkaMetric" => ("confluent_kafka.common.kafka_metric", "KafkaMetric"),
         "TimestampType" => ("confluent_kafka.common.timestamp_type", "TimestampType"),
+        "Header" => ("confluent_kafka.common.header", "Header"),
         "Headers" => ("confluent_kafka.common.headers", "Headers"),
         "Iterable" => ("collections.abc", "Iterable"),
         "Mapping" => ("collections.abc", "Mapping"),
@@ -1874,9 +1875,11 @@ fn py_type(ty: &str, input: bool, info: &ClassInfo, used: &mut BTreeSet<String>)
         "Map" => format!("dict[{}, {}]", arg(0, used)?, arg(1, used)?),
         "ByteBuffer" | "byte[]" if input => "bytes".into(),
         "ByteBuffer" | "byte[]" => "memoryview".into(),
-        _ if header_type(ty) && input => {
-            format!("{}[tuple[str, bytes | bytearray | memoryview | None]]", named("Iterable", used))
-        },
+        _ if header_type(ty) && input => format!(
+            "{}[{} | tuple[str, bytes | bytearray | memoryview | None]]",
+            named("Iterable", used),
+            named("Header", used)
+        ),
         _ if header_type(ty) => named("Headers", used),
         "TopicPartition" | "OffsetAndMetadata" | "KafkaMetric" | "TimestampType" => named(base, used),
         other if info.java.enums.iter().any(|e| e.name == other) => format!("{}.{}", info.py_name, other),

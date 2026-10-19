@@ -34,7 +34,15 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import assert_type
 
-from confluent_kafka.common import Node, TimestampType, TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common import (
+    Header,
+    Headers,
+    Node,
+    TimestampType,
+    TopicIdPartition,
+    TopicPartition,
+    Uuid,
+)
 from confluent_kafka.common.serialization import (
     Deserializer,
     Serializer,
@@ -1128,3 +1136,28 @@ def _one_stub_per_java_overload(c: object = None) -> None:
 
 def test_one_stub_per_java_overload_typing_imports() -> None:
     _one_stub_per_java_overload()
+
+
+def _header_types() -> None:
+    record = ProducerRecord(topic="t", partition=None, key=b"k", value=b"v",
+                            headers=[("pair", b"1"), Header(key="h", value=None)])
+    headers = record.headers()
+    assert_type(headers, Headers)
+    for header in headers:
+        assert_type(header, Header)
+        assert_type(header.key(), str)
+        assert_type(header.value(), "memoryview | None")
+    assert_type(headers.add(header=Header(key="k", value=b"v")), Headers)
+    assert_type(headers.add(key="k", value=None), Headers)
+    assert_type(headers.remove(key="k"), Headers)
+    assert_type(headers.last_header(key="k"), "Header | None")
+    assert_type(headers.headers(key="k"), "list[Header]")
+    assert_type(headers.to_array(), "tuple[Header, ...]")
+    assert_type(Headers(), Headers)
+    assert_type(Headers(headers=[("k", None)]), Headers)
+    consumed = ConsumerRecord(topic="t", partition=0, offset=0, key=b"k", value=b"v")
+    assert_type(consumed.headers(), Headers)
+
+
+def test_header_typing() -> None:
+    _header_types()

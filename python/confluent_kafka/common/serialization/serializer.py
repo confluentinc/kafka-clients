@@ -42,6 +42,8 @@ class Serializer(Protocol[T_contra]):
     def __call__(self, topic: str, value: T_contra | None,
                  headers: Headers | None = None) -> bytes | None:
         """Convert ``value`` into bytes: ``topic`` is the topic associated
-        with the data, ``headers`` the headers associated with the record, and
-        ``value`` the typed data. Returns the serialized bytes."""
+        with the data, ``headers`` the headers associated with the record (its
+        own ``Headers``, which a serializer may change: they turn read-only
+        once the record is sent, as Java's ``KafkaProducer`` seals them), and ``value`` the typed data. Returns the
+        serialized bytes."""
         ...

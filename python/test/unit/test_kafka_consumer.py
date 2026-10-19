@@ -158,7 +158,7 @@ import pytest
 from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError, 
 )
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import Headers, KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
@@ -3094,7 +3094,7 @@ class _NativeRecord:
         self.serialized_value_size = -1 if value is None else len(value)
         self.key = None if key is None else memoryview(key)
         self.value = None if value is None else memoryview(value)
-        self.headers = ()
+        self.headers = Headers()  # what the extension builds: writable, empty
         self.leader_epoch = None
 
 

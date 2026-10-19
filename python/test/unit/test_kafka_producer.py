@@ -82,8 +82,11 @@ are not, with the reason:
   ``negativePartitionShouldThrow`` (also a ``MockClient``), and
   ``testMonitorablePlugins`` (the ``Monitorable`` metrics of a serializer,
   partitioner and interceptor plugin);
-- ``testHeadersFailure``: Python headers are immutable, so there is no
-  read-only state to check;
+- ``testHeadersFailure``: Java's ``doSend`` waits for the topic's metadata
+  before it serializes and makes the headers read-only, so a send that times
+  out on the metadata leaves them writable; here the serializers run, and the
+  headers turn read-only, on the caller's thread before the record reaches the
+  core, whose metadata wait follows, so the state Java checks is not reached;
 - ``testUnusedConfigs``: only the core reports the keys it does not know, in its
   own log (CLAUDE.md, Python Binding Conventions, Configuration);
 - ``testInvalidGenerationIdAndMemberIdCombinedInSendOffsets``: the generation /
@@ -108,7 +111,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
+from confluent_kafka.common import Header, KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
@@ -292,8 +295,9 @@ def test_invalid_socket_receive_buffer_size() -> None:
 
 
 def test_headers_success() -> None:
-    # Java also checks, with an interceptor, that the headers turn read-only;
-    # Python headers are immutable. The serializers get the record's headers.
+    # Java's doTestHeaders, without the interceptor (the client runs none): the
+    # headers can be changed before the send and are read-only after it, and
+    # the serializers get the record's headers.
     calls: list[tuple[str, object, object]] = []
 
     def recording(topic: str, value: str | None, headers: Any = None) -> bytes | None:
@@ -304,11 +308,21 @@ def test_headers_success() -> None:
     producer = KafkaProducer(configs=configs, key_serializer=recording,
                              value_serializer=recording)
     topic = "topic"
-    record = ProducerRecord(topic=topic, partition=None, key="key", value="value",
-                            headers=[("test", b"header2")])
+    record = ProducerRecord(topic=topic, key="key", value="value")
+    # ensure headers can be mutated pre send.
+    record.headers().add(header=Header(key="test", value=b"header2"))
     producer.send(record=record)
+    # ensure headers are closed and cannot be mutated post send
+    assert record.headers()._is_read_only()  # noqa: SLF001
+    with pytest.raises(IllegalStateError) as exc:
+        record.headers().add(header=Header(key="test", value=b"test"))
+    assert str(exc.value) == "RecordHeaders has been closed."
+    # ensure existing headers are not changed, and last header for key is
+    # still original value
+    last = record.headers().last_header(key="test")
+    assert last is not None and bytes(last.value() or b"") == b"header2"
     assert calls == [(topic, "key", record.headers()), (topic, "value", record.headers())]
-    assert bytes(record.headers()[-1][1]) == b"header2"  # type: ignore[arg-type]
+    assert calls[0][2] is record.headers()
     producer.close(timeout=0)
 
 

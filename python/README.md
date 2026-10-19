@@ -30,7 +30,7 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
-    MetricName, Metric, KafkaMetric, TimestampType, Headers,
+    MetricName, Metric, KafkaMetric, TimestampType, Header, Headers,
     KafkaError,  # Java's org.apache.kafka.common.KafkaException
     KafkaFuture, AsyncKafkaFuture,  # every future the package hands out
 )
@@ -65,6 +65,23 @@ confluent-kafka-python that passes `None` to skip an argument must leave the
 argument out instead. The signatures show the private default `MISSING`
 (`help()`, `inspect.signature`): it only marks a parameter some overload omits
 and is never a value to pass.
+
+## Headers
+
+A record's headers are Java's: `record.headers()` returns a `Headers`
+(`confluent_kafka.common`), never `None` and empty when there are none, holding
+`Header` objects with `key()` and `value()`, a `memoryview` or `None` (for a
+fetched record, a view into the fetch batch, never a copy). `Headers` has
+Java's `add(header=…)` / `add(key=…, value=…)`, `remove(key=…)`,
+`last_header(key=…)`, `headers(key=…)` and `to_array()`, and iterates with
+`for h in record.headers()`. A record's headers can be changed until it is sent
+(by `KafkaProducer.send`, once the serializers ran); then `add` and `remove`
+raise `IllegalStateError("RecordHeaders has been closed.")`, as Java's
+`KafkaProducer` seals them. A polled record's headers stay writable, as Java's
+`CompletedFetch` leaves them. Where headers are taken (`ProducerRecord(headers=…)`,
+`ConsumerRecord(headers=…)`), each element is a `Header(key=…, value=…)` or a
+`(key, value)` pair. Code that read headers as `(key, value)` tuples
+(`for k, v in record.headers()`) reads `h.key()`, `h.value()` instead.
 
 ## Async peers
 
