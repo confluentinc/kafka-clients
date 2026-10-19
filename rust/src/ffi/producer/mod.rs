@@ -95,7 +95,8 @@
 //! the call (see below). Only a record the producer would have to wait for,
 //! on metadata or on buffer memory, is *queued*. When either serializer is a
 //! C implementation, every record is queued and `cb` fires later, through the
-//! callback vector; only a closed producer still completes inside the call.
+//! callback vector, a closed producer's refusal included; only a send made
+//! while `_destroy` runs completes inside the call.
 //! A per-producer submission task takes the queued records in FIFO order and
 //! tries each again on the producer without waiting. One it still has to
 //! wait for moves to a task of its own, which runs Java's blocking `send` for
