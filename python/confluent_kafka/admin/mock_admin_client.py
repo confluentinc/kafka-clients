@@ -394,7 +394,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
                       options: DescribeAclsOptions = MISSING) -> DescribeAclsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_acls(filter)
 
     @overload
@@ -405,7 +405,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def create_acls(self, *, acls: Iterable[AclBinding],
                     options: CreateAclsOptions = MISSING) -> CreateAclsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._create_acls(acls)
 
     @overload
@@ -416,7 +416,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
                     options: DeleteAclsOptions = MISSING) -> DeleteAclsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._delete_acls(filters)
 
     @overload
@@ -430,7 +430,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
                          options: DescribeConfigsOptions = MISSING
                          ) -> DescribeConfigsResult[Sync]:
         """The configs of broker, topic, client-metrics and group resources; another
-        type fails its future with ``UnsupportedVersionError("Not implemented
+        type fails its future with ``UnsupportedOperationError("Not implemented
         yet")`` (``options`` is ignored)."""
         return self._describe_configs(resources)
 
@@ -514,7 +514,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
                           options: CreatePartitionsOptions = MISSING
                           ) -> CreatePartitionsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._create_partitions(new_partitions)
 
     @overload
@@ -529,7 +529,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
                        options: DeleteRecordsOptions = MISSING) -> DeleteRecordsResult[Sync]:
         """An empty result for no records; otherwise raises
-        ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._delete_records(records_to_delete)
 
     @overload
@@ -618,7 +618,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
                                  options: DescribeConsumerGroupsOptions = MISSING
                                  ) -> DescribeConsumerGroupsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_consumer_groups(group_ids)
 
     @overload
@@ -650,7 +650,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     ) -> ListConsumerGroupOffsetsResult[Sync]:
         """The offsets set by ``update_consumer_group_offsets`` for one group: all
         for a spec with no partitions, else those of its partitions. More or fewer
-        than one group raises ``UnsupportedVersionError("Not implemented yet")``;
+        than one group raises ``UnsupportedOperationError("Not implemented yet")``;
         ``group_id`` (Java's ``new ListConsumerGroupOffsetsSpec()``, whose
         partitions are ``None``) raises ``TypeError`` once an offset is stored,
         where Java's mock throws ``NullPointerException``; ``options`` is ignored."""
@@ -673,7 +673,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
                                options: DeleteConsumerGroupsOptions = MISSING
                                ) -> DeleteConsumerGroupsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._delete_consumer_groups(group_ids)
 
     @overload
@@ -694,7 +694,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
                                       partitions: Iterable[TopicPartition],
                                       options: DeleteConsumerGroupOffsetsOptions = MISSING
                                       ) -> DeleteConsumerGroupOffsetsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._delete_consumer_group_offsets(group_id, partitions)
 
     @overload
@@ -718,7 +718,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def elect_leaders(self, *, election_type: ElectionType,
                       partitions: Iterable[TopicPartition] | None,
                       options: ElectLeadersOptions = MISSING) -> ElectLeadersResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._elect_leaders(election_type, partitions)
 
     @overload
@@ -776,7 +776,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def remove_members_from_consumer_group(
         self, *, group_id: str, options: RemoveMembersFromConsumerGroupOptions
     ) -> RemoveMembersFromConsumerGroupResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._remove_members_from_consumer_group(group_id, options)
 
     @overload
@@ -797,7 +797,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
                                      options: AlterConsumerGroupOffsetsOptions = MISSING
                                      ) -> AlterConsumerGroupOffsetsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implement yet")``, as Java's mock."""
         return self._alter_consumer_group_offsets(group_id, offsets)
 
     @overload
@@ -813,7 +813,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
                      options: ListOffsetsOptions = MISSING) -> ListOffsetsResult[Sync]:
         """The offsets set by ``update_beginning_offsets`` for
         ``OffsetSpec.earliest()`` and by ``update_end_offsets`` for every other spec;
-        ``OffsetSpec.for_timestamp`` raises ``UnsupportedVersionError("Not implement
+        ``OffsetSpec.for_timestamp`` raises ``UnsupportedOperationError("Not implement
         yet")``, as Java's mock (``options`` is ignored)."""
         return self._list_offsets(topic_partition_offsets)
 
@@ -830,7 +830,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
                                options: DescribeClientQuotasOptions = MISSING
                                ) -> DescribeClientQuotasResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implement yet")``, as Java's mock."""
         return self._describe_client_quotas(filter)
 
     @overload
@@ -848,7 +848,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
                             options: AlterClientQuotasOptions = MISSING
                             ) -> AlterClientQuotasResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implement yet")``, as Java's mock."""
         return self._alter_client_quotas(entries)
 
     @overload
@@ -870,7 +870,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
             self, *, users: Sequence[str] | None = MISSING,
             options: DescribeUserScramCredentialsOptions = MISSING
     ) -> DescribeUserScramCredentialsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_user_scram_credentials(None if users is MISSING else users)
 
     @overload
@@ -889,7 +889,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
             self, *, alterations: Sequence[UserScramCredentialAlteration],
             options: AlterUserScramCredentialsOptions = MISSING
     ) -> AlterUserScramCredentialsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._alter_user_scram_credentials(alterations)
 
     @overload
@@ -953,7 +953,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
                            options: DescribeProducersOptions = MISSING
                            ) -> DescribeProducersResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_producers(partitions)
 
     @overload
@@ -971,7 +971,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def describe_transactions(self, *, transactional_ids: Iterable[str],
                               options: DescribeTransactionsOptions = MISSING
                               ) -> DescribeTransactionsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_transactions(transactional_ids)
 
     @overload
@@ -983,7 +983,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def abort_transaction(self, *, spec: AbortTransactionSpec,
                           options: AbortTransactionOptions = MISSING
                           ) -> AbortTransactionResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._abort_transaction(spec)
 
     @overload
@@ -994,7 +994,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def list_transactions(self, *, options: ListTransactionsOptions = MISSING
                           ) -> ListTransactionsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._list_transactions()
 
     @overload
@@ -1007,7 +1007,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def fence_producers(self, *, transactional_ids: Iterable[str],
                         options: FenceProducersOptions = MISSING
                         ) -> FenceProducersResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._fence_producers(transactional_ids)
 
     @overload
@@ -1041,7 +1041,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def describe_classic_groups(self, *, group_ids: Iterable[str],
                                 options: DescribeClassicGroupsOptions = MISSING
                                 ) -> DescribeClassicGroupsResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._describe_classic_groups(group_ids)
 
     @overload
@@ -1057,7 +1057,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def force_terminate_transaction(self, *, transactional_id: str,
                                     options: TerminateTransactionOptions = MISSING
                                     ) -> TerminateTransactionResult[Sync]:
-        """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
+        """Raises ``UnsupportedOperationError("Not implemented yet")``, as Java's mock."""
         return self._force_terminate_transaction(transactional_id)
 
     # ---- The Java mock's own methods with a future in their type -----------------

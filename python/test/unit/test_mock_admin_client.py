@@ -117,6 +117,7 @@ from confluent_kafka.common.errors.unknown_topic_id_error import UnknownTopicIdE
 from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
     UnknownTopicOrPartitionError,
 )
+from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.consumer import OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -735,7 +736,7 @@ def test_describe_configs_other_resources() -> None:
     entry = value_of(values[group]).get(name="g.k")
     assert entry is not None and entry.value() == "d"
     error = error_of(values[logger])
-    assert isinstance(error, UnsupportedVersionError) and str(error) == "Not implemented yet"
+    assert isinstance(error, UnsupportedOperationError) and str(error) == "Not implemented yet"
 
 
 def test_incremental_alter_configs_unsupported_op_and_type() -> None:
@@ -748,7 +749,7 @@ def test_incremental_alter_configs_unsupported_op_and_type() -> None:
         configs={broker: [append], logger: [set_op("k", "v")]}).values()
     error = error_of(values[broker])
     assert isinstance(error, InvalidRequestError) and str(error) == "Unsupported op type APPEND"
-    assert isinstance(error_of(values[logger]), UnsupportedVersionError)
+    assert isinstance(error_of(values[logger]), UnsupportedOperationError)
 
 
 def test_replica_log_dirs() -> None:
@@ -791,15 +792,15 @@ def test_describe_log_dirs() -> None:
 
 def test_unimplemented_methods_raise_java_messages() -> None:
     client = admin()
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.create_partitions(new_partitions={})
     assert str(e.value) == "Not implemented yet"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.elect_leaders(election_type=ElectionType.PREFERRED, partitions=None)
     assert str(e.value) == "Not implemented yet"
     assert client.delete_records(records_to_delete={}).low_watermarks() == {}
     tp = TopicPartition(topic="t", partition=0)
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.delete_records(records_to_delete={tp: RecordsToDelete.before_offset(offset=1)})
     assert str(e.value) == "Not implemented yet"
 
@@ -813,7 +814,7 @@ def test_list_offsets() -> None:
     assert value_of(earliest.partition_result(partition=tp)).offset() == 3
     latest = client.list_offsets(topic_partition_offsets={tp: OffsetSpec.latest()})
     assert value_of(latest.partition_result(partition=tp)).offset() == 9
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.list_offsets(topic_partition_offsets={tp: OffsetSpec.for_timestamp(timestamp=1)})
     assert str(e.value) == "Not implement yet"
     other = TopicPartition(topic="t", partition=1)
@@ -1224,10 +1225,10 @@ def test_list_consumer_group_offsets_java_mock_quirks() -> None:
     with pytest.raises(TypeError) as none:
         mock.list_consumer_group_offsets(group_id="g")
     assert str(none.value) == "ListConsumerGroupOffsetsSpec.topic_partitions must not be None"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         mock.list_consumer_group_offsets(group_specs={})
     assert str(e.value) == "Not implemented yet"
-    with pytest.raises(UnsupportedVersionError):
+    with pytest.raises(UnsupportedOperationError):
         mock.list_consumer_group_offsets(group_specs={
             "a": ListConsumerGroupOffsetsSpec(), "b": ListConsumerGroupOffsetsSpec()})
     with pytest.raises(IllegalArgumentError) as iae:
@@ -1286,7 +1287,7 @@ def test_unimplemented_g3b_methods_raise_java_messages() -> None:
         (client.force_terminate_transaction, {"transactional_id": "t"}, implemented),
     ]
     for method, kwargs, message in calls:
-        with pytest.raises(UnsupportedVersionError) as e:
+        with pytest.raises(UnsupportedOperationError) as e:
             method(**kwargs)
         assert str(e.value) == message, method
 

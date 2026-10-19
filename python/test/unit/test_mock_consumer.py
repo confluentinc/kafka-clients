@@ -38,7 +38,8 @@ import pytest
 
 from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, Node, PartitionInfo, TimestampType, TopicPartition
-from confluent_kafka.common.errors import UnsupportedVersionError, WakeupError
+from confluent_kafka import UnsupportedOperationError
+from confluent_kafka.common.errors import WakeupError
 from confluent_kafka.consumer import (
     AsyncMockConsumer, CloseOptions, ConsumerRebalanceListener, ConsumerRecord, MockConsumer,
     NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError, SubscriptionPattern,
@@ -542,7 +543,7 @@ def test_set_offsets_exception_raises_the_injected_instance_and_clears() -> None
 
 def test_offsets_for_times_is_not_implemented() -> None:
     consumer = earliest()
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         consumer.offsets_for_times(timestamps_to_search={tp("t", 0): 0})
     assert str(e.value) == "Not implemented yet."
 
@@ -576,7 +577,7 @@ def test_the_duration_overloads_ignore_the_timeout() -> None:
         assert consumer.list_topics(timeout=timeout) == {}
         assert consumer.beginning_offsets(partitions=[partition], timeout=timeout) == {partition: 2}
         assert consumer.end_offsets(partitions=[partition], timeout=timeout) == {partition: 7}
-        with pytest.raises(UnsupportedVersionError) as e:
+        with pytest.raises(UnsupportedOperationError) as e:
             consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=timeout)
         assert str(e.value) == "Not implemented yet."
     consumer.close()
@@ -601,7 +602,7 @@ def test_the_async_duration_overloads_ignore_the_timeout() -> None:
         assert await consumer.beginning_offsets(partitions=[partition], timeout=-1) == {
             partition: 2}
         assert await consumer.end_offsets(partitions=[partition], timeout=-1) == {partition: 7}
-        with pytest.raises(UnsupportedVersionError):
+        with pytest.raises(UnsupportedOperationError):
             await consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=-1)
 
     asyncio.run(main())
@@ -1064,7 +1065,7 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
         consumer.wakeup()
         with pytest.raises(WakeupError):
             await consumer.poll(timeout=0)
-        with pytest.raises(UnsupportedVersionError):
+        with pytest.raises(UnsupportedOperationError):
             await consumer.offsets_for_times(timestamps_to_search={partition: 0})
         assert await consumer.current_lag(topic_partition=partition) == 0
         async with consumer:

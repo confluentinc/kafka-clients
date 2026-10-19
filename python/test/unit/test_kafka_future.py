@@ -46,7 +46,7 @@ from confluent_kafka import ExecutionError
 from confluent_kafka import TimeoutError as JavaTimeoutError
 from confluent_kafka import _throwable
 from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
-from confluent_kafka.common.errors import UnsupportedVersionError
+from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 # KafkaFutureTest is @Timeout(120); every wait here is bounded far below that.
@@ -663,7 +663,7 @@ def test_future_timeout_with_zero_wait(kind: Kind) -> None:
 def test_leak_completable_future(kind: Kind) -> None:
     """Java's ``testLeakCompletableFuture``: the inner future
     ``to_completion_stage()`` returns cannot be completed by user code, which
-    gets ``UnsupportedOperationException`` (``UnsupportedVersionError``).
+    gets ``UnsupportedOperationException`` (``UnsupportedOperationError``).
     Java's ``completeOnTimeout`` / ``completeAsync`` / ``obtrude*`` /
     ``minimalCompletionStage`` have no counterpart on Python's futures."""
     impl, kfut = new_future(kind)
@@ -677,9 +677,9 @@ def test_leak_completable_future(kind: Kind) -> None:
     else:
         comfut = kfut.to_completion_stage()
     message = "User code should not complete futures returned from Kafka clients"
-    with pytest.raises(UnsupportedVersionError, match=message):
+    with pytest.raises(UnsupportedOperationError, match=message):
         comfut.set_result("")
-    with pytest.raises(UnsupportedVersionError, match=message):
+    with pytest.raises(UnsupportedOperationError, match=message):
         comfut.set_exception(RuntimeError())
     assert not kfut.is_done()
     assert not comfut.done()

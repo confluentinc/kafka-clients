@@ -73,7 +73,6 @@ from confluent_kafka._wait import WAIT_SLICE_S as WAIT_SLICE_S
 from confluent_kafka._wait import result_sliced as result_sliced
 from confluent_kafka._wait import wait_sliced as wait_sliced
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
-from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.metric_name import MetricName
 from confluent_kafka.common.node import Node
@@ -82,6 +81,7 @@ from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
+from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
 if TYPE_CHECKING:
     from confluent_kafka import Duration
@@ -206,12 +206,12 @@ def offsets_to_spec(
 def group_metadata_handle(group_metadata: ConsumerGroupMetadata) -> object:
     """The core's handle a ``KafkaConsumer``'s ``group_metadata()`` carries,
     which the FFI takes in place of the four fields. Metadata without one (a
-    mock consumer's) raises ``UnsupportedVersionError``, as the FFI has no
+    mock consumer's) raises ``UnsupportedOperationError``, as the FFI has no
     constructor to build a handle from the fields; Java sends any
     ``ConsumerGroupMetadata``."""
     native = group_metadata._native
     if native is None:
-        raise UnsupportedVersionError(message=NO_GROUP_METADATA_HANDLE_MESSAGE)
+        raise UnsupportedOperationError(message=NO_GROUP_METADATA_HANDLE_MESSAGE)
     return native
 
 

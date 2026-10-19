@@ -39,7 +39,7 @@ checks its range as Java does, ``Integer.parseInt`` raises ``IllegalArgumentErro
 (``NumberFormatException``), and a ``null`` the mock itself looks up and dereferences
 (Java's ``NullPointerException``) raises ``IllegalStateError`` naming the state the
 mock lacks, or ``TypeError`` for an option left ``None``. Java's ``UnsupportedOperationException``
-is ``UnsupportedVersionError`` (Types), with Java's messages, typo included
+is the root ``UnsupportedOperationError`` (Types), with Java's messages, typo included
 .
 
 Left out with what they serve (Class family, Dropped): ``setMockMetrics`` (state of
@@ -271,7 +271,19 @@ def _current_time_millis() -> int:
     return time.time_ns() // 1_000_000
 
 
-def _unsupported(message: str) -> Exception:
+def _unsupported(message: str | None = None) -> Exception:
+    """Java's ``UnsupportedOperationException``: ``UnsupportedOperationError``
+    (Types); without a message, Java's no-argument constructor."""
+    from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
+
+    if message is None:
+        return UnsupportedOperationError()
+    return UnsupportedOperationError(message=message)
+
+
+def _unsupported_version(message: str) -> Exception:
+    """Java's ``UnsupportedVersionException``, which ``unregisterController``
+    fails its future with when the mock does not use a raft controller."""
     from confluent_kafka.common.errors.unsupported_version_error import (
         UnsupportedVersionError,
     )
@@ -1119,7 +1131,7 @@ class MockAdminClientCore:
                     return new_map
                 stored[resource_name] = new_map
                 return None
-            return _unsupported("")
+            return _unsupported()
 
     def _alter_replica_log_dirs(
             self, replica_assignment: Mapping[TopicPartitionReplica, str]
@@ -1685,7 +1697,7 @@ class MockAdminClientCore:
         if self._using_raft_controller:
             return UnregisterControllerResult._new(
                 future=self._kind._FUTURE.completed_future(value=None), kind=self._kind)
-        return UnregisterControllerResult._new(future=self._failed(_unsupported("")),
+        return UnregisterControllerResult._new(future=self._failed(_unsupported_version("")),
                                                kind=self._kind)
 
     def _describe_producers(self, partitions: Iterable[TopicPartition]

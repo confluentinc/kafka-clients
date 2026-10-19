@@ -381,11 +381,11 @@ _USER_COMPLETION_MESSAGE = "User code should not complete futures returned from 
 
 
 def _user_completion() -> BaseException:
-    """Java's ``UnsupportedOperationException`` (``UnsupportedVersionError``)
+    """Java's ``UnsupportedOperationException`` (``UnsupportedOperationError``)
     for user code completing an inner future."""
-    from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
+    from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
-    return UnsupportedVersionError(message=_USER_COMPLETION_MESSAGE)
+    return UnsupportedOperationError(message=_USER_COMPLETION_MESSAGE)
 
 
 class _InnerFuture(concurrent.futures.Future[T]):

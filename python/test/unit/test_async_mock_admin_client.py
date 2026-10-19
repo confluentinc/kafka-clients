@@ -58,6 +58,7 @@ from confluent_kafka.common.kafka_future import AsyncKafkaFuture
 from confluent_kafka.common.errors.invalid_request_error import InvalidRequestError
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
+from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.execution_error import ExecutionError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -203,7 +204,7 @@ async def test_partitions_records_log_dirs_and_offsets() -> None:
     await _value(client.create_topics(new_topics=[
         NewTopic(name="t", num_partitions=1, replication_factor=2)]).all())
     tp = TopicPartition(topic="t", partition=0)
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.create_partitions(new_partitions={})
     assert str(e.value) == "Not implemented yet"
     assert client.delete_records(records_to_delete={}).low_watermarks() == {}
@@ -234,7 +235,7 @@ async def test_consumer_group_offsets() -> None:
     with pytest.raises(TypeError) as none:  # Java's default spec: NullPointerException
         client.list_consumer_group_offsets(group_id="g")
     assert str(none.value) == "ListConsumerGroupOffsetsSpec.topic_partitions must not be None"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.describe_consumer_groups(group_ids=["g"])
     assert str(e.value) == "Not implemented yet"
 
@@ -280,16 +281,16 @@ async def test_features() -> None:
 
 async def test_unimplemented_groups_raise_java_messages() -> None:
     client = admin()
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.describe_acls(filter=AclBindingFilter.ANY)
     assert str(e.value) == "Not implemented yet"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.alter_client_quotas(entries=[])
     assert str(e.value) == "Not implement yet"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.describe_user_scram_credentials()
     assert str(e.value) == "Not implemented yet"
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         client.list_transactions()
     assert str(e.value) == "Not implemented yet"
 

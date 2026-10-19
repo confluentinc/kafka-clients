@@ -680,6 +680,16 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "",
         &[&[], &[("String", "s")]],
     ),
+    // Java's `UnsupportedOperationException`, thrown by the pure-Python mocks
+    // (`MockConsumer.offsetsForTimes`, `MockAdminClient`'s "Not implemented yet").
+    // The core models no id for it yet (core-ffi-improvements-list.md B8), so an
+    // error from the core stays `UnsupportedVersionError`.
+    (
+        "java.lang.UnsupportedOperationException",
+        "java.lang.RuntimeException",
+        "",
+        JDK_FOUR,
+    ),
     // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
     // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
 ];
@@ -714,7 +724,7 @@ const BLOCK_END: &str = "# END GENERATED ERRORS";
 struct ClassInfo {
     java_fqn: String,
     py_name: String,
-    /// `(constant name, value)`; `None` for the abstract classes and the two
+    /// `(constant name, value)`; `None` for the abstract classes and the
     /// built-ins the core does not model.
     ffi_id: Option<(String, i32)>,
     is_abstract: bool,
@@ -3299,9 +3309,10 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins
-        // (NoSuchElementException, ExecutionException; NullPointerException is Python's TypeError).
-        assert_eq!(classes.len(), 173);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins
+        // (NoSuchElementException, ExecutionException, UnsupportedOperationException;
+        // NullPointerException is Python's TypeError).
+        assert_eq!(classes.len(), 174);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
@@ -3324,6 +3335,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.TimeoutException"), "builtins.TimeoutError");
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
+        assert_eq!(base("java.lang.UnsupportedOperationException"), "RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"

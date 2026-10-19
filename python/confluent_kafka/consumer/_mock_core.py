@@ -63,12 +63,12 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka._java import java_str
-from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
+from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
 from ._auto_offset_reset_strategy import AutoOffsetResetStrategy
 from ._base import CONCURRENT_MESSAGE
@@ -541,7 +541,7 @@ class MockConsumerCore(Generic[K, V]):
         # Java's mock throws UnsupportedOperationException("Not implemented
         # yet.") (MockConsumer.java:611), inside its synchronized body.
         with self._lock:
-            raise UnsupportedVersionError(message="Not implemented yet.")
+            raise UnsupportedOperationError(message="Not implemented yet.")
 
     def _offsets_of(self, partitions: Iterable[TopicPartition],
                     offsets: dict[TopicPartition, int], which: str) -> dict[TopicPartition, int]:

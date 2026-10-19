@@ -37,7 +37,7 @@ from confluent_kafka._args import MISSING
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import InvalidGroupIdError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
-from confluent_kafka.common.errors import UnsupportedVersionError
+from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.consumer import (
     AsyncConsumer,
     AsyncKafkaConsumer,
@@ -366,7 +366,7 @@ def test_offset_lookups_null_arguments(kind: str) -> None:
             c.update_end_offsets(new_offsets={TP: 9})
             assert await call("beginning_offsets", partitions=[TP], timeout=None) == {TP: 1}
             assert await call("end_offsets", partitions=[TP], timeout=None) == {TP: 9}
-            await raises(UnsupportedVersionError, "Not implemented yet.",
+            await raises(UnsupportedOperationError, "Not implemented yet.",
                    lambda: call("offsets_for_times", timestamps_to_search=None))
     run(kind, body)
 

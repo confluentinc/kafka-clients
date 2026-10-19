@@ -196,6 +196,7 @@ ERRORS: tuple[tuple[str, str, str], ...] = (
     ("confluent_kafka.no_such_element_error", "NoSuchElementError", "java.util.NoSuchElementException"),
     ("confluent_kafka.producer.buffer_exhausted_error", "BufferExhaustedError", "org.apache.kafka.clients.producer.BufferExhaustedException"),
     ("confluent_kafka.timeout_error", "TimeoutError", "java.util.concurrent.TimeoutException"),
+    ("confluent_kafka.unsupported_operation_error", "UnsupportedOperationError", "java.lang.UnsupportedOperationException"),
 )
 
 # Java's ``Errors`` default message by wire code (``NONE`` has none): what
