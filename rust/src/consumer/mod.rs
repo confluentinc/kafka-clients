@@ -36,7 +36,7 @@ mod kafka_consumer;
 mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
-mod offset_commit_callback;
+pub mod offset_commit_callback;
 mod subscription_pattern;
 
 pub(crate) mod internals;
@@ -185,11 +185,6 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
-    /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
-    // Java's KafkaConsumer.clientId() is package-private; consumer-threading.md §1 lists it
-    #[doc(alias = "rust-only")]
-    fn client_id(&self) -> &str;
-
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
     ///
     /// Returns `Option<i64>` — the natural Rust analog.
@@ -317,6 +312,17 @@ where
     ///
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
+    ///
+    /// # Cancellation
+    ///
+    /// The returned future may be dropped before it completes, for example by
+    /// `tokio::time::timeout` or a `tokio::select!`, also while a
+    /// [`Deserializer`](crate::common::serialization::Deserializer) is
+    /// pending. The call then returns no records and leaves the positions
+    /// where they were before it, also when a partition's leader changed in
+    /// the meantime, so a later commit of the consumed offsets covers none of
+    /// the records it decoded, and a later `poll()` returns them, unless the
+    /// partition was sought, reset, paused or reassigned in between.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
     fn poll(&mut self, timeout: Duration) -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
 
@@ -655,6 +661,14 @@ where
     /// `Clone`, so neither is expressible with a
     /// bare reference; capture a [`ConsumerHandle`] instead. See
     /// [`ConsumerHandle`].
+    ///
+    /// The handle carries the other half of the `&mut self` exclusivity: its
+    /// async operations are admitted only while this consumer is running a
+    /// callback (a `ConsumerRebalanceListener` method or an
+    /// `OffsetCommitCallback`), and otherwise return the
+    /// `ConcurrentModificationError` Java's `acquire()` throws. `wakeup` and
+    /// the sync reads work from any thread at any time. See the `Threads`
+    /// section of [`ConsumerHandle`].
     // listener reentrancy handle (consumer-threading.md §31, §41)
     #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;

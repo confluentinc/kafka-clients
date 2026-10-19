@@ -14,14 +14,18 @@
 
 //! Specification of the desired offsets when listing offsets.
 //!
-//! Corresponds to `org.apache.kafka.clients.admin.OffsetSpec`.
+//! Corresponds to `org.apache.kafka.clients.admin.OffsetSpec`. Its nested
+//! subclass with data, [`TimestampSpec`], is reached through this module, as
+//! CLAUDE.md §2 provides for nested classes.
 
 /// Specifies the desired offsets when using `Admin::list_offsets`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.OffsetSpec`. Java models the
 /// variants as nested subclasses of `OffsetSpec`; the Rust translation uses a
 /// single closed enum since the variants carry no behavior beyond their
-/// timestamp mapping (`getOffsetFromSpec`).
+/// timestamp mapping (`getOffsetFromSpec`). The one subclass with data,
+/// `TimestampSpec`, stays behind its variant as a struct, so a field Java adds
+/// to it arrives without changing the variant's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
@@ -54,7 +58,36 @@ pub enum OffsetSpec {
     /// the given timestamp (in milliseconds).
     ///
     /// Mirrors `OffsetSpec.TimestampSpec`.
-    Timestamp(i64),
+    Timestamp(TimestampSpec),
+}
+
+/// The offset whose timestamp is greater than or equal to a requested
+/// timestamp (in milliseconds).
+///
+/// Corresponds to `org.apache.kafka.clients.admin.OffsetSpec.TimestampSpec`.
+/// Java keeps its constructor and `timestamp()` package-private: the value is
+/// built with [`OffsetSpec::for_timestamp`] and only `KafkaAdminClient`'s
+/// `getOffsetFromSpec` reads it, so outside the crate it is opaque.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec")]
+pub struct TimestampSpec {
+    timestamp: i64,
+}
+
+impl TimestampSpec {
+    /// Translated from the package-private constructor `TimestampSpec(long)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec#TimestampSpec")]
+    pub(crate) fn new(timestamp: i64) -> Self {
+        Self { timestamp }
+    }
+
+    /// The requested timestamp, in milliseconds.
+    ///
+    /// Translated from the package-private `TimestampSpec.timestamp()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec#timestamp")]
+    pub(crate) fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
 }
 
 impl OffsetSpec {
@@ -80,7 +113,7 @@ impl OffsetSpec {
     /// Mirrors `OffsetSpec.forTimestamp(long)`.
     #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#forTimestamp")]
     pub fn for_timestamp(timestamp: i64) -> Self {
-        Self::Timestamp(timestamp)
+        Self::Timestamp(TimestampSpec::new(timestamp))
     }
 
     /// Used to retrieve the offset with the largest timestamp of a partition.
@@ -129,6 +162,15 @@ mod tests {
         assert_eq!(OffsetSpec::earliest_local(), OffsetSpec::EarliestLocal);
         assert_eq!(OffsetSpec::latest_tiered(), OffsetSpec::LatestTiered);
         assert_eq!(OffsetSpec::earliest_pending_upload(), OffsetSpec::EarliestPendingUpload);
-        assert_eq!(OffsetSpec::for_timestamp(42), OffsetSpec::Timestamp(42));
+        assert_eq!(OffsetSpec::for_timestamp(42), OffsetSpec::Timestamp(TimestampSpec::new(42)));
+    }
+
+    #[test]
+    fn timestamp_spec_keeps_its_timestamp() {
+        let OffsetSpec::Timestamp(spec) = OffsetSpec::for_timestamp(42) else {
+            panic!("forTimestamp builds a TimestampSpec");
+        };
+        assert_eq!(spec.timestamp(), 42);
+        assert_ne!(OffsetSpec::for_timestamp(42), OffsetSpec::for_timestamp(43));
     }
 }

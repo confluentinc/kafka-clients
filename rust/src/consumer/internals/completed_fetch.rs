@@ -116,7 +116,7 @@ use crate::common::record::internal::{
     AbstractRecords, ByteBufferLogInputStream, CompressionType, ControlRecordType, DefaultRecord, DefaultRecordBatch,
     DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion,
 };
-use crate::common::serialization::Deserializer;
+use crate::common::serialization::DynDeserializer;
 use crate::common::utils::internals::BufferSupplier;
 use crate::common::utils::internals::ByteUtils;
 use crate::common::utils::internals::ChunkedBytesStream;
@@ -460,15 +460,19 @@ impl RecordStream {
         Ok(&self.record)
     }
 
-    /// Drops the record just read, its first `consumed` bytes, and lets go of
-    /// its buffer once all of it is consumed, so the next record is not read
-    /// while it is still held. A record a deserializer sliced keeps the buffer
-    /// alive through its own reference. Java keeps the record in `lastRecord`
-    /// until the next one is read (`CompletedFetch.java:277`); nothing a
-    /// caller sees depends on that.
+    /// Drops the record just read, its first `consumed` bytes. A buffer of up
+    /// to [`MAX_RECORD_PREALLOCATION`] bytes is kept, for
+    /// [`Self::read_record`] to read the next record into when nothing else
+    /// holds it any more; a bigger one is let go of once all of it is
+    /// consumed, so a big record is not held while the next is read. A record
+    /// a deserializer sliced keeps the buffer alive through its own reference,
+    /// and the next record then gets a buffer of its own. Java keeps the record
+    /// in `lastRecord` until the next one is read (`CompletedFetch.java:277`);
+    /// nothing a caller sees depends on that.
     fn consume(&mut self, consumed: usize) {
-        self.record.advance(consumed.min(self.record.len()));
-        if self.record.is_empty() {
+        let size = self.record.len();
+        self.record.advance(consumed.min(size));
+        if self.record.is_empty() && size > MAX_RECORD_PREALLOCATION {
             self.record = bytes::Bytes::new();
         }
     }
@@ -541,7 +545,7 @@ impl RecordStream {
             return;
         };
         let total = size_length + size;
-        let mut record = Vec::new();
+        let mut record = self.take_spare_buffer();
         if let Err(e) = record.try_reserve_exact(total.min(MAX_RECORD_PREALLOCATION)) {
             self.error = Some(e.into());
             return;
@@ -558,7 +562,8 @@ impl RecordStream {
             // `take` stops the read at the room there is: `read_to_end` grows a
             // buffer only past what it was given room for, and keeps the bytes
             // read before a failure.
-            let wanted = record.capacity() - record.len();
+            // A reused buffer may hold more than this record: read no further.
+            let wanted = record.capacity().min(total) - record.len();
             match (&mut self.reader).take(wanted as u64).read_to_end(&mut record) {
                 Ok(read) if read < wanted => {
                     self.eof = true;
@@ -573,6 +578,26 @@ impl RecordStream {
         }
         // Adopts the allocation; nothing is copied.
         self.record = bytes::Bytes::from(record);
+    }
+
+    /// The buffer of the record read last, emptied, for the next record to be
+    /// read into, when nothing else holds it: the key and value handed to the
+    /// deserializers share it (`Bytes::slice_ref`), and once they are dropped
+    /// it is this stream's alone again. Reusing it keeps a compressed record
+    /// at one allocation, the reference count the first slice of it adds,
+    /// rather than two, a buffer and its reference count. A buffer still held
+    /// elsewhere (a deserializer kept a slice of it) is left to its holder, and
+    /// the next record gets a new one, so no record shares a buffer with the
+    /// records around it.
+    fn take_spare_buffer(&mut self) -> Vec<u8> {
+        match std::mem::take(&mut self.record).try_into_mut() {
+            Ok(spare) => {
+                let mut spare = Vec::from(spare);
+                spare.clear();
+                spare
+            },
+            Err(_) => Vec::new(),
+        }
     }
 
     /// The next byte of the stream, or nothing once it has ended or failed,
@@ -800,10 +825,21 @@ impl CompletedFetch {
     }
 
     /// Pulls up to `max_records` records out of the fetch, decoding each
-    /// via the supplied deserializers.
+    /// via the supplied deserializers, and appends them to `out`.
     ///
     /// Mirrors Java's
-    /// `<K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig, Deserializers<K, V>, int)`.
+    /// `<K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig, Deserializers<K, V>, int)`,
+    /// except that the caller owns the list the records go to, so that a
+    /// caller whose future is dropped still holds what was decoded.
+    ///
+    /// # Cancellation
+    ///
+    /// Cancel-safe: the record cursor and `next_fetch_offset` move past a
+    /// record only once both its deserializers have resolved and the record
+    /// is in `out`. A call dropped while a deserializer is pending leaves the
+    /// cursor on that record, so the next call decodes it again; every record
+    /// before it is in `out`, and the fetch's position (`next_fetch_offset`)
+    /// is the one after the last of them.
     ///
     /// # Errors
     ///
@@ -812,16 +848,17 @@ impl CompletedFetch {
     /// deserialization error if a record fails to decode and no records
     /// were successfully decoded in this call.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#fetchRecords")]
-    pub(crate) fn fetch_records<K, V>(
+    pub(crate) async fn fetch_records<K, V>(
         &mut self,
         config: &FetchConfig,
-        key_deserializer: &dyn Deserializer<K>,
-        value_deserializer: &dyn Deserializer<V>,
+        key_deserializer: &dyn DynDeserializer<K>,
+        value_deserializer: &dyn DynDeserializer<V>,
         max_records: i32,
-    ) -> Result<Vec<ConsumerRecord<K, V>>, Error>
+        out: &mut Vec<ConsumerRecord<K, V>>,
+    ) -> Result<(), Error>
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
     {
         if self.corrupt_last_record {
             // Java: `throw new KafkaException("Received exception when fetching the
@@ -840,10 +877,12 @@ impl CompletedFetch {
             });
         }
         if self.is_consumed || max_records <= 0 {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
-        let mut out: Vec<ConsumerRecord<K, V>> = Vec::new();
+        // Java's `records.isEmpty()` is about this call's records, not those
+        // the caller already holds.
+        let records_before = out.len();
         // Java wraps the whole record loop in
         //   try { ... }
         //   catch (SerializationException se) { cachedRecordException = se;
@@ -858,19 +897,22 @@ impl CompletedFetch {
         // the cause. When records ARE in hand the error is swallowed and the
         // prefix returned, so a corrupt batch does not discard the records
         // already decoded before it.
-        let loop_result = self.fetch_records_loop(config, key_deserializer, value_deserializer, max_records, &mut out);
+        let loop_result = self
+            .fetch_records_loop(config, key_deserializer, value_deserializer, max_records, out)
+            .await;
+        let none_decoded = out.len() == records_before;
         match loop_result {
-            Ok(()) => Ok(out),
+            Ok(()) => Ok(()),
             // `catch (SerializationException se)` comes FIRST in Java, so it
             // wins over the broad arm. `RecordDeserializationException extends
             // SerializationException`, hence both variants.
             Err(err @ (Error::Serialization(_) | Error::RecordDeserialization(_))) => {
                 self.cached_record_error = Some(err.clone());
-                if out.is_empty() {
+                if none_decoded {
                     // Java rethrows `se` itself — no message wrap.
                     Err(err)
                 } else {
-                    Ok(out)
+                    Ok(())
                 }
             },
             // `catch (KafkaException e)`. A non-`KafkaException` (Java's
@@ -879,7 +921,7 @@ impl CompletedFetch {
             // unwrapped.
             Err(err) if err.is_kafka_error() => {
                 self.cached_record_error = Some(err.clone());
-                if out.is_empty() {
+                if none_decoded {
                     Err(Error::KafkaError(KafkaError::with_message_source(
                         Errors::UnknownServerError,
                         format!(
@@ -889,7 +931,7 @@ impl CompletedFetch {
                         err,
                     )))
                 } else {
-                    Ok(out)
+                    Ok(())
                 }
             },
             Err(err) => Err(err),
@@ -903,17 +945,17 @@ impl CompletedFetch {
     /// access to the records decoded so far — which is what decides between
     /// propagating and swallowing. Every error exit below simply returns `Err`,
     /// exactly as Java's loop body simply throws.
-    fn fetch_records_loop<K, V>(
+    async fn fetch_records_loop<K, V>(
         &mut self,
         config: &FetchConfig,
-        key_deserializer: &dyn Deserializer<K>,
-        value_deserializer: &dyn Deserializer<V>,
+        key_deserializer: &dyn DynDeserializer<K>,
+        value_deserializer: &dyn DynDeserializer<V>,
         max_records: i32,
         out: &mut Vec<ConsumerRecord<K, V>>,
     ) -> Result<(), Error>
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
     {
         self.ensure_cursor();
         // Preallocate the output Vec to avoid the realloc churn of growing from
@@ -959,10 +1001,12 @@ impl CompletedFetch {
 
             // §27: read the record as a borrowing `DefaultRecordRef` — the
             // key/value bytes are slices into the fetch (or decompression)
-            // buffer, never copied. We deserialize while holding the borrow,
-            // then advance the cursor's byte offset AFTER the borrow drops.
-            let key_result;
-            let value_result;
+            // buffer, never copied. They are handed to the deserializers as
+            // `Bytes` sharing that buffer (`slice_ref`: a reference count, no
+            // copy), so the borrow of `self` ends before the deserializers are
+            // awaited.
+            let key_bytes: Option<bytes::Bytes>;
+            let value_bytes: Option<bytes::Bytes>;
             let leader_epoch;
             let timestamp_type;
             let key_size;
@@ -972,15 +1016,6 @@ impl CompletedFetch {
             let record_size_in_bytes;
             let record_bytes_consumed;
             let headers_owned;
-            // Java's `newRecordDeserializationException` carries the offending
-            // record's RAW key and value buffers (`record.key()` /
-            // `record.value()`) so a consumer error handler can inspect them.
-            // They are slices into the fetch buffer, alive only inside the
-            // borrow below — so they are copied out ONLY when a deserializer
-            // actually failed. On the happy path this stays `None` and §27's
-            // "no per-record payload copy" guarantee holds.
-            let mut error_key_bytes: Option<Vec<u8>> = None;
-            let mut error_value_bytes: Option<Vec<u8>> = None;
             {
                 // Verified non-empty: `advance_to_next_fetched_record` returned
                 // `true` (or a cached exception positioned us here and the
@@ -992,13 +1027,11 @@ impl CompletedFetch {
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
                     return Err(premature_eof_error(&self.partition));
                 };
-                let topic_str: &str = &self.topic_arc;
                 // §27: the refcounted buffer that owns this record's key/value
-                // bytes. `BytesDeserializer::deserialize_from_shared` slices it
-                // (slice_ref) with no copy; other deserializers ignore it.
-                let source_bytes = self
-                    .current_record_source_bytes()
-                    .expect("record source must exist while peeking");
+                // bytes, which the key and value are sliced from.
+                let Some(source_bytes) = self.current_record_source_bytes() else {
+                    return Err(premature_eof_error(&self.partition));
+                };
                 // The only owned copy of record payload on the happy path:
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
@@ -1013,33 +1046,8 @@ impl CompletedFetch {
                     )))
                 })?;
                 headers_owned = RecordHeaders::with_header_iter(headers_vec);
-                key_result = match record.key() {
-                    None => Ok(None),
-                    Some(key_bytes) => key_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, source_bytes, key_bytes)
-                        .map(Some),
-                };
-                // Java's `parseRecord` is two sequential `try` blocks and the first
-                // one's catch *throws* (`CompletedFetch.java:313-328`), so the value
-                // deserializer is never invoked for a record whose key failed. Running
-                // it anyway is observable: a user deserializer may count, cache or log,
-                // and it would do so for a record Java never hands it. The key error is
-                // returned below before this value is read, so `Ok(None)` here is inert.
-                value_result = if key_result.is_err() {
-                    Ok(None)
-                } else {
-                    match record.value() {
-                        None => Ok(None),
-                        Some(value_bytes) => value_deserializer
-                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, source_bytes, value_bytes)
-                            .map(Some),
-                    }
-                };
-                // Java passes BOTH buffers regardless of which side failed.
-                if key_result.is_err() || value_result.is_err() {
-                    error_key_bytes = record.key().map(<[u8]>::to_vec);
-                    error_value_bytes = record.value().map(<[u8]>::to_vec);
-                }
+                key_bytes = record.key().map(|key| source_bytes.slice_ref(key));
+                value_bytes = record.value().map(|value| source_bytes.slice_ref(value));
                 leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
                 timestamp_type = batch_meta.timestamp_type;
                 key_size = record.key_size();
@@ -1049,6 +1057,57 @@ impl CompletedFetch {
                 record_size_in_bytes = record.size_in_bytes();
                 record_bytes_consumed = record.size_in_bytes() as usize;
             }
+
+            // Java's `parseRecord` (`CompletedFetch.java:323,329`) hands each
+            // deserializer the record's own buffer, `record.key()` /
+            // `record.value()`; `deserialize_with_headers_bytes` is that call,
+            // its default forwarding the borrowed bytes. Nothing has moved yet:
+            // a call dropped here decodes this record again (see
+            // `fetch_records`).
+            let topic_str: &str = &self.topic_arc;
+            let key_result = match &key_bytes {
+                None => Ok(None),
+                Some(key) => {
+                    DynDeserializer::deserialize_with_headers_bytes(key_deserializer, topic_str, &headers_owned, key)
+                        .await
+                        .map(Some)
+                },
+            };
+            // Java's `parseRecord` is two sequential `try` blocks and the first
+            // one's catch *throws* (`CompletedFetch.java:313-328`), so the value
+            // deserializer is never invoked for a record whose key failed. Running
+            // it anyway is observable: a user deserializer may count, cache or log,
+            // and it would do so for a record Java never hands it. The key error is
+            // returned below before this value is read, so `Ok(None)` here is inert.
+            let value_result = if key_result.is_err() {
+                Ok(None)
+            } else {
+                match &value_bytes {
+                    None => Ok(None),
+                    Some(value) => DynDeserializer::deserialize_with_headers_bytes(
+                        value_deserializer,
+                        topic_str,
+                        &headers_owned,
+                        value,
+                    )
+                    .await
+                    .map(Some),
+                }
+            };
+            // Java's `newRecordDeserializationException` carries the offending
+            // record's RAW key and value buffers (`record.key()` /
+            // `record.value()`) so a consumer error handler can inspect them,
+            // BOTH regardless of which side failed. They are copied out ONLY
+            // when a deserializer actually failed, so on the happy path §27's
+            // "no per-record payload copy" guarantee holds.
+            let (mut error_key_bytes, mut error_value_bytes) = if key_result.is_err() || value_result.is_err() {
+                (
+                    key_bytes.as_deref().map(<[u8]>::to_vec),
+                    value_bytes.as_deref().map(<[u8]>::to_vec),
+                )
+            } else {
+                (None, None)
+            };
 
             let key = match key_result {
                 Ok(k) => k,
@@ -2019,6 +2078,26 @@ mod tests {
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};
 
+    impl CompletedFetch {
+        /// Java's `fetchRecords`, returning the list: drives
+        /// [`CompletedFetch::fetch_records`] to completion in one poll, which
+        /// the always-ready deserializers of these tests allow.
+        fn fetch_records_now<K: Send + 'static, V: Send + 'static>(
+            &mut self,
+            config: &FetchConfig,
+            key_deserializer: &dyn DynDeserializer<K>,
+            value_deserializer: &dyn DynDeserializer<V>,
+            max_records: i32,
+        ) -> Result<Vec<ConsumerRecord<K, V>>, Error> {
+            use futures_util::FutureExt;
+            let mut out = Vec::new();
+            self.fetch_records(config, key_deserializer, value_deserializer, max_records, &mut out)
+                .now_or_never()
+                .expect("the test deserializers are always ready")
+                .map(|()| out)
+        }
+    }
+
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
     }
@@ -2034,7 +2113,7 @@ mod tests {
     /// String deserializer that decodes UTF-8 bytes.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
@@ -2043,7 +2122,7 @@ mod tests {
     /// error path.
     struct FailingDeserializer;
     impl Deserializer<String> for FailingDeserializer {
-        fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+        async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
             Err(Error::serialization("simulated failure"))
         }
     }
@@ -2077,7 +2156,7 @@ mod tests {
         }
     }
     impl Deserializer<String> for MaybeFailingDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             let (prefix, origin_label) = match self.side {
                 DeserializationOriginFlag::Key => ("key-", "key"),
                 DeserializationOriginFlag::Value => ("value-", "value"),
@@ -2232,7 +2311,7 @@ mod tests {
     /// regression on the per-record path unmistakable.
     struct LenDeserializer;
     impl Deserializer<usize> for LenDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
             Ok(data.len())
         }
     }
@@ -2299,7 +2378,7 @@ mod tests {
             crate::AllocTrackingGuard::reset();
             // The measured call drives ONLY the per-record loop — no drain().
             let recs = cf
-                .fetch_records::<usize, usize>(&fetch_config, &key_de, &value_de, RECORD_COUNT)
+                .fetch_records_now::<usize, usize>(&fetch_config, &key_de, &value_de, RECORD_COUNT)
                 .unwrap();
             alloc_count = crate::AllocTrackingGuard::count();
             n_records = recs.len();
@@ -2344,19 +2423,19 @@ mod tests {
         let value_de: StringDeserializer = StringDeserializer;
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(10, records.len());
         assert_eq!(10, records[0].offset());
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(1, records.len());
         assert_eq!(20, records[0].offset());
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(0, records.len());
     }
@@ -2377,7 +2456,7 @@ mod tests {
         let value_de = StringDeserializer;
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(10, records.len());
         assert_eq!(10, records[0].offset());
@@ -2385,13 +2464,13 @@ mod tests {
         assert_eq!(Some(&"value-5".to_string()), records[0].value());
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(1, records.len());
         assert_eq!(20, records[0].offset());
 
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(0, records.len());
     }
@@ -2420,7 +2499,7 @@ mod tests {
             let mut collected: Vec<ConsumerRecord<String, String>> = Vec::new();
             loop {
                 let batch = cf
-                    .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 5)
+                    .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 5)
                     .unwrap();
                 if batch.is_empty() {
                     break;
@@ -2554,14 +2633,14 @@ mod tests {
         // set, so the NEXT call raises. Propagating on this call instead would
         // discard 3 already-decoded records whose positions have advanced.
         let first = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .expect("records already decoded must be returned, not discarded");
         assert_eq!(3, first.len(), "the 3 real records are returned before the fault surfaces");
 
         // Second call: the cached fault surfaces, wrapped in Java's
         // "seek past the record" message with the original as the cause.
         let err = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .expect_err("the cached premature-EOF fault must surface on the next call");
         // Java: `throw new KafkaException("Received exception when fetching the
         // next record from " + partition + ". If needed, please seek past the
@@ -2611,7 +2690,7 @@ mod tests {
         let mut saw_error = false;
         let mut total = 0;
         for _ in 0..5 {
-            match cf.fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 1) {
+            match cf.fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 1) {
                 Ok(batch) => {
                     if batch.is_empty() {
                         break;
@@ -2695,7 +2774,7 @@ mod tests {
         let mut collected: Vec<ConsumerRecord<String, String>> = Vec::new();
         loop {
             let batch = cf
-                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
                 .unwrap();
             if batch.is_empty() {
                 break;
@@ -2747,7 +2826,7 @@ mod tests {
         let mut collected: Vec<ConsumerRecord<String, String>> = Vec::new();
         loop {
             let batch = cf
-                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
                 .unwrap();
             if batch.is_empty() {
                 break;
@@ -2776,7 +2855,7 @@ mod tests {
         let key_de = StringDeserializer;
         let value_de = StringDeserializer;
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, -10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, -10)
             .unwrap();
         assert_eq!(0, records.len());
     }
@@ -2805,7 +2884,7 @@ mod tests {
         let key_de = StringDeserializer;
         let value_de = StringDeserializer;
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(0, records.len());
     }
@@ -2821,12 +2900,12 @@ mod tests {
         let key_de = FailingDeserializer;
         let value_de = StringDeserializer;
         let err = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         assert!(err.message().contains("KEY"), "{}", err.message());
         // Subsequent call should re-raise.
         let err2 = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         // The cached path returns the cached error, which embeds the
         // same "Error deserializing KEY" prefix.
@@ -2871,7 +2950,7 @@ mod tests {
         // Since `out` is non-empty, the call returns the prefix [0] and
         // does NOT propagate the error.
         let first = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(1, first.len(), "expected one valid record before the failure");
         assert_eq!(0, first[0].offset());
@@ -2879,7 +2958,7 @@ mod tests {
         // Second call: cached exception re-raises with KEY origin and
         // the failed offset (1) in the message.
         let err = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         let msg = err.message();
         assert!(msg.contains("KEY"), "expected KEY origin: {msg}");
@@ -2927,13 +3006,13 @@ mod tests {
         let value_de = MaybeFailingDeserializer::new(DeserializationOriginFlag::Value, 3);
 
         let first = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(1, first.len(), "expected one valid record before the failure");
         assert_eq!(2, first[0].offset());
 
         let err = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         let msg = err.message();
         assert!(msg.contains("VALUE"), "expected VALUE origin: {msg}");
@@ -2943,7 +3022,7 @@ mod tests {
         // Cached-exception re-raise: a third call re-raises the same error
         // (Java re-raises until the user seeks past the offset).
         let err3 = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         assert!(
             err3.message().contains("VALUE"),
@@ -2991,7 +3070,7 @@ mod tests {
             let key_de = StringDeserializer;
             let value_de = StringDeserializer;
             let records = cf
-                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
                 .unwrap();
             assert_eq!(0, records.len(), "READ_COMMITTED must remove aborted records");
         }
@@ -3012,7 +3091,7 @@ mod tests {
             let key_de = StringDeserializer;
             let value_de = StringDeserializer;
             let records = cf
-                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
                 .unwrap();
             assert_eq!(
                 num_records as usize,
@@ -3054,7 +3133,7 @@ mod tests {
         let key_de = StringDeserializer;
         let value_de = StringDeserializer;
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(
             num_records as usize,
@@ -3086,13 +3165,13 @@ mod tests {
         let key_de = StringDeserializer;
         let value_de = StringDeserializer;
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 3)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 3)
             .unwrap();
         assert_eq!(3, records.len());
         assert_eq!(103, cf.next_fetch_offset());
         // Exhaust the rest.
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 100)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 100)
             .unwrap();
         assert_eq!(2, records.len());
         // After full drain, next offset should equal last record offset + 1 (104+1=105).
@@ -3110,7 +3189,7 @@ mod tests {
         fail: bool,
     }
     impl Deserializer<String> for CountingDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail {
                 return Err(Error::serialization("simulated failure"));
@@ -3137,7 +3216,7 @@ mod tests {
         let mut cf = new_completed_fetch(0, bytes);
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
         let err = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap_err();
         assert!(err.message().contains("KEY"), "{}", err.message());
 
@@ -3165,10 +3244,51 @@ mod tests {
         let mut cf = new_completed_fetch(0, bytes);
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
         let records = cf
-            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .fetch_records_now::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .unwrap();
         assert_eq!(3, records.len());
         assert_eq!(3, value_calls.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A deserializer that answers only through the `Bytes` overload, so a
+    /// record read through any other overload fails.
+    struct BytesOverloadOnly;
+
+    impl Deserializer<String> for BytesOverloadOnly {
+        async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+            Err(Error::serialization("the slice overload was called"))
+        }
+
+        async fn deserialize_with_headers_bytes(
+            &self,
+            _topic: &str,
+            _headers: &RecordHeaders,
+            data: &bytes::Bytes,
+        ) -> Result<String, Error> {
+            Ok(format!("bytes:{}", String::from_utf8_lossy(data)))
+        }
+    }
+
+    /// `CompletedFetch` reads every key and value through
+    /// `deserialize_with_headers_bytes` (Java's `deserialize(topic, headers,
+    /// ByteBuffer)`), so a deserializer overriding it gets the fetched `Bytes`.
+    #[test]
+    fn test_records_are_read_through_the_bytes_overload() {
+        let bytes = new_records(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records_now::<String, String>(&fetch_config, &BytesOverloadOnly, &BytesOverloadOnly, 10)
+            .unwrap();
+        assert_eq!(3, records.len());
+        for record in &records {
+            assert!(record.key().is_some_and(|k| k.starts_with("bytes:")), "key {:?}", record.key());
+            assert!(
+                record.value().is_some_and(|v| v.starts_with("bytes:")),
+                "value {:?}",
+                record.value()
+            );
+        }
     }
 
     // ── Decode hardening: every batch header is validated ───────────────────
@@ -3214,11 +3334,11 @@ mod tests {
         let mut cf = new_completed_fetch(0, buf);
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
         let first = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the intact first batch's records are returned");
         assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the second batch's fault must surface");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         assert!(err.is_kafka_error(), "{err:?}");
@@ -3304,7 +3424,7 @@ mod tests {
         let mut cf = new_completed_fetch(7, batch);
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("a 42-byte batch has no v2 header");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         assert_eq!(
@@ -3398,7 +3518,7 @@ mod tests {
         );
         let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
         let records = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the aborted batch is skipped, not parsed");
         assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
     }
@@ -3434,11 +3554,11 @@ mod tests {
         );
         let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
         let first = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the first batch's records are returned");
         assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the control batch's count is invalid");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         let cause = cause(&err);
@@ -3511,7 +3631,7 @@ mod tests {
         );
         let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
         let records = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the aborted batch is skipped, not inflated");
         assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
     }
@@ -3568,7 +3688,7 @@ mod tests {
             // Exactly the first batch's two records, so the cursor stops at the
             // end of that batch without reading the second.
             let first = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 2)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 2)
                 .expect("the first batch's records are returned");
             assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
             assert!(
@@ -3577,7 +3697,7 @@ mod tests {
             );
 
             let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect_err("the second batch fails");
             assert_eq!(SEEK_PAST_MESSAGE, err.message());
             let prefix = "Record batch for partition test-0 at offset 2 is invalid, cause: ";
@@ -3667,10 +3787,10 @@ mod tests {
         let mut cf = new_completed_fetch(0, buf.to_vec());
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
         let first = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the records before the fault are returned");
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the fault surfaces on the next call");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         assert!(err.is_kafka_error(), "{err:?}");
@@ -3883,7 +4003,7 @@ mod tests {
             let mut cf = new_completed_fetch(0, buf);
             let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
             let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect_err("the stream is not gzip");
             assert_eq!(SEEK_PAST_MESSAGE, err.message());
             let cause = cause(&err);
@@ -3928,7 +4048,7 @@ mod tests {
                 let mut cf = new_completed_fetch(0, buf.clone());
                 let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
                 let first = cf
-                    .fetch_records::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
+                    .fetch_records_now::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
                     .expect("the records before the cut are returned");
                 assert_eq!(
                     (0..count).map(|n| (n, VALUE_SIZE)).collect::<Vec<_>>(),
@@ -3939,7 +4059,7 @@ mod tests {
                     "{compression:?} check.crcs={check_crcs}"
                 );
                 let err = cf
-                    .fetch_records::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
+                    .fetch_records_now::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, 1000)
                     .expect_err("the cut surfaces on the next call");
                 assert_eq!(SEEK_PAST_MESSAGE, err.message());
                 let cause = cause(&err);
@@ -3991,7 +4111,7 @@ mod tests {
         let mut out = Vec::new();
         loop {
             let records = cf
-                .fetch_records::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, max_records)
+                .fetch_records_now::<usize, usize>(&config, &LenDeserializer, &LenDeserializer, max_records)
                 .expect("the records are valid");
             if records.is_empty() {
                 return out;
@@ -4012,7 +4132,7 @@ mod tests {
             let mut read = Vec::new();
             loop {
                 let records = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 4)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 4)
                     .expect("the batches are valid");
                 if records.is_empty() {
                     break;
@@ -4075,7 +4195,7 @@ mod tests {
             let mut read = Vec::new();
             loop {
                 let records = cf
-                    .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 7)
+                    .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 7)
                     .expect("the records are valid");
                 if records.is_empty() {
                     break;
@@ -4106,7 +4226,7 @@ mod tests {
             let mut cf = new_completed_fetch(6, new_multi_batch_records(0, 1, 10, compression.clone()));
             let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
             let records = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect("the batch is valid");
             assert_eq!(
                 vec![6, 7, 8, 9],
@@ -4129,13 +4249,13 @@ mod tests {
         failing: std::sync::atomic::AtomicBool,
     }
     impl Deserializer<String> for FailWhileSet {
-        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, Error> {
+        async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, Error> {
             if self.failing.load(std::sync::atomic::Ordering::SeqCst)
                 && MaybeFailingDeserializer::parse_offset(data, "value-") == Some(self.offset)
             {
                 return Err(Error::serialization("simulated failure"));
             }
-            StringDeserializer.deserialize(topic, data)
+            Deserializer::deserialize(&StringDeserializer, topic, data).await
         }
     }
 
@@ -4155,11 +4275,11 @@ mod tests {
             let value_de = FailWhileSet { offset: 2, failing: std::sync::atomic::AtomicBool::new(true) };
 
             let first = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &value_de, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &value_de, 10)
                 .expect("the records before the failing one are returned");
             assert_eq!(vec![0, 1], offsets(&first), "{compression:?}");
             let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &value_de, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &value_de, 10)
                 .expect_err("the failing record fails again");
             assert_eq!(
                 "Error deserializing VALUE for partition test-0 at offset 2. \
@@ -4175,7 +4295,7 @@ mod tests {
 
             value_de.failing.store(false, std::sync::atomic::Ordering::SeqCst);
             let rest = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &value_de, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &value_de, 10)
                 .expect("the record is read again and decodes");
             assert_eq!(vec![2, 3, 4], offsets(&rest), "{compression:?}");
             assert_eq!(Some(&"value-2".to_string()), rest[0].value(), "{compression:?}");
@@ -4239,7 +4359,7 @@ mod tests {
             let (records, kept) = {
                 let _guard = crate::AllocTrackingGuard::new();
                 let records = cf
-                    .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 10)
+                    .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 10)
                     .expect("the batch is valid");
                 (records, crate::AllocTrackingGuard::net_bytes())
             };
@@ -4284,11 +4404,11 @@ mod tests {
             let mut cf = new_completed_fetch(0, compressed_batch_with_records(&batch, &records, compression));
             let _guard = crate::AllocTrackingGuard::new();
             let first = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect("the first record is returned");
             assert_eq!(1, first.len(), "{compression:?}");
             let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect_err("the second record fails");
             (cause(&err).message().to_string(), crate::AllocTrackingGuard::max_allocation())
         };
@@ -4451,7 +4571,7 @@ mod tests {
                 let (read, kept) = {
                     let _guard = crate::AllocTrackingGuard::new();
                     let read = cf
-                        .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 10)
+                        .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, 10)
                         .expect("the batch is valid");
                     (read, crate::AllocTrackingGuard::net_bytes())
                 };
@@ -4560,7 +4680,7 @@ mod tests {
                 cf.ensure_cursor();
                 let guard = crate::AllocTrackingGuard::new();
                 let records = cf
-                    .fetch_records::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, max_records)
+                    .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&config, &deserializer, &deserializer, max_records)
                     .expect("the batch is valid");
                 let kept = crate::AllocTrackingGuard::net_bytes();
                 drop(guard);
@@ -4671,12 +4791,12 @@ mod tests {
                 let mut cf = new_completed_fetch(0, buf.clone());
                 let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
                 let first = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect("the records before the last are returned");
                 assert_eq!(vec![0], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>(), "{shape}");
                 assert_eq!(1, cf.next_fetch_offset(), "{shape}: the position stays on the withheld record");
                 let err = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect_err("the fault surfaces on the next call");
                 assert_eq!(SEEK_PAST_MESSAGE, err.message());
                 assert_eq!(expected, cause(&err).message(), "{shape} check.crcs={check_crcs}");
@@ -4702,7 +4822,7 @@ mod tests {
                 let mut cf = new_completed_fetch(0, buf.clone());
                 let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
                 let records = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect("a batch declaring no records is not an error");
                 assert!(records.is_empty(), "{shape} check.crcs={check_crcs}");
                 assert_eq!(1, cf.next_fetch_offset(), "{shape} check.crcs={check_crcs}");
@@ -4777,7 +4897,7 @@ mod tests {
                 );
                 let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
                 let records = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect("the batches are valid");
                 assert_eq!(
                     expected,
@@ -4815,7 +4935,7 @@ mod tests {
                 );
                 let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
                 let records = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect("the batches are valid");
                 assert_eq!(
                     vec![0, 1, 5, 6],
@@ -4848,7 +4968,7 @@ mod tests {
             );
             let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
             let err = cf
-                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                 .expect_err("the second control record is short");
             assert_eq!(SEEK_PAST_MESSAGE, err.message());
             let cause = cause(&err);
@@ -4890,7 +5010,7 @@ mod tests {
                 );
                 let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
                 let err = cf
-                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
                     .expect_err("the second control record's size does not end");
                 assert_eq!(SEEK_PAST_MESSAGE, err.message());
                 let cause = cause(&err);
@@ -4936,7 +5056,7 @@ mod tests {
             cf.ensure_cursor();
             let _guard = crate::AllocTrackingGuard::new();
             let records = cf
-                .fetch_records::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, RECORD_COUNT)
+                .fetch_records_now::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, RECORD_COUNT)
                 .expect("the batch is valid");
             assert_eq!(RECORD_COUNT as usize, records.len());
             crate::AllocTrackingGuard::count()
@@ -5016,7 +5136,7 @@ mod tests {
         let mut cf = new_completed_fetch(0, buf);
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the record declares more bytes than its batch holds");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         let cause = cause(&err);
@@ -5037,7 +5157,7 @@ mod tests {
         let mut cf = new_completed_fetch(2, buf);
         let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
         let err = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the control record declares more bytes than its batch holds");
         assert_eq!(SEEK_PAST_MESSAGE, err.message());
         let cause = cause(&err);
@@ -5059,7 +5179,7 @@ mod tests {
         let mut cf = new_completed_fetch(0, buf);
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
         let first = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("a truncated batch is no batch, not an error");
         assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
         // Exhausted, not drained: `FetchCollector` drains after the position
@@ -5068,7 +5188,7 @@ mod tests {
         assert!(!cf.is_consumed());
         assert_eq!(2, cf.next_fetch_offset(), "the next fetch starts at the truncated batch");
         let rest = cf
-            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .unwrap();
         assert!(rest.is_empty());
     }

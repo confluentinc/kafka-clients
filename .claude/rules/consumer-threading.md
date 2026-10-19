@@ -31,8 +31,11 @@ Java (on the trait they are declared as returning `impl Future + Send`, see
 
 Java methods that do not block remain synchronous:
 
-  - `assignment()`, `subscription()`, `paused()`, `metrics()`, `client_id()`,
+  - `assignment()`, `subscription()`, `paused()`, `metrics()`,
     `group_metadata()`, `wakeup()`
+
+`clientId()` is package-private on Java's `KafkaConsumer` and absent from the
+`Consumer` interface, so it is not on the Rust trait and has no C binding.
 
 Two notes on the names above, so neither is "corrected" back later:
 
@@ -110,7 +113,6 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
         // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
         // its constructors; it becomes an interface in Kafka 5.0).
         fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-        fn client_id(&self) -> &str;
     }
 
     // Sealed; blanket-implemented for every `C: Consumer<K, V>`. Each async

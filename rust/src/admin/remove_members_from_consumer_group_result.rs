@@ -65,7 +65,7 @@ impl RemoveMembersFromConsumerGroupResult {
         // on unspecified set/map iteration order anyway).
         let mut member_infos: Vec<MemberToRemove> = self.member_infos.iter().cloned().collect();
         member_infos.sort_by(|a, b| a.group_instance_id().cmp(b.group_instance_id()));
-        self.future.then_apply(move |member_errors| {
+        self.future.then_apply(move |member_errors: MemberErrors| {
             if member_infos.is_empty() {
                 // removeAll mode: fail on the first member-level error.
                 let mut entries: Vec<(&MemberIdentity, &Errors)> = member_errors.iter().collect();

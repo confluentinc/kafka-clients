@@ -505,9 +505,11 @@ async fn test_send_while_topic_get_recreated() {
                 let _ = <TestProducer as Producer<String, Vec<u8>>>::send_with_callback(
                     &producer,
                     record(&topic, &format!("value{i}")),
-                    Some(Box::new(move |_metadata, _error| {
-                        num_acks.fetch_add(1, Ordering::SeqCst);
-                    })),
+                    Some(Box::new(
+                        move |_metadata: Option<&confluent_kafka::producer::RecordMetadata>, _error: Option<&Error>| {
+                            num_acks.fetch_add(1, Ordering::SeqCst);
+                        },
+                    )),
                 )
                 .await;
             }

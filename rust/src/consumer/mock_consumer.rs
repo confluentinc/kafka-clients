@@ -47,11 +47,6 @@ use crate::consumer::{
 use crate::consumer::{ConsumerNoOffsetForPartitionError, ConsumerOffsetOutOfRangeError};
 use crate::metadata::LeaderAndEpoch;
 
-/// Fixed `client.id` returned by [`MockConsumer::client_id`]. Java's
-/// `MockConsumer` has no equivalent accessor; the `Consumer` trait requires
-/// one, so we pick a stable constant.
-const MOCK_CLIENT_ID: &str = "mock-consumer";
-
 /// One scheduled poll task — see [`MockConsumer::schedule_poll_task`].
 ///
 /// The deviation from Java's parameterless `Runnable` is documented on the
@@ -90,7 +85,10 @@ pub struct MockConsumer<K, V> {
     /// (`commitSync()` is `commitSync(subscriptions.allConsumed())`).
     subscriptions: Arc<Mutex<SubscriptionState>>,
     beginning_offsets: HashMap<TopicPartition, i64>,
-    end_offsets: HashMap<TopicPartition, i64>,
+    /// Shared so a [`Consumer::handle`] obtained from this mock computes
+    /// `current_lag` over the same end offsets, as a Java callback calling
+    /// `consumer.currentLag(tp)` on the mock does.
+    end_offsets: Arc<Mutex<HashMap<TopicPartition, i64>>>,
     duration_reset_offsets: HashMap<TopicPartition, i64>,
     /// Shared so a [`Consumer::handle`] obtained from this mock commits into
     /// the same map, as a Java callback calling back into the mock does.
@@ -147,7 +145,7 @@ impl<K, V> MockConsumer<K, V> {
             partitions: HashMap::new(),
             subscriptions: Arc::new(Mutex::new(SubscriptionState::new(offset_reset_strategy))),
             beginning_offsets: HashMap::new(),
-            end_offsets: HashMap::new(),
+            end_offsets: Arc::new(Mutex::new(HashMap::new())),
             duration_reset_offsets: HashMap::new(),
             committed: Arc::new(Mutex::new(HashMap::new())),
             poll_tasks: VecDeque::new(),
@@ -201,7 +199,12 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `updateEndOffsets(Map<TopicPartition, Long>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets")]
     pub fn update_end_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
-        self.end_offsets.extend(offsets);
+        self.end_offsets_lock().extend(offsets);
+    }
+
+    /// Locks the shared end offsets; never held across an `.await`.
+    fn end_offsets_lock(&self) -> std::sync::MutexGuard<'_, HashMap<TopicPartition, i64>> {
+        self.end_offsets.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Update the duration-based reset offsets used when the reset strategy
@@ -274,45 +277,51 @@ impl<K, V> MockConsumer<K, V> {
     /// `consumer-threading.md` §31 / Phase 2); Java's listener methods
     /// are sync.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#rebalance")]
-    pub async fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> Result<(), Error> {
-        let old_assignment_set = self.subs().assigned_partitions();
-        let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
+    pub fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        K: Send,
+        V: Send,
+    {
+        async move {
+            let old_assignment_set = self.subs().assigned_partitions();
+            let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
 
-        let added: Vec<TopicPartition> = new_assignment
-            .iter()
-            .filter(|tp| !old_assignment_set.contains(tp))
-            .cloned()
-            .collect();
-        let removed: Vec<TopicPartition> = old_assignment_set
-            .iter()
-            .filter(|tp| !new_assignment_set.contains(tp))
-            .cloned()
-            .collect();
+            let added: Vec<TopicPartition> = new_assignment
+                .iter()
+                .filter(|tp| !old_assignment_set.contains(tp))
+                .cloned()
+                .collect();
+            let removed: Vec<TopicPartition> = old_assignment_set
+                .iter()
+                .filter(|tp| !new_assignment_set.contains(tp))
+                .cloned()
+                .collect();
 
-        // Clear buffered records (Java: `records.clear()` at line 137).
-        self.records.clear();
+            // Clear buffered records (Java: `records.clear()` at line 137).
+            self.records.clear();
 
-        // Invoke onPartitionsRevoked first (Java line 140-142). Per
-        // consumer-threading.md §16, clone the Arc out before awaiting.
-        let listener = self.subs().rebalance_listener();
-        if !removed.is_empty()
-            && let Some(listener) = listener
-        {
-            listener.on_partitions_revoked(&removed).await?;
+            // Invoke onPartitionsRevoked first (Java line 140-142). Per
+            // consumer-threading.md §16, clone the Arc out before awaiting.
+            let listener = self.subs().rebalance_listener();
+            if !removed.is_empty()
+                && let Some(listener) = listener
+            {
+                listener.on_partitions_revoked(&removed).await?;
+            }
+
+            // Replace assignment (Java line 143:
+            // `subscriptions.assignFromSubscribed(newAssignment)`).
+            self.subs().assign_from_subscribed(new_assignment)?;
+
+            // Invoke onPartitionsAssigned (Java line 144). Java passes only the
+            // *added* partitions, not the full new assignment.
+            let listener = self.subs().rebalance_listener();
+            if let Some(listener) = listener {
+                listener.on_partitions_assigned(&added).await?;
+            }
+
+            Ok(())
         }
-
-        // Replace assignment (Java line 143:
-        // `subscriptions.assignFromSubscribed(newAssignment)`).
-        self.subs().assign_from_subscribed(new_assignment)?;
-
-        // Invoke onPartitionsAssigned (Java line 144). Java passes only the
-        // *added* partitions, not the full new assignment.
-        let listener = self.subs().rebalance_listener();
-        if let Some(listener) = listener {
-            listener.on_partitions_assigned(&added).await?;
-        }
-
-        Ok(())
     }
 
     /// Simulates a partition loss event. Calls
@@ -340,37 +349,47 @@ impl<K, V> MockConsumer<K, V> {
     /// [`ConsumerRebalanceListener::on_partitions_lost`]: crate::consumer::ConsumerRebalanceListener::on_partitions_lost
     /// [`ConsumerRebalanceListener::on_partitions_revoked`]: crate::consumer::ConsumerRebalanceListener::on_partitions_revoked
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#losePartitions")]
-    pub async fn lose_partitions(&mut self, partitions_lost: &[TopicPartition]) -> Result<(), Error> {
-        let current_assignment = self.subs().assigned_partitions();
-        let mut lost: Vec<TopicPartition> = Vec::with_capacity(partitions_lost.len());
-        for tp in partitions_lost {
-            if !lost.contains(tp) {
-                lost.push(tp.clone());
+    pub fn lose_partitions(
+        &mut self,
+        partitions_lost: &[TopicPartition],
+    ) -> impl Future<Output = Result<(), Error>> + Send
+    where
+        K: Send,
+        V: Send,
+    {
+        async move {
+            let current_assignment = self.subs().assigned_partitions();
+            let mut lost: Vec<TopicPartition> = Vec::with_capacity(partitions_lost.len());
+            for tp in partitions_lost {
+                if !lost.contains(tp) {
+                    lost.push(tp.clone());
+                }
             }
+            let not_assigned: Vec<String> = lost
+                .iter()
+                .filter(|tp| !current_assignment.contains(*tp))
+                .map(ToString::to_string)
+                .collect();
+            if !not_assigned.is_empty() {
+                // Java formats the `List` with `toString()`: `[test-1, test-2]`.
+                return Err(Error::local_illegal_state(format!(
+                    "Cannot lose partitions that are not currently assigned: [{}]",
+                    not_assigned.join(", ")
+                )));
+            }
+            for tp in &lost {
+                self.records.remove(tp);
+            }
+            // Clone the listener `Arc` out, dropping the guard, before awaiting
+            // (consumer-threading.md §16).
+            let listener = self.subs().rebalance_listener();
+            if let Some(listener) = listener {
+                listener.on_partitions_lost(&lost).await?;
+            }
+            let remaining: Vec<TopicPartition> =
+                current_assignment.into_iter().filter(|tp| !lost.contains(tp)).collect();
+            self.subs().assign_from_subscribed(&remaining)
         }
-        let not_assigned: Vec<String> = lost
-            .iter()
-            .filter(|tp| !current_assignment.contains(*tp))
-            .map(ToString::to_string)
-            .collect();
-        if !not_assigned.is_empty() {
-            // Java formats the `List` with `toString()`: `[test-1, test-2]`.
-            return Err(Error::local_illegal_state(format!(
-                "Cannot lose partitions that are not currently assigned: [{}]",
-                not_assigned.join(", ")
-            )));
-        }
-        for tp in &lost {
-            self.records.remove(tp);
-        }
-        // Clone the listener `Arc` out, dropping the guard, before awaiting
-        // (consumer-threading.md §16).
-        let listener = self.subs().rebalance_listener();
-        if let Some(listener) = listener {
-            listener.on_partitions_lost(&lost).await?;
-        }
-        let remaining: Vec<TopicPartition> = current_assignment.into_iter().filter(|tp| !lost.contains(tp)).collect();
-        self.subs().assign_from_subscribed(&remaining)
     }
 
     /// Schedule a task to run on the next
@@ -532,7 +551,7 @@ impl<K, V> MockConsumer<K, V> {
             })?;
             self.subs().seek(tp, offset)
         } else if strategy == AutoOffsetResetStrategy::LATEST {
-            let offset = self.end_offsets.get(tp).copied().ok_or_else(|| {
+            let offset = self.end_offsets_lock().get(tp).copied().ok_or_else(|| {
                 Error::local_illegal_state("MockConsumer didn't have end offset specified, but tried to seek to end")
             })?;
             self.subs().seek(tp, offset)
@@ -575,17 +594,7 @@ where
     }
 
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
-        // Java line 692-693: hard-coded sentinel values.
-        Arc::new(ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
-            "dummy.group.id",
-            1,
-            "1",
-            None,
-        ))
-    }
-
-    fn client_id(&self) -> &str {
-        MOCK_CLIENT_ID
+        mock_group_metadata()
     }
 
     /// Translates Java's
@@ -625,25 +634,7 @@ where
     /// returns `None`. Callers needing the strict Java behavior must
     /// pre-check `assignment().contains(tp)` themselves.
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        // Unassigned → None (diverges from Java, which throws). See rustdoc.
-        if !self.subs().is_assigned(topic_partition) {
-            return None;
-        }
-        match self.end_offsets.get(topic_partition).copied() {
-            // No end offset known: Java's "caught up" model.
-            None => Some(0),
-            Some(end) => {
-                // Read position WITHOUT triggering update_fetch_position
-                // (which requires &mut self and is not available here).
-                // If the partition has no valid position yet, fall back to
-                // the caught-up model.
-                let position = self.subs().position_or_null(topic_partition).map(|p| p.offset);
-                match position {
-                    Some(p) => Some(end - p),
-                    None => Some(0),
-                }
-            },
-        }
+        mock_current_lag(&self.subscriptions, &self.end_offsets, topic_partition)
     }
 
     // ── Subscription / assignment ──────────────────────────────────────
@@ -1097,8 +1088,9 @@ where
             return Err(error);
         }
         let mut result = HashMap::new();
+        let end_offsets = self.end_offsets_lock();
         for tp in partitions {
-            let off = self.end_offsets.get(tp).copied().ok_or_else(|| {
+            let off = end_offsets.get(tp).copied().ok_or_else(|| {
                 Error::local_illegal_state(format!("The partition {tp} does not have an end offset."))
             })?;
             result.insert(tp.clone(), off);
@@ -1155,7 +1147,7 @@ where
         // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
         self.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(
-            CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS,
+            crate::consumer::internals::ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64,
         )))
         .await
     }
@@ -1180,6 +1172,7 @@ where
             Arc::clone(&self.committed),
             Arc::clone(&self.subscriptions),
             Arc::clone(&self.paused),
+            Arc::clone(&self.end_offsets),
         )
     }
 }
@@ -1204,6 +1197,61 @@ fn ensure_mock_not_closed(closed: &AtomicBool) -> Result<(), Error> {
         Err(Error::local_illegal_state("This consumer has already been closed."))
     } else {
         Ok(())
+    }
+}
+
+/// Java's `groupMetadata()` (`MockConsumer.java:692-693`): hard-coded
+/// sentinel values, returned by the mock and by every [`ConsumerHandle`]
+/// obtained from it.
+pub(crate) fn mock_group_metadata() -> Arc<dyn ConsumerGroupMetadata> {
+    Arc::new(ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
+        "dummy.group.id",
+        1,
+        "1",
+        None,
+    ))
+}
+
+/// Java's `currentLag(TopicPartition)` (`MockConsumer.java:645-660`) over the
+/// mock's shared state: the lag of the mock and of every [`ConsumerHandle`]
+/// obtained from it.
+///
+/// - Returns `None` for an unassigned partition — a divergence from Java,
+///   which throws; callers needing the strict Java behavior pre-check
+///   `assignment().contains(tp)` themselves.
+/// - Returns `Some(0)` when no end offset is known or the partition has no
+///   valid position yet (Java's "caught up" model).
+/// - Returns `Some(end - position)` otherwise.
+///
+/// Each lock is taken for a read and released; none is held across an
+/// `.await` (`consumer-threading.md` §16).
+pub(crate) fn mock_current_lag(
+    subscriptions: &Mutex<SubscriptionState>,
+    end_offsets: &Mutex<HashMap<TopicPartition, i64>>,
+    topic_partition: &TopicPartition,
+) -> Option<i64> {
+    let subs = subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+    // Unassigned → None (diverges from Java, which throws). See rustdoc.
+    if !subs.is_assigned(topic_partition) {
+        return None;
+    }
+    let end = end_offsets
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(topic_partition)
+        .copied();
+    match end {
+        // No end offset known: Java's "caught up" model.
+        None => Some(0),
+        Some(end) => {
+            // Read the position WITHOUT triggering `update_fetch_position`
+            // (which needs `&mut self`). If the partition has no valid
+            // position yet, fall back to the caught-up model.
+            match subs.position_or_null(topic_partition).map(|p| p.offset) {
+                Some(p) => Some(end - p),
+                None => Some(0),
+            }
+        },
     }
 }
 
@@ -1434,11 +1482,17 @@ mod tests {
             offsets(&tp, 5)
         );
 
-        handle.commit_async_offsets(offsets(&tp, 6)).await.expect("commit async");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let cb = Arc::new(RecordingCallback { label: "async", seen: Arc::clone(&seen), nested: None });
+        handle
+            .commit_async_with_offsets_callback(offsets(&tp, 6), cb)
+            .await
+            .expect("commit async");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
             offsets(&tp, 6)
         );
+        assert_eq!(*seen.lock().unwrap(), vec![("async", offsets(&tp, 6))]);
     }
 
     fn tp_of(topic: &str) -> TopicPartition {
@@ -1567,21 +1621,41 @@ mod tests {
     }
 
     /// The handle's getters read the mock's own state, as a Java callback
-    /// calling `consumer.assignment()` / `subscription()` / `paused()` does.
+    /// calling `consumer.assignment()` / `paused()` / `currentLag()` /
+    /// `groupMetadata()` does.
     #[tokio::test]
     async fn handle_getters_read_the_mock_state() {
         let mut c: MockConsumer<String, String> =
             MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         let handle = c.handle();
         c.subscribe_with_topics(vec!["test".to_string()]).await.expect("subscribe");
-        assert_eq!(handle.subscription(), HashSet::from(["test".to_string()]));
         let tp = tp_of("test");
+        // Unassigned: `None` from the handle as from the mock.
+        assert_eq!(handle.current_lag(&tp), None);
         c.rebalance(std::slice::from_ref(&tp)).await.expect("rebalance");
         assert_eq!(handle.assignment(), HashSet::from([tp.clone()]));
         c.pause(std::slice::from_ref(&tp)).await.expect("pause");
         assert_eq!(handle.paused(), HashSet::from([tp.clone()]));
         c.resume(std::slice::from_ref(&tp)).await.expect("resume");
         assert!(handle.paused().is_empty());
+
+        // Assigned, no end offset: caught up.
+        assert_eq!(handle.current_lag(&tp), Some(0));
+        c.update_end_offsets(HashMap::from([(tp.clone(), 10)]));
+        c.seek_with_offset(tp.clone(), 4).await.expect("seek");
+        assert_eq!(
+            handle.current_lag(&tp),
+            Some(6),
+            "handle lag reads the mock's end offsets and position"
+        );
+        assert_eq!(handle.current_lag(&tp), c.current_lag(&tp));
+
+        // Java's `MockConsumer.groupMetadata()` sentinel values.
+        let meta = handle.group_metadata();
+        assert_eq!(meta.group_id(), "dummy.group.id");
+        assert_eq!(meta.generation_id(), 1);
+        assert_eq!(meta.member_id(), "1");
+        assert_eq!(meta.group_instance_id(), None);
     }
 
     /// Commits from inside `onPartitionsRevoked` through the handle, the

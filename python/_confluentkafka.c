@@ -1697,10 +1697,8 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     err = (fut = kafka_producer_Producer_send_with_callback(p->producer, rec, cb, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
-    // Both are read during the call only (the record was cloned -- its key and
-    // value bytes were read during the call -- and the callback registration
-    // copied into the Rust closure).
-    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
+    // The send consumed the callback handle. The record is read during the call
+    // only (it was cloned -- its key and value bytes were read during the call).
     ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
 
     if (err != NULL) {
@@ -1827,9 +1825,9 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     // this thread holds, and the handover completion runs on this thread
     // exactly as the pump runs a queued record's.
     kafka_producer_Producer_send_with_callback_cb(p->producer, rec, cb, producer_send_cb, ctx);
-    // Both are copied by the call; the record's key/value bytes stay borrowed
-    // until producer_send_cb (ctx->record holds them).
-    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
+    // The call consumed the callback handle and copied the record; the record's
+    // key/value bytes stay borrowed until producer_send_cb (ctx->record holds
+    // them).
     ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
     return PyLong_FromLong(0);
 }
@@ -2500,37 +2498,6 @@ static PyObject* py_MockProducer_sent_offsets(PyObject* self, PyObject* args) {
     int8_t sent = 0;
     if (ffi_raise((sent = kafka_producer_MockProducer_sent_offsets_err(p->mp, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     return PyBool_FromLong(sent ? 1 : 0);
-}
-
-// MockProducer_committed_offset(handle, group_id, topic, partition)
-//   -> (offset, leader_epoch | None, metadata) or None
-static PyObject* py_MockProducer_committed_offset(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long ptr;
-    const char* group;
-    const char* topic;
-    int partition;
-    if (!PyArg_ParseTuple(args, "Kssi", &ptr, &group, &topic, &partition)) return NULL;
-    Producer* p = producer_from_handle(ptr);
-    kafka_common_TopicPartition_t* tp = NULL;
-    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, partition, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    kafka_consumer_OffsetAndMetadata_t* oam = NULL;  // owned or NULL
-    kafka_common_Error_t* err = (oam = kafka_producer_MockProducer_committed_offset_err(p->mp, group, tp, &ffi_err), ffi_take(&ffi_err));
-    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(err)) return NULL;
-    if (oam == NULL) Py_RETURN_NONE;
-    int32_t epoch = -1;  // -1 = Optional.empty()
-    const char* metadata = NULL;
-    int64_t offset = 0;
-    PyObject* out = NULL;
-    if (!ffi_raise((epoch = kafka_consumer_OffsetAndMetadata_leader_epoch_err(oam, &ffi_err), ffi_take(&ffi_err)))
-        && !ffi_raise((metadata = kafka_consumer_OffsetAndMetadata_metadata_err(oam, &ffi_err), ffi_take(&ffi_err)))
-        && !ffi_raise((offset = kafka_consumer_OffsetAndMetadata_offset_err(oam, &ffi_err), ffi_take(&ffi_err)))) {
-        PyObject* py_epoch = epoch >= 0 ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
-        out = py_epoch ? Py_BuildValue("(LNs)", (long long)offset, py_epoch, metadata ? metadata : "") : NULL;
-    }
-    ffi_unraisable((kafka_consumer_OffsetAndMetadata_destroy_err(oam, &ffi_err), ffi_take(&ffi_err)));
-    return out;
 }
 
 // KafkaError accessor/destroy functions
@@ -3943,6 +3910,7 @@ typedef struct {
     ListenerCtx* listener;                 // the registered listener's `self`, or NULL
     CommitCbCtx* orphans;                  // see CommitCbCtx
     PinnedBytes* pinned;                   // see PinnedBytes
+    PyObject* client_id;                   // KafkaConsumer: its config's client.id (str), else NULL
 } Consumer;
 
 static Consumer* consumer_from_handle(unsigned long long h) {
@@ -4249,7 +4217,8 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
 // deserializers, so records carry `kafka_Bytes_t *` keys and values. On failure
 // the handle is 0 and `error` the owned error handle (an int, 0 on success);
 // the construction runs with the GIL released (it resolves the bootstrap
-// servers).
+// servers). The handle keeps the configuration's `client.id`, generated when
+// unset, for Consumer_client_id.
 static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     PyObject* config_dict;
@@ -4274,27 +4243,45 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err = (config = kafka_consumer_ConsumerConfig_new(props, &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_Map_destroy_err(props, &ffi_err), ffi_take(&ffi_err)));
     kafka_consumer_KafkaConsumer_t* kc = NULL;
+    PyObject* py_client_id = NULL;
     if (err == NULL) {
         kafka_common_Error_t* destroy_err;
-        Py_BEGIN_ALLOW_THREADS
-        err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
-        Py_END_ALLOW_THREADS
+        const char* client_id = NULL;  // borrowed from config, read before it is destroyed
+        err = (client_id = kafka_consumer_ConsumerConfig_get_string(config, "client.id", &ffi_err), ffi_take(&ffi_err));
+        // client.id is always set once ConsumerConfig_new resolved it.
+        if (err == NULL && client_id != NULL)
+            py_client_id = PyUnicode_FromString(client_id);
+        if (err == NULL && py_client_id != NULL) {
+            Py_BEGIN_ALLOW_THREADS
+            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
+            Py_END_ALLOW_THREADS
+        }
         destroy_err = (kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err));
         ffi_unraisable(destroy_err);
     }
     if (err != NULL) {
+        Py_XDECREF(py_client_id);
         PyObject* py_err = error_handle_to_py(err);
         if (py_err == NULL) { ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err))); return NULL; }
         return Py_BuildValue("(iN)", 0, py_err);
     }
-    Consumer* c = consumer_alloc();
+    if (py_client_id == NULL) {  // kc was not built
+        if (!PyErr_Occurred())
+            PyErr_SetString(PyExc_SystemError, "ConsumerConfig resolved no client.id");
+        return NULL;
+    }
+    Consumer* c = (py_client_id != NULL || !PyErr_Occurred()) ? consumer_alloc() : NULL;
     if (c != NULL) {
         c->kc = kc;  // owned
+        c->client_id = py_client_id;  // owned
         if (ffi_raise((c->consumer = kafka_consumer_KafkaConsumer__as_Consumer_err(c->kc, &ffi_err), ffi_take(&ffi_err)))  // borrowed view
             || ffi_raise((kafka_consumer_Consumer__set_callbacks_notify_err(c->consumer, consumer_callbacks_notify, c, &ffi_err), ffi_take(&ffi_err)))) {
+            Py_XDECREF(py_client_id);
             PyMem_Free(c);
             c = NULL;
         }
+    } else {
+        Py_XDECREF(py_client_id);
     }
     if (c == NULL) {
         Py_BEGIN_ALLOW_THREADS
@@ -4333,6 +4320,7 @@ static PyObject* py_Consumer_destroy(PyObject* self, PyObject* args) {
         c->pinned = next;
     }
     Py_XDECREF(c->notify_cb);
+    Py_XDECREF(c->client_id);
     PyMem_Free(c);
     Py_RETURN_NONE;
 }
@@ -4434,14 +4422,15 @@ static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     return ret;
 }
 
+// Consumer_client_id(handle) -> str | None: the client.id Consumer_KafkaConsumer_new
+// read from the consumer's ConsumerConfig (generated there when unset); None
+// for a mock. Java's KafkaConsumer.clientId() is package-private, so the core
+// has no getter: the id is the configuration's, read before the consumer is built.
 static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    const char* s = NULL;  // borrowed
-    if (ffi_raise((s = kafka_consumer_Consumer_client_id_err(consumer_self(h), &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (s == NULL) Py_RETURN_NONE;
-    return PyUnicode_FromString(s);
+    PyObject* id = consumer_from_handle(h)->client_id;
+    return Py_NewRef(id != NULL ? id : Py_None);
 }
 
 // Consumer_current_lag(handle, topic, partition) -> (int | None, err | None),
@@ -5442,15 +5431,6 @@ static PyObject* py_ConsumerHandle_paused(PyObject* self, PyObject* args) {
     return tp_list_to_py(list);
 }
 
-static PyObject* py_ConsumerHandle_subscription(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h;
-    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    kafka_List_t* list = NULL;
-    if (ffi_raise((list = kafka_consumer_ConsumerHandle_subscription_err(handle_self(h), &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    return string_list_to_py(list);
-}
-
 // No-timeout variants of the map-returning shapes (the ConsumerHandle's Java
 // methods have no Duration overload). py(h, tps) / py_cb(h, tps, cb)
 #define DEF_TPLIST_MAP_OPS_NT(pyname, SELF_T, SELF_FN, OP, OP_CB, CONV)                 \
@@ -5562,8 +5542,6 @@ static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {             
 
 #define HANDLE_T const kafka_consumer_ConsumerHandle_t*
 
-DEF_TPLIST_VOID_OPS(ConsumerHandle_assign, HANDLE_T, handle_self,
-                    kafka_consumer_ConsumerHandle_assign, kafka_consumer_ConsumerHandle_assign_cb)
 DEF_TPLIST_VOID_OPS(ConsumerHandle_seek_to_beginning, HANDLE_T, handle_self,
                     kafka_consumer_ConsumerHandle_seek_to_beginning, kafka_consumer_ConsumerHandle_seek_to_beginning_cb)
 DEF_TPLIST_VOID_OPS(ConsumerHandle_seek_to_end, HANDLE_T, handle_self,
@@ -5593,9 +5571,34 @@ DEF_TIMESTAMPS_MAP_OPS_NT(ConsumerHandle_offsets_for_times, HANDLE_T, handle_sel
 DEF_COMMIT_OPS_NT(ConsumerHandle_commit_sync, HANDLE_T, handle_self,
                   kafka_consumer_ConsumerHandle_commit_sync, kafka_consumer_ConsumerHandle_commit_sync_with_offsets,
                   kafka_consumer_ConsumerHandle_commit_sync_cb, kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb)
-DEF_COMMIT_OPS_NT(ConsumerHandle_commit_async, HANDLE_T, handle_self,
-                  kafka_consumer_ConsumerHandle_commit_async, kafka_consumer_ConsumerHandle_commit_async_offsets,
-                  kafka_consumer_ConsumerHandle_commit_async_cb, kafka_consumer_ConsumerHandle_commit_async_offsets_cb)
+
+// ConsumerHandle_commit_async(hh) -> err | None
+//
+// Java's commitAsync() from inside a callback. Java has no commitAsync(Map):
+// a commit of given offsets without a callback is commitAsync(offsets, null),
+// ConsumerHandle_commit_async_callback with a None adapter.
+static PyObject* py_ConsumerHandle_commit_async(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    kafka_common_Error_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    kafka_consumer_ConsumerHandle_commit_async(s, &err);
+    Py_END_ALLOW_THREADS
+    return err_result(err);
+}
+
+static PyObject* py_ConsumerHandle_commit_async_cb(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &h, &cb)) return NULL;
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    Py_BEGIN_ALLOW_THREADS
+    kafka_consumer_ConsumerHandle_commit_async_cb(s, producer_void_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
 
 // ConsumerHandle_commit_async_callback(h, hh, spec | None, adapter) -> err | None
 //
@@ -9217,7 +9220,7 @@ static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
         kafka_common_Error_t* spec_err = NULL;
         if (is_timestamp) {
             kafka_admin_OffsetSpec_t* ts = NULL;
-            spec_err = (ts = kafka_admin_OffsetSpec_timestamp_err((int64_t)value, &ffi_err), ffi_take(&ffi_err));
+            spec_err = (ts = kafka_admin_OffsetSpec_for_timestamp_err((int64_t)value, &ffi_err), ffi_take(&ffi_err));
             if (spec_err == NULL && obj_list_add(&owned, ts) < 0) goto fail;
             os = ts;
         } else {
@@ -10838,8 +10841,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Test hook: install (code, message) / clear (None) the mock's commitTransaction error"},
     {"MockProducer_sent_offsets", py_MockProducer_sent_offsets, METH_VARARGS,
      "Test hook: whether offsets were staged in the current transaction"},
-    {"MockProducer_committed_offset", py_MockProducer_committed_offset, METH_VARARGS,
-     "Test hook: (offset, leader_epoch | None, metadata) for (group_id, topic, partition) or None"},
     {"KafkaError_code", py_KafkaError_code, METH_VARARGS,
      "Get error code from KafkaError pointer"},
     {"KafkaError_message", py_KafkaError_message, METH_VARARGS,
@@ -10879,7 +10880,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "(list[(topic, partition)] | None, err | None)"},
     {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS, "Metrics snapshot as list[dict] with name/group/description/tags/value"},
     {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
-    {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "Client id string"},
+    {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "client.id from the consumer's ConsumerConfig, or None for a mock"},
     {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "(lag int | None, err | None)"},
     {"Consumer_poll", py_Consumer_poll, METH_VARARGS, "poll(h, timeout_ms) -> (ConsumerRecords | None, err | None)"},
     {"Consumer_poll_cb", py_Consumer_poll_cb, METH_VARARGS, "poll twin; cb(ConsumerRecords | None, err | None)"},
@@ -10935,10 +10936,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_destroy", py_ConsumerHandle_destroy, METH_VARARGS, "Destroy a re-entrancy handle"},
     {"ConsumerHandle_wakeup", py_ConsumerHandle_wakeup, METH_VARARGS, "Wake up the owning consumer"},
     {"ConsumerHandle_assignment", py_ConsumerHandle_assignment, METH_VARARGS, "Assignment as list[(topic, partition)]"},
-    {"ConsumerHandle_subscription", py_ConsumerHandle_subscription, METH_VARARGS, "Subscription as list[str]"},
     {"ConsumerHandle_paused", py_ConsumerHandle_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},
-    {"ConsumerHandle_assign", py_ConsumerHandle_assign, METH_VARARGS, "assign(hh, [(topic, partition)]) -> err | None"},
-    {"ConsumerHandle_assign_cb", py_ConsumerHandle_assign_cb, METH_VARARGS, "assign twin; cb(err | None)"},
     {"ConsumerHandle_seek", py_ConsumerHandle_seek, METH_VARARGS, "seek(hh, topic, partition, offset) -> err | None"},
     {"ConsumerHandle_seek_cb", py_ConsumerHandle_seek_cb, METH_VARARGS, "seek twin; cb(err | None)"},
     {"ConsumerHandle_seek_with_metadata", py_ConsumerHandle_seek_with_metadata, METH_VARARGS,
@@ -10964,7 +10962,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_offsets_for_times_cb", py_ConsumerHandle_offsets_for_times_cb, METH_VARARGS, "offsets_for_times twin; cb(dict | None, err | None)"},
     {"ConsumerHandle_commit_sync", py_ConsumerHandle_commit_sync, METH_VARARGS, "commit_sync(hh, offsets_spec | None) -> err | None"},
     {"ConsumerHandle_commit_sync_cb", py_ConsumerHandle_commit_sync_cb, METH_VARARGS, "commit_sync twin; cb(err | None)"},
-    {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh, offsets_spec | None) -> err | None"},
+    {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh) -> err | None"},
     {"ConsumerHandle_commit_async_cb", py_ConsumerHandle_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
     {"ConsumerHandle_commit_async_callback", py_ConsumerHandle_commit_async_callback, METH_VARARGS,
      "commit_async_callback(h, hh, offsets_spec | None, adapter) -> err | None"},

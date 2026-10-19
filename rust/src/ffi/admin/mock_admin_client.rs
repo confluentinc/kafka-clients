@@ -170,36 +170,6 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
     unsafe { &*(self_ as *const AdminClassHandle) }.as_admin()
 }
 
-/// `MockAdminClient.Builder.featureLevels` / `minSupportedFeatureLevels` /
-/// `maxSupportedFeatureLevels`: seeds the three feature-level maps
-/// (`kafka_Map_t` of `const char *` to `const int16_t *`, borrowed and copied
-/// during the call).
-///
-/// # Safety
-///
-/// `self_` must be a live handle; the maps null or live maps of the types
-/// above.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
-    self_: *const kafka_admin_MockAdminClient_t,
-    feature_levels: *const kafka_Map_t,
-    min_supported_feature_levels: *const kafka_Map_t,
-    max_supported_feature_levels: *const kafka_Map_t,
-) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
-    // constructor, kept alive for this call, as `mock_ref` requires, and
-    // each map null or a live map of C strings to `const int16_t *` values, as `map_string_i16`
-    // requires.
-    unsafe {
-        mock_ref(self_).set_feature_levels(
-            map_string_i16(feature_levels),
-            map_string_i16(min_supported_feature_levels),
-            map_string_i16(max_supported_feature_levels),
-        )
-    }
-}
-
 /// `MockAdminClient.updateBeginningOffsets(Map<TopicPartition, Long>)`:
 /// `new_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *`
 /// to `const int64_t *`, borrowed and copied during the call.
@@ -259,28 +229,6 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
     // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
     // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_).update_consumer_group_offsets(map_topic_partition_i64(new_offsets)) }
-}
-
-/// `MockAdminClient.Builder.brokerLogDirs`: the log directories of
-/// `broker_id` (`kafka_List_t` of `const char *`, copied during the call);
-/// fails with Java's message for an unknown broker.
-///
-/// # Safety
-///
-/// `self_` must be a live handle and `log_dirs` null or a live list of C
-/// strings. `out_err` must be a valid slot pointing at null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
-    self_: *const kafka_admin_MockAdminClient_t,
-    broker_id: i32,
-    log_dirs: *const kafka_List_t,
-    out_err: *mut *mut kafka_common_Error_t,
-) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
-    // constructor, kept alive for this call, as `mock_ref` requires, and
-    // `log_dirs` null or a live list of C strings, as `list_strings` requires; they are copied.
-    unsafe { deliver_unit(mock_ref(self_).set_broker_log_dirs(broker_id, list_strings(log_dirs)), out_err) }
 }
 
 /// `MockAdminClient.addTopic(boolean internal, String name,
@@ -378,25 +326,6 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires.
     unsafe { mock_ref(self_) }.timeout_next_request(number_of_requests)
-}
-
-/// `MockAdminClient.Builder.usingRaftController(boolean)`, as a setter on the
-/// constructed mock: whether the mocked cluster runs a KRaft controller
-/// quorum, which decides whether `unregister_controller` succeeds. `0` is
-/// `false` (the default), any other value `true`.
-///
-/// # Safety
-///
-/// `self_` must be a live handle.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_using_raft_controller(
-    self_: *const kafka_admin_MockAdminClient_t,
-    using_raft_controller: i8,
-) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
-    // constructor, kept alive for this call, as `mock_ref` requires.
-    unsafe { mock_ref(self_) }.set_using_raft_controller(using_raft_controller != 0)
 }
 
 /// `MockAdminClient.controller(Node controller)`: makes `controller` (a node

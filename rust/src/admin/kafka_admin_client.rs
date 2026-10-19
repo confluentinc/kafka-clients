@@ -2405,7 +2405,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
-        OffsetSpec::Timestamp(timestamp) => timestamp,
+        OffsetSpec::Timestamp(spec) => spec.timestamp(),
         OffsetSpec::Earliest => ListOffsetsRequest::EARLIEST_TIMESTAMP,
         OffsetSpec::MaxTimestamp => ListOffsetsRequest::MAX_TIMESTAMP,
         OffsetSpec::EarliestLocal => ListOffsetsRequest::EARLIEST_LOCAL_TIMESTAMP,
@@ -3629,10 +3629,10 @@ impl Admin for KafkaAdminClient {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
                 let mut valid_topic_names: Vec<String> = Vec::new();
-                for name in &names {
+                for name in collection.topic_names() {
                     if topic_name_is_unrepresentable(name) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -3662,10 +3662,10 @@ impl Admin for KafkaAdminClient {
                 }
                 DeleteTopicsResult::of_topic_names(public)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut handles: HashMap<Uuid, KafkaFutureImpl<()>> = HashMap::new();
                 let mut valid_topic_ids: Vec<Uuid> = Vec::new();
-                for id in &ids {
+                for id in collection.topic_ids() {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -3754,16 +3754,19 @@ impl Admin for KafkaAdminClient {
         options: DescribeTopicsOptions,
     ) -> DescribeTopicsResult {
         match topics {
-            TopicCollection::TopicNames(names) => DescribeTopicsResult::of_topic_names(
-                self.handle_describe_topics_by_names_with_describe_topic_partitions_api(&names, &options),
+            TopicCollection::TopicNames(collection) => DescribeTopicsResult::of_topic_names(
+                self.handle_describe_topics_by_names_with_describe_topic_partitions_api(
+                    collection.topic_names(),
+                    &options,
+                ),
             ),
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 // Describing by id uses the Metadata API in Java too
                 // (handleDescribeTopicsByIds → convertTopicIdsToMetadataRequestTopic),
                 // not DescribeTopicPartitions, so it is translated faithfully here.
                 let mut handles: HashMap<Uuid, KafkaFutureImpl<TopicDescription>> = HashMap::new();
                 let mut valid_topic_ids: Vec<Uuid> = Vec::new();
-                for id in &ids {
+                for id in collection.topic_ids() {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -10948,10 +10951,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string(), "/data1".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11004,10 +11006,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11031,10 +11032,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,

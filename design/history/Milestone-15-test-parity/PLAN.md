@@ -313,6 +313,14 @@ Harness follow-ups (reverted from `24aca2b5` in `e68e6757` after a CI-only hang)
   auto-commit only fires from app-side `poll()` (`CommitRequestManager.java:181-203`, via the
   app-thread poll event). Effect: Rust commits ~auto.commit.interval after construction even if
   the app stops polling. Not changed on this branch (behaviour change outside test scope).
+  **Decided: fixed** on `esabellico/rust_interface_corrective_actions` (COMMENTS.1.md Issue 5):
+  the call was removed from `poll_with_coordinator`, as upstream KAFKA-18641 (709bfc506a,
+  "AsyncKafkaConsumer could lose records with auto offset commit") removed it from Java's
+  `poll`. The divergence was more than timing: the background commit snapshots
+  `allConsumed()` while the application is still processing the records the last `poll()`
+  returned, so a crash loses them. Auto-commit on the interval now fires only from
+  `update_timer_and_maybe_commit` (the `AsyncPoll` and `AssignmentChange` events), plus the
+  before-rebalance and close paths.
 
 - **Admin client ignores `metadata.recovery.strategy` (Phase 19 / Critic 83):**
   `src/admin/kafka_admin_client.rs:368` hardcodes `MetadataRecoveryStrategy::None`;

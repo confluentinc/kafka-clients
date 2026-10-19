@@ -1,0 +1,87 @@
+version: v1.0
+name: Bump version
+
+# Run as a Semaphore Task (the `bump-version` task in service.yml). Sets a new
+# version with `make bump-version` on a branch off BASE_BRANCH, pushes it and
+# opens a PR against BASE_BRANCH. Nothing is merged, tagged or published: the
+# PR's own build runs the checks, the API compatibility check among them.
+#
+# Required Task parameters:
+#   VERSION         -- X.Y.Z, or X.Y.Z-alpha.N / -beta.N / -rc.N. The Cargo
+#                      manifests get it as given, the Python packages in
+#                      PEP 440 (0.3.0-rc.1 -> 0.3.0rc1).
+# Optional:
+#   PYTHON_VERSION  -- a PEP 440 version for the Python packages instead
+#                      (e.g. 0.3.0.post1 for a Python-only release).
+#   BASE_BRANCH     -- the branch to bump and the PR's base; default master.
+#
+# The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION> when that is
+# given; the job fails if it already exists on origin. Like the translation
+# agent's jobs, it pushes and runs `gh` with the agent's GitHub credentials.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-0
+
+blocks:
+  - name: Bump version
+    task:
+      # No task-level env_vars: declaring VERSION, PYTHON_VERSION or
+      # BASE_BRANCH here would shadow the Task parameters supplied at trigger
+      # time. Defaults are applied shell-side below.
+      jobs:
+        - name: bump-version
+          commands:
+            - checkout
+            - |
+              : "${VERSION:?VERSION must be set as a Task parameter}"
+            - export BASE_BRANCH="${BASE_BRANCH:-master}"
+            - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}"
+            - |
+              if git ls-remote --exit-code --heads origin "${BUMP_BRANCH}" >/dev/null; then
+                echo "Refusing to bump: ${BUMP_BRANCH} already exists on origin; close its PR and delete it first" >&2
+                exit 1
+              fi
+            # Semaphore's shallow single-branch clone has no
+            # origin/<other-branch>, so start from FETCH_HEAD.
+            - git fetch origin "${BASE_BRANCH}"
+            - git checkout -B "${BUMP_BRANCH}" FETCH_HEAD
+            # Installs rustup, which installs the toolchain rust/rust-toolchain.toml pins.
+            - ./.semaphore/dependencies.sh
+            - make bump-version VERSION="${VERSION}" PYTHON_VERSION="${PYTHON_VERSION:-}"
+            - |
+              if git diff --quiet; then
+                echo "Nothing to bump: ${BASE_BRANCH} already has these versions" >&2
+                exit 1
+              fi
+            - git diff --stat
+            - git config user.name >/dev/null || git config user.name "Semaphore CI"
+            - git config user.email >/dev/null || git config user.email "semaphore-ci@confluent.io"
+            # --no-verify: a pre-commit hook, if one is configured, would run
+            # the suite here; the PR's own build runs the checks.
+            - |
+              PYTHON_NOTE=""
+              if [ -n "${PYTHON_VERSION:-}" ]; then
+                PYTHON_NOTE=" The Python packages are at ${PYTHON_VERSION}."
+              fi
+              git commit --no-verify -a -q -F - <<EOF
+              Version ${VERSION}
+
+              Set by the "Bump version" Semaphore Task with \`make bump-version\`.${PYTHON_NOTE}
+              EOF
+            - git push origin "HEAD:refs/heads/${BUMP_BRANCH}"
+            - |
+              {
+                echo "Sets version \`${VERSION}\` with \`make bump-version\`, from the \"Bump version\" Semaphore Task."
+                echo
+                if [ -n "${PYTHON_VERSION:-}" ]; then
+                  echo "The Python packages get \`${PYTHON_VERSION}\`, given as PYTHON_VERSION."
+                else
+                  echo "The Python packages get the same version in PEP 440 form."
+                fi
+                echo
+                echo '```'
+                git show --stat --format= HEAD
+                echo '```'
+              } > "${HOME}/pr-body.md"
+            - gh pr create --base "${BASE_BRANCH}" --head "${BUMP_BRANCH}" --title "Version ${VERSION}" --body-file "${HOME}/pr-body.md"

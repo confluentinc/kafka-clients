@@ -491,8 +491,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._void_spec(fn, tp_to_spec(partition_list)))
 
     def _c_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("assign", _lib.Consumer_assign_cb,
-                    self._assign_partitions(partitions))
+        # Not on the ConsumerHandle (KIP-1306's RebalanceConsumer has no
+        # assign): from inside a callback it reaches the busy consumer and
+        # reports ConcurrentModificationError, as Java's acquire() does from
+        # another thread.
+        partition_list = list(self._assign_partitions(partitions))
+        self._run_sync(*self._void_spec(_lib.Consumer_assign_cb, tp_to_spec(partition_list)))
 
     def _c_unsubscribe(self) -> None:
         self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_cb))

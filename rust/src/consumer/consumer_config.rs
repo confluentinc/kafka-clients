@@ -56,6 +56,12 @@ static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 /// Documentation for the underlying keys can be found in the
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
+/// As in Java, the configuration is built from the string map, by
+/// [`ConsumerConfig::new`], which validates every key as Java's `ConfigDef`
+/// does. There are no typed getters or setters: a key's type and validators
+/// change across Kafka releases, so a getter would freeze the type and a
+/// setter would skip the validation.
+///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 // `Debug` is derived: every secret this struct holds is a `Password` inside
 // `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
@@ -414,8 +420,16 @@ impl ConsumerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`.
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
-    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909). See
-    /// [`Self::bootstrap_resolve_timeout_ms`].
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909): selects the
+    /// client's bootstrap DNS resolution mode. `0` (the default) resolves
+    /// `bootstrap.servers` synchronously when the consumer is created, and a
+    /// resolution failure fails creation with a config error. A positive value
+    /// resolves asynchronously, retrying for at most this long before every
+    /// subsequent call fails with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
+    /// the consumer must then be closed and re-created. Setting a positive
+    /// value enables an evolving feature whose compatibility may be broken in a
+    /// minor release.
     pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
         CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
 
@@ -426,18 +440,16 @@ impl ConsumerConfig {
 
     /// Config key: `metadata.max.age.ms`.
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
-    /// Config key: `metadata.recovery.strategy`.
-    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = "metadata.recovery.strategy";
-    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`.
-    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
-        "metadata.recovery.rebootstrap.trigger.ms";
 
     /// Config key: `exclude.internal.topics`.
     pub const EXCLUDE_INTERNAL_TOPICS_CONFIG: &'static str = "exclude.internal.topics";
     /// Default value of `exclude.internal.topics`.
     pub const DEFAULT_EXCLUDE_INTERNAL_TOPICS: bool = true;
     /// Config key: `internal.throw.on.fetch.stable.offset.unsupported`.
-    pub const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &'static str =
+    ///
+    /// Package-private in Java (`ConsumerConfig.java:370`), like every
+    /// `internal.*` key: Java may remove it in a minor release.
+    pub(crate) const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &'static str =
         "internal.throw.on.fetch.stable.offset.unsupported";
     /// Config key: `isolation.level`.
     pub const ISOLATION_LEVEL_CONFIG: &'static str = "isolation.level";
@@ -462,22 +474,53 @@ impl ConsumerConfig {
 
     /// Config key: `security.providers`.
     pub const SECURITY_PROVIDERS_CONFIG: &'static str = "security.providers";
-    /// Config key: `security.protocol`.
-    pub const SECURITY_PROTOCOL_CONFIG: &'static str = "security.protocol";
-    /// Config key: `sasl.mechanism`.
-    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
-    /// Config key: `sasl.jaas.config`.
-    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Config key: `config.providers`.
     pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
 
-    // -------- Getters --------
+    // -------- Typed getters (crate-internal) --------
+    //
+    // Java reads a key through `AbstractConfig`'s keyed lookups
+    // (`getInt(REQUEST_TIMEOUT_MS_CONFIG)`); the client's own readers get a
+    // typed getter per key instead. They are `pub(crate)`, not public: a key's
+    // Java type changes across releases (`linger.ms` was a `long`, an `int`,
+    // then a `long` again) and a public getter would freeze it, so users
+    // configure through the string map only, which `new` validates.
+
+    /// The value of the `STRING`-typed configuration `key`, trimmed, or `None`
+    /// when it has no value (Java's `null`, e.g. an unset `group.id`).
+    ///
+    /// `client.id` answers the resolved id: when the property is unset, `new`
+    /// derives it the way Java's `maybeOverrideClientId` does, so this is the
+    /// id the consumer reports to the brokers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] with Java's `Unknown configuration '<key>'`
+    /// when `key` is not a `STRING`-typed `ConsumerConfig` key.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
+    pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
+        let value = match key {
+            Self::GROUP_ID_CONFIG => self.group_id.as_deref(),
+            Self::GROUP_INSTANCE_ID_CONFIG => self.group_instance_id.as_deref(),
+            Self::GROUP_PROTOCOL_CONFIG => Some(self.group_protocol.as_str()),
+            Self::GROUP_REMOTE_ASSIGNOR_CONFIG => self.group_remote_assignor.as_deref(),
+            Self::CLIENT_ID_CONFIG => Some(self.client_id.as_str()),
+            Self::CLIENT_RACK_CONFIG => Some(self.client_rack.as_str()),
+            Self::AUTO_OFFSET_RESET_CONFIG => Some(self.auto_offset_reset.as_str()),
+            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => Some(self.metadata_recovery_strategy.as_str()),
+            Self::ISOLATION_LEVEL_CONFIG => Some(self.isolation_level.as_str()),
+            Self::METRICS_RECORDING_LEVEL_CONFIG => Some(self.metrics_recording_level.as_str()),
+            Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
+            Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
+            Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
+            _ => return Err(Error::config_message(format!("Unknown configuration '{key}'"))),
+        };
+        Ok(value.map(str::trim))
+    }
 
     /// `bootstrap.servers`.
-    // typed getter for `bootstrap.servers`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn bootstrap_servers(&self) -> &[String] {
+    pub(crate) fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
     }
     /// `client.dns.lookup`.
@@ -485,9 +528,7 @@ impl ConsumerConfig {
         self.client_dns_lookup
     }
     /// `client.id`.
-    // typed getter for `client.id`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn client_id(&self) -> &str {
+    pub(crate) fn client_id(&self) -> &str {
         &self.client_id
     }
     /// `client.rack`, empty when unset ([`Self::DEFAULT_CLIENT_RACK`]).
@@ -495,197 +536,61 @@ impl ConsumerConfig {
         &self.client_rack
     }
     /// `group.id`, if any.
-    // typed getter for `group.id`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn group_id(&self) -> Option<&str> {
+    pub(crate) fn group_id(&self) -> Option<&str> {
         self.group_id.as_deref()
     }
     /// `group.instance.id`, if any.
-    // typed getter for `group.instance.id`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn group_instance_id(&self) -> Option<&str> {
+    pub(crate) fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
     /// `group.protocol`.
-    // typed getter for `group.protocol`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn group_protocol(&self) -> &str {
+    pub(crate) fn group_protocol(&self) -> &str {
         &self.group_protocol
     }
     /// `group.remote.assignor`, if any.
-    // typed getter for `group.remote.assignor`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn group_remote_assignor(&self) -> Option<&str> {
+    pub(crate) fn group_remote_assignor(&self) -> Option<&str> {
         self.group_remote_assignor.as_deref()
     }
-    /// `max.poll.records`.
-    // typed getter for `max.poll.records`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn max_poll_records(&self) -> i32 {
-        self.max_poll_records
-    }
     /// `max.poll.interval.ms`.
-    // typed getter for `max.poll.interval.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn max_poll_interval_ms(&self) -> i32 {
+    pub(crate) fn max_poll_interval_ms(&self) -> i32 {
         self.max_poll_interval_ms
     }
-    /// `session.timeout.ms`.
-    // typed getter for `session.timeout.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn session_timeout_ms(&self) -> i32 {
-        self.session_timeout_ms
-    }
-    /// `heartbeat.interval.ms`.
-    // typed getter for `heartbeat.interval.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn heartbeat_interval_ms(&self) -> i32 {
-        self.heartbeat_interval_ms
-    }
     /// `enable.auto.commit`.
-    // typed getter for `enable.auto.commit`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn enable_auto_commit(&self) -> bool {
+    pub(crate) fn enable_auto_commit(&self) -> bool {
         self.enable_auto_commit
     }
     /// `auto.commit.interval.ms`.
-    // typed getter for `auto.commit.interval.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn auto_commit_interval_ms(&self) -> i32 {
+    pub(crate) fn auto_commit_interval_ms(&self) -> i32 {
         self.auto_commit_interval_ms
     }
     /// `auto.offset.reset`.
-    // typed getter for `auto.offset.reset`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn auto_offset_reset(&self) -> &str {
+    pub(crate) fn auto_offset_reset(&self) -> &str {
         &self.auto_offset_reset
     }
-    /// `partition.assignment.strategy`.
-    // typed getter for `partition.assignment.strategy`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn partition_assignment_strategy(&self) -> &[String] {
-        &self.partition_assignment_strategy
-    }
-    /// `security.protocol` - the protocol name (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
-    // typed getter for `security.protocol`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn security_protocol(&self) -> &str {
-        self.security_protocol.name()
-    }
     /// `metadata.recovery.strategy`.
-    // typed getter for `metadata.recovery.strategy`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn metadata_recovery_strategy(&self) -> &str {
+    pub(crate) fn metadata_recovery_strategy(&self) -> &str {
         &self.metadata_recovery_strategy
     }
     /// `internal.throw.on.fetch.stable.offset.unsupported`.
-    // typed getter for `internal.throw.on.fetch.stable.offset.unsupported`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
+    pub(crate) fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
         self.throw_on_fetch_stable_offset_unsupported
     }
     /// `request.timeout.ms`.
-    // typed getter for `request.timeout.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn request_timeout_ms(&self) -> i32 {
+    pub(crate) fn request_timeout_ms(&self) -> i32 {
         self.request_timeout_ms
     }
     /// `retry.backoff.ms`.
-    // typed getter for `retry.backoff.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn retry_backoff_ms(&self) -> i64 {
+    pub(crate) fn retry_backoff_ms(&self) -> i64 {
         self.retry_backoff_ms
     }
     /// `retry.backoff.max.ms`.
-    // typed getter for `retry.backoff.max.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn retry_backoff_max_ms(&self) -> i64 {
+    pub(crate) fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
     }
-    /// `bootstrap.resolve.timeout.ms` (KIP-909): selects the client's bootstrap
-    /// DNS resolution mode. `0` (the default) resolves `bootstrap.servers`
-    /// synchronously when the consumer is created, and a resolution failure
-    /// fails creation with a config error. A positive value resolves
-    /// asynchronously, retrying for at most this long before every subsequent
-    /// call fails with an unrecoverable
-    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
-    /// the consumer must then be closed and re-created. Setting a positive
-    /// value enables an evolving feature whose compatibility may be broken in a
-    /// minor release.
-    // typed getter for `bootstrap.resolve.timeout.ms`, in place of an AbstractConfig lookup
-    #[doc(alias = "rust-only")]
-    pub fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+    /// `bootstrap.resolve.timeout.ms` (KIP-909); see
+    /// [`Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG`].
+    pub(crate) fn bootstrap_resolve_timeout_ms(&self) -> i64 {
         self.bootstrap_resolve_timeout_ms
-    }
-
-    // -------- Fluent setters --------
-
-    /// Set `bootstrap.servers`.
-    // typed setter for `bootstrap.servers`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
-        self.bootstrap_servers = bootstrap_servers;
-        self
-    }
-    /// Set `client.id`, trimmed as [`ConsumerConfig::new`] trims it (Java's
-    /// `ConfigDef.parseType`), so a blank id is generated at construction.
-    // typed setter for `client.id`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = client_id.into().trim().to_string();
-        self
-    }
-    /// Set `group.id`.
-    ///
-    /// A `client.id` generated by [`ConsumerConfig::new`] already embeds the
-    /// group id, so after changing the group either set `client.id`
-    /// explicitly or clear it with `set_client_id("")`, which the consumer
-    /// constructor then regenerates.
-    ///
-    /// Trimmed as [`ConsumerConfig::new`] trims it (Java's
-    /// `ConfigDef.parseType`), so a blank id is rejected at construction.
-    // typed setter for `group.id`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
-        self.group_id = Some(group_id.into().trim().to_string());
-        self
-    }
-    /// Set `group.protocol`.
-    // typed setter for `group.protocol`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_group_protocol(mut self, protocol: impl Into<String>) -> Self {
-        self.group_protocol = protocol.into();
-        self
-    }
-    /// Set `auto.offset.reset`.
-    // typed setter for `auto.offset.reset`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
-        self.auto_offset_reset = value.into();
-        self
-    }
-    /// Set `enable.auto.commit`.
-    // typed setter for `enable.auto.commit`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
-        self.enable_auto_commit = value;
-        self
-    }
-
-    /// Set `request.timeout.ms`.
-    // typed setter for `request.timeout.ms`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_request_timeout_ms(mut self, value: i32) -> Self {
-        self.request_timeout_ms = value;
-        self
-    }
-
-    /// Set `retry.backoff.ms`.
-    // typed setter for `retry.backoff.ms`, in place of the properties map
-    #[doc(alias = "rust-only")]
-    pub fn set_retry_backoff_ms(mut self, value: i64) -> Self {
-        self.retry_backoff_ms = value;
-        self
     }
 
     /// Parses a string-typed property map into a typed `ConsumerConfig`.
@@ -899,14 +804,17 @@ impl ConsumerConfig {
                 Self::METADATA_MAX_AGE_CONFIG => {
                     config.metadata_max_age_ms = parse_i64(key, value)?;
                 },
-                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
+                        return Err(Error::config_name_value(
+                            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG,
+                            value,
+                        ));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
-                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ConsumerConfig` (`:717-721`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
@@ -982,19 +890,19 @@ impl ConsumerConfig {
                 Self::SECURITY_PROVIDERS_CONFIG => {
                     config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
                 },
-                Self::SECURITY_PROTOCOL_CONFIG => {
+                CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
                         Error::config_name_value_message(
-                            Self::SECURITY_PROTOCOL_CONFIG,
+                            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
                         )
                     })?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
+                SaslConfigs::SASL_MECHANISM => {
                     config.sasl_config.mechanism = value.clone();
                 },
-                Self::SASL_JAAS_CONFIG => {
+                SaslConfigs::SASL_JAAS_CONFIG => {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
@@ -1097,16 +1005,16 @@ mod tests {
     #[test]
     fn test_default_values() {
         let c = ConsumerConfig::default();
-        assert_eq!(c.max_poll_records(), 500);
+        assert_eq!(c.max_poll_records, 500);
         assert_eq!(c.max_poll_interval_ms(), 300_000);
-        assert_eq!(c.session_timeout_ms(), 45_000);
-        assert_eq!(c.heartbeat_interval_ms(), 3_000);
+        assert_eq!(c.session_timeout_ms, 45_000);
+        assert_eq!(c.heartbeat_interval_ms, 3_000);
         assert!(c.enable_auto_commit());
         assert_eq!(c.auto_commit_interval_ms(), 5_000);
         assert_eq!(c.auto_offset_reset(), "latest");
         assert_eq!(c.group_protocol(), "classic");
         assert_eq!(c.group_id(), None);
-        assert_eq!(c.security_protocol(), "PLAINTEXT");
+        assert_eq!(c.security_protocol, SecurityProtocol::Plaintext);
         assert_eq!(c.metadata_recovery_strategy(), "rebootstrap");
     }
 
@@ -1121,7 +1029,7 @@ mod tests {
         assert_eq!(c.bootstrap_servers(), &["host1:9092".to_string(), "host2:9093".to_string()]);
         assert_eq!(c.group_id(), Some("g"));
         assert_eq!(c.client_id(), "my-consumer");
-        assert_eq!(c.max_poll_records(), 100);
+        assert_eq!(c.max_poll_records, 100);
     }
 
     #[test]
@@ -1336,13 +1244,13 @@ mod tests {
             props.insert("security.protocol".to_string(), input.to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.security_protocol, expected, "for input {input}");
-            assert_eq!(c.security_protocol(), expected.name());
         }
     }
 
     /// `security.protocol` parsing is case-insensitive (mirrors Java/`for_name`).
     #[test]
-    fn test_security_protocol_case_insensitive() {
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testCaseInsensitiveSecurityProtocol")]
+    fn test_case_insensitive_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
@@ -1785,6 +1693,23 @@ mod tests {
         assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
     }
 
+    /// `getString` answers a `STRING` key's value, `null` for an unset
+    /// nullable one, the generated `client.id` when the property is unset, and
+    /// `Unknown configuration` for a key that is not a `STRING` key.
+    #[test]
+    fn test_get_string() {
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")])).unwrap();
+        assert_eq!(Some("test-group"), config.get_string(ConsumerConfig::GROUP_ID_CONFIG).unwrap());
+        assert_eq!(None, config.get_string(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG).unwrap());
+        let client_id = config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap().unwrap();
+        assert_eq!(config.client_id(), client_id);
+        sequence_suffix(client_id, "consumer-test-group-");
+        match config.get_string(ConsumerConfig::MAX_POLL_RECORDS_CONFIG) {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'max.poll.records'", e.message()),
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
+    }
+
     /// `client.rack` is a `Type.STRING`, so `ConfigDef.parseType` trims it
     /// (Critic 96 F3); unset, it is `DEFAULT_CLIENT_RACK`, the empty string.
     #[test]
@@ -1834,5 +1759,166 @@ mod tests {
         // so the consumer constructor rejects it as Java does.
         let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, " ")])).unwrap();
         assert_eq!(config.group_id(), Some(""));
+    }
+
+    // -------- Translated from `org.apache.kafka.clients.consumer.ConsumerConfigTest` --------
+    //
+    // Java reads values back through `AbstractConfig`'s keyed getters
+    // (`getString(GROUP_PROTOCOL_CONFIG)`, `getList`, `getBoolean`, `originals()`),
+    // which are not translated; the crate-private getters and fields stand in for
+    // them, which is why these tests live in the crate rather than in
+    // `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
+    // every property map (`ConsumerConfigTest.java:60`) because its `ConfigDef`
+    // defines them with no default; Rust takes the deserializers as constructor
+    // arguments to the consumer, and `ConsumerConfig` holds no deserializer state,
+    // so the two keys are absent from `base_props`.
+    //
+    // Skipped tests:
+    // - `testOverrideEnableAutoCommit` — exercises Java's `postProcessParsedConfig`
+    //   auto-commit override, deferred (PLAN.md "Cross-field validation").
+    // - `testAppendDeserializerToConfig`, `testAppendDeserializerToConfigWithException`
+    //   — exercise the Java static `appendDeserializerToConfig` helper that mutates a
+    //   typed `Map<String, Object>`; there is no equivalent function to test.
+    // - `testRemoteAssignorWithClassicGroupProtocol`,
+    //   `testUnsupportedConfigsWithConsumerGroupProtocol` — cross-field validation,
+    //   deferred (consumer-threading.md §20: classic-protocol-only keys are accepted
+    //   silently for now).
+    // - `testValidateConfigPropertiesFile` — reads `config/consumer.properties` from
+    //   the Apache Kafka source tree; not part of the Rust client.
+    // `testInvalidSecurityProtocol` and `testCaseInsensitiveSecurityProtocol` are
+    // `test_invalid_security_protocol` and `test_case_insensitive_security_protocol`
+    // above.
+
+    /// Translated from `ConsumerConfigTest.ensureDefaultThrowOnUnsupportedStableFlagToFalse`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#ensureDefaultThrowOnUnsupportedStableFlagToFalse"
+    )]
+    fn ensure_default_return_on_unsupported_stable_flag_to_false() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        assert!(!config.throw_on_fetch_stable_offset_unsupported());
+    }
+
+    /// Translated from `ConsumerConfigTest.testDefaultPartitionAssignor`.
+    ///
+    /// `partition.assignment.strategy` is a classic-protocol-only key in Java.
+    /// Per consumer-threading.md §20 it is accepted silently and stored untyped
+    /// (as a list of class-name strings). Its default is empty in the Rust struct
+    /// (Java's default is `[RangeAssignor, CooperativeStickyAssignor]`, class
+    /// objects that are not translated).
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultPartitionAssignor")]
+    fn test_default_partition_assignor() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        assert!(config.partition_assignment_strategy.is_empty());
+    }
+
+    /// Translated from `ConsumerConfigTest.testOverrideClientId`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testOverrideClientId")]
+    fn test_override_client_id() {
+        let mut props = base_props();
+        props.insert(ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string());
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert!(!config.client_id().is_empty());
+    }
+
+    /// Translated from `ConsumerConfigTest.testInvalidGroupInstanceId`: the
+    /// `group.instance.id` empty-string check is enforced.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidGroupInstanceId")]
+    fn test_invalid_group_instance_id() {
+        let mut props = base_props();
+        props.insert(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG.to_string(), String::new());
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(
+            err.message().contains(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG),
+            "error message should mention the failing config key, got: {}",
+            err.message()
+        );
+    }
+
+    /// Translated from `ConsumerConfigTest.testDefaultConsumerGroupConfig`.
+    ///
+    /// Java's default for `group.protocol` is `"classic"`
+    /// (`ConsumerConfig.DEFAULT_GROUP_PROTOCOL`); `group.remote.assignor` is `null`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultConsumerGroupConfig")]
+    fn test_default_consumer_group_config() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        assert_eq!(config.group_protocol(), "classic");
+        assert_eq!(config.group_remote_assignor(), None);
+    }
+
+    /// Translated from `ConsumerConfigTest.testRemoteAssignorConfig`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testRemoteAssignorConfig")]
+    fn test_remote_assignor_config() {
+        let mut props = base_props();
+        let remote_assignor_name = "SomeAssignor";
+        let protocol = "consumer";
+        props.insert(
+            ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG.to_string(),
+            remote_assignor_name.to_string(),
+        );
+        props.insert(ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), protocol.to_string());
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(config.group_protocol(), protocol);
+        assert_eq!(config.group_remote_assignor(), Some(remote_assignor_name));
+    }
+
+    /// Translated from `ConsumerConfigTest.testDefaultMetadataRecoveryStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultMetadataRecoveryStrategy")]
+    fn test_default_metadata_recovery_strategy() {
+        let config = ConsumerConfig::new(&base_props()).unwrap();
+        assert_eq!(config.metadata_recovery_strategy(), "rebootstrap");
+    }
+
+    /// Translated from `ConsumerConfigTest.testInvalidMetadataRecoveryStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidMetadataRecoveryStrategy")]
+    fn test_invalid_metadata_recovery_strategy() {
+        let mut props = base_props();
+        props.insert(
+            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        assert!(
+            err.message().contains(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG),
+            "error message should mention the failing config key, got: {}",
+            err.message()
+        );
+    }
+
+    /// Translated from `ConsumerConfigTest.testProtocolConfigValidation`.
+    ///
+    /// Java uses `@ParameterizedTest @CsvSource(...)`; the same inputs are iterated.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testProtocolConfigValidation")]
+    fn test_protocol_config_validation() {
+        let cases: &[(&str, bool)] = &[
+            ("consumer", true),
+            ("classic", true),
+            ("Consumer", true),
+            ("Classic", true),
+            ("invalid", false),
+        ];
+        for (protocol, is_valid) in cases {
+            let mut props = base_props();
+            props.insert(ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), protocol.to_string());
+            if *is_valid {
+                let config = ConsumerConfig::new(&props).unwrap();
+                assert_eq!(config.group_protocol(), *protocol);
+            } else {
+                let err = ConsumerConfig::new(&props).unwrap_err();
+                assert!(
+                    err.message().contains(ConsumerConfig::GROUP_PROTOCOL_CONFIG),
+                    "case {protocol}: {}",
+                    err.message()
+                );
+            }
+        }
     }
 }

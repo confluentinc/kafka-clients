@@ -61,7 +61,7 @@ impl DescribeUserScramCredentialsResult {
     /// future.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, UserScramCredentialsDescription>> {
-        self.data_future.then_apply(|data| {
+        self.data_future.then_apply(|data: DescribeUserScramCredentialsResponseData| {
             if let Some(first_failed) = data.results.iter().find(|result| {
                 result.error_code != Errors::None.code() && result.error_code != Errors::ResourceNotFound.code()
             }) {
@@ -89,7 +89,7 @@ impl DescribeUserScramCredentialsResult {
     /// have a credential but could not be described are included.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#users")]
     pub fn users(&self) -> KafkaFuture<Vec<String>> {
-        self.data_future.then_apply(|data| {
+        self.data_future.then_apply(|data: DescribeUserScramCredentialsResponseData| {
             Ok(data
                 .results
                 .iter()
@@ -107,25 +107,26 @@ impl DescribeUserScramCredentialsResult {
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description")]
     pub fn description(&self, user_name: &str) -> KafkaFuture<UserScramCredentialsDescription> {
         let user_name = user_name.to_string();
-        self.data_future.then_apply(move |data| {
-            match data.results.iter().find(|result| result.user == user_name) {
-                None => Err(Error::with_message(
-                    Errors::ResourceNotFound,
-                    format!("No such user: {user_name}"),
-                )),
-                Some(user_result) => {
-                    if user_result.error_code != Errors::None.code() {
-                        // RESOURCE_NOT_FOUND is included here.
-                        Err(api_error(user_result.error_code, &user_result.error_message))
-                    } else {
-                        Ok(UserScramCredentialsDescription::new(
-                            user_result.user.clone(),
-                            scram_credential_infos_for(user_result),
-                        ))
-                    }
-                },
-            }
-        })
+        self.data_future
+            .then_apply(move |data: DescribeUserScramCredentialsResponseData| {
+                match data.results.iter().find(|result| result.user == user_name) {
+                    None => Err(Error::with_message(
+                        Errors::ResourceNotFound,
+                        format!("No such user: {user_name}"),
+                    )),
+                    Some(user_result) => {
+                        if user_result.error_code != Errors::None.code() {
+                            // RESOURCE_NOT_FOUND is included here.
+                            Err(api_error(user_result.error_code, &user_result.error_message))
+                        } else {
+                            Ok(UserScramCredentialsDescription::new(
+                                user_result.user.clone(),
+                                scram_credential_infos_for(user_result),
+                            ))
+                        }
+                    },
+                }
+            })
     }
 }
 

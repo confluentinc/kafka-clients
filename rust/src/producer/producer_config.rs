@@ -545,9 +545,6 @@ impl fmt::Debug for ProducerConfig {
 }
 
 impl ProducerConfig {
-    /// Maximum number of in-flight requests per connection when idempotence is enabled.
-    pub const MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE: i32 = MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE;
-
     // --- Config key constants (matching Java string keys) ---
 
     /// Config key: `bootstrap.servers`
@@ -627,11 +624,6 @@ impl ProducerConfig {
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// Config key: `metadata.max.idle.ms`
     pub const METADATA_MAX_IDLE_CONFIG: &'static str = "metadata.max.idle.ms";
-    /// Config key: `metadata.recovery.strategy`
-    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = "metadata.recovery.strategy";
-    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`
-    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
-        "metadata.recovery.rebootstrap.trigger.ms";
     /// Config key: `partitioner.adaptive.partitioning.enable`
     pub const PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG: &'static str =
         "partitioner.adaptive.partitioning.enable";
@@ -642,15 +634,23 @@ impl ProducerConfig {
     /// Config key: `partitioner.rack.aware`
     pub const PARTITIONER_RACK_AWARE_CONFIG: &'static str = "partitioner.rack.aware";
     /// Config key: `partitioner.type`
+    // selects a built-in partitioner in place of Java's class-valued `partitioner.class` (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
     /// Accepted `partitioner.type` value selecting the CRC-32 key hash
     /// (the crate-internal `KeyHasher::Crc32`) — the default, librdkafka `consistent_random` parity.
+    // selects a built-in partitioner in place of Java's class-valued `partitioner.class` (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     pub const CONSISTENT_RANDOM_PARTITIONER: &'static str = "ConsistentRandomPartitioner";
     /// Accepted `partitioner.type` value selecting the murmur2 key hash
     /// (the crate-internal `KeyHasher::Murmur2`) — exact Java-client parity.
+    // selects a built-in partitioner in place of Java's class-valued `partitioner.class` (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     pub const MURMUR2_RANDOM_PARTITIONER: &'static str = "Murmur2RandomPartitioner";
     /// Accepted `partitioner.type` value selecting the
     /// [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner).
+    // selects a built-in partitioner in place of Java's class-valued `partitioner.class` (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     pub const ROUND_ROBIN_PARTITIONER: &'static str = "RoundRobinPartitioner";
     /// Config key: `transactional.id`
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
@@ -664,12 +664,6 @@ impl ProducerConfig {
     pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = "metrics.recording.level";
     /// Config key: `transaction.two.phase.commit.enable`
     pub const TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG: &'static str = "transaction.two.phase.commit.enable";
-    /// Config key: `security.protocol`
-    pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
-    /// Config key: `sasl.mechanism`
-    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
-    /// Config key: `sasl.jaas.config`
-    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Creates a `ProducerConfig` from a map of string key-value pairs.
     ///
@@ -841,13 +835,13 @@ impl ProducerConfig {
                     // `atLeast(5000)`.
                     config.metadata_max_idle_ms = Self::at_least(key, Self::parse_i64(key, value)?, 5000)?;
                 },
-                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
                     // (`ProducerConfig.java:598-599`).
                     config.metadata_recovery_strategy =
                         MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
                 },
-                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
                     // Java `ProducerConfig` (`:602-605`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = Self::parse_i64(key, value)?;
@@ -948,7 +942,7 @@ impl ProducerConfig {
                 Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG => {
                     config.two_phase_commit_enable = Self::parse_bool(key, value)?;
                 },
-                Self::SECURITY_PROTOCOL_CONFIG => {
+                CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
                         Error::config_name_value_message(
                             key,
@@ -957,10 +951,10 @@ impl ProducerConfig {
                         )
                     })?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
+                SaslConfigs::SASL_MECHANISM => {
                     config.sasl_config.mechanism = value.to_string();
                 },
-                Self::SASL_JAAS_CONFIG => {
+                SaslConfigs::SASL_JAAS_CONFIG => {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
@@ -1146,7 +1140,7 @@ impl ProducerConfig {
 
             // Unlike the two above, this is always an error — never a silent
             // disable — regardless of whether the user asked for idempotence.
-            if Self::MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
+            if MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
                 return Err(Error::config_message(format!(
                     "To use the idempotent producer, {} must be set to at most 5. Current value is {}.",
                     Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,

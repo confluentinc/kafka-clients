@@ -131,8 +131,8 @@ pub(crate) unsafe fn record_headers_ref<'a>(
     // not mutated for `'a`, so it points at a live `RecordHeadersInner`: the `Box::into_raw` of
     // `box_record_headers`, one a `ConsumerRecord`, `ProducerRecord` or
     // `RecordDeserializationError` handle embeds boxed and hands out through `as_ptr`, which lives
-    // as long as that parent, or the call-local one the serializer passes to C. The shared
-    // reference to its `headers` field is therefore sound for `'a`.
+    // as long as that parent, or the call-local one a serializer or deserializer invoker passes
+    // to C. The shared reference to its `headers` field is therefore sound for `'a`.
     unsafe { &*(headers as *const RecordHeadersInner) }.headers()
 }
 
@@ -249,8 +249,8 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 }
 
 /// The handle as the `Headers` interface it implements: a borrowed view
-/// valid until the handle is destroyed, never passed to
-/// `kafka_common_header_Headers_destroy`. Mutable, as `Headers` mutates.
+/// valid until the handle is destroyed, never passed to a `_destroy`
+/// (`Headers_t` has none). Mutable, as `Headers` mutates.
 ///
 /// # Safety
 ///
@@ -263,8 +263,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers
 ) -> *mut kafka_common_header_Headers_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-headers handle that no
     // other call uses at the same time, so it points at a live `RecordHeadersInner` that does not
-    // move (every owner keeps it boxed, except the serializer, whose local lives unmoved for the
-    // one call that uses it) and no other reference to its `view` is in use, as `headers_view`
+    // move (every owner keeps it boxed, except the serializer and deserializer invokers, whose
+    // local lives unmoved for the one call that uses it) and no other reference to its `view` is
+    // in use, as `headers_view`
     // requires. The view returned points into the handle, so it lives until the handle is
     // destroyed, as the rustdoc states.
     unsafe { RecordHeadersInner::headers_view(self_ as *mut RecordHeadersInner) }

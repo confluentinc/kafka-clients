@@ -24,9 +24,11 @@ use crate::consumer::OffsetAndMetadata;
 /// A map of topic partitions to their committed offset and metadata. A `None`
 /// value indicates the group has no committed offset for that partition
 /// (Java's `null` value in the map).
-// the per-group map type of ListConsumerGroupOffsetsResult, a Java `Map<TopicPartition, OffsetAndMetadata>`
-#[doc(alias = "rust-only")]
-pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
+///
+/// Crate-private shorthand: Java names no such type and writes
+/// `Map<TopicPartition, OffsetAndMetadata>` out in each signature, so the public
+/// signatures show the full map type and the name stays free for Java.
+pub(crate) type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
 /// The result of `Admin::list_consumer_group_offsets_with_group_specs`.
 ///

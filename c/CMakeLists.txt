@@ -93,7 +93,9 @@ target_link_libraries(test_kafka_admin unity::framework ${CONFLUENT_KAFKA_RUST} 
 
 add_executable(test_serialization tests/test_serialization.c)
 target_include_directories(test_serialization PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_serialization unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The asynchronous serde tests report from a helper thread, so pthread is
+# needed explicitly in addition to ${SYSTEM_LIBS}.
+target_link_libraries(test_serialization unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_kafka_future tests/test_kafka_future.c)
 target_include_directories(test_kafka_future PRIVATE ${RUST_INCLUDE_DIR})

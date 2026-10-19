@@ -54,7 +54,7 @@ use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -234,7 +234,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     async fn send_with_callback(
         &self,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut client = self.client.clone();
         let request = SendRequest {
@@ -259,8 +259,8 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         // we run the user's closure here with the decoded result.
         if let Some(cb) = callback {
             match &result {
-                Ok(metadata) => cb(Some(metadata), None),
-                Err(err) => cb(None, Some(err)),
+                Ok(metadata) => cb.on_completion(Some(metadata), None),
+                Err(err) => cb.on_completion(None, Some(err)),
             }
         }
         Ok(KafkaFuture::completed_future(result))
@@ -296,7 +296,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// this is a live producer in another language, NOT a mock, so reporting an
     /// empty map would misreport its state. Mirrors the consumer backend.
     ///
-    /// Each entry is rebuilt locally as a `ClosureGauge` returning the value the
+    /// Each entry is rebuilt locally as a `gauge::new` gauge returning the value the
     /// backend measured while serving the RPC. That is snapshot, not live,
     /// semantics — which is exactly what `Producer::metrics` documents.
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
@@ -391,10 +391,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
         None => MetricValue::Double(0.0),
     };
-    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let provider = gauge::new(move |_config, _now| value.clone());
     // A standalone registry mints the `KafkaMetric`, as Java code obtains one
     // (its constructor is public only "for testing"); the metric outlives it.
-    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, Box::new(provider));
     (name, metric)
 }
 
