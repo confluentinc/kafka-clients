@@ -178,6 +178,14 @@ rewritten in this form.
 
 ## Consumer
 
+- Set `group.protocol` to `consumer`: this client implements only the KIP-848
+  consumer group protocol, and Java's default, `classic`, is rejected by the
+  client's core when the consumer is built, with
+  `UnsupportedVersionError("Classic group protocol is not yet supported in this
+  client; set group.protocol=consumer (KIP-848).")`.
+- The share consumer (KIP-932: `ShareConsumer`, `KafkaShareConsumer`,
+  `MockShareConsumer`) is not generated yet: the C FFI has no entry point for
+  it.
 - The calls that wait take Java's `Duration` overloads as an optional keyword:
   `commit(timeout=…)`, `position(…, timeout=…)`, `committed(…, timeout=…)`,
   `partitions_for(…, timeout=…)`, `list_topics(timeout=…)`,

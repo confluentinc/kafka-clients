@@ -51,6 +51,9 @@ the ``kafka_consumer_Consumer_`` prefix, in parentheses):
 (``register_metric_for_subscription`` /
 ``unregister_metric_from_subscription``).
 Not generated, Java deprecating it (Class family): ``close(Duration)``.
+Not generated, the C FFI having no entry point for it: the share-consumer
+family (``ShareConsumer``, ``KafkaShareConsumer``, ``MockShareConsumer`` and
+their ``Async`` peers, ``AcknowledgeType``, ``AcknowledgementCommitCallback``).
 Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 ``AsyncKafkaConsumer`` body only logs that it is unsupported *(deviation)*.
 """
