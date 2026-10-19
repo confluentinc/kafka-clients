@@ -13,18 +13,23 @@ name: create-release-tag
 #     publishes it to PyPI. Until the Python release is signed off, its
 #     uploads are commented out in semaphore.yml and publish-pypi.yml: the tag
 #     build runs every check and publishes nothing.
+#   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
+#     like any other, and its tag build tests and packages the client without
+#     publishing it.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
 #   - the build is of the master branch;
 #   - the version is a valid release version for the client and equals its
 #     version at this commit: [package] version in rust/Cargo.toml
-#     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or
-#     -rc.N), or [project] version in python/pyproject.toml
-#     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN);
-#   - the tag does not yet exist, and the version is new: for rust, higher
-#     than every version on crates.io; for python, not yet on any index it is
-#     published to (Test PyPI, and PyPI for a final version);
+#     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N
+#     or -dev.N), or [project] version in python/pyproject.toml
+#     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
+#     optionally by .devN);
+#   - the tag does not yet exist, and, unless it is a dev version, the version
+#     is new: for rust, higher than every version on crates.io; for python, not
+#     yet on any index it is published to (Test PyPI, and PyPI for a final
+#     version);
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -77,21 +82,27 @@ blocks:
                   rust)
                     version_param=RUST_VERSION
                     version=${RUST_VERSION:-}
-                    version_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
-                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N'
+                    version_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc|dev)\.[0-9]+)?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N or -dev.N'
+                    dev_pattern='-dev\.[0-9]+$'
                     manifest=rust/Cargo.toml
                     manifest_key=package
                     ;;
                   python)
                     version_param=PYTHON_VERSION
                     version=${PYTHON_VERSION:-}
-                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'
-                    version_form='<major>.<minor>.<patch>, optionally followed by aN, bN or rcN'
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then optionally by .devN'
+                    dev_pattern='\.dev[0-9]+$'
                     manifest=python/pyproject.toml
                     manifest_key=project
                     ;;
                 esac
                 tag="${client}/${version}"
+                # A dev version is tested and packaged, never published.
+                dev=""
+                [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
+                return 0
               }
             # A pull request build reports the target branch in
             # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. A build
@@ -148,7 +159,8 @@ blocks:
             # need only be new on each index it is published to, Test PyPI and,
             # for a final version, PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
-            # after 4.5.0). `fetch` writes the body of a URL to a file, or
+            # after 4.5.0). A dev version is never published, so it is not
+            # compared with the registries. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
             # status, and on an empty body, which no existing page has.
             - |
@@ -164,6 +176,10 @@ blocks:
               published_file=$(mktemp) && body=$(mktemp) || refuse "could not create a temporary file"
               for client in "${clients[@]}"; do
                 use_client "${client}"
+                if [ -n "${dev}" ]; then
+                  echo "${tag} is a dev version, which is never published; not checking the registries"
+                  continue
+                fi
                 case "${client}" in
                   rust)
                     fetch "https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/${CRATE}" "${body}" \
@@ -276,6 +292,10 @@ blocks:
             - |
               for client in "${clients[@]}"; do
                 use_client "${client}"
+                if [ -n "${dev}" ]; then
+                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${client} ${version}; a dev version publishes nothing."
+                  continue
+                fi
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
                   python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI. For a final version, then run its \"Publish to PyPI\" promotion to publish to PyPI." ;;
