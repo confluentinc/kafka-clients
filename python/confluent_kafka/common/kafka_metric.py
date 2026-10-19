@@ -34,6 +34,7 @@ import time as _time
 import types
 from typing import TYPE_CHECKING, Any, overload
 
+from confluent_kafka._args import MISSING
 from confluent_kafka.illegal_state_error import IllegalStateError
 
 if TYPE_CHECKING:
@@ -42,9 +43,6 @@ if TYPE_CHECKING:
     from .metric_name import MetricName
 
 __all__ = ["KafkaMetric"]
-
-_NOT_GIVEN: Any = object()
-
 
 class KafkaMetric:
     """A metric, backed by a value provider.
@@ -76,11 +74,11 @@ class KafkaMetric:
     @overload
     def config(self, *, config: MetricConfig) -> None: ...
 
-    def config(self, *, config: Any = _NOT_GIVEN) -> Any:
+    def config(self, *, config: Any = MISSING) -> Any:
         """Java's ``config()`` (the configuration of this metric) and
         ``config(MetricConfig)`` (set it). "This is supposed to be used by
         server only." """
-        if config is _NOT_GIVEN:
+        if config is MISSING:
             return self._config
         with self._locked():
             self._config = config

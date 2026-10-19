@@ -72,7 +72,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._async import (
     LoopBinding,
     OffLoopPump,
@@ -90,6 +90,8 @@ from ._base import (
     LONG_MAX_VALUE,
     _ProducerState,
     check_group_metadata,
+    check_offsets,
+    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -725,6 +727,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.send_offsets_to_transaction`."""
         self._check_not_closed()
         check_group_metadata(group_metadata)
+        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         await self._run_async(_lib.Producer_send_offsets_to_transaction_cb, spec, native)
@@ -749,7 +752,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         await self._run_async(_lib.Producer_abort_transaction_cb, reports="EndTxn(false)")
 
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = UNSET
+                   callback: _AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for the record to reach
         the producer, without blocking the loop, and raises what
@@ -784,9 +787,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         after its event loop has closed is dropped with a warning on the
         ``confluent_kafka.producer`` logger: its callback does not run (or an
         awaited one does not finish) and its future does not complete."""
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
+        check_record(record)
         # Before the serializers, so a call from another loop has no effect.
         # The pump runs on every _PUMP_EVERY-th send taken at once in a row
         # and on the first after a suspension; the others only count.
@@ -925,7 +929,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
-    async def close(self, *, timeout: Duration | None = None) -> None:
+    async def close(self, *, timeout: Duration = MISSING) -> None:
         """See :meth:`Producer.close`: it waits for the callbacks of the
         records sent before it, ``async def`` ones included. From an ``async
         def`` callback it does not wait and is equivalent to

@@ -32,8 +32,11 @@ by ``java_forms``, and ``close()`` / ``(option)``.
 The ``Duration`` overloads of ``commitSync``, ``position``, ``committed``,
 ``partitionsFor``, ``listTopics``, ``offsetsForTimes``, ``beginningOffsets`` and
 ``endOffsets`` are the optional ``timeout`` of their method (Signatures,
-Timeouts): ``None`` calls the overload without it, a given one the
-``kafka_consumer_Consumer_*_with_timeout`` entry point. Inside a callback this
+Timeouts): left out calls the overload without it, a given one the
+``kafka_consumer_Consumer_*_with_timeout`` entry point; a ``None`` is Java's null
+``Duration``, ``TypeError("timeout must not be None")``. Every parameter some
+overload omits defaults to the private ``MISSING``; an explicit ``None`` is
+Java's ``null`` (Signatures). Inside a callback this
 consumer delivers, only ``position`` takes a ``timeout``; the others raise
 ``ConcurrentModificationError`` for one, as ``partitions_for`` and
 ``list_topics`` are refused there with or without it *(deviation: inside a
@@ -57,7 +60,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms, reject_str
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
@@ -122,16 +125,19 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._c_subscription()
 
     @overload
-    def subscribe(self, *, topics: Iterable[str],
-                  callback: ConsumerRebalanceListener | None = None) -> None: ...
+    def subscribe(self, *, topics: Iterable[str]) -> None: ...
+    @overload
+    def subscribe(self, *, topics: Iterable[str], callback: ConsumerRebalanceListener) -> None: ...
     @overload
     def subscribe(self, *, pattern: SubscriptionPattern,
-                  callback: ConsumerRebalanceListener | None = None) -> None: ...
+                  callback: ConsumerRebalanceListener) -> None: ...
+    @overload
+    def subscribe(self, *, pattern: SubscriptionPattern) -> None: ...
 
     @java_forms(*SUBSCRIBE_FORMS)
-    def subscribe(self, *, topics: Iterable[str] | None = None,
-                  pattern: SubscriptionPattern | None = None,
-                  callback: ConsumerRebalanceListener | None = None) -> None:
+    def subscribe(self, *, topics: Iterable[str] = MISSING,
+                  pattern: SubscriptionPattern = MISSING,
+                  callback: ConsumerRebalanceListener = MISSING) -> None:
         """Subscribe to the given list of ``topics`` to get dynamically assigned
         partitions, or to the topics matching the broker-side RE2/J ``pattern``.
         Topic subscriptions are not incremental: this replaces the current
@@ -143,12 +149,14 @@ class Consumer(Generic[K, V], _ConsumerState):
         inside ``poll()`` and the other waiting calls; subscribing without one
         releases the previous listener.
 
-        Raises ``IllegalArgumentError`` if ``topics`` contains a null or empty
-        topic, ``IllegalStateError`` if ``subscribe()`` is called after
-        ``assign()`` or with an incompatible subscription type, and
-        ``InvalidGroupIdError`` without a ``group.id``.
+        Raises ``IllegalArgumentError`` if ``callback`` is ``None``
+        ("RebalanceListener cannot be None"), if ``topics`` or ``pattern`` is
+        ``None`` or ``topics`` contains a null or empty topic,
+        ``IllegalStateError`` if ``subscribe()`` is called after ``assign()`` or
+        with an incompatible subscription type, and ``InvalidGroupIdError``
+        without a ``group.id``.
         """
-        if topics is not None:
+        if topics is not MISSING:
             self._c_subscribe_topics(topics, callback)
         else:
             self._c_subscribe_pattern(pattern, callback)
@@ -197,8 +205,8 @@ class Consumer(Generic[K, V], _ConsumerState):
         """
         return self._c_poll(timeout)
 
-    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-               timeout: Duration | None = None) -> None:
+    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
+               timeout: Duration = MISSING) -> None:
         """Commit the offsets returned on the last ``poll()`` for all the
         subscribed topics and partitions, or the given ``offsets``. This is a
         synchronous commit and will block until either the commit succeeds, an
@@ -213,10 +221,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``RebalanceInProgressError`` while the consumer is in the middle of a
         rebalance, ``WakeupError`` if ``wakeup()`` is called before or while this
         method is called, ``AuthorizationError`` if not authorized,
-        ``IllegalArgumentError`` if ``timeout`` is negative, and ``KafkaError``
-        for any other unrecoverable error. Inside a callback this consumer delivers, a given ``timeout`` raises
-        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*.
+        ``IllegalArgumentError`` if ``timeout`` is negative, ``TypeError`` if
+        ``offsets`` or ``timeout`` is ``None``, and ``KafkaError`` for any other
+        unrecoverable error. Inside a callback this consumer delivers, a given
+        ``timeout`` raises ``ConcurrentModificationError`` *(deviation: inside a
+        listener the core's handle has no timed form; goes when it has)*.
         """
         self._c_commit(offsets, timeout)
 
@@ -227,12 +236,13 @@ class Consumer(Generic[K, V], _ConsumerState):
                       callback: OffsetCommitCallback | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
-    def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                      callback: OffsetCommitCallback | None = UNSET) -> None:
+    def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
+                      callback: OffsetCommitCallback | None = MISSING) -> None:
         """Commit the offsets returned on the last ``poll()`` for the subscribed
         topics and partitions, or the given ``offsets``, without waiting. Java's
         ``commitAsync``. ``commit_nowait(offsets=…, callback=None)`` is Java's
-        ``commitAsync(offsets, null)``.
+        ``commitAsync(offsets, null)``; ``offsets=None`` raises ``TypeError``, as
+        Java's ``new HashMap<>(offsets)`` does.
 
         This is an asynchronous call and will not block. Any errors encountered
         are either passed to the ``callback`` (if provided) or discarded.
@@ -274,8 +284,8 @@ class Consumer(Generic[K, V], _ConsumerState):
              offset_and_metadata: OffsetAndMetadata) -> None: ...
 
     @java_forms(*SEEK_FORMS)
-    def seek(self, *, partition: TopicPartition, offset: int | None = None,
-             offset_and_metadata: OffsetAndMetadata | None = None) -> None:
+    def seek(self, *, partition: TopicPartition, offset: int = MISSING,
+             offset_and_metadata: OffsetAndMetadata = MISSING) -> None:
         """Overrides the fetch offsets that the consumer will use on the next
         ``poll()``: to ``offset``, or to the offset (and leader epoch) of
         ``offset_and_metadata``. If this API is invoked for the same partition
@@ -283,9 +293,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         that you may lose data if this API is arbitrarily used in the middle of
         consumption, to reset the fetch offsets.
 
-        Raises ``IllegalArgumentError`` if the offset is negative and
+        Raises ``IllegalArgumentError`` if the offset is negative,
         ``IllegalStateError`` if the partition is not currently assigned to
-        this consumer.
+        this consumer (a ``None`` partition never is), and ``TypeError`` if
+        ``offset`` or ``offset_and_metadata`` is ``None``.
         """
         self._c_seek(partition, offset, offset_and_metadata)
 
@@ -305,14 +316,14 @@ class Consumer(Generic[K, V], _ConsumerState):
         currently assigned partitions."""
         self._c_seek_to_end(partitions)
 
-    def position(self, *, partition: TopicPartition, timeout: Duration | None = None) -> int:
+    def position(self, *, partition: TopicPartition, timeout: Duration = MISSING) -> int:
         """Get the offset of the next record that will be fetched (if a record
         with that offset exists). This method may issue a remote call to the
         server if there is no current position for the given partition, and
         waits up to ``timeout``, ``default.api.timeout.ms`` without one.
 
         Raises ``IllegalStateError`` if the partition is not assigned to this
-        consumer, ``InvalidOffsetError`` if no offset is currently defined for
+        consumer (a ``None`` partition never is), ``InvalidOffsetError`` if no offset is currently defined for
         it, ``WakeupError`` on ``wakeup()``, ``IllegalArgumentError`` if
         ``timeout`` is negative, and ``TimeoutError`` if the position cannot be
         determined before the timeout expires.
@@ -320,7 +331,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._c_position(partition, timeout)
 
     def committed(self, *, partitions: Iterable[TopicPartition],
-                  timeout: Duration | None = None
+                  timeout: Duration = MISSING
                   ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         """Retrieve the last committed offset for the given partitions (whether
         the commit happened by this process or another). The returned offset is
@@ -339,7 +350,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         """Get the metrics kept by the consumer."""
         return self._c_metrics()
 
-    def partitions_for(self, *, topic: str, timeout: Duration | None = None
+    def partitions_for(self, *, topic: str, timeout: Duration = MISSING
                        ) -> list[PartitionInfo]:
         """Get metadata about the partitions for a given topic. This method
         issues a remote call to the server if it does not already have any
@@ -347,10 +358,12 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``default.api.timeout.ms`` without one (``TimeoutError`` once it
         expires; a zero ``timeout`` raises it at once when the metadata is not
         cached). Returns an empty list if the topic is not found and
-        ``allow.auto.create.topics`` is not set."""
+        ``allow.auto.create.topics`` is not set. A ``None`` topic raises
+        ``TypeError``, or ``TimeoutError`` for a zero ``timeout``, as Java's
+        ``partitionsFor(null, timeout)`` does."""
         return self._c_partitions_for(topic, timeout)
 
-    def list_topics(self, *, timeout: Duration | None = None
+    def list_topics(self, *, timeout: Duration = MISSING
                     ) -> dict[str, list[PartitionInfo]]:
         """Get metadata about partitions for all topics that the user is
         authorized to view. This method issues a remote call to the server and
@@ -379,7 +392,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._c_resume(partitions)
 
     def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
-                          timeout: Duration | None = None
+                          timeout: Duration = MISSING
                           ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         """Look up the offsets for the given partitions by timestamp. The
         returned offset for each partition is the earliest offset whose
@@ -399,7 +412,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._c_offsets_for_times(timestamps_to_search, timeout)
 
     def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
-                          timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                          timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """Get the first offset for the given partitions. This method does not
         change the current consumer position of the partitions, and waits up to
         ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
@@ -410,7 +423,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._c_beginning_offsets(partitions, timeout)
 
     def end_offsets(self, *, partitions: Iterable[TopicPartition],
-                    timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                    timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         """Get the end offsets for the given partitions: the offset of the
         upcoming message, i.e. the offset of the last available message + 1 (or
         the last stable offset under ``read_committed``). This method does not
@@ -439,7 +452,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``InvalidGroupIdError`` if the consumer has no ``group.id``."""
         return self._c_group_metadata()
 
-    def close(self, *, option: CloseOptions | None = None) -> None:
+    def close(self, *, option: CloseOptions = MISSING) -> None:
         """Close the consumer, waiting up to the ``option``'s timeout (by
         default the default close timeout, 30 seconds) for any needed cleanup;
         the ``option`` also sets the group membership operation. If auto-commit
@@ -449,8 +462,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         call after it raises ``IllegalStateError``. Note that ``wakeup()`` cannot
         be used to interrupt close.
 
-        Raises ``IllegalArgumentError`` if the timeout is negative, and
-        ``KafkaError`` for any other error during close.
+        Raises ``IllegalArgumentError`` if the timeout is negative,
+        ``TypeError`` if ``option`` is ``None`` (Java's ``option.timeout()`` on a
+        null), and ``KafkaError`` for any other error during close.
         """
         self._c_close(option)
 
@@ -468,21 +482,25 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     # ---- the FFI implementations of the waiting calls ------------------------
     def _c_subscribe_topics(self, topics: Iterable[str],
-                            callback: ConsumerRebalanceListener | None) -> None:
+                            callback: ConsumerRebalanceListener) -> None:
+        reject_str("topics", topics)  # the shape check precedes the others
+        listener = self._subscribe_listener(callback)
+        self._check_not_null("subscribe_topics", topics)
         topic_list = blank_null_topics(topics)
-        previous, self._listener = self._listener, callback
+        previous, self._listener = self._listener, listener
         try:
-            self._run_sync(*self._subscribe_topics_spec(topic_list, callback))
+            self._run_sync(*self._subscribe_topics_spec(topic_list, listener))
         except BaseException:
             self._listener = previous
             raise
 
-    def _c_subscribe_pattern(self, pattern: SubscriptionPattern | None,
-                             callback: ConsumerRebalanceListener | None) -> None:
-        assert pattern is not None
-        previous, self._listener = self._listener, callback
+    def _c_subscribe_pattern(self, pattern: SubscriptionPattern,
+                             callback: ConsumerRebalanceListener) -> None:
+        listener = self._subscribe_listener(callback)
+        self._check_not_null("subscribe_pattern", pattern)
+        previous, self._listener = self._listener, listener
         try:
-            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), callback))
+            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), listener))
         except BaseException:
             self._listener = previous
             raise
@@ -521,20 +539,22 @@ class Consumer(Generic[K, V], _ConsumerState):
             raise result.error
         return result.records
 
-    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
-                  timeout: Duration | None = None) -> None:
+    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                  timeout: Duration = MISSING) -> None:
+        offsets = self._offsets_arg(offsets)
         timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
             self._reentrant_use("commit", offsets)
             return
         self._run_sync(*self._commit_spec(offsets, timeout_ms))
 
-    def _c_seek(self, partition: TopicPartition, offset: int | None,
-                offset_and_metadata: OffsetAndMetadata | None) -> None:
+    def _c_seek(self, partition: TopicPartition, offset: int,
+                offset_and_metadata: OffsetAndMetadata) -> None:
+        to, oam = self._seek_args(partition, offset, offset_and_metadata)
         if self._in_callback():
-            self._reentrant_use("seek", partition, offset, offset_and_metadata)
+            self._reentrant_use("seek", partition, to, oam)
             return
-        self._run_sync(*self._seek_spec(partition, offset, offset_and_metadata))
+        self._run_sync(*self._seek_spec(partition, to, oam))
 
     def _c_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_cb, partitions)
@@ -542,7 +562,8 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
-    def _c_position(self, partition: TopicPartition, timeout: Duration | None = None) -> int:
+    def _c_position(self, partition: TopicPartition, timeout: Duration = MISSING) -> int:
+        self._check_position_partition(partition)
         timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
@@ -551,8 +572,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         return fetched
 
     def _c_committed(self, partitions: Iterable[TopicPartition],
-                     timeout: Duration | None = None
+                     timeout: Duration = MISSING
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+        self._check_committed_timeout(partitions, timeout)
         timeout_ms = self._timeout_ms(timeout, group=True)
         self._check_committed_partitions(partitions)
         partition_list = list(partitions)
@@ -563,19 +585,20 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._committed_spec(partition_list, timeout_ms))
 
     def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
+        self._check_not_null("current_lag", topic_partition)
         if self._in_callback():
             in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
             return in_callback
         lag: int | None = self._run_sync(*self._current_lag_spec(topic_partition))
         return lag
 
-    def _c_partitions_for(self, topic: str, timeout: Duration | None = None
+    def _c_partitions_for(self, topic: str, timeout: Duration = MISSING
                           ) -> list[PartitionInfo]:
         timeout_ms = self._timeout_ms(timeout)
-        self._check_not_null("partitions_for", topic)
+        self._check_partitions_for_topic(topic, timeout_ms)
         return self._run_sync(*self._partitions_for_spec(topic, timeout_ms))
 
-    def _c_list_topics(self, timeout: Duration | None = None) -> dict[str, list[PartitionInfo]]:
+    def _c_list_topics(self, timeout: Duration = MISSING) -> dict[str, list[PartitionInfo]]:
         return self._run_sync(*self._list_topics_spec(self._timeout_ms(timeout)))
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
@@ -585,7 +608,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
-                             timeout: Duration | None = None
+                             timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         self._check_not_null("offsets_for_times", timestamps_to_search)
         timeout_ms = self._timeout_ms(timeout)
@@ -597,7 +620,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._offsets_for_times_spec(timestamps, timeout_ms))
 
     def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
-                      timeout: Duration | None) -> dict[TopicPartition, int]:
+                      timeout: Duration) -> dict[TopicPartition, int]:
         self._check_not_null(op, partitions)
         timeout_ms = self._timeout_ms(timeout)
         partition_list = list(partitions)
@@ -607,16 +630,16 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._long_offsets_spec(fn, partition_list, timeout_ms))
 
     def _c_beginning_offsets(self, partitions: Iterable[TopicPartition],
-                             timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                             timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_cb,
                                   partitions, timeout)
 
     def _c_end_offsets(self, partitions: Iterable[TopicPartition],
-                       timeout: Duration | None = None) -> dict[TopicPartition, int]:
+                       timeout: Duration = MISSING) -> dict[TopicPartition, int]:
         return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb, partitions,
                                   timeout)
 
-    def _c_close(self, option: CloseOptions | None) -> None:
+    def _c_close(self, option: CloseOptions) -> None:
         if self._is_closed():
             return
         timeout_ms, operation = close_args(option)

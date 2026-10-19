@@ -50,6 +50,22 @@ from confluent_kafka import (
 The native extension is `_confluentkafka` (private): the package imports it; it
 is never a public import path.
 
+## `None` is Java's `null`
+
+Every keyword-only parameter mirrors a Java argument, and `None` is Java's
+`null`, never "not given": leaving a parameter out is the only way to choose the
+Java overload without it (`CLAUDE.md`, Python Binding Conventions, Signatures).
+`consumer.close()` is Java's `close()`, while `consumer.close(option=None)` is
+`close(null)` and raises `TypeError("option must not be None")`, as Java's
+`NullPointerException`; `producer.send(record=r, callback=None)` is Java's
+`send(record, null)`. Where Java gives `null` a meaning, `None` keeps it
+(`ProducerRecord(topic=…, partition=None, key=None, value=…)`, an
+`Optional` parameter's `Optional.empty()`). Code written against kafka-python or
+confluent-kafka-python that passes `None` to skip an argument must leave the
+argument out instead. The signatures show the private default `MISSING`
+(`help()`, `inspect.signature`): it only marks a parameter some overload omits
+and is never a value to pass.
+
 ## Async peers
 
 Each async client lives in the same module as its sync peer, `Async`-prefixed
@@ -115,8 +131,9 @@ thread, on the event loop for an async client.
   `commit(timeout=…)`, `position(…, timeout=…)`, `committed(…, timeout=…)`,
   `partitions_for(…, timeout=…)`, `list_topics(timeout=…)`,
   `offsets_for_times(…, timeout=…)`, `beginning_offsets(…, timeout=…)` and
-  `end_offsets(…, timeout=…)`; omitted or `None` calls the overload without it
-  (`default.api.timeout.ms` applies). A negative timeout raises
+  `end_offsets(…, timeout=…)`; left out calls the overload without it
+  (`default.api.timeout.ms` applies), and `None` is Java's null `Duration`
+  (`TypeError("timeout must not be None")`). A negative timeout raises
   `IllegalArgumentError`.
 - `poll(timeout=…)` runs the deserializers on the caller's thread. A null key or
   value is not deserialized: the record's field is `None`. A failing one

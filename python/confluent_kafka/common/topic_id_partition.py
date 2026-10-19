@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 
 from .topic_partition import TopicPartition
@@ -49,18 +49,23 @@ class TopicIdPartition:
     def __init__(self, *, topic_id: Uuid, partition: int, topic: str | None) -> None: ...
 
     @java_forms(Form("topic_id", "topic_partition"), Form("topic_id", "partition", "topic"))
-    def __init__(self, *, topic_id: Uuid, topic_partition: TopicPartition | None = None,
-                 partition: int | None = None, topic: str | None = UNSET) -> None:
+    def __init__(self, *, topic_id: Uuid, topic_partition: TopicPartition = MISSING,
+                 partition: int = MISSING, topic: str | None = MISSING) -> None:
         """Create an instance with the provided parameters: the topic id and
         either the topic partition, or the partition id and the topic name (or
-        null: ``topic=None`` is given)."""
+        null: ``topic=None`` is given). A ``None`` ``topic_id`` or
+        ``topic_partition`` raises ``TypeError``, as Java's
+        ``Objects.requireNonNull``."""
         if topic_id is None:
             raise TypeError("topic_id must not be None")
         self._topic_id = topic_id
-        if topic_partition is not None:
+        if topic_partition is not MISSING:
+            if topic_partition is None:
+                raise TypeError("topic_partition must not be None")
             self._topic_partition = topic_partition
         else:
-            assert partition is not None
+            if partition is None:  # an int: Java cannot pass null
+                raise TypeError("partition must not be None")
             self._topic_partition = TopicPartition(topic=topic, partition=partition)  # type: ignore[arg-type]
 
     def topic_id(self) -> Uuid:

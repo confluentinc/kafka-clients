@@ -34,7 +34,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
 from confluent_kafka import Duration
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 
 __all__ = ["CloseOptions"]
 
@@ -122,8 +122,8 @@ class CloseOptions:
                      operation: CloseOptions.GroupMembershipOperation = GroupMembershipOperation.DEFAULT,
                      timeout: Duration | None = None) -> None: ...
     else:
-        def __init__(self, *, operation: CloseOptions.GroupMembershipOperation = UNSET,
-                     timeout: Duration | None = UNSET) -> None:
+        def __init__(self, *, operation: CloseOptions.GroupMembershipOperation = MISSING,
+                     timeout: Duration | None = MISSING) -> None:
             """Java's private ``CloseOptions()``, the ``DEFAULT`` operation and no
             timeout, then each keyword given calls its setter: ``operation`` the
             group membership operation upon shutdown (``None`` raises
@@ -131,9 +131,9 @@ class CloseOptions:
             to wait for the consumer to close (``None`` for the default timeout)."""
             self._operation = CloseOptions.GroupMembershipOperation.DEFAULT
             self._timeout: Duration | None = None
-            if operation is not UNSET:
+            if operation is not MISSING:
                 self.with_group_membership_operation(operation=operation)
-            if timeout is not UNSET:
+            if timeout is not MISSING:
                 self.with_timeout(timeout=timeout)
 
     @staticmethod

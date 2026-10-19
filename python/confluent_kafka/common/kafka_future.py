@@ -69,6 +69,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka._wait import WAIT_SLICE_S, done_within
 
 if TYPE_CHECKING:
@@ -665,16 +666,19 @@ class KafkaFuture(_KafkaFutureBase[T]):
         request or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
-    def get(self, *, timeout: Duration | None = None) -> T:
+    def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising
         ``confluent_kafka.TimeoutError`` when it elapses first (a negative or
-        zero timeout raises at once unless the future is done).
+        zero timeout raises at once unless the future is done). A ``None``
+        timeout raises ``TypeError``, as Java's null ``TimeUnit`` does.
 
         A failed future raises ``confluent_kafka.ExecutionError`` from the
         failure; a cancelled one ``concurrent.futures.CancelledError``. The wait
         is in short slices, so Ctrl+C ends it."""
-        seconds = None if timeout is None else _timeout_s(timeout)
+        if timeout is None:  # Java's unit.toNanos(timeout) on a null TimeUnit
+            raise TypeError("timeout must not be None")
+        seconds = None if timeout is MISSING else _timeout_s(timeout)
         impl = self._read_done_handle()
         if impl is None or impl._state == _PENDING:
             inner = self._waiter()
@@ -838,16 +842,19 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
         or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
-    async def get(self, *, timeout: Duration | None = None) -> T:
+    async def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising
         ``confluent_kafka.TimeoutError`` when it elapses first (a negative or
-        zero timeout raises at once unless the future is done).
+        zero timeout raises at once unless the future is done). A ``None``
+        timeout raises ``TypeError``, as Java's null ``TimeUnit`` does.
 
         A failed future raises ``confluent_kafka.ExecutionError`` from the
         failure; a cancelled one ``asyncio.CancelledError``. Cancelling the
         awaiting task does not cancel the future."""
-        seconds = None if timeout is None else _timeout_s(timeout)
+        if timeout is None:  # Java's unit.toNanos(timeout) on a null TimeUnit
+            raise TypeError("timeout must not be None")
+        seconds = None if timeout is MISSING else _timeout_s(timeout)
         impl = self._read_done_handle()
         if impl is None or impl._state == _PENDING:
             inner = self._waiter()

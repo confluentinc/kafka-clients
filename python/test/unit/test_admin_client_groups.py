@@ -219,8 +219,9 @@ def test_list_consumer_group_offsets_rejects_what_java_has_no_overload_for() -> 
         with pytest.raises(IllegalArgumentError, match=re.escape(LCGO_FORMS + "(options)")):
             admin.list_consumer_group_offsets(  # type: ignore[call-overload]
                 options=ListConsumerGroupOffsetsOptions())
-        # An explicit None is "not given" (Signatures).
-        with pytest.raises(IllegalArgumentError, match=re.escape(LCGO_FORMS + "()")):
+        # An explicit None is given: Java's listConsumerGroupOffsets((String) null),
+        # whose null group id the FFI cannot carry (Signatures, exception 4).
+        with pytest.raises(TypeError, match="^group_id must not be None$"):
             admin.list_consumer_group_offsets(group_id=None)  # type: ignore[call-overload]
 
 

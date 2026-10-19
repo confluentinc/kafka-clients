@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka._wait import wait_sliced
 from confluent_kafka.common.kafka_error import KafkaError
@@ -80,6 +80,8 @@ from ._base import (
     Completion,
     _ProducerState,
     check_group_metadata,
+    check_offsets,
+    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -391,6 +393,7 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         check_group_metadata(group_metadata)
+        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         self._run_void("AddOffsetsToTxn", _lib.Producer_send_offsets_to_transaction_cb,
@@ -441,11 +444,12 @@ class Producer(Generic[K, V], _ProducerState):
         self._run_void("EndTxn(false)", _lib.Producer_abort_transaction_cb)
 
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = UNSET) -> KafkaFuture[RecordMetadata]:
+             callback: Callback | None = MISSING) -> KafkaFuture[RecordMetadata]:
         """Asynchronously send a record to a topic and invoke the provided
         ``callback`` when the send has been acknowledged (``None`` indicates no
-        callback). Java's ``send(record)`` passes ``null`` to it, so
-        ``callback`` defaults to ``UNSET`` (Signatures) and is filled here.
+        callback). Java's ``send(record)`` passes ``null`` to it, so a
+        ``callback`` left out is filled here with ``None``. A ``None`` record
+        raises ``TypeError``, as Java's ``record.topic()`` does.
 
         The send is asynchronous and this method will return immediately
         (except for rare cases described below) once the record has been stored
@@ -505,9 +509,10 @@ class Producer(Generic[K, V], _ProducerState):
         callback, of this producer or another, ``send()`` hands its record over
         on the calling thread (see the module docstring).
         """
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None
         self._check_not_closed()
+        check_record(record)
         if callback is not None:
             reject_coroutine_callback(callback)
         native, topic, partition = self._native_parts(record)
@@ -618,7 +623,7 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
-    def close(self, *, timeout: Duration | None = None) -> None:
+    def close(self, *, timeout: Duration = MISSING) -> None:
         """Close this producer: ``close()`` waits until all previously sent
         requests complete; ``close(timeout=…)`` waits up to ``timeout`` for the
         producer to complete the sending of all incomplete requests, and if it
@@ -635,7 +640,9 @@ class Producer(Generic[K, V], _ProducerState):
         Closing twice is harmless; any other call after it raises
         ``IllegalStateError``. A negative ``timeout`` raises
         ``IllegalArgumentError``, except that a second ``close()`` returns
-        before checking it *(deviation)*.
+        before checking it *(deviation)*. A ``None`` ``timeout`` raises
+        ``TypeError``, Java's ``timeout.toMillis()`` on a null, with the same
+        exception.
         """
         if self._closed:
             return

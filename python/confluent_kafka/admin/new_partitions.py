@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 
 __all__ = ["NewPartitions"]
@@ -60,11 +61,12 @@ class NewPartitions:
 
     @staticmethod
     def increase_to(*, total_count: int,
-                    new_assignments: Sequence[Sequence[int]] | None = None) -> NewPartitions:
+                    new_assignments: Sequence[Sequence[int]] | None = MISSING) -> NewPartitions:
         """Increase the partition count for a topic to the given
         ``total_count``, assigning the new partitions according to the given
-        ``new_assignments``, or, when it is not given, leaving the assignment of
-        new replicas to brokers to the broker.
+        ``new_assignments``, or, when it is left out (Java's ``increaseTo(totalCount)``
+        passes ``null``) or ``None``, leaving the assignment of new replicas to
+        brokers to the broker.
 
         The length of the given ``new_assignments`` should equal
         ``total_count - old_count``, since the assignment of existing partitions
@@ -79,6 +81,8 @@ class NewPartitions:
         partition 4's preferred leader will be broker 2 and partition 5's
         preferred leader will be broker 3.
         """
+        if new_assignments is MISSING:
+            new_assignments = None
         return NewPartitions._new(total_count=total_count, new_assignments=new_assignments)
 
     def total_count(self) -> int:

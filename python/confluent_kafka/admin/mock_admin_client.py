@@ -54,7 +54,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
+from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Sync
 from confluent_kafka.admin._mock_core import MockAdminClientBuilderCore, MockAdminClientCore
 from confluent_kafka.admin.admin import Admin
@@ -230,7 +231,7 @@ _DESCRIBE_USER_SCRAM_CREDENTIALS_FORMS = (Form(), Form("users"), Form("users", "
 # listConfigResources() passes (Set.of(), new ListConfigResourcesOptions()).
 _LIST_CONFIG_RESOURCES_FORMS = (
     Form("config_resource_types", "options",
-         defaults={"config_resource_types": (), "options": None}),
+         defaults={"config_resource_types": (), "options": MISSING}),
     Form())
 
 
@@ -268,8 +269,8 @@ class MockAdminClient(MockAdminClientCore, Admin):
     def __init__(self, *, brokers: Sequence[Node], controller: Node) -> None: ...
 
     @java_forms(*_INIT_FORMS)
-    def __init__(self, *, brokers: Sequence[Node] | None = None,
-                 controller: Node | None = None) -> None:
+    def __init__(self, *, brokers: Sequence[Node] | None = MISSING,
+                 controller: Node | None = MISSING) -> None:
         """A mock of ``brokers`` with ``controller`` (one of them), the default
         cluster id, one partition and ``len(brokers)`` replicas per new topic, and
         ``DEFAULT_LOG_DIRS`` on every broker; with no arguments, one broker
@@ -298,7 +299,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
             default_group_configs=default_group_configs)
         return client
 
-    def close(self, *, timeout: Duration | None = None) -> None:
+    def close(self, *, timeout: Duration | None = MISSING) -> None:
         """Does nothing, as Java's mock (no check of ``timeout`` either)."""
         self._close()
 
@@ -309,7 +310,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
         self.close()
 
     def create_topics(self, *, new_topics: Iterable[NewTopic],
-                      options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Sync]:
+                      options: CreateTopicsOptions | None = MISSING) -> CreateTopicsResult[Sync]:
         """Create the topics: ``default_replication_factor`` / ``default_partitions``
         stand for ``-1``, the first brokers are the replicas and the first broker
         the leader; ``options`` is ignored."""
@@ -323,11 +324,14 @@ class MockAdminClient(MockAdminClientCore, Admin):
                       options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]: ...
 
     def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]:
+                      options: DeleteTopicsOptions | None = MISSING) -> DeleteTopicsResult[Sync]:
         """Delete the topics, by name or by id; ``options`` is ignored."""
+        if topics is None:  # the shape check: Java's compiler rejects deleteTopics(null)
+            raise _conversions.ambiguous_none("delete_topics", "topics",
+                                              ("Iterable[str]", "TopicCollection"))
         return self._delete_topics(topics)
 
-    def list_topics(self, *, options: ListTopicsOptions | None = None) -> ListTopicsResult[Sync]:
+    def list_topics(self, *, options: ListTopicsOptions | None = MISSING) -> ListTopicsResult[Sync]:
         """List every topic, internal ones included (``options`` is ignored)."""
         return self._list_topics()
 
@@ -341,36 +345,36 @@ class MockAdminClient(MockAdminClientCore, Admin):
                         ) -> DescribeTopicsResult[Sync]: ...
 
     @java_forms(*_DESCRIBE_TOPICS_FORMS)
-    def describe_topics(self, *, topic_names: Iterable[str] | None = None,
-                        topics: TopicCollection | None = None,
-                        options: DescribeTopicsOptions | None = None
+    def describe_topics(self, *, topic_names: Iterable[str] | None = MISSING,
+                        topics: TopicCollection | None = MISSING,
+                        options: DescribeTopicsOptions | None = MISSING
                         ) -> DescribeTopicsResult[Sync]:
         """Describe the topics, by name or by id; ``options`` is ignored."""
         return self._describe_topics(topic_names, topics)
 
-    def describe_cluster(self, *, options: DescribeClusterOptions | None = None
+    def describe_cluster(self, *, options: DescribeClusterOptions | None = MISSING
                          ) -> DescribeClusterResult[Sync]:
         """The brokers, the controller, the cluster id and no authorized operations
         (``options`` is ignored)."""
         return self._describe_cluster()
 
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                      options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Sync]:
+                      options: DescribeAclsOptions | None = MISSING) -> DescribeAclsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._describe_acls(filter)
 
     def create_acls(self, *, acls: Iterable[AclBinding],
-                    options: CreateAclsOptions | None = None) -> CreateAclsResult[Sync]:
+                    options: CreateAclsOptions | None = MISSING) -> CreateAclsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._create_acls(acls)
 
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                    options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Sync]:
+                    options: DeleteAclsOptions | None = MISSING) -> DeleteAclsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._delete_acls(filters)
 
     def describe_configs(self, *, resources: Iterable[ConfigResource],
-                         options: DescribeConfigsOptions | None = None
+                         options: DescribeConfigsOptions | None = MISSING
                          ) -> DescribeConfigsResult[Sync]:
         """The configs of broker, topic, client-metrics and group resources; another
         type fails its future with ``UnsupportedVersionError("Not implemented
@@ -379,45 +383,45 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-            options: AlterConfigsOptions | None = None) -> AlterConfigsResult[Sync]:
+            options: AlterConfigsOptions | None = MISSING) -> AlterConfigsResult[Sync]:
         """Apply ``SET`` and ``DELETE`` operations to broker, topic, client-metrics
         and group configs (``options`` is ignored)."""
         return self._incremental_alter_configs(configs)
 
     def alter_replica_log_dirs(self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
-                               options: AlterReplicaLogDirsOptions | None = None
+                               options: AlterReplicaLogDirsOptions | None = MISSING
                                ) -> AlterReplicaLogDirsResult[Sync]:
         """Record a move of each replica to the given log directory, which must be
         one of its broker's (``options`` is ignored)."""
         return self._alter_replica_log_dirs(replica_assignment)
 
     def describe_log_dirs(self, *, brokers: Iterable[int],
-                          options: DescribeLogDirsOptions | None = None
+                          options: DescribeLogDirsOptions | None = MISSING
                           ) -> DescribeLogDirsResult[Sync]:
         """The log directories of the brokers, with every replica of every topic in
         its partition's first log directory (``options`` is ignored)."""
         return self._describe_log_dirs(brokers)
 
     def describe_replica_log_dirs(self, *, replicas: Iterable[TopicPartitionReplica],
-                                  options: DescribeReplicaLogDirsOptions | None = None
+                                  options: DescribeReplicaLogDirsOptions | None = MISSING
                                   ) -> DescribeReplicaLogDirsResult[Sync]:
         """The current and future log directory of each replica of a known topic
         (``options`` is ignored)."""
         return self._describe_replica_log_dirs(replicas)
 
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
-                          options: CreatePartitionsOptions | None = None
+                          options: CreatePartitionsOptions | None = MISSING
                           ) -> CreatePartitionsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._create_partitions(new_partitions)
 
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                       options: DeleteRecordsOptions | None = None) -> DeleteRecordsResult[Sync]:
+                       options: DeleteRecordsOptions | None = MISSING) -> DeleteRecordsResult[Sync]:
         """An empty result for no records; otherwise raises
         ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._delete_records(records_to_delete)
 
-    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = MISSING
                                 ) -> CreateDelegationTokenResult[Sync]:
         """Create a token owned by the first of ``options.renewers()``, issued now, its
         maximum timestamp ``options.max_lifetime_ms()``, its HMAC its id's bytes; a
@@ -425,37 +429,37 @@ class MockAdminClient(MockAdminClientCore, Admin):
         ``InvalidPrincipalTypeError``, and no renewer raises ``IndexError``, as
         Java's mock (``options.owner()`` is ignored)."""
         return self._create_delegation_token(
-            options if options is not None else CreateDelegationTokenOptions())
+            _conversions.options_or_new(options, CreateDelegationTokenOptions))
 
     def renew_delegation_token(self, *, hmac: bytes,
-                               options: RenewDelegationTokenOptions | None = None
+                               options: RenewDelegationTokenOptions | None = MISSING
                                ) -> RenewDelegationTokenResult[Sync]:
         """Set the expiry timestamp of the tokens with this HMAC to
         ``options.renew_time_period_ms()``, the future's value; none fails it with
         ``DelegationTokenNotFoundError``."""
         return self._renew_delegation_token(
-            hmac, options if options is not None else RenewDelegationTokenOptions())
+            hmac, _conversions.options_or_new(options, RenewDelegationTokenOptions))
 
     def expire_delegation_token(self, *, hmac: bytes,
-                                options: ExpireDelegationTokenOptions | None = None
+                                options: ExpireDelegationTokenOptions | None = MISSING
                                 ) -> ExpireDelegationTokenResult[Sync]:
         """Remove the tokens with this HMAC when ``options.expiry_time_period_ms()`` is
         -1 or in the past, the future's value being that period; none fails it with
         ``DelegationTokenNotFoundError``."""
         return self._expire_delegation_token(
-            hmac, options if options is not None else ExpireDelegationTokenOptions())
+            hmac, _conversions.options_or_new(options, ExpireDelegationTokenOptions))
 
     def describe_delegation_token(self, *,
-                                  options: DescribeDelegationTokenOptions | None = None
+                                  options: DescribeDelegationTokenOptions | None = MISSING
                                   ) -> DescribeDelegationTokenResult[Sync]:
         """The tokens of ``options.owners()``, all for an empty list; the default
         owners (``None``) raise ``TypeError``, where Java's mock throws
         ``NullPointerException`` (decision 10)."""
         return self._describe_delegation_token(
-            options if options is not None else DescribeDelegationTokenOptions())
+            _conversions.options_or_new(options, DescribeDelegationTokenOptions))
 
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                 options: DescribeConsumerGroupsOptions | None = None
+                                 options: DescribeConsumerGroupsOptions | None = MISSING
                                  ) -> DescribeConsumerGroupsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._describe_consumer_groups(group_ids)
@@ -472,9 +476,9 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     @java_forms(*_LIST_CONSUMER_GROUP_OFFSETS_FORMS)
     def list_consumer_group_offsets(
-        self, *, group_id: str | None = None,
-        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = None,
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *, group_id: str | None = MISSING,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = MISSING,
+        options: ListConsumerGroupOffsetsOptions | None = MISSING
     ) -> ListConsumerGroupOffsetsResult[Sync]:
         """The offsets set by ``update_consumer_group_offsets`` for one group: all
         for a spec with no partitions, else those of its partitions. More or fewer
@@ -482,38 +486,39 @@ class MockAdminClient(MockAdminClientCore, Admin):
         ``group_id`` (Java's ``new ListConsumerGroupOffsetsSpec()``, whose
         partitions are ``None``) raises ``TypeError`` once an offset is stored,
         where Java's mock throws ``NullPointerException``; ``options`` is ignored."""
-        if group_specs is None:
-            assert group_id is not None  # java_forms: one or the other
-            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}
-        return self._list_consumer_group_offsets(group_specs)
+        if group_specs is MISSING:  # java_forms: one or the other
+            # Admin.listConsumerGroupOffsets(groupId, options): singletonMap, a None
+            # group id included.
+            group_specs = {group_id: ListConsumerGroupOffsetsSpec()}  # type: ignore[dict-item]
+        return self._list_consumer_group_offsets(group_specs)  # type: ignore[arg-type]
 
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                               options: DeleteConsumerGroupsOptions | None = None
+                               options: DeleteConsumerGroupsOptions | None = MISSING
                                ) -> DeleteConsumerGroupsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._delete_consumer_groups(group_ids)
 
     def delete_consumer_group_offsets(self, *, group_id: str,
                                       partitions: Iterable[TopicPartition],
-                                      options: DeleteConsumerGroupOffsetsOptions | None = None
+                                      options: DeleteConsumerGroupOffsetsOptions | None = MISSING
                                       ) -> DeleteConsumerGroupOffsetsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._delete_consumer_group_offsets(group_id, partitions)
 
-    def list_groups(self, *, options: ListGroupsOptions | None = None) -> ListGroupsResult[Sync]:
+    def list_groups(self, *, options: ListGroupsOptions | None = MISSING) -> ListGroupsResult[Sync]:
         """One stable consumer group of the ``consumer`` protocol per group with
         configs (``options`` and its filters are ignored)."""
         return self._list_groups()
 
     def elect_leaders(self, *, election_type: ElectionType,
                       partitions: Iterable[TopicPartition] | None,
-                      options: ElectLeadersOptions | None = None) -> ElectLeadersResult[Sync]:
+                      options: ElectLeadersOptions | None = MISSING) -> ElectLeadersResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._elect_leaders(election_type, partitions)
 
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-            options: AlterPartitionReassignmentsOptions | None = None
+            options: AlterPartitionReassignmentsOptions | None = MISSING
             ) -> AlterPartitionReassignmentsResult[Sync]:
         """Store each reassignment, or cancel it for ``None`` (Java's empty
         ``Optional``); an unknown partition fails its future with
@@ -521,12 +526,15 @@ class MockAdminClient(MockAdminClientCore, Admin):
         return self._alter_partition_reassignments(reassignments)
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] | None = None,
-            options: ListPartitionReassignmentsOptions | None = None
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
+            options: ListPartitionReassignmentsOptions | None = MISSING
             ) -> ListPartitionReassignmentsResult[Sync]:
         """The stored reassignments of ``partitions`` (all when ``None``, Java's
         ``listPartitionReassignments()`` / ``Optional.empty()``), with the replicas
         being added and removed (``options`` is ignored)."""
+        if partitions is MISSING:  # Java's listPartitionReassignments(options): Optional.empty()
+            return self._list_partition_reassignments(None)
+        _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
         return self._list_partition_reassignments(partitions)
 
     def remove_members_from_consumer_group(
@@ -537,13 +545,13 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     def alter_consumer_group_offsets(self, *, group_id: str,
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                     options: AlterConsumerGroupOffsetsOptions | None = None
+                                     options: AlterConsumerGroupOffsetsOptions | None = MISSING
                                      ) -> AlterConsumerGroupOffsetsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
         return self._alter_consumer_group_offsets(group_id, offsets)
 
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                     options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Sync]:
+                     options: ListOffsetsOptions | None = MISSING) -> ListOffsetsResult[Sync]:
         """The offsets set by ``update_beginning_offsets`` for
         ``OffsetSpec.earliest()`` and by ``update_end_offsets`` for every other spec;
         ``OffsetSpec.for_timestamp`` raises ``UnsupportedVersionError("Not implement
@@ -551,13 +559,13 @@ class MockAdminClient(MockAdminClientCore, Admin):
         return self._list_offsets(topic_partition_offsets)
 
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                               options: DescribeClientQuotasOptions | None = None
+                               options: DescribeClientQuotasOptions | None = MISSING
                                ) -> DescribeClientQuotasResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
         return self._describe_client_quotas(filter)
 
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                            options: AlterClientQuotasOptions | None = None
+                            options: AlterClientQuotasOptions | None = MISSING
                             ) -> AlterClientQuotasResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implement yet")``, as Java's mock."""
         return self._alter_client_quotas(entries)
@@ -573,20 +581,20 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     @java_forms(*_DESCRIBE_USER_SCRAM_CREDENTIALS_FORMS)
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None = UNSET,
-            options: DescribeUserScramCredentialsOptions | None = None
+            self, *, users: Sequence[str] | None = MISSING,
+            options: DescribeUserScramCredentialsOptions | None = MISSING
     ) -> DescribeUserScramCredentialsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
-        return self._describe_user_scram_credentials(None if users is UNSET else users)
+        return self._describe_user_scram_credentials(None if users is MISSING else users)
 
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
-            options: AlterUserScramCredentialsOptions | None = None
+            options: AlterUserScramCredentialsOptions | None = MISSING
     ) -> AlterUserScramCredentialsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._alter_user_scram_credentials(alterations)
 
-    def describe_features(self, *, options: DescribeFeaturesOptions | None = None
+    def describe_features(self, *, options: DescribeFeaturesOptions | None = MISSING
                           ) -> DescribeFeaturesResult[Sync]:
         """Each feature level of the builder as a finalized ``[level, level]`` range,
         with the builder's supported range, finalized epoch 123 (``options`` is
@@ -594,47 +602,48 @@ class MockAdminClient(MockAdminClientCore, Admin):
         return self._describe_features()
 
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                        options: UpdateFeaturesOptions | None = None
+                        options: UpdateFeaturesOptions | None = MISSING
                         ) -> UpdateFeaturesResult[Sync]:
         """Check each update against the current level and the supported range; the
         first that fails fails every future with ``InvalidRequestError``, else each
         level is set (not with ``options.validate_only()``)."""
-        if options is None:
+        if options is MISSING:
             options = UpdateFeaturesOptions()
-        return self._update_features(feature_updates, options.validate_only())
+        return self._update_features(feature_updates, options)
 
     def unregister_controller(self, *, controller_id: int,
-                              options: UnregisterControllerOptions | None = None
+                              options: UnregisterControllerOptions | None = MISSING
                               ) -> UnregisterControllerResult[Sync]:
         """A completed future when the mock uses a raft controller, else one failed
         with ``UnsupportedVersionError("")``, as Java's mock."""
+        _conversions.non_null(controller_id, "controller_id")  # Java's int parameter
         return self._unregister_controller(controller_id)
 
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                           options: DescribeProducersOptions | None = None
+                           options: DescribeProducersOptions | None = MISSING
                            ) -> DescribeProducersResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._describe_producers(partitions)
 
     def describe_transactions(self, *, transactional_ids: Iterable[str],
-                              options: DescribeTransactionsOptions | None = None
+                              options: DescribeTransactionsOptions | None = MISSING
                               ) -> DescribeTransactionsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._describe_transactions(transactional_ids)
 
     def abort_transaction(self, *, spec: AbortTransactionSpec,
-                          options: AbortTransactionOptions | None = None
+                          options: AbortTransactionOptions | None = MISSING
                           ) -> AbortTransactionResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._abort_transaction(spec)
 
-    def list_transactions(self, *, options: ListTransactionsOptions | None = None
+    def list_transactions(self, *, options: ListTransactionsOptions | None = MISSING
                           ) -> ListTransactionsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._list_transactions()
 
     def fence_producers(self, *, transactional_ids: Iterable[str],
-                        options: FenceProducersOptions | None = None
+                        options: FenceProducersOptions | None = MISSING
                         ) -> FenceProducersResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._fence_producers(transactional_ids)
@@ -648,21 +657,21 @@ class MockAdminClient(MockAdminClientCore, Admin):
 
     @java_forms(*_LIST_CONFIG_RESOURCES_FORMS)
     def list_config_resources(self, *,
-                              config_resource_types: Iterable[ConfigResource.Type] = UNSET,
-                              options: ListConfigResourcesOptions | None = None
+                              config_resource_types: Iterable[ConfigResource.Type] = MISSING,
+                              options: ListConfigResourcesOptions | None = MISSING
                               ) -> ListConfigResourcesResult[Sync]:
         """The topic, broker, broker-logger, client-metrics and group resources of the
         given types (all for none); ``options`` is ignored."""
         return self._list_config_resources(config_resource_types)
 
     def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                options: DescribeClassicGroupsOptions | None = None
+                                options: DescribeClassicGroupsOptions | None = MISSING
                                 ) -> DescribeClassicGroupsResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._describe_classic_groups(group_ids)
 
     def force_terminate_transaction(self, *, transactional_id: str,
-                                    options: TerminateTransactionOptions | None = None
+                                    options: TerminateTransactionOptions | None = MISSING
                                     ) -> TerminateTransactionResult[Sync]:
         """Raises ``UnsupportedVersionError("Not implemented yet")``, as Java's mock."""
         return self._force_terminate_transaction(transactional_id)
