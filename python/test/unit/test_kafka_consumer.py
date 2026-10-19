@@ -2246,8 +2246,9 @@ def test_async_concurrent_use_on_one_loop_meets_the_guard() -> None:
         # Java's metrics() takes no acquire(): it answers.
         assert isinstance(consumer.metrics(), dict)
         consumer.wakeup()
-        with pytest.raises(WakeupError):
+        with pytest.raises(WakeupError) as woken:
             await poll
+        assert str(woken.value) == ""  # Java's WakeupException has no message
         await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
@@ -2406,8 +2407,9 @@ def test_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_poll() 
         consumer.assign(partitions=[TP0])
         consumer.wakeup()
         consumer.commit(offsets={})
-        with pytest.raises(WakeupError):
+        with pytest.raises(WakeupError) as woken:
             consumer.poll(timeout=0)
+        assert str(woken.value) == ""  # Java's WakeupException has no message
         assert consumer.poll(timeout=0).is_empty()
     finally:
         consumer.close(option=CloseOptions.timeout(timeout=0))
