@@ -1311,6 +1311,19 @@ impl CommitRequestManager {
         guard.pending.unsent_offset_commits.len()
     }
 
+    /// Test-only accessor returning the offsets of the first queued, unsent
+    /// offset commit, so a test in another module can assert what an
+    /// auto-commit took from `subscriptions.allConsumed()`.
+    #[cfg(test)]
+    pub(crate) fn first_unsent_commit_offsets_for_test(&self) -> Option<HashMap<TopicPartition, OffsetAndMetadata>> {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard
+            .pending
+            .unsent_offset_commits
+            .front()
+            .map(|request| request.offsets.clone())
+    }
+
     /// Test-only accessor exposing a clone of the current `MemberInfo`
     /// (member id + member epoch). Used by sibling-module tests
     /// (e.g. `async_kafka_consumer` Issue-7 regression) to verify that

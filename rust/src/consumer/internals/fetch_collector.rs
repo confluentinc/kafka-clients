@@ -207,22 +207,23 @@ where
     /// # Cancellation
     ///
     /// The future can be dropped while a deserializer is pending (a `poll()`
-    /// cancelled by `tokio::time::timeout` or a `select!`). Nothing it decoded
-    /// is then returned, and every consumed position it moved goes back to
-    /// the offset it had before this call, whether the partition is fetching
-    /// or, after a leader change, awaiting validation (which then validates
-    /// the restored position against the new leader), so neither a commit of
-    /// the consumed offsets nor the next call skips a record: the fetches it
-    /// took are put back, and the ones it had read from no longer match their
-    /// partition's position, so the next call ignores them as Java ignores any
-    /// stale fetch and the fetcher fetches those records again (see
-    /// [`CollectState`]).
+    /// cancelled by `tokio::time::timeout` or a `select!`). No consumed
+    /// position moves before the last deserializer has returned: the call
+    /// moves them all at its end, in one step with the KAFKA-15529 drains,
+    /// after checking each partition again, so a partition unassigned, paused,
+    /// reset, seeked or awaiting validation since it was read keeps its
+    /// position and its records are not returned. So a dropped call returns
+    /// nothing and moves nothing, and neither a commit of the consumed offsets
+    /// taken while it was pending nor the next call skips a record: the
+    /// fetches it took are put back, and the ones it had read from no longer
+    /// match their partition's position, so the next call ignores them as Java
+    /// ignores any stale fetch and the fetcher fetches those records again
+    /// (see [`CollectState`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch")]
     pub(crate) async fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, Error> {
         // The loop's state lives in a guard, so that a call dropped while a
         // deserializer is pending puts back what it took (see `CollectState`).
         let mut state = CollectState {
-            collector: self,
             fetch_buffer,
             collected: Collected::default(),
             paused_completed_fetches: Vec::new(),
@@ -355,8 +356,17 @@ where
                     state
                         .collected
                         .add(&cf_back.partition, partition_records, next_offset, part_position_advanced);
-                    // Put cf back as next-in-line for the next iteration.
-                    fetch_buffer.set_next_in_line_fetch(Some(cf_back));
+                    if cf_back.is_exhausted() && !cf_back.is_consumed() {
+                        // Java drains an exhausted fetch right after moving its
+                        // partition's position (`FetchCollector.java:189-193`,
+                        // KAFKA-15529). Here the position moves only once the
+                        // whole call has read, so the fetch is held, still
+                        // buffered, and drained after that (`drain_exhausted`).
+                        fetch_buffer.hold_exhausted(cf_back);
+                    } else {
+                        // Put cf back as next-in-line for the next iteration.
+                        fetch_buffer.set_next_in_line_fetch(Some(cf_back));
+                    }
                 },
                 Err(boxed) => {
                     let (cf_back, e) = *boxed;
@@ -392,8 +402,16 @@ where
         if !paused_completed_fetches.is_empty() {
             fetch_buffer.add_all(paused_completed_fetches);
         }
+
+        // Every deserializer has returned: move the positions, then drain the
+        // exhausted fetches (KAFKA-15529), with no `.await` in between, so the
+        // call can no longer be dropped half-way.
+        let moved = self.move_positions(&mut state.collected, &state.advanced);
+        fetch_buffer.drain_exhausted();
         state.done = true;
         let collected = std::mem::take(&mut state.collected);
+        moved?;
+        self.record_partition_lag_and_lead(&state.advanced);
 
         // Java's outer `catch (KafkaException e)` (`FetchCollector.java:138`)
         // swallows the error when we have records in hand (`!fetch.isEmpty()`).
@@ -449,45 +467,138 @@ where
         }
     }
 
-    /// Moves the consumed position of `tp` to where `cf` has read up to, if
-    /// that is past `position`. Returns whether it moved: Java's
-    /// `Fetch.positionAdvanced` for the partition.
+    /// Records that `cf` has read `tp` up to past `position`, if it has.
+    /// Returns whether it has: Java's `Fetch.positionAdvanced` for the
+    /// partition.
     ///
-    /// The first move of each partition in the call is recorded in
-    /// `advanced`, with the position it started from, for a cancelled call to
-    /// undo (see [`CollectState`]).
+    /// Java moves the position here (`FetchCollector.java:177-187`); the Rust
+    /// collector records the move in `tp`'s entry of `advanced`, and
+    /// [`Self::move_positions`] makes it once the call has read everything,
+    /// since a deserializer `.await` may still follow (see [`CollectState`]).
     fn advance_position(
-        &self,
-        advanced: &mut Vec<AdvancedPosition>,
+        advanced: &mut [AdvancedPosition],
         tp: &TopicPartition,
         cf: &CompletedFetch,
         position: &FetchPosition,
-        num_records: usize,
     ) -> bool {
         if cf.next_fetch_offset() <= position.offset {
             return false;
         }
-        let next_position =
-            FetchPosition::with_leader(cf.next_fetch_offset(), cf.last_epoch(), position.current_leader.clone());
-        trace!(
-            "Updating fetch position from {} to {} for partition {} and returning {} records from `poll()`",
-            position, next_position, tp, num_records
-        );
-        let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-        // set_position only fails if the partition is no
-        // longer assigned — in that case drop silently;
-        // Java would also no-op here.
-        if guard.set_position(tp, next_position.clone()).is_ok() {
-            match advanced.iter_mut().find(|a| a.partition == *tp) {
-                Some(entry) => entry.advanced_to = next_position,
-                None => advanced.push(AdvancedPosition {
-                    partition: tp.clone(),
-                    original: position.clone(),
-                    advanced_to: next_position,
-                }),
-            }
+        if let Some(entry) = advanced.iter_mut().find(|a| a.partition == *tp) {
+            entry.read_to = Some((cf.next_fetch_offset(), cf.last_epoch()));
         }
         true
+    }
+
+    /// Moves the position of every partition in `advanced` the call has read
+    /// past its position, under one `SubscriptionState` lock: the
+    /// `subscriptions.position(tp, nextPosition)` Java's `fetchRecords` makes
+    /// for each partition (`FetchCollector.java:177-187`).
+    ///
+    /// Java checks a partition and moves its position with no wait in
+    /// between. Here the deserializers ran since the partition was checked,
+    /// and the background task or a listener may have unassigned it, paused
+    /// it, reset or validated it, or the user seeked it meanwhile. So each
+    /// partition is checked again first, as Java's `fetchRecords` checks it
+    /// (`FetchCollector.java:151-210`): one no longer assigned, no longer
+    /// fetchable, or whose position is no longer the one the call read from,
+    /// keeps its position, and its records and next offset are dropped from
+    /// `collected`, to be fetched again, so that no record is returned whose
+    /// position does not move past it. `collected`'s `position_advanced` is
+    /// then that of the partitions kept.
+    ///
+    /// # Errors
+    ///
+    /// The illegal-state error of a failed `set_position`, as Java's
+    /// `subscriptions.position(tp, nextPosition)` throws
+    /// (`SubscriptionState.java:1208-1211`).
+    fn move_positions(&self, collected: &mut Collected<K, V>, advanced: &[AdvancedPosition]) -> Result<(), Error> {
+        if advanced.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+        let mut position_advanced = false;
+        for entry in advanced {
+            let tp = &entry.partition;
+            let kept = if !guard.is_assigned(tp) {
+                debug!(
+                    "Not returning fetched records for partition {} since it is no longer assigned",
+                    tp
+                );
+                None
+            } else if !guard.is_fetchable(tp) {
+                debug!(
+                    "Not returning fetched records for assigned partition {} since it is no longer fetchable",
+                    tp
+                );
+                None
+            } else {
+                match guard.position_or_null(tp) {
+                    Some(current) if current.offset == entry.original.offset => Some(current.current_leader.clone()),
+                    Some(current) => {
+                        debug!(
+                            "Ignoring fetched records for {} at offset {} since the current position is {}",
+                            tp, entry.original.offset, current
+                        );
+                        None
+                    },
+                    // Unreachable while `is_fetchable` holds, as in the
+                    // `MissingPosition` arm of `fetch_records_from_partition`.
+                    None => {
+                        debug!(
+                            "Not returning fetched records for assigned partition {} since it has no position",
+                            tp
+                        );
+                        None
+                    },
+                }
+            };
+            let Some(current_leader) = kept else {
+                collected.records_by_partition.shift_remove(tp);
+                collected.next_offsets.remove(tp);
+                continue;
+            };
+            let Some((offset, offset_epoch)) = entry.read_to else {
+                continue;
+            };
+            let next_position = FetchPosition::with_leader(offset, offset_epoch, current_leader);
+            trace!(
+                "Updating fetch position from {} to {} for partition {} and returning {} records from `poll()`",
+                entry.original,
+                next_position,
+                tp,
+                collected.records_by_partition.get(tp).map_or(0, Vec::len)
+            );
+            guard.set_position(tp, next_position)?;
+            position_advanced = true;
+        }
+        collected.position_advanced = position_advanced;
+        Ok(())
+    }
+
+    /// Records the lag and lead of every partition in `advanced` still
+    /// assigned, as Java's `fetchRecords` does after moving the position
+    /// (`FetchCollector.java:195-202`). The record methods update the
+    /// client-level INFO `records-lag-max` / `records-lead-min` sensors AND
+    /// register + record the DETAILED per-partition sensors at INFO — full
+    /// Java parity, no DEBUG gating (see `FetchMetricsManager`). This is
+    /// per-partition per-poll, not per-record.
+    fn record_partition_lag_and_lead(&self, advanced: &[AdvancedPosition]) {
+        for AdvancedPosition { partition, .. } in advanced {
+            let (partition_lag, partition_lead) = {
+                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                (
+                    guard.partition_lag(partition, self.fetch_config.isolation_level).ok().flatten(),
+                    guard.partition_lead(partition).ok().flatten(),
+                )
+            };
+            if let Some(lag) = partition_lag {
+                self.metrics_manager.record_partition_lag(partition, lag);
+            }
+            if let Some(lead) = partition_lead {
+                self.metrics_manager.record_partition_lead(partition, lead);
+            }
+        }
     }
 
     /// Pulls records from `next_in_line` for its partition, consulting
@@ -595,7 +706,18 @@ where
                     cf,
                 })
             },
-            FetchabilityCheck::Position(position) => {
+            FetchabilityCheck::Position(subscribed) => {
+                // The call moves positions only once it has read everything
+                // (`move_positions`), so a partition it has already read from
+                // is next in line at the offset it read up to.
+                let position = match advanced.iter().find(|a| a.partition == tp) {
+                    Some(AdvancedPosition { original, read_to: Some((offset, offset_epoch)), .. })
+                        if original.offset == subscribed.offset =>
+                    {
+                        FetchPosition::with_leader(*offset, *offset_epoch, subscribed.current_leader.clone())
+                    },
+                    _ => subscribed,
+                };
                 if cf.next_fetch_offset() != position.offset {
                     // Not next-in-line based on the consumed position;
                     // these must be from an obsolete request.
@@ -611,6 +733,14 @@ where
                         next_offset: None,
                         position_advanced: false,
                         cf,
+                    });
+                }
+
+                if !advanced.iter().any(|a| a.partition == tp) {
+                    advanced.push(AdvancedPosition {
+                        partition: tp.clone(),
+                        original: position.clone(),
+                        read_to: None,
                     });
                 }
 
@@ -638,39 +768,11 @@ where
                     tp
                 );
 
-                // Advance the subscription position if the cursor advanced.
-                let position_advanced = self.advance_position(advanced, &tp, &cf, &position, part_records.len());
-
-                // Drain after position update to ensure the background task sees
-                // the updated position before it sees is_consumed=true. This
-                // prevents duplicate fetch requests for the old offset
-                // (KAFKA-15529).
-                if cf.is_exhausted() {
-                    cf.drain();
-                }
-
-                // Record per-partition lag / lead, mirroring Java's
-                // `FetchCollector` (`subscriptions.partitionLag` /
-                // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
-                // The record methods update the client-level INFO
-                // `records-lag-max` / `records-lead-min` sensors AND register +
-                // record the DETAILED per-partition sensors at INFO — full Java
-                // parity, no DEBUG gating (see `FetchMetricsManager`). This is
-                // per-partition per-poll, not per-record (Java's accepted
-                // per-fetch cost, to be measured in M8).
-                let (partition_lag, partition_lead) = {
-                    let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-                    (
-                        guard.partition_lag(&tp, self.fetch_config.isolation_level).ok().flatten(),
-                        guard.partition_lead(&tp).ok().flatten(),
-                    )
-                };
-                if let Some(lag) = partition_lag {
-                    self.metrics_manager.record_partition_lag(&tp, lag);
-                }
-                if let Some(lead) = partition_lead {
-                    self.metrics_manager.record_partition_lead(&tp, lead);
-                }
+                // Record how far the cursor advanced; `move_positions` moves the
+                // position, and `drain_exhausted` then drains an exhausted fetch
+                // (KAFKA-15529), once the call has read everything. Lag and
+                // lead are recorded after that (`record_partition_lag_and_lead`).
+                let position_advanced = Self::advance_position(advanced, &tp, &cf, &position);
 
                 let metadata =
                     match OffsetAndMetadata::with_leader_epoch_metadata(cf.next_fetch_offset(), cf.last_epoch(), "") {
@@ -1117,13 +1219,16 @@ impl<K, V> Collected<K, V> {
     }
 }
 
-/// A consumed position [`FetchCollector::collect_fetch`] moved: where the
-/// partition was before the call first moved it, and where the call last
-/// moved it to, for a cancelled call to put back (see [`CollectState`]).
+/// A partition [`FetchCollector::collect_fetch`] reads records from: its
+/// consumed position when the call first read from it, and the offset and
+/// offset epoch the call has read it up to, which
+/// [`FetchCollector::move_positions`] makes its position once the call has
+/// read everything (see [`CollectState`]).
 struct AdvancedPosition {
     partition: TopicPartition,
     original: FetchPosition,
-    advanced_to: FetchPosition,
+    /// `(offset, offset_epoch)` past `original`, if the call has read past it.
+    read_to: Option<(i64, Option<i32>)>,
 }
 
 /// The fetch [`FetchCollector::fetch_records_from_partition`] is decoding
@@ -1143,21 +1248,20 @@ struct InFlightFetch<K, V> {
 /// paused fetches, and the next-in-line fetch stays in the buffer throughout.
 /// A Rust `poll()` future can be dropped while a deserializer is pending, and
 /// that must neither lose nor skip a record (CLAUDE.md §11.6.1). A Java
-/// position moves only for records `poll()` returns, so on drop before
-/// completion this leaves the consumer as if the call had returned nothing:
+/// position moves only for records `poll()` returns, so the call moves no
+/// position before its last deserializer has returned: it records how far it
+/// read each partition in `advanced`, and moves the positions together after
+/// the loop ([`FetchCollector::move_positions`]). Until then the consumed
+/// offsets an auto-commit, a commit or `close()` takes from the background
+/// task are those of the records already returned. On drop before completion
+/// this leaves the consumer as if the call had returned nothing:
 ///
 /// - puts the fetch being decoded back as the next in line, its records
 ///   decoded so far discarded;
 /// - re-adds the paused fetches, as Java's `finally` does;
 /// - discards the records collected from the partitions already done;
-/// - moves each consumed position the call moved back to the one it had
-///   before the call, if the partition is still assigned and its offset is
-///   still the one the call set (a seek or reset since then wins). The
-///   partition's current leader is kept: if a leader change since then put
-///   the partition in AWAIT_VALIDATION at the moved offset, the restored
-///   position is validated against the new leader instead (Java's
-///   `seekUnvalidated`), and a validation already sent for the moved one is
-///   ignored, its request position no longer matching.
+/// - drains the fetches it read to the end ([`FetchBuffer::hold_exhausted`]),
+///   their positions unmoved.
 ///
 /// A fetch the call had read records from, the one put back or one still
 /// buffered, now starts past its partition's position, so the next call
@@ -1165,7 +1269,7 @@ struct InFlightFetch<K, V> {
 /// the position ("Ignoring fetched records for {} at offset {} since the
 /// current position is {}"), and drains it; the fetcher, which skips a
 /// partition while a fetch of it is buffered, then fetches the records again
-/// from the restored position. A partition the user seeks, pauses or loses in
+/// from the unmoved position. A partition the user seeks, pauses or loses in
 /// between follows Java's rules from there: nothing decoded before the
 /// cancellation is ever returned.
 struct CollectState<'a, K, V>
@@ -1173,13 +1277,12 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    collector: &'a FetchCollector<K, V>,
     fetch_buffer: &'a FetchBuffer,
     collected: Collected<K, V>,
     paused_completed_fetches: Vec<CompletedFetch>,
     in_flight: Option<InFlightFetch<K, V>>,
-    /// The consumed positions the call moved, at most one entry per
-    /// partition; allocated only once a position moves.
+    /// The partitions the call reads records from, at most one entry per
+    /// partition; allocated only once the call reads from a partition.
     advanced: Vec<AdvancedPosition>,
     /// Set once the call completes, when there is nothing to put back.
     done: bool,
@@ -1203,54 +1306,9 @@ where
         if !paused_completed_fetches.is_empty() {
             self.fetch_buffer.add_all(paused_completed_fetches);
         }
-        if !self.advanced.is_empty() {
-            let mut guard = self.collector.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            for AdvancedPosition { partition, original, advanced_to } in self.advanced.drain(..) {
-                if !guard.is_assigned(&partition) {
-                    continue;
-                }
-                // Only a position the call left where it put it goes back: a
-                // seek or reset since then wins. The leader may have been
-                // updated since, so the current one is kept.
-                let restored = match guard.position_or_null(&partition) {
-                    Some(current) if current.offset == advanced_to.offset => FetchPosition::with_leader(
-                        original.offset,
-                        original.offset_epoch,
-                        current.current_leader.clone(),
-                    ),
-                    _ => continue,
-                };
-                // How the position goes back depends on the partition's fetch
-                // state. FETCHING: the position is valid, and only the offset
-                // changes. AWAIT_VALIDATION: a leader change since the call
-                // moved the position (a KIP-951 leader update or a metadata
-                // update, through `maybe_validate_position_for_current_leader`)
-                // asked for the moved position to be validated against the new
-                // leader; the restored one is validated against it instead,
-                // as Java's `seekUnvalidated` does for a position whose epoch
-                // is still to be checked. An `OffsetsForLeaderEpoch` already
-                // sent for the moved position is then ignored by
-                // `maybe_complete_validation`, its request position no longer
-                // being the current one. AWAIT_RESET has no position and is
-                // excluded above: the reset wins.
-                let awaiting_validation = guard.awaiting_validation(&partition).unwrap_or(false);
-                if !awaiting_validation && !guard.has_valid_position(&partition) {
-                    continue;
-                }
-                debug!(
-                    "Moving the position of {partition} back from {advanced_to} to {restored}, \
-                     since the poll returning its records was cancelled"
-                );
-                let result = if awaiting_validation {
-                    guard.seek_unvalidated(&partition, restored)
-                } else {
-                    guard.set_position(&partition, restored)
-                };
-                if let Err(e) = result {
-                    warn!("Could not move the position of {partition} back after a cancelled poll: {e}");
-                }
-            }
-        }
+        // No position has moved; the fetches read to the end are drained, to
+        // be fetched again from there.
+        self.fetch_buffer.drain_exhausted();
         let discarded = self.collected.record_count();
         if discarded > 0 {
             debug!("Discarding the {discarded} records of a cancelled poll; they will be fetched again");
@@ -1461,14 +1519,13 @@ mod tests {
         assert_eq!(vec![DEFAULT_RECORD_COUNT as i64], *positions_at_drain_time.lock().unwrap());
     }
 
-    /// A value deserializer that is pending, on a `Notify` nobody notifies,
-    /// on the first call for `value` of `topic`, and ready on every other
-    /// call.
+    /// A value deserializer that is pending, on `notify`, on the first call
+    /// for `value` of `topic`, and ready on every other call.
     struct PendingAtDeserializer {
         topic: &'static str,
         value: &'static [u8],
         pended: std::sync::atomic::AtomicBool,
-        notify: tokio::sync::Notify,
+        notify: Arc<tokio::sync::Notify>,
     }
 
     impl Deserializer<String> for PendingAtDeserializer {
@@ -1494,6 +1551,13 @@ mod tests {
     /// fetch of `DEFAULT_RECORD_COUNT` records buffered for each,
     /// `CANCEL_DONE`'s first.
     fn cancel_fixture(h: &Harness) -> FetchCollector<String, String> {
+        cancel_fixture_with_notify(h).0
+    }
+
+    /// [`cancel_fixture`], with the `Notify` that lets the pending
+    /// deserializer go on.
+    fn cancel_fixture_with_notify(h: &Harness) -> (FetchCollector<String, String>, Arc<tokio::sync::Notify>) {
+        let notify = Arc::new(tokio::sync::Notify::new());
         let collector = FetchCollector::new(
             h.metadata.clone(),
             h.subs.clone(),
@@ -1504,7 +1568,7 @@ mod tests {
                     topic: CANCEL_IN_FLIGHT.0,
                     value: b"value-3",
                     pended: std::sync::atomic::AtomicBool::new(false),
-                    notify: tokio::sync::Notify::new(),
+                    notify: Arc::clone(&notify),
                 }),
             )),
             FetchMetricsManager::for_test(),
@@ -1527,26 +1591,43 @@ mod tests {
         ));
         h.fetch_buffer
             .add(build_completed_fetch(h, in_flight, 0, DEFAULT_RECORD_COUNT, None));
-        collector
+        (collector, notify)
+    }
+
+    /// Polls `future` once with a waker that does nothing.
+    fn poll_once<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> std::task::Poll<T> {
+        future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
     }
 
     /// Polls `collector.collect_fetch` once, asserts it is pending on record 3
-    /// of `CANCEL_IN_FLIGHT` with `CANCEL_DONE` collected and its position
-    /// moved, runs `while_pending`, then drops the future.
+    /// of `CANCEL_IN_FLIGHT` with `CANCEL_DONE` read to the end but no
+    /// position moved, runs `while_pending`, then drops the future.
     fn collect_and_cancel(h: &Harness, collector: &FetchCollector<String, String>, while_pending: impl FnOnce()) {
-        let done = tp(CANCEL_DONE.0, CANCEL_DONE.1);
         let mut future = Box::pin(collector.collect_fetch(&h.fetch_buffer));
-        let poll = future
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
-        assert!(poll.is_pending(), "the deserializer is pending on value-3");
-        assert_eq!(
-            Some(DEFAULT_RECORD_COUNT as i64),
-            h.subs.lock().unwrap().position(&done).unwrap().map(|p| p.offset),
-            "the partition collected before the cancellation has moved"
-        );
+        assert_pending_with_no_position_moved(h, &mut future);
         while_pending();
         drop(future);
+    }
+
+    /// Asserts `future`, a collect over [`cancel_fixture`], is pending on
+    /// record 3 of `CANCEL_IN_FLIGHT` with both positions unmoved and both
+    /// partitions still buffered.
+    fn assert_pending_with_no_position_moved<T>(h: &Harness, future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) {
+        let (done, in_flight) = (tp(CANCEL_DONE.0, CANCEL_DONE.1), tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1));
+        assert!(poll_once(future).is_pending(), "the deserializer is pending on value-3");
+        let positions = (position_of(h, &done), position_of(h, &in_flight));
+        assert_eq!(
+            (Some(0), Some(0)),
+            positions,
+            "no position moves before the collect's last deserializer returns"
+        );
+        assert_eq!(
+            HashSet::from([done, in_flight]),
+            h.fetch_buffer.buffered_partitions(),
+            "the fetch read to the end stays buffered, so it is not fetched again from the unmoved position"
+        );
     }
 
     fn offsets_of(fetch: &ConsumerRecords<String, String>, partition: &TopicPartition) -> Vec<i64> {
@@ -1558,11 +1639,11 @@ mod tests {
     }
 
     /// A `poll()` cancelled while a deserializer is pending mid-collect (the
-    /// caller's `select!` or timeout dropping the future) moves every position
-    /// it moved back, so the consumed offsets a commit, auto-commit or
-    /// `close()` takes cover none of the records it never returned.
+    /// caller's `select!` or timeout dropping the future) has moved no
+    /// position, so the consumed offsets a commit, auto-commit or `close()`
+    /// takes cover none of the records it never returned.
     #[test]
-    fn test_collect_cancelled_mid_fetch_restores_the_consumed_positions() {
+    fn test_collect_cancelled_mid_fetch_leaves_the_consumed_positions() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let collector = cancel_fixture(&h);
         let (done, in_flight) = (tp(CANCEL_DONE.0, CANCEL_DONE.1), tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1));
@@ -1576,16 +1657,16 @@ mod tests {
         assert_eq!(
             Some(&FetchPosition::with_leader(0, None, LeaderAndEpoch::no_leader_or_epoch())),
             h.subs.lock().unwrap().position(&done).unwrap(),
-            "the whole position is restored"
+            "the whole position is unchanged"
         );
     }
 
     /// After a cancelled collect the next one ignores the fetches the
     /// cancelled one had read from, as stale (Java's "Ignoring fetched
     /// records" branch), and returns nothing; with nothing buffered for them
-    /// the fetcher fetches both partitions again from the restored positions,
+    /// the fetcher fetches both partitions again from the unmoved positions,
     /// and every record is then returned exactly once, in offset order, with
-    /// matching next offsets. A response to a fetch sent at the moved position
+    /// matching next offsets. A response to a fetch sent past the position
     /// meanwhile is ignored too.
     #[test]
     fn test_collect_cancelled_mid_fetch_refetches_every_record_exactly_once() {
@@ -1598,7 +1679,7 @@ mod tests {
             "the fetch being decoded is put back"
         );
 
-        // A fetch the background task sent at the moved position.
+        // A fetch sent past the position.
         h.fetch_buffer.add(build_completed_fetch(
             &h,
             done.clone(),
@@ -1614,7 +1695,7 @@ mod tests {
         );
         assert_eq!((Some(0), Some(0)), (position_of(&h, &done), position_of(&h, &in_flight)));
 
-        // The fetcher's new fetches, from the restored positions.
+        // The fetcher's new fetches, from the unmoved positions.
         h.fetch_buffer
             .add(build_completed_fetch(&h, done.clone(), 0, DEFAULT_RECORD_COUNT, None));
         h.fetch_buffer
@@ -1646,8 +1727,7 @@ mod tests {
     }
 
     /// After a cancelled collect and a `seek`, records come from the seek
-    /// position only; a seek made while the collect is pending wins over the
-    /// restore.
+    /// position only; a seek made while the collect is pending stays.
     #[test]
     fn test_collect_cancelled_mid_fetch_then_seek() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
@@ -1672,7 +1752,7 @@ mod tests {
 
     /// After a cancelled collect and a `pause`, nothing is returned from the
     /// paused partition; once resumed, its records come from the restored
-    /// position.
+    /// position it kept.
     #[test]
     fn test_collect_cancelled_mid_fetch_then_pause() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
@@ -1730,15 +1810,14 @@ mod tests {
 
     /// A leader change while a collect is pending (a KIP-951 leader update or
     /// a metadata update, which the background task applies through
-    /// `maybe_validate_position_for_current_leader`) puts a partition the
-    /// collect has moved into AWAIT_VALIDATION at the moved offset. The
-    /// cancelled collect still moves it back, keeping the new leader: with an
-    /// offset epoch the restored position awaits validation against the new
-    /// leader, an `OffsetsForLeaderEpoch` response for the moved position is
-    /// ignored, and once validated every record is fetched and returned
-    /// exactly once; without one it goes straight to FETCHING.
+    /// `maybe_validate_position_for_current_leader`) acts on the position the
+    /// partition had before the collect, which the collect has not moved: with
+    /// an offset epoch it awaits validation against the new leader, without
+    /// one it stays FETCHING with the new leader. After the cancellation the
+    /// position is unchanged, and once validated every record is fetched and
+    /// returned exactly once.
     #[test]
-    fn test_collect_cancelled_mid_fetch_after_a_leader_change_restores_the_position() {
+    fn test_collect_cancelled_mid_fetch_after_a_leader_change_validates_the_unmoved_position() {
         let new_leader = LeaderAndEpoch::new(
             Some(Node::new(1, "localhost".to_string(), 9092)),
             Some(CANCEL_DONE_LEADER_EPOCH + 1),
@@ -1750,47 +1829,32 @@ mod tests {
             let original = FetchPosition::with_leader(0, original_epoch, LeaderAndEpoch::no_leader_or_epoch());
             h.subs.lock().unwrap().seek_validated(&done, original).unwrap();
 
-            let mut moved = None;
             collect_and_cancel(&h, &collector, || {
                 let mut guard = h.subs.lock().unwrap();
-                assert!(
+                assert_eq!(
+                    original_epoch.is_some(),
                     guard.maybe_validate_position_for_current_leader(&crate::ApiVersions::new(), &done, &new_leader),
-                    "the moved position carries the batch's epoch, so it awaits validation"
+                    "only a position with an offset epoch awaits validation: {original_epoch:?}"
                 );
-                moved = guard.position(&done).unwrap().cloned();
             });
-            let moved = moved.expect("a position");
-            assert_eq!(
-                FetchPosition::with_leader(
-                    DEFAULT_RECORD_COUNT as i64,
-                    Some(CANCEL_DONE_LEADER_EPOCH),
-                    new_leader.clone()
-                ),
-                moved
-            );
 
-            let restored = FetchPosition::with_leader(0, original_epoch, new_leader.clone());
+            let unmoved = FetchPosition::with_leader(0, original_epoch, new_leader.clone());
             {
                 let mut guard = h.subs.lock().unwrap();
-                assert_eq!(Some(&restored), guard.position(&done).unwrap(), "{original_epoch:?}");
+                assert_eq!(Some(&unmoved), guard.position(&done).unwrap(), "{original_epoch:?}");
                 assert_eq!(
                     original_epoch.is_some(),
                     guard.awaiting_validation(&done).unwrap(),
                     "{original_epoch:?}"
                 );
                 if original_epoch.is_some() {
-                    // The response to the validation sent for the moved position.
                     let mut end_offset = crate::offset_for_leader_epoch_response_data::EpochEndOffset::new();
                     end_offset.set_leader_epoch(CANCEL_DONE_LEADER_EPOCH);
                     end_offset.set_end_offset(DEFAULT_RECORD_COUNT as i64);
-                    assert!(guard.maybe_complete_validation(&done, &moved, &end_offset).is_none());
-                    assert!(guard.awaiting_validation(&done).unwrap(), "a stale validation is ignored");
-                    assert_eq!(Some(&restored), guard.position(&done).unwrap());
-                    // The response to the validation of the restored position.
-                    assert!(guard.maybe_complete_validation(&done, &restored, &end_offset).is_none());
+                    assert!(guard.maybe_complete_validation(&done, &unmoved, &end_offset).is_none());
                 }
                 assert!(guard.has_valid_position(&done));
-                assert_eq!(Some(&restored), guard.position(&done).unwrap());
+                assert_eq!(Some(&unmoved), guard.position(&done).unwrap());
             }
 
             assert!(collector.collect_fetch_now(&h.fetch_buffer).unwrap().is_empty());
@@ -1803,6 +1867,126 @@ mod tests {
             assert_eq!(all, offsets_of(&fetch, &done), "{original_epoch:?}");
             assert_eq!(all, offsets_of(&fetch, &in_flight), "{original_epoch:?}");
             assert!(collector.collect_fetch_now(&h.fetch_buffer).unwrap().is_empty());
+        }
+    }
+
+    /// A partition read in full before a pending deserializer, then taken out
+    /// of fetching while it is pending — a leader change putting it in
+    /// AWAIT_VALIDATION, a seek, or an unassignment — keeps the position it
+    /// has then once the collect completes, and its records are not returned:
+    /// the collect checks every partition again before it moves the positions
+    /// (Java's `fetchRecords` checks, `FetchCollector.java:151-210`), and
+    /// drains its fetch, so it is fetched again from that position. The other
+    /// partition's records are returned and its position moves past them.
+    #[test]
+    fn test_collect_completed_after_a_partition_changed_while_pending_drops_its_records() {
+        let new_leader = LeaderAndEpoch::new(
+            Some(Node::new(1, "localhost".to_string(), 9092)),
+            Some(CANCEL_DONE_LEADER_EPOCH + 1),
+        );
+        /// Takes `done` out of fetching, given the new leader.
+        type Change = fn(&mut SubscriptionState, &TopicPartition, &LeaderAndEpoch);
+        let changes: [(&str, Change); 3] = [
+            ("leader change", |subs, done, new_leader| {
+                assert!(subs.maybe_validate_position_for_current_leader(&crate::ApiVersions::new(), done, new_leader));
+            }),
+            ("seek", |subs, done, _| subs.seek(done, 7).unwrap()),
+            ("unassign", |subs, done, _| {
+                let in_flight = tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1);
+                assert_ne!(done, &in_flight);
+                subs.assign_from_user(HashSet::from([in_flight])).unwrap();
+            }),
+        ];
+        for (change, apply) in changes {
+            let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+            let (collector, notify) = cancel_fixture_with_notify(&h);
+            let (done, in_flight) = (tp(CANCEL_DONE.0, CANCEL_DONE.1), tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1));
+            let original =
+                FetchPosition::with_leader(0, Some(CANCEL_DONE_LEADER_EPOCH), LeaderAndEpoch::no_leader_or_epoch());
+            h.subs.lock().unwrap().seek_validated(&done, original).unwrap();
+
+            let mut future = Box::pin(collector.collect_fetch(&h.fetch_buffer));
+            assert_pending_with_no_position_moved(&h, &mut future);
+            let changed = {
+                let mut guard = h.subs.lock().unwrap();
+                apply(&mut guard, &done, &new_leader);
+                guard.position_or_null(&done).cloned()
+            };
+            notify.notify_one();
+            let fetch = match poll_once(&mut future) {
+                std::task::Poll::Ready(fetch) => fetch.unwrap(),
+                std::task::Poll::Pending => panic!("the deserializer went on ({change})"),
+            };
+            drop(future);
+
+            assert!(offsets_of(&fetch, &done).is_empty(), "{change}");
+            assert!(!fetch.next_offsets().contains_key(&done), "{change}");
+            assert_eq!(changed, h.subs.lock().unwrap().position_or_null(&done).cloned(), "{change}");
+            assert_eq!(
+                (0..DEFAULT_RECORD_COUNT as i64).collect::<Vec<_>>(),
+                offsets_of(&fetch, &in_flight),
+                "{change}"
+            );
+            assert_eq!(Some(DEFAULT_RECORD_COUNT as i64), position_of(&h, &in_flight), "{change}");
+            assert!(
+                !h.fetch_buffer.buffered_partitions().contains(&done),
+                "the dropped partition's fetch is drained, to be fetched again ({change})"
+            );
+        }
+    }
+
+    /// An auto-commit taken by the background task while a collect is pending
+    /// on a deserializer commits the positions of the records already
+    /// returned, not those of the records the collect has decoded but not yet
+    /// returned: Java's `poll()` moves a position only together with the
+    /// records it returns, so a commit never covers a record the application
+    /// has not seen. Once the collect returns its records, the positions move
+    /// past them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_auto_commit_while_a_deserializer_is_pending_commits_the_unmoved_positions() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let (collector, notify) = cancel_fixture_with_notify(&h);
+        let (done, in_flight) = (tp(CANCEL_DONE.0, CANCEL_DONE.1), tp(CANCEL_IN_FLIGHT.0, CANCEL_IN_FLIGHT.1));
+        let mut config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..crate::consumer::ConsumerConfig::defaults()
+        };
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 1_000;
+        let manager = crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            h.metadata.clone(),
+            h.subs.clone(),
+            "group-1",
+            None,
+            h.time.clone(),
+            0,
+        );
+
+        let mut future = Box::pin(collector.collect_fetch(&h.fetch_buffer));
+        assert_pending_with_no_position_moved(&h, &mut future);
+        // The auto-commit interval has elapsed.
+        manager.update_timer_and_maybe_commit(2_000);
+        let committed: HashMap<TopicPartition, i64> = manager
+            .first_unsent_commit_offsets_for_test()
+            .expect("an auto-commit is queued")
+            .iter()
+            .map(|(partition, offset)| (partition.clone(), offset.offset()))
+            .collect();
+        assert_eq!(HashMap::from([(done.clone(), 0), (in_flight.clone(), 0)]), committed);
+
+        notify.notify_one();
+        let fetch = match poll_once(&mut future) {
+            std::task::Poll::Ready(fetch) => fetch.unwrap(),
+            std::task::Poll::Pending => panic!("the deserializer went on"),
+        };
+        drop(future);
+        for partition in [&done, &in_flight] {
+            assert_eq!(
+                (0..DEFAULT_RECORD_COUNT as i64).collect::<Vec<_>>(),
+                offsets_of(&fetch, partition)
+            );
+            assert_eq!(Some(DEFAULT_RECORD_COUNT as i64), position_of(&h, partition));
         }
     }
 
