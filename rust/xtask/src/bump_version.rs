@@ -25,6 +25,13 @@
 //! own instead, any PEP 440 version in normal form, for a Python-only release
 //! such as `0.3.0.post1`.
 //!
+//! The two are separate version lines (`rfc/versioning.md`): the crates follow
+//! semver, the Python packages their own PEP 440 line, which only moves up. A
+//! Python version lower, in PEP 440 order, than the one any package has is
+//! refused, whether it comes from `--python-version` or from the crate
+//! version: so while the crate's PEP 440 form is the lower one (`0.2.0b1`
+//! against `4.4.0b1`), `--python-version` is required.
+//!
 //! What is released together:
 //!
 //!   - every member of the Rust workspace at the version of `confluent-kafka`
@@ -50,7 +57,10 @@ const PYPROJECTS: [&str; 2] = ["python/pyproject.toml", "tools/translation_agent
 /// Python modules whose `__version__` follows the crate's.
 const PYTHON_VERSION_MODULES: [&str; 1] = ["tools/translation_agent/translation_agent/__init__.py"];
 
-const USAGE: &str = "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N] [--python-version PEP440_VERSION]";
+const USAGE: &str = "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N] [--python-version PEP440_VERSION]\n\
+     The crates get the semver version; the Python packages the PEP 440 version, by default the\n\
+     crate's in PEP 440 form. Python versions are their own line and only move up: a version below\n\
+     a package's current one is refused, so pass --python-version while the crate's is lower.";
 
 /// A pre-release stage, in release order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,6 +209,8 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         None => new.pep440(),
     };
 
+    let target = Pep440::parse(&python).with_context(|| format!("`{python}` is not a PEP 440 version"))?;
+
     let root = repo_root()?;
     let workspace = read(&root.join(WORKSPACE_MANIFEST))?;
     let current_text =
@@ -233,14 +245,19 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     }
     for pyproject in PYPROJECTS {
         let path = root.join(pyproject);
-        let edited = set_table_value(&read(&path)?, "project", "version", &python)
+        let text = read(&path)?;
+        let current = table_value(&text, "project", "version")
             .with_context(|| format!("{pyproject} has no [project] version"))?;
+        ensure_not_lowered(pyproject, current, &python, &target)?;
+        let edited = set_table_value(&text, "project", "version", &python).expect("read above");
         edits.push((path, edited));
     }
     for module in PYTHON_VERSION_MODULES {
         let path = root.join(module);
-        let edited =
-            set_module_version(&read(&path)?, &python).with_context(|| format!("{module} has no __version__"))?;
+        let text = read(&path)?;
+        let current = module_version(&text).with_context(|| format!("{module} has no __version__"))?;
+        ensure_not_lowered(module, current, &python, &target)?;
+        let edited = set_module_version(&text, &python).expect("read above");
         edits.push((path, edited));
     }
 
@@ -262,45 +279,108 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refuses to write `python` (parsed: `target`) over `current`, the version
+/// `file` has, when it is lower in PEP 440 order: the Python packages only
+/// move up.
+fn ensure_not_lowered(file: &str, current: &str, python: &str, target: &Pep440) -> anyhow::Result<()> {
+    let current_version = Pep440::parse(current)
+        .with_context(|| format!("{file} has `{current}`, not a PEP 440 version in normal form"))?;
+    if *target < current_version {
+        anyhow::bail!(
+            "{file} is at {current}: the Python version {python} would lower it. Python versions only move up; \
+             pass --python-version with a version not below {current}"
+        );
+    }
+    Ok(())
+}
+
 /// Whether `text` is a PEP 440 version in normal form:
 /// `[N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]`.
 fn is_pep440(text: &str) -> bool {
-    let (public, local) = match text.split_once('+') {
-        Some((public, local)) => (public, Some(local)),
-        None => (text, None),
-    };
-    let local_ok = local.is_none_or(|local| {
-        local
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
-    });
-    let public = match public.split_once('!') {
-        Some((epoch, rest)) if number(epoch).is_some() => rest,
-        Some(_) => return false,
-        None => public,
-    };
-    // The release runs up to the first letter, less the dot of `.post` or `.dev`.
-    let letters = public.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(public.len());
-    let release = public[..letters].strip_suffix('.').unwrap_or(&public[..letters]);
-    let suffix_ok = || {
-        let rest = strip_segment(&public[release.len()..], &["a", "b", "rc"])?;
-        let rest = strip_segment(rest, &[".post"])?;
-        let rest = strip_segment(rest, &[".dev"])?;
-        Some(rest.is_empty())
-    };
-    local_ok && release.split('.').all(|part| number(part).is_some()) && suffix_ok() == Some(true)
+    Pep440::parse(text).is_some()
 }
 
-/// `rest` without a leading `<label>N` for the first of `labels` it starts
-/// with, or unchanged when it starts with none; `None` when the label has no
-/// number after it.
-fn strip_segment<'a>(rest: &'a str, labels: &[&str]) -> Option<&'a str> {
-    let Some(after) = labels.iter().find_map(|label| rest.strip_prefix(label)) else {
-        return Some(rest);
+/// A PEP 440 version in normal form, ordered as PEP 440 orders versions
+/// ("Summary of permitted suffixes and relative ordering"): by epoch, then
+/// release (trailing zeros ignored, `1.0 == 1.0.0`), then a dev release of
+/// the bare release before its pre-releases (`1.0.dev1 < 1.0a1`), the
+/// pre-releases `a < b < rc` before the release, a post-release after it,
+/// and a dev release before what it is a dev release of
+/// (`1.0a1.dev1 < 1.0a1`, `1.0.post1.dev1 < 1.0.post1`). A local label is
+/// not compared: `1.0+x` neither lowers nor raises `1.0`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pep440 {
+    epoch: u64,
+    /// The release, trailing zeros removed.
+    release: Vec<u64>,
+    /// `(0, ..)` for a dev release of the bare release, `(1, stage, n)` for a
+    /// pre-release, `(2, ..)` for none.
+    pre: (u8, u8, u64),
+    /// `None`, the lowest, when not a post-release.
+    post: Option<u64>,
+    /// `(0, n)` for `.devN`, `(1, 0)`, the highest, for none.
+    dev: (u8, u64),
+}
+
+impl Pep440 {
+    fn parse(text: &str) -> Option<Self> {
+        let (public, local) = match text.split_once('+') {
+            Some((public, local)) => (public, Some(local)),
+            None => (text, None),
+        };
+        let local_ok = local.is_none_or(|local| {
+            local
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+        });
+        if !local_ok {
+            return None;
+        }
+        let (epoch, public) = match public.split_once('!') {
+            Some((epoch, rest)) => (number(epoch)?, rest),
+            None => (0, public),
+        };
+        // The release runs up to the first letter, less the dot of `.post` or `.dev`.
+        let letters = public.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(public.len());
+        let release_text = public[..letters].strip_suffix('.').unwrap_or(&public[..letters]);
+        let mut release = release_text.split('.').map(number).collect::<Option<Vec<u64>>>()?;
+        while release.len() > 1 && release.last() == Some(&0) {
+            release.pop();
+        }
+        let (pre, rest) = segment(&public[release_text.len()..], &["a", "b", "rc"])?;
+        let (post, rest) = segment(rest, &[".post"])?;
+        let (dev, rest) = segment(rest, &[".dev"])?;
+        if !rest.is_empty() {
+            return None;
+        }
+        let pre = match (pre, post, dev) {
+            (Some((stage, n)), _, _) => (1, stage as u8, n),
+            (None, None, Some(_)) => (0, 0, 0),
+            (None, _, _) => (2, 0, 0),
+        };
+        Some(Pep440 {
+            epoch,
+            release,
+            pre,
+            post: post.map(|(_, n)| n),
+            dev: dev.map_or((1, 0), |(_, n)| (0, n)),
+        })
+    }
+}
+
+/// A leading `<label>N` of `rest`, for the first of `labels` it starts with,
+/// as the label's index and `N`, and what follows it; `(None, rest)` when it
+/// starts with none, `None` when the label has no number after it.
+fn segment<'a>(rest: &'a str, labels: &[&str]) -> Option<(Option<(usize, u64)>, &'a str)> {
+    let Some((index, after)) = labels
+        .iter()
+        .enumerate()
+        .find_map(|(index, label)| Some((index, rest.strip_prefix(label)?)))
+    else {
+        return Some((None, rest));
     };
     let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
-    number(&after[..digits])?;
-    Some(&after[digits..])
+    Some((Some((index, number(&after[..digits])?)), &after[digits..]))
 }
 
 /// The string value of `key` in `[table]`.
@@ -332,6 +412,13 @@ fn set_table_value(text: &str, table: &str, key: &str, value: &str) -> Option<St
         edited.push_str(line);
     }
     found.then_some(edited)
+}
+
+/// The value of the module-level `__version__ = "..."` of `text`.
+fn module_version(text: &str) -> Option<&str> {
+    text.lines()
+        .filter(|line| line.starts_with("__version__"))
+        .find_map(|line| quoted_value(line, "__version__").map(|(start, end)| &line[start..end]))
 }
 
 /// `text` with the value of its module-level `__version__ = "..."` replaced.
@@ -525,6 +612,76 @@ mod tests {
         }
     }
 
+    /// PEP 440's ordering, each version below the next.
+    #[test]
+    fn pep440_versions_compare_in_pep440_order() {
+        let ordered = [
+            "0.2.0b1",
+            "0.2.0",
+            "1.0.dev0",
+            "1.0.dev1",
+            "1.0a1.dev1",
+            "1.0a1",
+            "1.0a1.post1.dev1",
+            "1.0a1.post1",
+            "1.0a2",
+            "1.0b1",
+            "1.0rc1",
+            "1.0rc10",
+            "1.0",
+            "1.0.post1.dev1",
+            "1.0.post1",
+            "1.0.post2",
+            "1.0.1",
+            "1.1.dev1",
+            "1.10",
+            "4.4.0b1",
+            "4.4.0",
+            "1!0.1",
+        ];
+        for pair in ordered.windows(2) {
+            let (low, high) = (Pep440::parse(pair[0]).unwrap(), Pep440::parse(pair[1]).unwrap());
+            assert!(low < high, "{} < {}", pair[0], pair[1]);
+        }
+        // Trailing zeros and a local label do not count.
+        for (a, b) in [
+            ("1.0", "1.0.0"),
+            ("1", "1.0.0.0"),
+            ("4.4.0b1", "4.4b1"),
+            ("1.0", "1.0+cfk.1"),
+        ] {
+            assert_eq!(Pep440::parse(a).unwrap(), Pep440::parse(b).unwrap(), "{a} == {b}");
+        }
+    }
+
+    #[test]
+    fn a_lower_python_version_is_refused() {
+        let check = |current: &str, python: &str| {
+            ensure_not_lowered("python/pyproject.toml", current, python, &Pep440::parse(python).unwrap())
+        };
+        // The crate's 0.2.0-beta.1 in PEP 440 form would lower Python's 4.4.0b1.
+        let error = check("4.4.0b1", &v("0.2.0-beta.1").pep440()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "python/pyproject.toml is at 4.4.0b1: the Python version 0.2.0b1 would lower it. Python versions only \
+             move up; pass --python-version with a version not below 4.4.0b1"
+        );
+        // An explicit lower one is refused too.
+        assert!(check("4.4.0", "4.4.0rc1").is_err());
+        assert!(check("4.4.0.post1", "4.4.0").is_err());
+        // The same or a higher one is accepted.
+        check("4.4.0b1", "4.4.0b1").unwrap();
+        check("4.4.0b1", "4.4.0b2").unwrap();
+        check("4.4.0b1", "4.4.0").unwrap();
+        check("4.4.0b1", "4.4.0.post1").unwrap();
+        // A current version that is not PEP 440 is an error, not a pass.
+        let error = check("four", "4.4.0").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "python/pyproject.toml has `four`, not a PEP 440 version in normal form"
+        );
+    }
+
     #[test]
     fn table_value_is_set_only_in_its_table() {
         let manifest = "\
@@ -559,6 +716,8 @@ version = \"9.9.9\"
             Some("\"\"\"Doc.\"\"\"\n\nif x:\n    __version__ = \"0.0.0\"\n__version__ = \"0.3.0rc1\"\n")
         );
         assert_eq!(set_module_version("x = 1\n", "1.0.0"), None);
+        assert_eq!(module_version(module), Some("0.2.0"));
+        assert_eq!(module_version("x = 1\n"), None);
     }
 
     #[test]
@@ -582,11 +741,14 @@ version = \"9.9.9\"
         assert!(workspace_members(&workspace).is_some_and(|members| members.contains(&".".to_string())));
         for pyproject in PYPROJECTS {
             let text = read(&root.join(pyproject)).expect("pyproject");
-            assert!(table_value(&text, "project", "version").is_some(), "{pyproject}");
+            let current = table_value(&text, "project", "version").expect("project version");
+            assert!(Pep440::parse(current).is_some(), "{pyproject}: {current}");
         }
         for module in PYTHON_VERSION_MODULES {
             let text = read(&root.join(module)).expect("module");
             assert!(set_module_version(&text, "1.0.0").is_some(), "{module}");
+            let current = module_version(&text).expect("module version");
+            assert!(Pep440::parse(current).is_some(), "{module}: {current}");
         }
     }
 }

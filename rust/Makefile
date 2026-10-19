@@ -246,10 +246,11 @@ check-api-compat:
 # Sets one version on the crates and Python packages released together, in
 # each one's syntax: `make bump-version VERSION=0.3.0-rc.1` writes 0.3.0-rc.1
 # in the Cargo manifests and 0.3.0rc1 in the Python packages. PYTHON_VERSION
-# (PEP 440, e.g. 0.3.0.post1) gives the Python packages another version.
+# (PEP 440, e.g. 0.3.0.post1) gives the Python packages another version;
+# Python versions only move up, so a lower one is refused (rfc/versioning.md).
 bump-version:
 	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
-	cargo xtask bump-version $(VERSION) $(if $(PYTHON_VERSION),--python-version $(PYTHON_VERSION))
+	cargo xtask bump-version "$(VERSION)" $(if $(PYTHON_VERSION),--python-version "$(PYTHON_VERSION)")
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the

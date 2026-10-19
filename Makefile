@@ -320,7 +320,7 @@ check-api-compat:
 
 # `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...]`: see rust/Makefile.
 bump-version:
-	$(MAKE) -C rust bump-version VERSION=$(VERSION) PYTHON_VERSION=$(PYTHON_VERSION)
+	$(MAKE) -C rust bump-version VERSION="$(VERSION)" PYTHON_VERSION="$(PYTHON_VERSION)"
 
 # Static checks of the Python binding (see python/Makefile's `check-static`).
 # Needs no build artifacts, so it is cheap to run.

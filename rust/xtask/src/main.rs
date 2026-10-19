@@ -2131,6 +2131,9 @@ fn print_help() {
                   the Python packages: semver in Cargo manifests, PEP 440 in Python
                     e.g. cargo xtask bump-version 0.3.0-rc.1 (Python gets 0.3.0rc1);
                     pre-releases are -alpha.N, -beta.N and -rc.N
+                    --python-version PEP440 gives the Python packages their own version;
+                    Python versions are a separate line that only moves up, so one below
+                    a package's current version is refused (rfc/versioning.md)
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2179,7 +2182,7 @@ Usage:
   cargo xtask producer-perf-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N] [--python-version PEP440]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
