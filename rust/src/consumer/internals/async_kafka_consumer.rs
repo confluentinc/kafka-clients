@@ -75,6 +75,7 @@ use crate::consumer::SubscriptionPattern;
 use crate::consumer::internals::ConsumerInterceptors;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::ConsumerRebalanceListenerInvoker;
+use crate::consumer::internals::ConsumerUtils;
 use crate::consumer::internals::Deserializers;
 use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchCollector;
@@ -792,7 +793,7 @@ impl AsyncConsumerHandleState {
             }
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         loop {
             let position_offset = {
@@ -828,7 +829,7 @@ impl AsyncConsumerHandleState {
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     partition
                 )));
             }
@@ -845,7 +846,7 @@ impl AsyncConsumerHandleState {
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
@@ -862,7 +863,7 @@ impl AsyncConsumerHandleState {
             Ok(map) => Ok(map),
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
-                timeout.as_millis(),
+                ConsumerUtils::duration_to_millis(timeout),
                 format_partitions_for_display(partitions),
             ))),
             Err(err) => Err(err),
@@ -884,7 +885,7 @@ impl AsyncConsumerHandleState {
             timestamps_to_search.insert(tp.clone(), timestamp);
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -921,7 +922,7 @@ impl AsyncConsumerHandleState {
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -944,7 +945,7 @@ impl AsyncConsumerHandleState {
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -981,7 +982,7 @@ impl AsyncConsumerHandleState {
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -1019,7 +1020,7 @@ impl AsyncConsumerHandleState {
         timeout: Duration,
     ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let receiver = self
             .commit(CommitEventKind::Sync { offsets, deadline_ms })
             .await?
@@ -1052,7 +1053,7 @@ impl AsyncConsumerHandleState {
                 deadline_ms,
                 format!(
                     "Timeout of {}ms expired before successfully committing offsets",
-                    timeout.as_millis()
+                    ConsumerUtils::duration_to_millis(timeout)
                 ),
                 true,
             )
@@ -1289,7 +1290,7 @@ fn build_close_handle_fns(
 ) -> (SignalCloseFn, LifecycleFn) {
     let close_notify = Arc::clone(&notify);
     let signal_close_fn: SignalCloseFn = Box::new(move |timeout: Duration| {
-        close_timeout_ms.store(timeout.as_millis().min(i64::MAX as u128) as i64, Ordering::Release);
+        close_timeout_ms.store(ConsumerUtils::duration_to_millis(timeout), Ordering::Release);
         running.store(false, Ordering::Release);
         close_notify.notify_one();
     });
@@ -4929,7 +4930,8 @@ where
             }
         }
 
-        let poll_deadline_ms = CompletableEvent::calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
+        let poll_deadline_ms =
+            CompletableEvent::calculate_deadline_ms(start_ms, ConsumerUtils::duration_to_millis(timeout));
         let mut first_pass = true;
 
         loop {
@@ -5592,7 +5594,7 @@ where
         timeout: Duration,
     ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         let receiver = self
             .commit_inner(CommitEventKind::Sync { offsets, deadline_ms })
@@ -5626,7 +5628,7 @@ where
                 |_| false,
                 format!(
                     "Timeout of {}ms expired before successfully committing offsets",
-                    timeout.as_millis()
+                    ConsumerUtils::duration_to_millis(timeout)
                 ),
                 true,
             )
@@ -5820,7 +5822,7 @@ where
             }
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         loop {
             // Read the validated position under the lock; drop guard before await.
@@ -5876,7 +5878,7 @@ where
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     partition
                 )));
             }
@@ -5923,7 +5925,7 @@ where
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
@@ -5953,7 +5955,7 @@ where
                 // `{:?}` Debug form.
                 Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     format_partitions_for_display(partitions),
                 )))
             },
@@ -6043,7 +6045,7 @@ where
             timestamps_to_search.insert(tp.clone(), timestamp);
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             // Java: `if (timeout.isZero()) { applicationEventHandler.add(listOffsetsEvent); return new HashMap<>(); }`.
@@ -6107,7 +6109,7 @@ where
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -6145,7 +6147,7 @@ where
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             // Java: `if (timeout.toMillis() == 0L) { applicationEventHandler.add(...); return listOffsetsEvent.emptyResults(); }`.
@@ -6205,7 +6207,7 @@ where
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -6251,12 +6253,12 @@ where
             // hierarchy or the wire code changes.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before partitions for topic {topic} could be determined",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
 
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `partitionsFor` calls `setActiveTask(future)`
@@ -6293,11 +6295,11 @@ where
             // `Error` cannot represent; class, code and ancestry match.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before all topics' metadata could be listed",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `listTopics` calls `setActiveTask(future)`
@@ -6480,7 +6482,7 @@ where
         // close-step — Java clips to `request.timeout.ms` so each
         // close-step inherits the broker-RPC bound.
         let request_timeout_ms = self.config.request_timeout_ms() as i64;
-        let capped_timeout_ms = std::cmp::min(timeout.as_millis() as i64, request_timeout_ms);
+        let capped_timeout_ms = std::cmp::min(ConsumerUtils::duration_to_millis(timeout), request_timeout_ms);
         let close_start_ms = self.time.milliseconds();
         let close_deadline_ms = CompletableEvent::calculate_deadline_ms(close_start_ms, capped_timeout_ms);
 
@@ -15082,5 +15084,155 @@ mod tests {
              poll() spun without yielding while maximumTimeToWait was 0"
         );
         drop(handles.subscriptions);
+    }
+
+    // ── Duration::MAX timeouts (audit finding C1-03) ───────────────────
+
+    /// Accepts either Java-parity outcome for a `Duration` Java cannot
+    /// represent: the call is still blocked after the test's wait (Rust saturates —
+    /// `Long.MAX_VALUE` ms in Java waits), or it was rejected up front with a
+    /// non-timeout argument error (Java: `ArithmeticException: long overflow`
+    /// from `Duration.toMillis()`). Anything else — in particular an
+    /// immediate `Ok(empty)` or a retriable `TimeoutError` — is the bug.
+    fn duration_max_outcome_is_java_like<T: std::fmt::Debug>(
+        outcome: &Result<Result<T, Error>, tokio::time::error::Elapsed>,
+    ) -> bool {
+        match outcome {
+            Err(_elapsed) => true,
+            Ok(Err(err)) => !matches!(err, Error::Timeout(_)),
+            Ok(Ok(_)) => false,
+        }
+    }
+
+    /// Audit finding C1-03: `poll(Duration::MAX)` must not return an empty batch at once.
+    /// Java: `poll(Duration)` with `Long.MAX_VALUE` ms blocks; a `Duration`
+    /// beyond `Long.MAX_VALUE` ms throws `ArithmeticException` from
+    /// `Duration.toMillis()` (`AsyncKafkaConsumer.java` `poll` →
+    /// `time.timer(timeout)`). An unchecked `timeout.as_millis() as i64` wrapped
+    /// `Duration::MAX` to -1 ms, so the deadline had already passed.
+    #[tokio::test]
+    async fn poll_with_duration_max_does_not_return_immediately() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        // Stand-in bg task: complete every AsyncPoll so poll() is gated only
+        // by its own deadline (no records ever arrive).
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    state.mark_validate_positions_complete();
+                    state.complete_successfully();
+                }
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_millis(500), consumer.poll(Duration::MAX)).await;
+        let took = start.elapsed();
+        drainer.abort();
+        assert!(
+            duration_max_outcome_is_java_like(&outcome),
+            "poll(Duration::MAX) returned {:?} after {took:?}; Java never returns an empty batch for this \
+             timeout (Long.MAX_VALUE ms blocks, a larger Duration throws ArithmeticException)",
+            outcome.as_ref().map(|r| r.as_ref().map(|recs| recs.count()))
+        );
+    }
+
+    /// Audit finding C1-03: `commit_sync_with_offsets_timeout(.., Duration::MAX)` must not
+    /// report a timeout for a commit that completes 50 ms later. Java:
+    /// `commitSync(offsets, Duration)` waits (or throws `ArithmeticException`
+    /// for an unrepresentable `Duration`); it never fails with a retriable
+    /// `TimeoutException` before the commit completes.
+    #[tokio::test]
+    async fn commit_sync_with_duration_max_does_not_time_out_immediately() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 0);
+        let offsets = singleton_offsets(tp, 10);
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitSync { handle, offsets_ready, .. } = env.event {
+                    offsets_ready.complete(());
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    handle.complete(HashMap::new());
+                }
+            }
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            consumer.commit_sync_with_offsets_timeout(offsets, Duration::MAX),
+        )
+        .await;
+        completer.abort();
+        let ok = matches!(outcome, Ok(Ok(()))) || duration_max_outcome_is_java_like(&outcome) && outcome.is_ok();
+        assert!(
+            ok,
+            "commit_sync_with_offsets_timeout(Duration::MAX) must not report a timeout for a commit that \
+             completes 50 ms later (Java waits, or throws ArithmeticException up front); got {outcome:?}"
+        );
+    }
+
+    /// Audit finding C1-03 (ConsumerHandle path): `ConsumerHandle::position_with_timeout(..,
+    /// Duration::MAX)` must keep waiting for a position. An unchecked cast
+    /// wrapped the timeout to -1 ms and returned a retriable `TimeoutError` at once.
+    #[tokio::test]
+    async fn handle_position_with_duration_max_does_not_time_out_immediately() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            // Assigned but no position yet: position() must wait for one.
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+        }
+        let handle = consumer.handle();
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(500), handle.position_with_timeout(&tp, Duration::MAX)).await;
+        assert!(
+            duration_max_outcome_is_java_like(&outcome),
+            "ConsumerHandle::position_with_timeout(Duration::MAX) must not time out at once (Java: \
+             position(tp, Duration) waits, or throws ArithmeticException for an unrepresentable \
+             Duration); got {outcome:?}"
+        );
+        drop(handles.app_event_rx);
+    }
+
+    /// Audit finding C1-03 (close path): `close_with_options(timeout(Duration::MAX))` must
+    /// not close with a zero budget. Java caps the close timer at
+    /// `request.timeout.ms` (`createTimerForCloseRequests`,
+    /// `AsyncKafkaConsumer.java`), so `Long.MAX_VALUE` ms hands the
+    /// network thread ~`request.timeout.ms`; an unrepresentable `Duration`
+    /// throws before closing. An unchecked cast gave `min(-1, request_timeout_ms)`
+    /// = -1 ms, so auto-commit-on-close, leave-group and the network-thread
+    /// cleanup all got 0 ms.
+    #[tokio::test]
+    async fn close_with_duration_max_keeps_the_request_timeout_budget() {
+        use crate::consumer::CloseOptions;
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let request_timeout_ms = consumer.config.request_timeout_ms() as i64;
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        let result = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::MAX)).await;
+        drainer.abort();
+
+        let signalled = handles.signal_close_timeout_ms.load(Ordering::Acquire);
+        let rejected = matches!(result, Err(Error::LocalIllegalArgument(_)));
+        assert!(
+            rejected || signalled >= request_timeout_ms - 1_000,
+            "close(Duration::MAX) handed the bg task {signalled} ms (result {result:?}); Java caps the \
+             close timer at request.timeout.ms ({request_timeout_ms} ms) for Long.MAX_VALUE ms and \
+             throws for an unrepresentable Duration — it never closes with a 0 ms budget"
+        );
     }
 }
