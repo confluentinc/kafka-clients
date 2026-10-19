@@ -89,6 +89,9 @@ fn format() -> anyhow::Result<()> {
     // Format generator crate
     run_command("cargo", &["fmt", "--manifest-path", "generator/crate/Cargo.toml"])?;
 
+    // Format the smoke test, which no crate includes as a module
+    run_command("rustfmt", &["--edition", SMOKE_EDITION, SMOKE_MAIN_RS_PATH])?;
+
     println!("✅ Formatting complete!");
     Ok(())
 }
@@ -104,7 +107,12 @@ fn format_check() -> anyhow::Result<()> {
         .args(["fmt", "--manifest-path", "generator/crate/Cargo.toml", "--", "--check"])
         .status()?;
 
-    if !main_result.success() || !gen_result.success() {
+    // Check the smoke test, which no crate includes as a module
+    let smoke_result = Command::new("rustfmt")
+        .args(["--edition", SMOKE_EDITION, "--check", SMOKE_MAIN_RS_PATH])
+        .status()?;
+
+    if !main_result.success() || !gen_result.success() || !smoke_result.success() {
         eprintln!("❌ Code is not formatted. Run: cargo xtask format");
         exit(1);
     }
@@ -1567,6 +1575,11 @@ const PACKAGE_SMOKE_DIR: &str = "target/package-smoke";
 /// The project is outside every workspace, so the test can use only the crate's
 /// public API.
 const SMOKE_MAIN_RS: &str = include_str!("../smoke/main.rs");
+/// Path of [`SMOKE_MAIN_RS`] from `rust/`. It is not a module of any crate, so
+/// `format` and `format-check` pass it to rustfmt themselves.
+const SMOKE_MAIN_RS_PATH: &str = "xtask/smoke/main.rs";
+/// Edition of the generated smoke project.
+const SMOKE_EDITION: &str = "2024";
 /// Broker image started by `--with-broker`. It must match the image and tag used
 /// by the integration tests (`KAFKA_TAG` in `tests/common/kafka_cluster.rs`).
 const SMOKE_KAFKA_IMAGE: &str = "apache/kafka:4.2.0";
@@ -1849,7 +1862,7 @@ impl SmokeProject {
         fs::write(
             dir.join("Cargo.toml"),
             format!(
-                "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+                "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"{SMOKE_EDITION}\"\npublish = false\n\n\
                  [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {dependency}\n\
                  tokio = {{ version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"time\"] }}\n"
             ),
@@ -2604,12 +2617,21 @@ fn print_help() {
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
   package-check   Package the crate as the crates.io release does (without ffi-macros), validate
                   its contents and its 3 MiB size limit, then build and run the offline smoke
-                  test (xtask/smoke/main.rs) in a new project that depends on it
+                  test (xtask/smoke/main.rs) in a new project that depends on it. Packaging
+                  removes ffi-macros from Cargo.toml and Cargo.lock and restores them afterwards;
+                  a run interrupted while packaging (Ctrl+C) leaves them stripped, and
+                  `git diff` shows what to restore
   package-smoke-test  Run the smoke test in a new project that depends on the crate as a user would:
-                    --registry            depend on the manifest's version from crates.io instead of the local package
+                    --registry            depend on the manifest's version from crates.io instead of the local package;
+                                          the smoke test is this commit's, so run it from the commit that published
+                                          that version (it may not compile against another version's API)
                     --version <version>   with --registry, depend on this version instead
                     --with-broker         start a temporary apache/kafka broker in Docker for the round trip
-                                          (otherwise the round trip runs only if KAFKA_BOOTSTRAP_SERVERS is set)
+                                          (otherwise the round trip runs only if KAFKA_BOOTSTRAP_SERVERS is set);
+                                          a run interrupted with Ctrl+C leaves the container running: remove it
+                                          with `docker rm -f confluent-kafka-smoke-<pid>-<port>`
+                  Without --registry it packages the crate as package-check does, with the same
+                  Ctrl+C caveat
                     --toolchain <name>    build with `cargo +<name>` instead of the toolchain in rust-toolchain.toml
                     --msrv                install and build with the crate's minimum supported Rust version
                     --release             build and run the smoke test in release mode
