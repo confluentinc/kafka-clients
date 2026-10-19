@@ -3,7 +3,7 @@ requires = ["setuptools>=62.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "confluent-kafka-rust-python"
+name = "confluent-kafka"
 version = "4.4.0b1"
 description = "Python bindings for the Confluent Kafka Rust client"
 requires-python = ">=3.10"
