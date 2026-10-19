@@ -829,8 +829,8 @@ impl CompletedFetch {
     ///
     /// Mirrors Java's
     /// `<K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig, Deserializers<K, V>, int)`,
-    /// except that the caller owns the list the records go to, so that the
-    /// records decoded before a cancellation are not lost with this future.
+    /// except that the caller owns the list the records go to, so that a
+    /// caller whose future is dropped still holds what was decoded.
     ///
     /// # Cancellation
     ///
