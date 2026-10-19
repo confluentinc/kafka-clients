@@ -430,7 +430,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         offsets = self._offsets_arg(offsets)
         timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
-            self._reentrant_use("commit", offsets)
+            self._reentrant_use("commit", offsets, timeout_ms)
             return
         await self._run_async(*self._commit_spec(offsets, timeout_ms))
 
@@ -451,7 +451,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def _a_position(self, partition: TopicPartition,
                           timeout: Duration = MISSING) -> int:
         self._check_position_partition(partition)
-        timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
@@ -479,7 +479,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
-                "committed", partition_list)
+                "committed", partition_list, timeout_ms)
             return committed
         return await self._run_async(*self._committed_spec(partition_list, timeout_ms))
 
@@ -487,11 +487,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                                 ) -> list[PartitionInfo]:
         timeout_ms = self._timeout_ms(timeout)
         self._check_partitions_for_topic(topic, timeout_ms)
+        if self._in_callback():
+            infos: list[PartitionInfo] = self._reentrant_use("partitions_for", topic, timeout_ms)
+            return infos
         return await self._run_async(*self._partitions_for_spec(topic, timeout_ms))
 
     async def _a_list_topics(self, timeout: Duration = MISSING
                              ) -> dict[str, list[PartitionInfo]]:
-        return await self._run_async(*self._list_topics_spec(self._timeout_ms(timeout)))
+        timeout_ms = self._timeout_ms(timeout)
+        if self._in_callback():
+            topics: dict[str, list[PartitionInfo]] = self._reentrant_use("list_topics", timeout_ms)
+            return topics
+        return await self._run_async(*self._list_topics_spec(timeout_ms))
 
     async def _a_pause(self, partitions: Iterable[TopicPartition]) -> None:
         await self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
@@ -507,7 +514,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
-                "offsets_for_times", timestamps)
+                "offsets_for_times", timestamps, timeout_ms)
             return found
         return await self._run_async(*self._offsets_for_times_spec(timestamps, timeout_ms))
 
@@ -517,7 +524,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         partition_list = list(partitions)
         timeout_ms = self._timeout_ms(empty_input_timeout(partition_list, timeout))
         if self._in_callback():
-            offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
+            offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list,
+                                                                      timeout_ms)
             return offsets
         return await self._run_async(*self._long_offsets_spec(fn, partition_list, timeout_ms))
 

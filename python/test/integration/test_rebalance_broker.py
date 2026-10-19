@@ -45,7 +45,7 @@ from confluent_kafka.consumer import CloseOptions, ConsumerRebalanceListener
 
 from .broker_helpers import (
     DEADLINE, MODE, MODES, Consumer, aw, close_consumer, consumer_configs, make_consumer,
-    new_topic, unique,
+    new_topic, produce, unique,
 )
 
 Op = CloseOptions.GroupMembershipOperation
@@ -256,3 +256,44 @@ def test_static_member_rejoining_keeps_its_partitions(kafka_broker: Any, mode: s
             await close_consumer(stays)
 
     asyncio.run(body())
+
+
+@MODE
+def test_a_listener_reads_metadata_and_timed_offsets_through_the_handle(
+        kafka_broker: Any, mode: str) -> None:
+    # Inside on_partitions_assigned the consumer is called back through the
+    # core's ConsumerHandle: partitions_for and a timed end_offsets answer
+    # there (kafka_consumer_ConsumerHandle_partitions_for,
+    # ..._end_offsets_with_timeout), as Java's listener calls the consumer.
+    topic = new_topic(kafka_broker, "py-rebalance-handle", partitions=2)
+    produce(kafka_broker, topic, [b"a", b"b", b"c"], partition=0)
+    configs = consumer_configs(kafka_broker)
+    seen: dict[str, Any] = {}
+    consumer = make_consumer(mode, configs)
+
+    class SyncListener(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            if partitions:
+                seen["partitions_for"] = consumer.partitions_for(topic=topic)
+                seen["end_offsets"] = consumer.end_offsets(partitions=partitions, timeout=10.0)
+
+    class AsyncListener(ConsumerRebalanceListener):
+        async def on_partitions_assigned(  # type: ignore[override]
+                self, partitions: set[TopicPartition]) -> None:
+            if partitions:
+                seen["partitions_for"] = await consumer.partitions_for(topic=topic)
+                seen["end_offsets"] = await consumer.end_offsets(partitions=partitions,
+                                                                 timeout=10.0)
+
+    async def body() -> None:
+        try:
+            listener = SyncListener() if mode == "sync" else AsyncListener()
+            await aw(consumer.subscribe(topics=[topic], callback=listener))
+            await _poll_until_assigned(consumer, _partitions(topic))
+        finally:
+            await close_consumer(consumer)
+
+    asyncio.run(body())
+    assert sorted(p.partition() for p in seen["partitions_for"]) == [0, 1]
+    assert seen["end_offsets"] == {TopicPartition(topic=topic, partition=0): 3,
+                                   TopicPartition(topic=topic, partition=1): 0}

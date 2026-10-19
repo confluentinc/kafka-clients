@@ -37,10 +37,12 @@ Timeouts): left out calls the overload without it, a given one the
 ``Duration``, ``TypeError("timeout must not be None")``. Every parameter some
 overload omits defaults to the private ``MISSING``; an explicit ``None`` is
 Java's ``null`` (Signatures). Inside a callback this
-consumer delivers, only ``position`` takes a ``timeout``; the others raise
-``ConcurrentModificationError`` for one, as ``partitions_for`` and
-``list_topics`` are refused there with or without it *(deviation: inside a
-listener the core's handle has no timed form; goes when it has)*.
+consumer delivers, every one of them, ``partitions_for``, ``list_topics`` and
+``group_metadata`` go through the core's ``ConsumerHandle``, its
+``_with_timeout`` forms taking the ``timeout``; ``assign``, ``subscribe``,
+``subscription``, ``unsubscribe``, ``poll`` and ``close``, which the handle has
+no form of, raise ``ConcurrentModificationError`` there *(deviation: Java's
+listener may call them; goes when the handle has them)*.
 
 Not generated, their FFI entry point being missing (the name looked for, after
 the ``kafka_consumer_Consumer_`` prefix, in parentheses):
@@ -234,9 +236,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         method is called, ``AuthorizationError`` if not authorized,
         ``IllegalArgumentError`` if ``timeout`` is negative, ``TypeError`` if
         ``offsets`` or ``timeout`` is ``None``, and ``KafkaError`` for any other
-        unrecoverable error. Inside a callback this consumer delivers, a given
-        ``timeout`` raises ``ConcurrentModificationError`` *(deviation: inside a
-        listener the core's handle has no timed form; goes when it has)*.
+        unrecoverable error.
         """
         self._c_commit(offsets, timeout)
 
@@ -363,9 +363,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
         This call waits up to ``timeout`` for the offsets,
         ``default.api.timeout.ms`` without one, and raises ``TimeoutError`` if
-        they cannot be fetched before it expires. Inside a callback this consumer delivers, a given ``timeout`` raises
-        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*.
+        they cannot be fetched before it expires.
         """
         return self._c_committed(partitions, timeout)
 
@@ -442,9 +440,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``IllegalArgumentError`` if a target timestamp or the
         ``timeout`` is negative, ``UnsupportedVersionError`` if the broker does
         not support looking up the offsets by timestamp, and ``TimeoutError``
-        if the offsets cannot be fetched before the timeout expires. Inside a callback this consumer delivers, a given ``timeout`` raises
-        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*.
+        if the offsets cannot be fetched before the timeout expires.
         """
         return self._c_offsets_for_times(timestamps_to_search, timeout)
 
@@ -459,10 +455,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         """Get the first offset for the given partitions. This method does not
         change the current consumer position of the partitions, and waits up to
         ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
-        once it expires; a zero ``timeout`` returns an empty map at once).
-        Inside a callback this consumer delivers, a given ``timeout`` raises
-        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*."""
+        once it expires; a zero ``timeout`` returns an empty map at once)."""
         return self._c_beginning_offsets(partitions, timeout)
 
     @overload
@@ -477,10 +470,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         the last stable offset under ``read_committed``). This method does not
         change the current consumer position of the partitions, and waits up to
         ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
-        once it expires; a zero ``timeout`` returns an empty map at once).
-        Inside a callback this consumer delivers, a given ``timeout`` raises
-        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*."""
+        once it expires; a zero ``timeout`` returns an empty map at once)."""
         return self._c_end_offsets(partitions, timeout)
 
     def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
@@ -596,7 +586,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         offsets = self._offsets_arg(offsets)
         timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
-            self._reentrant_use("commit", offsets)
+            self._reentrant_use("commit", offsets, timeout_ms)
             return
         self._run_sync(*self._commit_spec(offsets, timeout_ms))
 
@@ -616,7 +606,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_position(self, partition: TopicPartition, timeout: Duration = MISSING) -> int:
         self._check_position_partition(partition)
-        timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
+        timeout_ms = self._timeout_ms(timeout, timer=True)
         if self._in_callback():
             position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
@@ -637,7 +627,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
-                "committed", partition_list)
+                "committed", partition_list, timeout_ms)
             return committed
         return self._run_sync(*self._committed_spec(partition_list, timeout_ms))
 
@@ -653,10 +643,17 @@ class Consumer(Generic[K, V], _ConsumerState):
                           ) -> list[PartitionInfo]:
         timeout_ms = self._timeout_ms(timeout)
         self._check_partitions_for_topic(topic, timeout_ms)
+        if self._in_callback():
+            infos: list[PartitionInfo] = self._reentrant_use("partitions_for", topic, timeout_ms)
+            return infos
         return self._run_sync(*self._partitions_for_spec(topic, timeout_ms))
 
     def _c_list_topics(self, timeout: Duration = MISSING) -> dict[str, list[PartitionInfo]]:
-        return self._run_sync(*self._list_topics_spec(self._timeout_ms(timeout)))
+        timeout_ms = self._timeout_ms(timeout)
+        if self._in_callback():
+            topics: dict[str, list[PartitionInfo]] = self._reentrant_use("list_topics", timeout_ms)
+            return topics
+        return self._run_sync(*self._list_topics_spec(timeout_ms))
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
@@ -672,7 +669,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
-                "offsets_for_times", timestamps)
+                "offsets_for_times", timestamps, timeout_ms)
             return found
         return self._run_sync(*self._offsets_for_times_spec(timestamps, timeout_ms))
 
@@ -682,7 +679,8 @@ class Consumer(Generic[K, V], _ConsumerState):
         partition_list = list(partitions)
         timeout_ms = self._timeout_ms(empty_input_timeout(partition_list, timeout))
         if self._in_callback():
-            offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
+            offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list,
+                                                                      timeout_ms)
             return offsets
         return self._run_sync(*self._long_offsets_spec(fn, partition_list, timeout_ms))
 

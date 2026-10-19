@@ -1064,34 +1064,113 @@ def test_a_duration_overload_checks_the_closed_state_first(method: str) -> None:
         assert str(e.value) == CLOSED
 
 
-# The Duration overloads whose ConsumerHandle form has no timeout.
-UNTIMED_IN_CALLBACK = ("commit", "committed", "offsets_for_times", "beginning_offsets",
-                       "end_offsets")
-
-
-@pytest.mark.parametrize("method", UNTIMED_IN_CALLBACK + tuple(sorted(METADATA)))
-def test_a_timeout_inside_a_callback_is_refused_where_the_handle_has_no_timed_form(
-        method: str) -> None:
-    # Inside a callback the call goes through the core's ConsumerHandle, which
-    # has a timed form of position only: the others are refused for a given
-    # timeout, as partitions_for / list_topics are refused there, rather than
-    # waiting default.api.timeout.ms (deviation: goes when the handle has one).
-    call = TIMED[method][0] if method in TIMED else METADATA[method][0]
-    with new_consumer() as consumer:
+@pytest.mark.parametrize("method", sorted(TIMED))
+def test_a_timed_call_inside_a_callback_passes_its_timeout(method: str) -> None:
+    # Inside a callback the call goes through the core's ConsumerHandle,
+    # whose Duration overloads (kafka_consumer_ConsumerHandle_<method>
+    # _with_timeout) take the timeout, as the consumer's do: it bounds the
+    # wait, not default.api.timeout.ms. Updated for the handle's timed forms
+    # (was: refused with ConcurrentModificationError, run decision 18b).
+    call, message = TIMED[method]
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
         consumer.assign(partitions=[TP0])
         raised: list[BaseException] = []
 
-        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
-            for timeout in (0, -1, 1.0):
+        def callback(**kwargs: Any) -> None:
+            for timeout in (0.2, -1):
                 try:
                     call(consumer, timeout=timeout)
                 except BaseException as exc:  # noqa: BLE001 - asserted below
                     raised.append(exc)
 
         consumer.commit_nowait(offsets={}, callback=callback)
+        started = time.monotonic()
         consumer.commit(offsets={})
-        assert [type(e) for e in raised] == [ConcurrentModificationError] * 3
-        assert {str(e) for e in raised} == {CONCURRENT}
+        assert time.monotonic() - started < WAIT
+        timed_out, negative = raised
+        assert isinstance(timed_out, KafkaTimeoutError)
+        assert str(timed_out) == message.format(200)
+        assert isinstance(negative, IllegalArgumentError)
+        assert str(negative) == NEGATIVE[method][1].format(-1000)
+
+
+@pytest.mark.parametrize("method", sorted(METADATA))
+def test_a_metadata_call_inside_a_callback_goes_through_the_handle(method: str) -> None:
+    # partitions_for / list_topics inside a callback: the handle's forms
+    # (kafka_consumer_ConsumerHandle_partitions_for / _list_topics, and their
+    # _with_timeout forms) answer as the consumer's do. Updated (was: refused
+    # with ConcurrentModificationError, the handle having no such form).
+    call, zero, expired = METADATA[method]
+    with new_consumer(**{"default.api.timeout.ms": 300}) as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            for timeout in (0, 0.2, None):
+                try:
+                    if timeout is None:  # the untimed overload
+                        call(consumer)
+                    else:
+                        call(consumer, timeout=timeout)
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [KafkaTimeoutError] * 3
+        assert str(raised[0]) == zero
+        assert str(raised[1]) in expired and str(raised[2]) in expired
+
+
+def test_group_metadata_inside_a_callback_goes_through_the_handle() -> None:
+    # group_metadata() inside a callback reads the handle's shared slot
+    # (kafka_consumer_ConsumerHandle_group_metadata), the delivering call
+    # holding the consumer's guard.
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        seen: list[Any] = []
+
+        def callback(**kwargs: Any) -> None:
+            seen.append(consumer.group_metadata())
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        (metadata,) = seen
+        outside = consumer.group_metadata()
+        assert metadata.group_id() == outside.group_id() == GROUP_ID
+        assert metadata.generation_id() == outside.generation_id()
+        assert metadata.member_id() == outside.member_id()
+
+
+@pytest.mark.parametrize("method", ["assign", "subscribe", "subscription", "unsubscribe", "poll",
+                                    "close"])
+def test_what_the_handle_has_no_form_of_is_refused_inside_a_callback(method: str) -> None:
+    # assign, subscribe, subscription, unsubscribe, poll and close have no
+    # ConsumerHandle form (KIP-1306's RebalanceConsumer has none of them):
+    # inside a callback they reach the busy consumer and raise
+    # ConcurrentModificationError, as Java's acquire() does from another thread.
+    calls: dict[str, Callable[[Any], Any]] = {
+        "assign": lambda c: c.assign(partitions=[TP0]),
+        "subscription": lambda c: c.subscription(),
+        "subscribe": lambda c: c.subscribe(topics=[TOPIC]),
+        "unsubscribe": lambda c: c.unsubscribe(),
+        "poll": lambda c: c.poll(timeout=0),
+        "close": lambda c: c.close(option=CloseOptions.timeout(timeout=0)),
+    }
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            try:
+                calls[method](consumer)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [ConcurrentModificationError]
+        assert str(raised[0]) == CONCURRENT
 
 
 def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
@@ -3609,6 +3688,68 @@ def test_the_async_mock_consumer_is_not_bound_to_a_loop() -> None:
     asyncio.run(consumer.assign(partitions=[TP1]))
     assert consumer.assignment() == {TP1}
     asyncio.run(consumer.close())
+
+
+def test_an_async_timed_call_inside_a_callback_goes_through_the_handle() -> None:
+    # AsyncKafkaConsumer runs the callback on its loop, inside the delivering
+    # call; a timed call and partitions_for there go through the handle's
+    # forms, as on the sync consumer.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs=configs(**{"default.api.timeout.ms": 300}))
+        await consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        async def callback(**kwargs: Any) -> None:
+            for call in (lambda: consumer.end_offsets(partitions=[TP0], timeout=0.2),
+                         lambda: consumer.partitions_for(topic=TOPIC, timeout=0)):
+                try:
+                    await call()
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    raised.append(exc)
+
+        await consumer.commit_nowait(offsets={}, callback=callback)
+        await consumer.commit(offsets={})
+        timed_out, zero = raised
+        assert isinstance(timed_out, KafkaTimeoutError)
+        assert str(timed_out) == TIMED["end_offsets"][1].format(200)
+        assert isinstance(zero, KafkaTimeoutError)
+        assert str(zero) == METADATA["partitions_for"][1]
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("method", ["committed", "position", "partitions_for", "list_topics"])
+def test_the_consumers_own_leftover_wakeup_is_not_raised_inside_a_callback(method: str) -> None:
+    # Critic 103 item 4: the consumer may leave its own wakeup armed after a
+    # call it woke (Ctrl+C, cancellation; _own_wake_left). Inside a callback a
+    # wakeable handle call that meets it is made again, so the user sees no
+    # WakeupError they did not ask for. partitions_for and list_topics are
+    # wakeable, as Java's (AsyncKafkaConsumer.java:1324, :1352).
+    calls: dict[str, Callable[[Any], Any]] = {
+        "committed": lambda c: c.committed(partitions={TP0}, timeout=0.3),
+        "position": lambda c: c.position(partition=TP0, timeout=0.3),
+        "partitions_for": lambda c: c.partitions_for(topic="other", timeout=0.3),
+        "list_topics": lambda c: c.list_topics(timeout=0.3),
+    }
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            with consumer._use() as h:  # noqa: SLF001
+                consumer._own_wake_left = True  # noqa: SLF001
+                _lib.Consumer_wakeup(h)  # what _own_wake sends
+            try:
+                calls[method](consumer)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [KafkaTimeoutError]
+
 
 def test_an_async_consumer_whose_loop_ended_can_still_be_closed() -> None:
     # The real path the gap 39-41 recovery serves: use the consumer on a loop

@@ -1589,19 +1589,15 @@ class _ConsumerState:
         return blank_null_topic_partitions(partitions)
 
     def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
-                    group: bool = False, handle_timed: bool = False) -> int:
+                    group: bool = False) -> int:
         """``overload_timeout_ms`` for a ``Duration`` overload, in Java's order
         (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
         Order); ``_NO_TIMEOUT`` when ``timeout`` is left out (``MISSING``),
         ``TypeError`` for a ``None``, Java's null ``Duration``, which Java
         dereferences after ``acquire()``.
 
-        The closed check comes first. Inside a callback, an overload whose
-        ``ConsumerHandle`` form has no timeout (every one but ``position``,
-        ``handle_timed``) is refused with ``ConcurrentModificationError``, as
-        ``partitions_for`` and ``list_topics`` are refused without one
-        (``_refuse_inside_callback``) *(deviation: inside a listener the core's
-        handle has no timed form; goes when it has)*. Then, inside one use of
+        The closed check comes first (inside a callback the timed overloads go
+        through the ``ConsumerHandle``'s ``_with_timeout`` forms). Then, inside one use of
         the handle, as Java checks the timeout after ``acquireAndEnsureOpen()``:
         another thread inside the consumer raises
         ``ConcurrentModificationError``; for a negative timeout, a consumer
@@ -1615,9 +1611,6 @@ class _ConsumerState:
             # Java's null Duration, dereferenced after acquire() (Order).
             with self._use():
                 raise TypeError("timeout must not be None")
-        if not handle_timed and self._in_callback():
-            with self._use():
-                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
         with self._use():
             millis = _duration_millis(timeout)
             if millis < 0 and group and not self._group_id_defined:
@@ -1748,8 +1741,13 @@ class _ConsumerState:
             with self._use():
                 pass
             raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
-        with self._use() as h:
-            native = self._read(_lib.Consumer_group_metadata(h))
+        if self._in_callback():
+            # Through the ConsumerHandle, whose read of the group metadata does
+            # not take the consumer's guard the delivering call holds.
+            native = self._reentrant_use("group_metadata")
+        else:
+            with self._use() as h:
+                native = self._read(_lib.Consumer_group_metadata(h))
         return ConsumerGroupMetadata._of(
             group_id=native.group_id, generation_id=native.generation_id,
             member_id=native.member_id, group_instance_id=native.group_instance_id,
@@ -1822,19 +1820,21 @@ class _ConsumerState:
         the consumer's background task, which keeps running while a callback
         is pending (``consumer-threading.md`` §31).
 
-        Of the ``Duration`` overloads the handle has only ``position``'s
-        (``kafka_consumer_ConsumerHandle_position_with_timeout``); the others
-        are refused inside a callback when a ``timeout`` is given
-        (``_timeout_ms``), as ``partitions_for`` and ``list_topics``, which
-        have no handle form, are refused."""
+        Every ``Duration`` overload has its handle form
+        (``kafka_consumer_ConsumerHandle_<method>_with_timeout``), taken for a
+        ``timeout_ms`` of 0 or more, the plain form for ``_NO_TIMEOUT``; so do
+        ``partitions_for``, ``list_topics`` and ``group_metadata``. What the
+        handle has no form of (``assign``, ``subscribe``, ``unsubscribe``,
+        ``poll``, ``close``, …) is refused inside a callback
+        (``_refuse_inside_callback``)."""
         handle = self._handle()
         if op == "commit":
-            (offsets,) = args
+            offsets, timeout_ms = args
             spec = None if offsets is None else offsets_to_spec(offsets)
             with self._handle_commit():
-                error = _lib.ConsumerHandle_commit_sync(handle, spec)
+                error = _lib.ConsumerHandle_commit_sync(handle, spec, timeout_ms)
                 while self._own_wake_raised(error):
-                    error = _lib.ConsumerHandle_commit_sync(handle, spec)
+                    error = _lib.ConsumerHandle_commit_sync(handle, spec, timeout_ms)
             if error:
                 self._raise_error(error)
             return None
@@ -1869,28 +1869,51 @@ class _ConsumerState:
             raise_if_error(error)
             return _lag_or_none(lag)
         if op == "committed":
-            (partitions,) = args
-            raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions))
+            partitions, timeout_ms = args
+            raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions), timeout_ms)
             while self._own_wake_raised(error):
-                raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions))
+                raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions),
+                                                           timeout_ms)
             raise_if_error(error)
             result = to_offset_map(raw or {})
             for tp in partitions:
                 result.setdefault(tp, None)
             return result
         if op in ("beginning_offsets", "end_offsets"):
-            (partitions,) = args
-            raw, error = getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions))
+            partitions, timeout_ms = args
+            raw, error = getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions),
+                                                               timeout_ms)
             raise_if_error(error)
             return to_long_map(raw or {})
         if op == "offsets_for_times":
-            (timestamps,) = args
-            raw, error = _lib.ConsumerHandle_offsets_for_times(handle, timestamps_to_spec(timestamps))
+            timestamps, timeout_ms = args
+            raw, error = _lib.ConsumerHandle_offsets_for_times(
+                handle, timestamps_to_spec(timestamps), timeout_ms)
             raise_if_error(error)
             result_t = to_offset_and_timestamp_map(raw or {})
             for tp in timestamps:
                 result_t.setdefault(tp, None)
             return result_t
+        if op == "partitions_for":
+            # Wakeable, as Java's partitionsFor (AsyncKafkaConsumer.java:1324):
+            # the consumer's own leftover wakeup is consumed and the call made
+            # again, as for committed and position.
+            topic, timeout_ms = args
+            infos, error = _lib.ConsumerHandle_partitions_for(handle, topic, timeout_ms)
+            while self._own_wake_raised(error):
+                infos, error = _lib.ConsumerHandle_partitions_for(handle, topic, timeout_ms)
+            raise_if_error(error)
+            return to_partition_info_list(infos or [])
+        if op == "list_topics":
+            # Wakeable, as Java's listTopics (AsyncKafkaConsumer.java:1352).
+            (timeout_ms,) = args
+            topics, error = _lib.ConsumerHandle_list_topics(handle, timeout_ms)
+            while self._own_wake_raised(error):
+                topics, error = _lib.ConsumerHandle_list_topics(handle, timeout_ms)
+            raise_if_error(error)
+            return to_topics_map(topics or {})
+        if op == "group_metadata":
+            return self._read(_lib.ConsumerHandle_group_metadata(handle))
         raise AssertionError(op)
 
     def _reentrant_use(self, op: str, *args: Any) -> Any:

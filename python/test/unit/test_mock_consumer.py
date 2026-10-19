@@ -1074,3 +1074,55 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
         assert consumer.closed()
 
     asyncio.run(main())
+
+
+def test_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> None:
+    # The calls the real consumer's ConsumerHandle now carries inside a
+    # listener (partitions_for, list_topics, group_metadata, the Duration
+    # overloads) are all allowed by Java's reentrant mock too.
+    consumer = earliest()
+    info = PartitionInfo(topic="t", partition=0, leader=None, replicas=(), in_sync_replicas=())
+    consumer.update_partitions(topic="t", partitions=[info])
+    consumer.update_end_offsets(new_offsets={tp("t", 0): 7})
+    seen: dict[str, Any] = {}
+
+    class Listener(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            seen["partitions_for"] = consumer.partitions_for(topic="t", timeout=1.0)
+            seen["list_topics"] = consumer.list_topics(timeout=1.0)
+            seen["group_id"] = consumer.group_metadata().group_id()
+            seen["end_offsets"] = consumer.end_offsets(partitions=[tp("t", 0)], timeout=1.0)
+            consumer.commit(offsets={tp("t", 0): OffsetAndMetadata(offset=3)}, timeout=1.0)
+            seen["committed"] = consumer.committed(partitions=[tp("t", 0)], timeout=1.0)
+
+    consumer.subscribe(topics=["t"], callback=Listener())
+    consumer.rebalance(new_assignment=[tp("t", 0)])
+    assert seen == {"partitions_for": [info], "list_topics": {"t": [info]},
+                    "group_id": "dummy.group.id", "end_offsets": {tp("t", 0): 7},
+                    "committed": {tp("t", 0): OffsetAndMetadata(offset=3)}}
+
+
+def test_async_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> None:
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        info = PartitionInfo(topic="t", partition=0, leader=None, replicas=(),
+                             in_sync_replicas=())
+        consumer.update_partitions(topic="t", partitions=[info])
+        consumer.update_end_offsets(new_offsets={tp("t", 0): 7})
+        seen: dict[str, Any] = {}
+
+        class Listener(ConsumerRebalanceListener):
+            async def on_partitions_assigned(  # type: ignore[override]
+                    self, partitions: set[TopicPartition]) -> None:
+                seen["partitions_for"] = await consumer.partitions_for(topic="t", timeout=1.0)
+                seen["list_topics"] = await consumer.list_topics(timeout=1.0)
+                seen["group_id"] = consumer.group_metadata().group_id()
+                seen["end_offsets"] = await consumer.end_offsets(partitions=[tp("t", 0)],
+                                                                 timeout=1.0)
+
+        await consumer.subscribe(topics=["t"], callback=Listener())
+        await consumer.rebalance(new_assignment=[tp("t", 0)])
+        assert seen == {"partitions_for": [info], "list_topics": {"t": [info]},
+                        "group_id": "dummy.group.id", "end_offsets": {tp("t", 0): 7}}
+
+    asyncio.run(main())
