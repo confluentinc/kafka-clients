@@ -176,7 +176,7 @@ impl FutureRecordMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Timeout`] if the timeout elapses before the result is available.
+    /// Returns [`Error::LocalTimeout`] if the timeout elapses before the result is available.
     /// Returns the error from the produce response if the record failed.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get")]
     pub fn get_with_timeout(
