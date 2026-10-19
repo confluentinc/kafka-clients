@@ -271,7 +271,10 @@ impl RequestBuilder for Builder {
                 data.set_key(single);
                 data.set_coordinator_keys(Vec::new());
             }
-        } else if batched_keys == 0 && !data.key.is_empty() {
+        } else if batched_keys == 0 {
+            // Java's guard is `data.key() != null`. `Key` is a non-nullable string in
+            // the spec, so that is always true and an empty key is moved like any
+            // other. Skipping it would send `CoordinatorKeys=[]`, a lookup of no key.
             data.set_coordinator_keys(vec![data.key.clone()]);
             data.set_key(String::new()); // default value
         }
@@ -359,6 +362,39 @@ mod tests {
                 assert_eq!(req.data().coordinator_keys, vec!["g1".to_string()]);
             },
             other => panic!("expected FindCoordinator variant, got {other:?}"),
+        }
+    }
+
+    /// An empty `key` is promoted at v4+ like any other: Java's guard is
+    /// `data.key() != null`, always true for the non-nullable `Key`. Java 4.4
+    /// encodes this v4 body as `00 02 01 00` (KeyType 0, `CoordinatorKeys=[""]`,
+    /// no tagged fields); v5 and v6 add no request field, so the body is the same.
+    #[test]
+    fn test_v4_plus_promotes_empty_key_to_coordinator_keys() {
+        for version in FindCoordinatorRequest::MIN_BATCHED_VERSION..=6 {
+            let mut data = FindCoordinatorRequestData::new();
+            data.set_key_type(CoordinatorType::Group.id());
+            data.set_key(String::new());
+            let mut builder = Builder::new(data);
+            let mut built = builder.build_version(version).expect("v4+ build");
+            match &built {
+                AbstractRequest::FindCoordinator(req) => {
+                    assert_eq!(req.data().key, "", "v{version}");
+                    assert_eq!(req.data().coordinator_keys, vec![String::new()], "v{version}");
+                },
+                other => panic!("expected FindCoordinator variant, got {other:?}"),
+            }
+            let bytes = built.serialize().expect("serialize").into_buffer();
+            assert_eq!(
+                vec![
+                    0x00, // KeyType = 0 (group)
+                    0x02, // CoordinatorKeys: compact array length (1 + 1)
+                    0x01, // "" (compact string length 0 + 1)
+                    0x00, // tagged fields
+                ],
+                bytes,
+                "v{version}"
+            );
         }
     }
 
