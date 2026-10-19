@@ -3562,6 +3562,11 @@ Each is documented at its call site as well.
    proportion to a transactions phase. Two `log` statements (`:1610`, and the
    `TxnOffsetCommit` debug at `:1901`) share the treatment.
 
+   **Resolved (TX1-02):** `Errors` has since gained `enum_name()`, Java's `name()`,
+   and its `Display` renders it, so the message and the `:1610` `log.error` now print
+   Java's constant (`{foo-0=UNKNOWN_SERVER_ERROR}`). The `TxnOffsetCommit` debug logs
+   the response's topics, not an `Errors` map, and is unchanged.
+
 2. **A malformed `AddPartitionsToTxn` response is an error, not a panic.** Java reads
    `errors().get(V3_AND_BELOW_TXN_ID)` (`:1561`) and iterates it unchecked; `errors()`
    omits that key entirely when the response carries no v3-and-below topic results, so
