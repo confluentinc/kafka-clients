@@ -82,6 +82,10 @@ from grpc_translate import (  # noqa: E402
     CallbackLog,
     GroupMetadataStore,
     LoggingRebalanceListener,
+    _consumer_close_options,
+    _consumer_subscribe_kwargs,
+    _consumer_timeout,
+    _current_lag_response,
     # The error codes the servicers stamp on errors of their own making, so the
     # Rust client can tell those apart from an error the client reported.
     _LOCAL_ILLEGAL_STATE,
@@ -474,7 +478,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
         return self._run_status(
             request.consumer_id,
-            lambda c: c.subscribe(topics=list(request.topics), callback=listener))
+            lambda c: c.subscribe(**_consumer_subscribe_kwargs(request, listener)))
 
     def Unsubscribe(self, request, context):
         return self._run_status(request.consumer_id, lambda c: c.unsubscribe())
@@ -502,10 +506,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     def CommitSync(self, request, context):
         def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
+            timeout = _consumer_timeout(request)
             if offsets:
-                c.commit(offsets=offsets)
+                c.commit(offsets=offsets, timeout=timeout)
             else:
-                c.commit()
+                c.commit(timeout=timeout)
         return self._run_status(request.consumer_id, do)
 
     def CommitAsync(self, request, context):
@@ -534,7 +539,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            result = consumer.committed(partitions=[_tp(p) for p in request.partitions])
+            result = consumer.committed(partitions=[_tp(p) for p in request.partitions],
+                                            timeout=_consumer_timeout(request))
         except KafkaError as e:
             return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
@@ -548,7 +554,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            offset = consumer.position(partition=_tp(request.partition))
+            offset = consumer.position(partition=_tp(request.partition),
+                                            timeout=_consumer_timeout(request))
         except KafkaError as e:
             return cpb.PositionResponse(error=_kafka_error_to_proto(e))
         return cpb.PositionResponse(offset=offset)
@@ -591,8 +598,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 message=f"unknown consumer_id {request.consumer_id}"))
         parts = [_tp(p) for p in request.partitions]
         try:
-            result = (consumer.end_offsets(partitions=parts) if end
-                      else consumer.beginning_offsets(partitions=parts))
+            # The timed overloads; absent timeout_ms selects the untimed ones.
+            timeout = _consumer_timeout(request)
+            result = (consumer.end_offsets(partitions=parts, timeout=timeout) if end
+                      else consumer.beginning_offsets(partitions=parts, timeout=timeout))
         except KafkaError as e:
             return cpb.LongOffsetsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.LongOffsetMapEntry(partition=_tp_to_proto(tp), offset=off) for tp, off in result.items()]
@@ -612,7 +621,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 message=f"unknown consumer_id {request.consumer_id}"))
         spec = {_tp(e.partition): e.timestamp for e in request.timestamps}
         try:
-            result = consumer.offsets_for_times(timestamps_to_search=spec)
+            result = consumer.offsets_for_times(timestamps_to_search=spec,
+                                                     timeout=_consumer_timeout(request))
         except KafkaError as e:
             return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
         # New value type: accessors are methods; a partition with no offset at or
@@ -738,13 +748,26 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
-            # Java's close(). Its deprecated close(Duration) is not translated
-            # (CLAUDE.md, Python Binding Conventions, Class family), so the
-            # request carries no timeout.
-            consumer.close()
+            # Java's close() or close(CloseOptions); its deprecated
+            # close(Duration) is not translated (CLAUDE.md, Python Binding
+            # Conventions, Class family).
+            consumer.close(option=_consumer_close_options(request))
         except KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
+
+    def CurrentLag(self, request, context):
+        # Java's currentLag: no remote call, so no wait.
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.CurrentLagResponse(error=pb.KafkaError(
+                code=_LOCAL_ILLEGAL_STATE,
+                message=f"unknown consumer_id {request.consumer_id}"))
+        try:
+            lag = consumer.current_lag(topic_partition=_tp(request.partition))
+        except Exception as e:  # noqa: BLE001
+            return cpb.CurrentLagResponse(error=_kafka_error_to_proto(e))
+        return _current_lag_response(lag)
 
     def GetCallbackLog(self, request, context):
         # Readable after Close on purpose: close() drains pending commit

@@ -30,13 +30,22 @@
 /// Expand a generic consumer test body into four `#[tokio::test]` wrappers,
 /// one per backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms, mirroring
 /// `multilanguage_test!`: with or without an explicit `ClusterConfig`.
+///
+/// Leading outer attributes (`#[ignore = "<reason>"]`) are applied to every
+/// arm: the form for a scenario that exposes a defect in the shared Rust core,
+/// which every backend reaches.
 #[macro_export]
 macro_rules! multilanguage_consumer_test {
-    ($name:ident, $body:ident) => {
-        $crate::multilanguage_consumer_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_consumer_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
     };
-    ($name:ident, $body:ident, $cluster_config:expr) => {
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
@@ -45,6 +54,7 @@ macro_rules! multilanguage_consumer_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
@@ -59,6 +69,7 @@ macro_rules! multilanguage_consumer_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
@@ -73,6 +84,7 @@ macro_rules! multilanguage_consumer_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
