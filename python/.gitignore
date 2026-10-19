@@ -4,3 +4,6 @@ build/
 __pycache__/
 dist/
 *.jsonl
+# The Rust FFI library and headers that .semaphore/build-ffi-library.sh stages
+# for the wheel build.
+/native/

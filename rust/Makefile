@@ -232,8 +232,10 @@ doc-check:
 
 # Package the crate as it would be published, fail if the compressed `.crate`
 # is above 3 MiB, and build a fresh project that depends on it.
+# `--locked`: a Cargo.lock that does not match the manifests fails here, on the
+# pull request, rather than in the release, which packages with `--locked`.
 package-check:
-	cargo xtask package-check
+	cargo --locked xtask package-check
 
 # Compare the Rust API (cargo-semver-checks) and the C ABI (libabigail's
 # abidiff) with a release tag, by default the highest one not above the
