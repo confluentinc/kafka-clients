@@ -3914,18 +3914,22 @@ impl Rule for ConsumerHandleSurface {
 /// Checks that every `Consumer` / `DynConsumer` method takes `&mut self`,
 /// except `wakeup`, `metrics` and `handle` (`consumer-threading.md` §1–§2).
 ///
-/// Java's `KafkaConsumer` is single-threaded: every method but `wakeup()` and
-/// `metrics()` runs `acquire()`, which throws `ConcurrentModificationException`
+/// Java's `KafkaConsumer` is single-threaded: its methods run
+/// `acquireAndEnsureOpen()`, which throws `ConcurrentModificationException`
 /// when a second thread is inside the consumer. Rust enforces that at compile
-/// time: the consumer is `Send + !Sync`, and its methods take `&mut self`, so
-/// no two calls can overlap. A method taking `&self` would compile today and
-/// stay callable through a shared reference forever after, so an
-/// implementation that later needs to mutate state for it (Java adding
-/// `acquire()`-guarded work to a getter) could not, without a breaking change.
-/// The three exceptions are the methods meant to be reached while another call
-/// holds the consumer: `wakeup` (Java's cross-thread method), `metrics` (Java's
-/// unguarded read) and `handle` (the `Send + Sync` handle for callbacks and
-/// other tasks).
+/// time: the consumer is `Send + !Sync`, and its guarded methods take
+/// `&mut self`, so no two calls can overlap. A method taking `&self` would
+/// compile today and stay callable through a shared reference forever after,
+/// so an implementation that later needs to mutate state for it (Java adding
+/// guarded work to a getter) could not, without a breaking change.
+///
+/// A method keeps `&self` only when Java leaves it outside the guard, plus the
+/// Rust-only `handle`. Java's unguarded methods are `wakeup()` (cross-thread
+/// by design), `metrics()`, `clientInstanceId(Duration)`,
+/// `registerMetricForSubscription` and `unregisterMetricFromSubscription`
+/// (`AsyncKafkaConsumer.java:887-902,1301,1855-1861`); the last three are not
+/// translated yet, and each joins [`Self::SHARED`] when it is. `handle` hands
+/// out the `Send + Sync` handle for callbacks and other tasks.
 ///
 /// Scope: the public traits named `Consumer` and `DynConsumer`. Either missing
 /// is a finding, so the rule cannot silently check nothing.
@@ -3935,7 +3939,10 @@ impl ConsumerReceiver {
     /// The traits whose methods are checked.
     const TRAITS: [&'static str; 2] = ["Consumer", "DynConsumer"];
 
-    /// The methods that take `&self`.
+    /// The methods that take `&self`: the translated methods Java leaves
+    /// outside `acquireAndEnsureOpen()`, and the Rust-only `handle`. When
+    /// `client_instance_id`, `register_metric_for_subscription` or
+    /// `unregister_metric_from_subscription` is translated, it is added here.
     const SHARED: [&'static str; 3] = ["wakeup", "metrics", "handle"];
 
     /// The receiver of `sig` as written: `&mut self`, `&self`, `self`, or
@@ -3997,13 +4004,15 @@ impl Rule for ConsumerReceiver {
     }
 
     fn hint(&self) -> &'static str {
-        "   The consumer is single-threaded, as Java's `acquire()` makes it: every
-   `Consumer` / `DynConsumer` method takes `&mut self`, so the compiler rules
-   out two overlapping calls and a getter can later mutate state without a
-   breaking change. Only `wakeup`, `metrics` and `handle` take `&self`: they are
-   reached while another call holds the consumer (consumer-threading.md §1-§2).
-   A getter that cannot fail in Java's sense panics with Java's message instead
-   of taking `&self`."
+        "   The consumer is single-threaded, as Java's `acquireAndEnsureOpen()` makes it:
+   every `Consumer` / `DynConsumer` method Java guards takes `&mut self`, so the
+   compiler rules out two overlapping calls and a getter can later mutate state
+   without a breaking change. A method takes `&self` only when Java leaves it
+   unguarded (`wakeup`, `metrics`; `client_instance_id`,
+   `register_metric_for_subscription` and `unregister_metric_from_subscription`
+   once translated, added to `SHARED`), plus the Rust-only `handle`
+   (consumer-threading.md §1-§2). A guarded getter that cannot fail in Java's
+   sense panics with Java's message instead of taking `&self`."
     }
 }
 
