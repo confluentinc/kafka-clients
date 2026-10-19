@@ -1167,21 +1167,30 @@ mod tests {
         }
     }
 
-    /// A destroy whose background task is stuck inside a TCP connect the
-    /// broker never answers cannot fail the call still pending: the bounded
-    /// join misses and the runtime cancels the task where it stands. The
-    /// blocking `get` waiting on the call's future still returns, the `get_cb`
-    /// still fires, both with the "client destroyed" error, and a `get` after
-    /// the destroy returns at once.
+    /// A destroy while the background task has a connect in progress that the
+    /// broker never answers fails the call still pending, as for any other
+    /// unreachable broker: the connect is not awaited inside the poll, so the
+    /// task is never stuck in it, the bounded join succeeds, and the task's exit
+    /// fails the call (Java `KafkaAdminClient.close`, `TimeoutException("The
+    /// AdminClient thread has exited.")`). The blocking `get`, the
+    /// `get_with_timeout` and the `get_cb` waiting on the call all see that
+    /// error, `destroy` returns promptly, and a `get` after it returns at once.
     ///
-    /// Linux only: the stuck connect relies on Linux dropping the SYNs a full
-    /// accept queue gets, and on `/proc/net/tcp` to see the connect start.
-    /// Elsewhere (macOS) the connect does not hang, so the call fails through
-    /// the background task's exit instead, which
-    /// `destroy_fails_the_rpc_still_waiting_for_an_unreachable_broker` covers.
+    /// Before the connect was made non-blocking this scenario left the task stuck
+    /// in the connect, so the join missed, the runtime cancelled the task where it
+    /// stood and the futures failed with the destroyed-client error instead. That
+    /// fallback does not depend on the admin client and is still covered through
+    /// the producer (`destroy_fires_a_waiting_future_get_cb_once` and the tests
+    /// next to it).
+    ///
+    /// Linux only: the connect that never answers relies on Linux dropping the
+    /// SYNs a full accept queue gets, and on `/proc/net/tcp` to see the connect
+    /// start. Elsewhere (macOS) the connect does not hang, so
+    /// `destroy_fails_the_rpc_still_waiting_for_an_unreachable_broker` covers the
+    /// same destroy.
     #[cfg(target_os = "linux")]
     #[test]
-    fn destroy_releases_a_blocking_get_whose_call_is_stuck_in_the_connect() {
+    fn destroy_fails_the_rpc_still_waiting_for_a_connect_the_broker_never_answers() {
         // Imported here: this Linux-only test is its only user.
         use crate::ffi::kafka_future::kafka_common_KafkaFuture_get_with_timeout;
         // A listener whose accept queue is full: Linux drops the SYNs it gets
@@ -1224,8 +1233,7 @@ mod tests {
             kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
             let blocking = names as usize;
             let (got_tx, got_rx) = std::sync::mpsc::channel();
-            // A `get` and a `get_with_timeout`: the timed one waits on a timer of
-            // the runtime the destroy stops, so it must be released before that.
+            // A `get` and a `get_with_timeout`.
             let getters: Vec<_> = [None, Some(120_000)]
                 .into_iter()
                 .map(|timeout| {
@@ -1241,18 +1249,22 @@ mod tests {
                         let message = std::ffi::CStr::from_ptr(kafka_common_Error_message(err))
                             .to_string_lossy()
                             .into_owned();
+                        let is_timeout = kafka_common_Error_is_timeout_error(err);
                         let illegal_state = kafka_common_Error_is_local_illegal_state_error(err);
                         kafka_common_Error_destroy(err);
-                        let _ = got_tx.send((timeout, illegal_state, message));
+                        let _ = got_tx.send((timeout, is_timeout, illegal_state, message));
                     })
                 })
                 .collect();
-            // Let the background task reach the connect: a destroy before it
-            // gets there fails the call normally instead.
+            // Let the background task reach the connect, so that the destroy
+            // finds it in progress.
             wait_for_syn_sent(address.port());
 
+            let started = std::time::Instant::now();
             kafka_admin_Admin_destroy(admin);
-            let destroyed = "The client was destroyed before the future completed";
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(5), "destroy took {elapsed:?}");
+            let exited = "The AdminClient thread has exited. Call: listTopics";
             let mut got: Vec<_> = (0..2)
                 .map(|_| got_rx.recv_timeout(Duration::from_secs(10)).expect("the blocking get returned"))
                 .collect();
@@ -1263,11 +1275,11 @@ mod tests {
             assert_eq!(
                 got,
                 [
-                    (None, 1, destroyed.to_string()),
-                    (Some(120_000), 1, destroyed.to_string())
+                    (None, 1, 0, exited.to_string()),
+                    (Some(120_000), 1, 0, exited.to_string())
                 ]
             );
-            assert_eq!(*fired.lock().unwrap(), [Some((0, 1, destroyed.to_string()))]);
+            assert_eq!(*fired.lock().unwrap(), [Some((1, 0, exited.to_string()))]);
 
             let started = std::time::Instant::now();
             assert!(kafka_common_KafkaFuture_get(names, &mut err).is_null());
@@ -1275,7 +1287,12 @@ mod tests {
                 started.elapsed() < Duration::from_secs(1),
                 "a get after the destroy waits for nothing"
             );
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
+            assert_eq!(kafka_common_Error_is_timeout_error(err), 1);
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 0);
+            assert_eq!(
+                std::ffi::CStr::from_ptr(kafka_common_Error_message(err)).to_string_lossy(),
+                exited
+            );
             kafka_common_Error_destroy(err);
             kafka_common_KafkaFuture_destroy(names);
             kafka_admin_ListTopicsResult_destroy(result);

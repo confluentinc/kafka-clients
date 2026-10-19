@@ -270,13 +270,17 @@ I/O-bound on the same `NetworkClient`).
     signals in a `tokio::select!` arm so the poll "returns early" on a wakeup.
     Do not: the poll is **not cancel-safe**. It performs connection setup —
     `initiate_connect` calls `connection_states.connecting()` (a persisted side
-    effect) and *then* `await`s `current_address()` / `selector.connect()`,
-    because the Rust `Selector::connect` awaits the TCP handshake instead of
-    being non-blocking like Java NIO. A `select!` that drops the poll at that
-    `await` strands the node in `Connecting` with no socket; it only recovers
-    after the ~10 s connection-setup-timeout (CLAUDE.md §11.6.1). This produced a
-    severe intermittent join stall — full analysis in
+    effect) and *then* `await`s `current_address()`, the address resolution.
+    A `select!` that drops the poll at that `await` strands the node in
+    `Connecting` with no socket; it only recovers after the ~10 s
+    connection-setup-timeout (CLAUDE.md §11.6.1). This produced a severe
+    intermittent join stall — full analysis in
     `design/current/consumer-join-stall-rootcause.md`.
+
+    (That stall was first seen while `Selector::connect` also awaited the TCP
+    handshake. It no longer does: like Java NIO it only starts the connect, and
+    `Selector::poll` finishes it, as `finishConnect()` does. The resolution
+    `await` remains, so the poll is still not cancel-safe.)
 
     (Earlier wording here said to "wrap the poll in `tokio::select!` against the
     wakeup token" and asserted it "must be cancel-safe". The requirement was
@@ -292,9 +296,10 @@ I/O-bound on the same `NetworkClient`).
     effects; Java's `Selector.wakeup()` returns `select()` cleanly — they are
     NOT equivalent.
   - This applies to any site that `await`s `network_client.poll(...)`. (The
-    alternative that would make cancellation safe is to make `Selector::connect`
-    non-blocking like Java NIO, so the poll has no side-effect-before-`await`;
-    that is not currently done.)
+    alternative that would make cancellation safe is to make `initiate_connect`
+    free of a side effect before an `await`, for example by resolving the
+    address before calling `connecting()`; that is not currently done.
+    `Selector::connect` is already non-blocking like Java NIO.)
   - Do NOT `tokio::spawn` inside the bg task for per-request or per-event
     work (CLAUDE.md §13).
 
