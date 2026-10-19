@@ -202,7 +202,7 @@ def _serde_factory_types() -> None:
                         headers: object = None) -> str | None:
         return None
 
-    def no_kwargs_ser(*, topic: str, value: str | None,
+    def no_kwargs_ser(*, topic: str, data: str | None,
                       headers: object = None) -> bytes | None:
         return None
 

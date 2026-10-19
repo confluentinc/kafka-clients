@@ -76,7 +76,7 @@ def _configured(serde: object, configs: dict[str, object], is_key: bool) -> None
 
 
 def _roundtrip(ser: Serializer[object], deser: Deserializer[object], value: object) -> None:
-    serialized = ser(topic=TOPIC, value=value)
+    serialized = ser(topic=TOPIC, data=value)
     got = deser(topic=TOPIC, data=None if serialized is None else memoryview(serialized))
     if isinstance(got, memoryview):
         got = bytes(got)
@@ -116,14 +116,14 @@ def test_all_serdes_should_roundtrip_input(name: str, ser: Serializer[object],
 def test_all_serdes_should_support_null(name: str, ser: Serializer[object],
                                         deser: Deserializer[object],
                                         values: list[object]) -> None:
-    assert ser(topic=TOPIC, value=None) is None, f"Should support null in {name} serialization"
+    assert ser(topic=TOPIC, data=None) is None, f"Should support null in {name} serialization"
     assert deser(topic=TOPIC, data=None) is None, f"Should support null in {name} deserialization"
     assert deser(topic=TOPIC, data=None, headers=()) is None
 
 
 def test_bool_and_json_support_null() -> None:
     for ser in (bool_serializer(), json_serializer()):
-        assert ser(topic=TOPIC, value=None) is None
+        assert ser(topic=TOPIC, data=None) is None
     for deser in (bool_deserializer(), json_deserializer()):
         assert deser(topic=TOPIC, data=None) is None
 
@@ -134,55 +134,55 @@ def test_bool_and_json_support_null() -> None:
 
 
 def test_integer_and_long_bytes() -> None:
-    assert int_serializer()(topic=TOPIC, value=423412424) == bytes.fromhex("193cc2c8")
-    assert int_serializer()(topic=TOPIC, value=-41243432) == bytes.fromhex("fd8aacd8")
-    assert int_serializer()(topic=TOPIC, value=-1) == b"\xff\xff\xff\xff"
-    assert int_serializer(size=8)(topic=TOPIC, value=922337203685477580) == bytes.fromhex("0ccccccccccccccc")
-    assert int_serializer(size=8)(topic=TOPIC, value=-922337203685477581) == bytes.fromhex("f333333333333333")
+    assert int_serializer()(topic=TOPIC, data=423412424) == bytes.fromhex("193cc2c8")
+    assert int_serializer()(topic=TOPIC, data=-41243432) == bytes.fromhex("fd8aacd8")
+    assert int_serializer()(topic=TOPIC, data=-1) == b"\xff\xff\xff\xff"
+    assert int_serializer(size=8)(topic=TOPIC, data=922337203685477580) == bytes.fromhex("0ccccccccccccccc")
+    assert int_serializer(size=8)(topic=TOPIC, data=-922337203685477581) == bytes.fromhex("f333333333333333")
     assert int_deserializer()(topic=TOPIC, data=memoryview(bytes.fromhex("fd8aacd8"))) == -41243432
     assert int_deserializer(size=8)(topic=TOPIC, data=memoryview(b"\xff" * 8)) == -1
 
 
 def test_float_and_double_bytes() -> None:
-    assert float_serializer(size=4)(topic=TOPIC, value=5678567.12312) == bytes.fromhex("4aad4bce")
-    assert float_serializer(size=4)(topic=TOPIC, value=-5678567.12341) == bytes.fromhex("caad4bce")
-    assert float_serializer()(topic=TOPIC, value=5678567.12312) == bytes.fromhex("4155a979c7e132b5")
-    assert float_serializer()(topic=TOPIC, value=-5678567.12341) == bytes.fromhex("c155a979c7e5f30e")
-    assert float_serializer(size=4)(topic=TOPIC, value=1.5) == b"\x3f\xc0\x00\x00"
-    assert float_serializer()(topic=TOPIC, value=1.5) == b"\x3f\xf8\x00\x00\x00\x00\x00\x00"
+    assert float_serializer(size=4)(topic=TOPIC, data=5678567.12312) == bytes.fromhex("4aad4bce")
+    assert float_serializer(size=4)(topic=TOPIC, data=-5678567.12341) == bytes.fromhex("caad4bce")
+    assert float_serializer()(topic=TOPIC, data=5678567.12312) == bytes.fromhex("4155a979c7e132b5")
+    assert float_serializer()(topic=TOPIC, data=-5678567.12341) == bytes.fromhex("c155a979c7e5f30e")
+    assert float_serializer(size=4)(topic=TOPIC, data=1.5) == b"\x3f\xc0\x00\x00"
+    assert float_serializer()(topic=TOPIC, data=1.5) == b"\x3f\xf8\x00\x00\x00\x00\x00\x00"
     # (float) narrowing: beyond the 32-bit range is an infinity.
-    assert float_serializer(size=4)(topic=TOPIC, value=1e39) == b"\x7f\x80\x00\x00"
-    assert float_serializer(size=4)(topic=TOPIC, value=-1e39) == b"\xff\x80\x00\x00"
+    assert float_serializer(size=4)(topic=TOPIC, data=1e39) == b"\x7f\x80\x00\x00"
+    assert float_serializer(size=4)(topic=TOPIC, data=-1e39) == b"\xff\x80\x00\x00"
 
 
 def test_double_serializer_writes_nan_as_double_to_long_bits() -> None:
     non_canonical = struct.unpack(">d", b"\x7f\xf0\x00\x00\x00\x00\x00\x01")[0]
     assert non_canonical != non_canonical
-    assert float_serializer()(topic=TOPIC, value=non_canonical) == b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
-    assert float_serializer()(topic=TOPIC, value=float("nan")) == b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
+    assert float_serializer()(topic=TOPIC, data=non_canonical) == b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
+    assert float_serializer()(topic=TOPIC, data=float("nan")) == b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
     # A plain NaN narrows to Java's quiet float NaN.
-    assert float_serializer(size=4)(topic=TOPIC, value=float("nan")) == b"\x7f\xc0\x00\x00"
+    assert float_serializer(size=4)(topic=TOPIC, data=float("nan")) == b"\x7f\xc0\x00\x00"
 
 
 def test_bool_and_string_bytes() -> None:
-    assert bool_serializer()(topic=TOPIC, value=True) == b"\x01"
-    assert bool_serializer()(topic=TOPIC, value=False) == b"\x00"
-    assert string_serializer()(topic=TOPIC, value="my string") == b"my string"
-    assert string_serializer()(topic=TOPIC, value="é€") == b"\xc3\xa9\xe2\x82\xac"
+    assert bool_serializer()(topic=TOPIC, data=True) == b"\x01"
+    assert bool_serializer()(topic=TOPIC, data=False) == b"\x00"
+    assert string_serializer()(topic=TOPIC, data="my string") == b"my string"
+    assert string_serializer()(topic=TOPIC, data="é€") == b"\xc3\xa9\xe2\x82\xac"
     # getBytes replaces what the charset cannot encode; new String replaces
     # malformed input with U+FFFD.
-    assert string_serializer()(topic=TOPIC, value="a\ud800b") == b"a?b"
-    assert string_serializer(encoding="ascii")(topic=TOPIC, value="é") == b"?"
+    assert string_serializer()(topic=TOPIC, data="a\ud800b") == b"a?b"
+    assert string_serializer(encoding="ascii")(topic=TOPIC, data="é") == b"?"
     assert string_deserializer()(topic=TOPIC, data=memoryview(b"a\xffb")) == "a�b"
 
 
 def test_string_utf16_and_utf32_follow_java_byte_order() -> None:
     # Java's UTF-16 writes a big-endian byte-order mark (none for ""); its
     # UTF-32 is big-endian with no mark.
-    assert string_serializer(encoding="UTF-16")(topic=TOPIC, value="my string") == (
+    assert string_serializer(encoding="UTF-16")(topic=TOPIC, data="my string") == (
         b"\xfe\xff" + bytes.fromhex("006d007900200073007400720069006e0067"))
-    assert string_serializer(encoding="UTF-16")(topic=TOPIC, value="") == b""
-    assert string_serializer(encoding="UTF-32")(topic=TOPIC, value="a") == b"\x00\x00\x00a"
+    assert string_serializer(encoding="UTF-16")(topic=TOPIC, data="") == b""
+    assert string_serializer(encoding="UTF-32")(topic=TOPIC, data="a") == b"\x00\x00\x00a"
     utf16 = string_deserializer(encoding="UTF-16")
     assert utf16(topic=TOPIC, data=memoryview(b"\x00a")) == "a"  # big-endian without a mark
     assert utf16(topic=TOPIC, data=memoryview(b"\xff\xfea\x00")) == "a"
@@ -194,18 +194,18 @@ def test_string_utf16_and_utf32_follow_java_byte_order() -> None:
 
 def test_uuid_bytes_are_the_dashed_form() -> None:
     value = uuid.UUID("0f14d0ab-9605-4a62-a9e4-5ed26688389b")
-    assert uuid_serializer()(topic=TOPIC, value=value) == b"0f14d0ab-9605-4a62-a9e4-5ed26688389b"
+    assert uuid_serializer()(topic=TOPIC, data=value) == b"0f14d0ab-9605-4a62-a9e4-5ed26688389b"
 
 
 def test_uuid_serializer_writes_text_not_the_binary_value() -> None:
     # Java's UUIDSerializer writes UUID.toString() in the configured encoding:
     # the 36-character dashed text, never the 16-byte binary value.
     value = uuid.UUID("0f14d0ab-9605-4a62-a9e4-5ed26688389b")
-    data = uuid_serializer()(topic=TOPIC, value=value)
+    data = uuid_serializer()(topic=TOPIC, data=value)
     assert data is not None and len(data) == 36 and data != value.bytes
     utf16 = uuid_serializer()
     _configured(utf16, {"value.serializer.encoding": "UTF-16BE"}, False)
-    assert utf16(topic=TOPIC, value=value) == str(value).encode("utf-16-be")
+    assert utf16(topic=TOPIC, data=value) == str(value).encode("utf-16-be")
 
 
 # --------------------------------------------------------------------------- #
@@ -219,13 +219,13 @@ def test_string_serde_should_support_different_encodings(encoding: str) -> None:
     _configured(serializer, {"key.serializer.encoding": encoding}, True)
     deserializer = string_deserializer()
     _configured(deserializer, {"key.deserializer.encoding": encoding}, True)
-    out = serializer(topic=TOPIC, value="my string")
+    out = serializer(topic=TOPIC, data="my string")
     assert out is not None
     assert deserializer(topic=TOPIC, data=memoryview(out)) == "my string", (
         f"Should get the original string after serialization and deserialization with "
         f"encoding {encoding}")
     # The factory argument is the constructor route to the same encodings.
-    out = string_serializer(encoding=encoding)(topic=TOPIC, value="my string")
+    out = string_serializer(encoding=encoding)(topic=TOPIC, data="my string")
     assert out is not None
     assert string_deserializer(encoding=encoding)(topic=TOPIC, data=memoryview(out)) == "my string"
 
@@ -249,11 +249,11 @@ def test_string_configure_precedence() -> None:
     serializer = string_serializer()
     _configured(serializer, {"serializer.encoding": "UTF-16", "key.serializer.encoding": "ascii"},
                 True)
-    assert serializer(topic=TOPIC, value="x") == b"x"
+    assert serializer(topic=TOPIC, data="x") == b"x"
     serializer = string_serializer()
     _configured(serializer, {"serializer.encoding": "UTF-16", "key.serializer.encoding": "ascii"},
                 False)
-    assert serializer(topic=TOPIC, value="x") == b"\xfe\xff\x00x"
+    assert serializer(topic=TOPIC, data="x") == b"\xfe\xff\x00x"
     deserializer = string_deserializer()
     _configured(deserializer, {"deserializer.encoding": "ascii"}, False)
     assert deserializer(topic=TOPIC, data=memoryview(b"x")) == "x"
@@ -307,7 +307,7 @@ def test_boolean_deserializer_unexpected_byte() -> None:
 
 @pytest.mark.parametrize("data_to_serialize", [True, False])
 def test_boolean_serializer(data_to_serialize: bool) -> None:
-    assert bool_serializer()(topic=TOPIC, value=data_to_serialize) == bytes([1 if data_to_serialize else 0])
+    assert bool_serializer()(topic=TOPIC, data=data_to_serialize) == bytes([1 if data_to_serialize else 0])
 
 
 @pytest.mark.parametrize("data_to_deserialize", [True, False])
@@ -328,10 +328,10 @@ def test_float_serde_should_preserve_nan_values() -> None:
         # Java builds the NaN with Float.intBitsToFloat; here it is read.
         some_nan = deserializer(topic=TOPIC, data=memoryview(raw))
         assert some_nan is not None and some_nan != some_nan
-        roundtrip = deserializer(topic=TOPIC, data=memoryview(serializer(topic=TOPIC, value=some_nan) or b""))
+        roundtrip = deserializer(topic=TOPIC, data=memoryview(serializer(topic=TOPIC, data=some_nan) or b""))
         assert roundtrip is not None
         # Because of NaN semantics we must assert based on the raw int bits.
-        assert serializer(topic=TOPIC, value=roundtrip) == raw
+        assert serializer(topic=TOPIC, data=roundtrip) == raw
 
 
 # --------------------------------------------------------------------------- #
@@ -341,7 +341,7 @@ def test_float_serde_should_preserve_nan_values() -> None:
 
 def test_string_deserializer_support_byte_buffer() -> None:
     data = "Hello, ByteBuffer!"
-    serialized = string_serializer()(topic=TOPIC, value=data)
+    serialized = string_serializer()(topic=TOPIC, data=data)
     assert serialized is not None
     buffer = bytearray(len(serialized) * 2)
     buffer[: len(serialized)] = serialized
@@ -382,7 +382,7 @@ def test_uuid_deserializer_rejects_the_binary_value() -> None:
         deserializer(topic=TOPIC, data=memoryview(value.bytes))
     assert str(exc.value) == "Error parsing data into UUID"
     assert isinstance(exc.value.__cause__, IllegalArgumentError)
-    data = uuid_serializer()(topic=TOPIC, value=value)
+    data = uuid_serializer()(topic=TOPIC, data=value)
     assert data is not None
     assert deserializer(topic=TOPIC, data=memoryview(data)) == value
 
@@ -391,7 +391,7 @@ def test_uuid_unsupported_encoding() -> None:
     serializer = uuid_serializer()
     _configured(serializer, {"value.serializer.encoding": "no-such-charset"}, False)
     with pytest.raises(SerializationError) as exc:
-        serializer(topic=TOPIC, value=uuid.uuid4())
+        serializer(topic=TOPIC, data=uuid.uuid4())
     assert str(exc.value) == (
         "Error when serializing UUID to byte[] due to unsupported encoding no-such-charset")
     assert exc.value.__cause__ is None
@@ -411,11 +411,11 @@ def test_uuid_unsupported_encoding() -> None:
 
 def test_json_serde() -> None:
     value = {"a": 1, "b": ["x", "y"], "c": None}
-    out = json_serializer()(topic=TOPIC, value=value)
+    out = json_serializer()(topic=TOPIC, data=value)
     assert out == b'{"a": 1, "b": ["x", "y"], "c": null}'
     assert json_deserializer()(topic=TOPIC, data=memoryview(out)) == value
     with pytest.raises(SerializationError) as exc:
-        json_serializer()(topic=TOPIC, value=object())
+        json_serializer()(topic=TOPIC, data=object())
     assert str(exc.value) == "Error serializing value to JSON"
     with pytest.raises(SerializationError) as exc:
         json_deserializer()(topic=TOPIC, data=memoryview(b"not json"))
@@ -460,7 +460,7 @@ def test_lifecycle_protocols() -> None:
     base.configure({}, True)
     base.close()
 
-    def bare(*, topic: str, value: object, headers: object = None, **kwargs: Any) -> bytes | None:
+    def bare(*, topic: str, data: object, headers: object = None, **kwargs: Any) -> bytes | None:
         return None
 
     assert not isinstance(bare, Configurable)

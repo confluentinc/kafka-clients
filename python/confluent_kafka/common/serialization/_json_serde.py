@@ -34,12 +34,18 @@ class JsonSerializer:
 
     __slots__ = ()
 
-    def __call__(self, *, topic: str, value: Any | None,
+    def __call__(self, *, topic: str, data: Any | None,
                  headers: Headers | None = None, **kwargs: Any) -> bytes | None:
-        if value is None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: Any | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
         try:
-            return json.dumps(value).encode("utf_8")
+            return json.dumps(data).encode("utf_8")
         except (TypeError, ValueError) as exc:
             raise SerializationError(message="Error serializing value to JSON") from exc
 
@@ -51,6 +57,12 @@ class JsonDeserializer:
 
     def __call__(self, *, topic: str, data: memoryview | None,
                  headers: Headers | None = None, **kwargs: Any) -> Any | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> Any | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         if data is None:
             return None
         try:

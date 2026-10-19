@@ -435,8 +435,8 @@ class MockProducerCore(Generic[K, V]):
                 # just to raise the serializer's error if the serializers are not
                 # the proper ones to serialize the key / value
                 # (each with `new RecordHeaders()`, MockProducer.java:316-317).
-                self._key_serializer(topic=record.topic(), value=record.key(), headers=Headers())
-                self._value_serializer(topic=record.topic(), value=record.value(),
+                self._key_serializer(topic=record.topic(), data=record.key(), headers=Headers())
+                self._value_serializer(topic=record.topic(), data=record.value(),
                                        headers=Headers())
             topic_partition = TopicPartition(topic=record.topic(), partition=partition)
             offset = self._next_offset(topic_partition)
@@ -530,9 +530,9 @@ class MockProducerCore(Generic[K, V]):
                     message=f"Invalid partition given with record: {partition} is not in the "
                     f"range [0...{num_partitions}].")
             return partition
-        key_bytes = self._key_serializer(topic=topic, value=record.key(),
+        key_bytes = self._key_serializer(topic=topic, data=record.key(),
                                          headers=record.headers())
-        value_bytes = self._value_serializer(topic=topic, value=record.value(),
+        value_bytes = self._value_serializer(topic=topic, data=record.value(),
                                              headers=record.headers())
         if self._partitioner is None:
             return self._partitions_for_topic(record.topic())[0].partition()

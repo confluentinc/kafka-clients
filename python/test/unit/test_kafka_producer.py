@@ -135,8 +135,8 @@ class MockSerializer:
     def __init__(self) -> None:
         MockSerializer.INIT_COUNT += 1
 
-    def __call__(self, *, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
-        return None if value is None else value.encode("utf-8")
+    def __call__(self, *, topic: str, data: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+        return None if data is None else data.encode("utf-8")
 
     def close(self) -> None:
         MockSerializer.CLOSE_COUNT += 1
@@ -154,7 +154,7 @@ def test_no_serializer_provided() -> None:
     producer_props = {"bootstrap.servers": "localhost:9000"}
     with KafkaProducer(configs=producer_props) as producer:
         assert producer._key_serializer(  # noqa: SLF001 - the default in use
-            topic="t", value=b"k") == b"k"
+            topic="t", data=b"k") == b"k"
 
 
 def test_constructor_failure_close_resource() -> None:
@@ -300,9 +300,9 @@ def test_headers_success() -> None:
     # the serializers get the record's headers.
     calls: list[tuple[str, object, object]] = []
 
-    def recording(*, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
-        calls.append((topic, value, headers))
-        return None if value is None else value.encode()
+    def recording(*, topic: str, data: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+        calls.append((topic, data, headers))
+        return None if data is None else data.encode()
 
     configs = {"bootstrap.servers": "localhost:9999", "max.block.ms": 5}
     producer = KafkaProducer(configs=configs, key_serializer=recording,
@@ -599,8 +599,8 @@ class RecordingSerializer:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, *, topic: str, value: Any, headers: Any = None, **kwargs: Any) -> bytes | None:
-        return None if value is None else str(value).encode()
+    def __call__(self, *, topic: str, data: Any, headers: Any = None, **kwargs: Any) -> bytes | None:
+        return None if data is None else str(data).encode()
 
 
 SERDE_PROPS = {"bootstrap.servers": "localhost:9999"}

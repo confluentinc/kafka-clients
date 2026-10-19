@@ -29,8 +29,14 @@ class BooleanSerializer:
 
     __slots__ = ()
 
-    def __call__(self, *, topic: str, value: bool | None,
+    def __call__(self, *, topic: str, data: bool | None,
                  headers: Headers | None = None, **kwargs: Any) -> bytes | None:
-        if value is None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: bool | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
-        return _TRUE if value else _FALSE
+        return _TRUE if data else _FALSE

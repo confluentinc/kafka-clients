@@ -34,6 +34,12 @@ class ByteArrayDeserializer:
 
     def __call__(self, *, topic: str, data: memoryview | None,
                  headers: Headers | None = None, **kwargs: Any) -> bytes | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         if data is None:
             return None
         return bytes(data)

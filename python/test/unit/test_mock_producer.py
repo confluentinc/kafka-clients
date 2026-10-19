@@ -695,7 +695,7 @@ def test_should_throw_class_cast_exception() -> None:
     # from send(). The mock calls the serializer, so send() raises the error the
     # serializer raises for that value.
     with pytest.raises(Exception) as direct:
-        int_serializer()(topic=TOPIC, value="key1", headers=())
+        int_serializer()(topic=TOPIC, data="key1", headers=())
     with MockProducer(cluster=_empty_cluster(), auto_complete=True, partitioner=None,
                       key_serializer=int_serializer(),
                       value_serializer=string_serializer()) as custom_producer:

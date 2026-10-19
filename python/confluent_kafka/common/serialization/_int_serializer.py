@@ -36,8 +36,14 @@ class IntSerializer:
     def __init__(self, size: int = 4) -> None:
         self._size = size
 
-    def __call__(self, *, topic: str, value: int | None,
+    def __call__(self, *, topic: str, data: int | None,
                  headers: Headers | None = None, **kwargs: Any) -> bytes | None:
-        if value is None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: int | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
-        return value.to_bytes(self._size, "big", signed=True)
+        return data.to_bytes(self._size, "big", signed=True)

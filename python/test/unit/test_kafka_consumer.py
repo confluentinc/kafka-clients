@@ -171,6 +171,14 @@ from confluent_kafka.consumer import (
 from confluent_kafka.consumer import _base as consumer_base
 from confluent_kafka.consumer._base import poll_timeout_ms
 
+
+def _caller(deserializer: Any) -> Any:
+    """The positional caller the consumer calls ``deserializer`` through
+    (``_kwargs.serde_caller``), as ``deserialize_batch`` expects."""
+    from confluent_kafka._kwargs import DESERIALIZER_NAMES, serde_caller
+
+    return serde_caller(deserializer, DESERIALIZER_NAMES)
+
 WAIT = 10.0
 TOPIC = "test"
 GROUP_ID = "mock-group"
@@ -3132,8 +3140,8 @@ def _refuses_null(*, topic: str, data: memoryview | None, headers: Any = None, *
 def test_a_null_key_is_not_deserialized() -> None:
     from confluent_kafka.consumer._poll import deserialize_batch
     result = deserialize_batch(_NativeBatch([_NativeRecord(TP0, 0, key=None, value=b"v")]),
-                               key_deserializer=_refuses_null,
-                               value_deserializer=_refuses_null)
+                               key_deserializer=_caller(_refuses_null),
+                               value_deserializer=_caller(_refuses_null))
     assert result.error is None and result.rewind == []
     (record,) = list(result.records)
     assert record.key() is None
@@ -3146,7 +3154,7 @@ def test_a_tombstone_is_delivered_with_a_null_value() -> None:
     result = deserialize_batch(
         _NativeBatch([_NativeRecord(TP0, 0, key=b"k", value=None),
                       _NativeRecord(TP0, 1, key=None, value=None)]),
-        key_deserializer=_refuses_null, value_deserializer=_refuses_null)
+        key_deserializer=_caller(_refuses_null), value_deserializer=_caller(_refuses_null))
     assert result.error is None
     tombstone, empty = list(result.records)
     assert (tombstone.key(), tombstone.value()) == ("k", None)
@@ -3166,7 +3174,7 @@ def test_a_failing_deserializer_still_fails_on_non_null_bytes() -> None:
     result = deserialize_batch(
         _NativeBatch([_NativeRecord(TP0, 0, key=None, value=None),
                       _NativeRecord(TP0, 1, key=None, value=b"x")]),
-        key_deserializer=_refuses_null, value_deserializer=failing)
+        key_deserializer=_caller(_refuses_null), value_deserializer=_caller(failing))
     (record,) = list(result.records)
     assert record.offset() == 0 and record.value() is None
     assert isinstance(result.error, RecordDeserializationError)

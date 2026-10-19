@@ -33,4 +33,10 @@ class ByteBufferDeserializer:
 
     def __call__(self, *, topic: str, data: memoryview | None,
                  headers: Headers | None = None, **kwargs: Any) -> memoryview | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> memoryview | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         return data

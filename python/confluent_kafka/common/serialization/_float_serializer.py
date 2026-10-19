@@ -62,12 +62,18 @@ class FloatSerializer:
     def __init__(self, size: int = 8) -> None:
         self._size = size
 
-    def __call__(self, *, topic: str, value: float | None,
+    def __call__(self, *, topic: str, data: float | None,
                  headers: Headers | None = None, **kwargs: Any) -> bytes | None:
-        if value is None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: float | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
         if self._size == 4:
-            return _float_bits(value)
-        if math.isnan(value):
+            return _float_bits(data)
+        if math.isnan(data):
             return _CANONICAL_DOUBLE_NAN
-        return struct.pack(">d", value)
+        return struct.pack(">d", data)

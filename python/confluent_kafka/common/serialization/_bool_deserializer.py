@@ -32,6 +32,12 @@ class BooleanDeserializer:
 
     def __call__(self, *, topic: str, data: memoryview | None,
                  headers: Headers | None = None, **kwargs: Any) -> bool | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> bool | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         if data is None:
             return None
         if len(data) != 1:

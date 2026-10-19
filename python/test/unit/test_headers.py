@@ -47,6 +47,14 @@ from confluent_kafka.producer import MockProducer, ProducerRecord
 from confluent_kafka.common.serialization import bytes_serializer
 
 
+def _caller(deserializer: Any) -> Any:
+    """The positional caller the consumer calls ``deserializer`` through
+    (``_kwargs.serde_caller``), as ``deserialize_batch`` expects."""
+    from confluent_kafka._kwargs import DESERIALIZER_NAMES, serde_caller
+
+    return serde_caller(deserializer, DESERIALIZER_NAMES)
+
+
 def _get_count(headers: Headers) -> int:
     return len(headers.to_array())
 
@@ -654,9 +662,9 @@ def test_poll_hands_out_writable_headers_after_the_deserializers() -> None:
         seen.append(headers)
         return bytes(data or b"")
 
-    result = deserialize_batch(batch, key_deserializer=deserializer,
-                               value_deserializer=lambda *, topic, data, headers=None, **_: bytes(
-                                   data or b""))
+    result = deserialize_batch(batch, key_deserializer=_caller(deserializer),
+                               value_deserializer=_caller(lambda *, topic, data, headers=None, **_:
+                                                          bytes(data or b"")))
     (record,) = result.records.records(partition=TopicPartition(topic="t", partition=0))
     assert record.headers() is seen[0]
     _assert_header("added", "by-deserializer", record.headers().last_header(key="added"))

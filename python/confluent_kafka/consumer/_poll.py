@@ -142,7 +142,9 @@ def deserialize_batch(
     value_deserializer: Callable[..., object],
 ) -> Deserialized:
     """Deserialize a native ``ConsumerRecords`` batch (``None`` for an empty
-    poll) on the caller's thread."""
+    poll) on the caller's thread. The deserializers are the positional
+    callers ``_kwargs.serde_caller`` chose, called as ``(topic, data,
+    headers)``."""
     if native_records is None:
         return Deserialized(ConsumerRecords.empty(), None, [])
 
@@ -165,13 +167,13 @@ def deserialize_batch(
         value: object = None
         if key_buffer is not None:
             try:
-                key = key_deserializer(topic=topic, data=key_buffer, headers=headers)
+                key = key_deserializer(topic, key_buffer, headers)
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does
                 error = _deserialization_error(
                     origin.KEY, tp, nr, key_buffer, value_buffer, headers, exc)
         if error is None and value_buffer is not None:
             try:
-                value = value_deserializer(topic=topic, data=value_buffer, headers=headers)
+                value = value_deserializer(topic, value_buffer, headers)
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does
                 error = _deserialization_error(
                     origin.VALUE, tp, nr, key_buffer, value_buffer, headers, exc)

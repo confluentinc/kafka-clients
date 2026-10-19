@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import MISSING, reject_str
-from confluent_kafka._kwargs import require_kwargs
+from confluent_kafka._kwargs import DESERIALIZER_NAMES, require_kwargs, serde_caller
 from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
@@ -529,6 +529,9 @@ class _ConsumerState:
         self._listener: ConsumerRebalanceListener | None = None
         self._key_deserializer: Deserializer[Any] = bytes_deserializer()
         self._value_deserializer: Deserializer[Any] = bytes_deserializer()
+        # How poll() calls them, chosen once (_kwargs.serde_caller).
+        self._key_deserialize = serde_caller(self._key_deserializer, DESERIALIZER_NAMES)
+        self._value_deserialize = serde_caller(self._value_deserializer, DESERIALIZER_NAMES)
         self._reentrant_handle = 0
         # The wakeup the consumer sent itself to end a wakeable call sooner on
         # Ctrl+C or cancellation (_run_sync, _wait_on_loop), left armed because
@@ -636,6 +639,8 @@ class _ConsumerState:
             raise
         self._key_deserializer = key
         self._value_deserializer = value
+        self._key_deserialize = serde_caller(key, DESERIALIZER_NAMES)
+        self._value_deserialize = serde_caller(value, DESERIALIZER_NAMES)
         self._h = handle
         self._group_id_defined = configs.get(_GROUP_ID) is not None
         # Registered once, before any operation can queue a callback
@@ -1438,8 +1443,8 @@ class _ConsumerState:
         def convert(records: Any) -> Deserialized:
             # The native batch owns the fetched bytes; the deserializers run on
             # this thread over memoryviews into it (consumer-threading.md §27).
-            return deserialize_batch(records, key_deserializer=self._key_deserializer,
-                                     value_deserializer=self._value_deserializer)
+            return deserialize_batch(records, key_deserializer=self._key_deserialize,
+                                     value_deserializer=self._value_deserialize)
 
         return self._value_spec(_lib.Consumer_poll_cb, convert, timeout_ms, wakeable=True)
 

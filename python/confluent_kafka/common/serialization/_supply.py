@@ -29,8 +29,9 @@ A serde from either route must accept ``**kwargs`` (it is called with keyword
 arguments named after Java's parameters): one without raises
 ``IllegalArgumentError("<param> must accept **kwargs")``, naming the
 constructor parameter (``key_serializer``) on the argument route and the config
-key (``key.serializer``) on the config route, where it is checked after
-``configure``, the instance then being closed.
+key (``key.serializer``) on the config route, where it is checked before
+``configure``, the instance then being closed, as Java's
+``getConfiguredInstance`` checks the type before it configures.
 """
 
 from __future__ import annotations
@@ -111,10 +112,10 @@ def _lacks_no_arg_constructor(cls: type) -> bool:
     return False
 
 
-def _construct_from_class(key: str, cls: type, configs: dict[str, object],
-                          is_key: bool) -> Callable[..., object]:
-    """No-arg construct ``cls`` and configure it, as Java's
-    ``AbstractConfig.getConfiguredInstance`` does."""
+def _construct_from_class(key: str, cls: type) -> Callable[..., object]:
+    """No-arg construct ``cls`` and check its type, as Java's
+    ``AbstractConfig.getConfiguredInstance`` does before it configures the
+    instance (``resolve_serde`` configures it)."""
     try:
         instance = cls()
     except TypeError as exc:
@@ -134,7 +135,6 @@ def _construct_from_class(key: str, cls: type, configs: dict[str, object],
         raise KafkaError(
             message=f"class {_class_name(cls)} is not an instance of "
             f"confluent_kafka.common.serialization.{base}")
-    configure_if_defined(instance, configs, is_key)
     return cast("Callable[..., object]", instance)
 
 
@@ -185,12 +185,21 @@ def resolve_serde(
         raise ConfigError(name=key, value=config_value,
                           message="Expected a Class instance or class name.")
     try:
-        instance = _construct_from_class(key, cls, config, is_key)
+        instance = _construct_from_class(key, cls)
     except Exception as exc:
         if construct_failure is None:
             raise
         raise construct_failure(exc) from exc
+    # The keyword contract is a type check: Java's getConfiguredInstance checks
+    # the type (and closes a wrong one) before it configures the instance
+    # (AbstractConfig.java:414-422).
     if not accepts_kwargs(instance):
         close_if_defined(instance)
         require_kwargs(instance, key)
+    try:
+        configure_if_defined(instance, config, is_key)
+    except Exception as exc:
+        if construct_failure is None:
+            raise
+        raise construct_failure(exc) from exc
     return instance

@@ -59,6 +59,12 @@ class FloatDeserializer:
 
     def __call__(self, *, topic: str, data: memoryview | None,
                  headers: Headers | None = None, **kwargs: Any) -> float | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> float | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         if data is None:
             return None
         if len(data) != self._size:

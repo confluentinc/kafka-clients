@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Any, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import MISSING
+from confluent_kafka._kwargs import SERIALIZER_NAMES, serde_caller
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
@@ -243,12 +244,13 @@ def check_offsets(offsets: object) -> None:
         raise TypeError("offsets must not be None")
 
 
-def serialize(serializer: Serializer[Any], topic: str, data: object,
+def serialize(serializer: Callable[..., object], topic: str, data: object,
               headers: object) -> bytes | None:
-    """One serializer call, Java's ``serialize(topic, headers, data)``: a
-    ``None`` ``data`` is passed too (the serializer decides what Java's null
+    """One serializer call, Java's ``serialize(topic, headers, data)``, through
+    the positional caller ``_kwargs.serde_caller`` chose for the serializer:
+    a ``None`` ``data`` is passed too (the serializer decides what Java's null
     maps to), and a ``None`` result is a null key or value."""
-    out = serializer(topic=topic, value=data, headers=cast(Any, headers))
+    out = serializer(topic, data, headers)
     if out is None or type(out) is bytes:
         return out
     if isinstance(out, (bytes, bytearray, memoryview)):
@@ -408,6 +410,9 @@ class _ProducerState:
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
+        # How send() calls them, chosen once (_kwargs.serde_caller).
+        self._key_serialize = serde_caller(self._key_serializer, SERIALIZER_NAMES)
+        self._value_serialize = serde_caller(self._value_serializer, SERIALIZER_NAMES)
         # The use of every send(), built once: a _Use holds no per-use state.
         self._send_use = _Use(self, closed_while_sending)
         # ProducerConfig max.block.ms: what bounds a wait that cannot be
@@ -489,6 +494,8 @@ class _ProducerState:
             raise from_ffi_error(error)
         self._key_serializer = key
         self._value_serializer = value
+        self._key_serialize = serde_caller(key, SERIALIZER_NAMES)
+        self._value_serialize = serde_caller(value, SERIALIZER_NAMES)
         self._c_producer = handle
         max_block_ms = native.get(_MAX_BLOCK_MS)
         if max_block_ms is not None:
@@ -549,8 +556,8 @@ class _ProducerState:
         which the completion needs, so they are read once."""
         topic = record.topic()
         headers = record.headers()
-        key = serialize(self._key_serializer, topic, record.key(), headers)
-        value = serialize(self._value_serializer, topic, record.value(), headers)
+        key = serialize(self._key_serialize, topic, record.key(), headers)
+        value = serialize(self._value_serialize, topic, record.value(), headers)
         partition = record.partition()
         timestamp = record.timestamp()
         # KafkaProducer.doSend: `setReadOnly(record.headers())` once the

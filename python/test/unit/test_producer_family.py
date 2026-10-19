@@ -429,8 +429,8 @@ class _UpperSerializer:
     def configure(self, configs: dict[str, Any], is_key: bool) -> None:
         _UpperSerializer.configured.append(is_key)
 
-    def __call__(self, *, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
-        return None if value is None else value.upper().encode()
+    def __call__(self, *, topic: str, data: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+        return None if data is None else data.upper().encode()
 
 
 # ===========================================================================
@@ -563,9 +563,9 @@ def test_serializer_is_called_on_a_null_value_with_the_headers() -> None:
     # null maps to.
     calls: list[tuple[str, object, object]] = []
 
-    def serializer(*, topic: str, value: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
-        calls.append((topic, value, headers))
-        return b"<null>" if value is None else value.encode()
+    def serializer(*, topic: str, data: str | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+        calls.append((topic, data, headers))
+        return b"<null>" if data is None else data.encode()
 
     record = ProducerRecord(topic=TOPIC, partition=None, key=None, value=None,
                             headers=[("h", b"1")])
@@ -577,7 +577,7 @@ def test_serializer_is_called_on_a_null_value_with_the_headers() -> None:
 def test_serializer_must_return_bytes() -> None:
     with pytest.raises(TypeError) as err:
         _native(ProducerRecord(topic=TOPIC, value=b"v"),
-                value_serializer=lambda *, topic, value, headers=None, **_: "text")
+                value_serializer=lambda *, topic, data, headers=None, **_: "text")
     assert str(err.value) == "a serializer must return bytes or None, not str"
 
 
@@ -1457,10 +1457,10 @@ def test_a_send_racing_close_is_refused_after_its_serializer() -> None:
     # Java's RecordAccumulator.append refuses one after close.
     started = threading.Event()
 
-    def slow(*, topic: str, value: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+    def slow(*, topic: str, data: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
         started.set()
         time.sleep(0.5)
-        return value
+        return data
 
     p = KafkaProducer(configs=UNREACHABLE, value_serializer=slow)
     raised: list[BaseException] = []
@@ -2096,9 +2096,9 @@ def test_an_async_send_from_another_loop_is_refused_before_its_serializer() -> N
     # RuntimeError before its serializer runs, and the producer stays usable.
     serialized: list[bytes | None] = []
 
-    def recording(*, topic: str, value: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
-        serialized.append(value)
-        return value
+    def recording(*, topic: str, data: bytes | None, headers: Any = None, **kwargs: Any) -> bytes | None:
+        serialized.append(data)
+        return data
 
     async def main() -> None:
         p = AsyncKafkaProducer(configs=UNREACHABLE, value_serializer=recording)
