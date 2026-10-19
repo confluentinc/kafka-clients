@@ -145,10 +145,6 @@ where
         Consumer::group_metadata(&self.delegate)
     }
 
-    fn client_id(&self) -> &str {
-        Consumer::client_id(&self.delegate)
-    }
-
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
         Consumer::current_lag(&self.delegate, topic_partition)
     }

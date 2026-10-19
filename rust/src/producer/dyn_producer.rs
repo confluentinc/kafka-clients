@@ -398,7 +398,7 @@ pub(crate) trait DynTrySend<K, V>: DynProducer<K, V> {
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,
@@ -414,7 +414,7 @@ where
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,
@@ -435,7 +435,7 @@ where
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,

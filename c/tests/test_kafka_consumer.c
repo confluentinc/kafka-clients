@@ -68,8 +68,8 @@ static kafka_consumer_KafkaConsumer_t *create_consumer(void) {
 // ---------------------------------------------------------------------------
 
 static void test_kafka_consumer_new_succeeds(void) {
-    kafka_consumer_Consumer_t *consumer = create_consumer();
-    kafka_consumer_Consumer_destroy(consumer);
+    kafka_consumer_KafkaConsumer_t *kc = create_consumer();
+    kafka_consumer_KafkaConsumer_destroy(kc);
 }
 
 // The map is the config's only input, as in Java: a missing `bootstrap.servers`
@@ -92,14 +92,15 @@ static void test_kafka_consumer_new_from_map(void) {
     TEST_ASSERT_NOT_NULL(config);
     kafka_Map_destroy(props);
 
-    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
+    kafka_consumer_KafkaConsumer_t *kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
     TEST_ASSERT_NULL(err);
     kafka_consumer_ConsumerConfig_destroy(config);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer__as_Consumer(kc);
     kafka_consumer_ConsumerGroupMetadata_t *metadata = kafka_consumer_Consumer_group_metadata(consumer, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("map-group", kafka_consumer_ConsumerGroupMetadata_group_id(metadata));
     kafka_consumer_ConsumerGroupMetadata_destroy(metadata);
-    kafka_consumer_Consumer_destroy(consumer);
+    kafka_consumer_KafkaConsumer_destroy(kc);
 }
 
 // Deserializer interfaces are passed as borrowed `Deserializer_t` views of

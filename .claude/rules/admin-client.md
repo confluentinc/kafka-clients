@@ -338,28 +338,13 @@ FFI).
 
 **How to apply:**
 
-  - Do not change `admin.py`'s existing public surface until it is ported to
-    the conventions as a whole; `_legacy_compat.py` is deleted with that port.
-  - The one exception is additive: a method for an Admin RPC that Java newly
-    adds and that the multilanguage test suite exercises through the Python
-    gRPC arms, plus the mock option that seeds that RPC's mock answer, may be
-    added to `admin.py` in its current style, without changing any existing
-    method. The current instance is the Apache Kafka 4.4 bump (Milestone 17):
-    `AdminClient.unregister_controller` (sync and asyncio, KAFKA-20395), which
-    `rust/tests/integration/admin_controllers_test.rs` drives through the Python
-    gRPC arms, and the `using_raft_controller` keyword of the `MockAdminClient`
-    and `AsyncMockAdminClient` constructors (Java's
-    `MockAdminClient.Builder.usingRaftController`, which 4.4's
-    `unregisterController` reads), which `python/test/unit/test_admin.py` covers.
-  - A Java `MockAdminClient.Builder` option is a keyword of the mock
-    constructors, never a setter on the built mock: Java fixes it at
-    construction (`usingRaftController` is a `final` field), and the Rust
-    `MockAdminClient` has no such setter for the C binding to wrap. The
-    `feature_levels` keyword (Java's `featureLevels`,
-    `minSupportedFeatureLevels` and `maxSupportedFeatureLevels`) is the other
-    instance; both replaced earlier setters of the same names.
-  - Nothing in the `confluent_kafka` public surface may import
-    `_legacy_compat.py`.
+  - Generate and change the binding only through the conventions; do not hand-edit generated code.
+  - A new Admin RPC is generated like any other once its FFI is in the header:
+    `unregister_controller` (KAFKA-20395, Kafka 4.4) is one, with
+    `MockAdminClient.Builder.using_raft_controller`, which Java's mock reads for it.
+  - The old binding `python/admin.py` and its private shim `confluent_kafka/_legacy_compat.py` are
+    gone; the gRPC admin translation, the soak client and the admin tests use
+    `confluent_kafka.admin`.
 
 (This section used to record the Python admin binding as paused, over a synchronous
 `rust/src/ffi/admin.rs` and the shared completion dispatcher; both were replaced.)

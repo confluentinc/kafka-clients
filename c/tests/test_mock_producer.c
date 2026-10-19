@@ -1204,7 +1204,6 @@ void test_async_callbacks_single_thread(void) {
         results[i].producer = f.producer;
         kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&results[i], on_completion);
         ASSERT_OK(futures[i] = kafka_producer_Producer_send_with_callback(f.producer, record, callback, &err));
-        kafka_producer_Callback_destroy(callback);
         kafka_producer_ProducerRecord_destroy(record);
     }
     for (int i = 0; i < 5; i++) {
@@ -2531,7 +2530,6 @@ void test_send_with_callback_cb_future_completes_after_the_callback_reported(voi
     send_result_t result;
     memset(&result, 0, sizeof(result));
     kafka_producer_Producer_send_with_callback_cb(f.producer, record, callback, on_send, &result);
-    kafka_producer_Callback_destroy(callback);
     kafka_producer_ProducerRecord_destroy(record);
 
     /* Taken at once (the mock never waits), so `cb` fired inside the call

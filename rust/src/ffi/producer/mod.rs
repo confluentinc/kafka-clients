@@ -572,7 +572,7 @@ async fn submission_loop(client: Arc<Client>, mut rx: UnboundedReceiver<SubmitRe
 async fn send_waiter(
     client: Arc<Client>,
     record: GenericRecord,
-    callback: Option<Callback>,
+    callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
     cb: kafka_producer_Producer_send_cb_t,
     opaque: SendPtr,
@@ -1698,7 +1698,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
 fn queue_send(
     client: &Arc<Client>,
     record: GenericRecord,
-    callback: Option<Callback>,
+    callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
     cb: kafka_producer_Producer_send_cb_t,
     opaque: *mut c_void,

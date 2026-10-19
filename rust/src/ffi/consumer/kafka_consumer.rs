@@ -164,7 +164,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     key_deserializer: *mut kafka_common_serialization_Deserializer_t,
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
     out_err: *mut *mut kafka_common_Error_t,
-) -> *mut kafka_consumer_Consumer_t {
+) -> *mut kafka_consumer_KafkaConsumer_t {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this
     // statement, the only use of the reference, as `consumer_config_ref` requires.
     let config = unsafe { consumer_config_ref(config) }.clone();

@@ -51,9 +51,8 @@
 //!
 //!   - a public struct, or an enum whose variants all carry data (`Error`,
 //!     `TopicCollection`): the opaque handle `<prefix>_t` when some method
-//!     takes `self` or some static returns the type, else no handle (nothing
-//!     constructs a `KafkaConsumer` from C: its constructor returns the
-//!     `Consumer` interface). A struct a public enum's data variant wraps
+//!     takes `self` or some static returns the type, else no handle. A
+//!     struct a public enum's data variant wraps
 //!     (`TopicCollection::TopicIds(TopicIdCollection)`) gets the handle
 //!     only when C can come to hold one — a static of its own builds it or
 //!     a public signature anywhere names it, a type inside a parameter or

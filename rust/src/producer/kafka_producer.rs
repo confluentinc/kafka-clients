@@ -131,7 +131,7 @@ pub(crate) enum TrySendOutcome {
     /// created and the callback was **not** invoked. The callback is handed back
     /// so the caller can retry the record with `send` once it can afford to
     /// wait.
-    WouldBlock(Option<Callback>),
+    WouldBlock(Option<Box<dyn Callback>>),
 }
 
 impl TrySendOutcome {
@@ -2009,7 +2009,8 @@ impl<K, V> KafkaProducer<K, V> {
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Box<dyn Callback>>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        wait: SendWait,
+    ) -> Result<TrySendOutcome, Error> {
         self.ensure_not_closed()?;
 
         // First make sure the metadata for the topic is available
@@ -2217,7 +2218,7 @@ impl<K, V> KafkaProducer<K, V> {
     pub(crate) async fn try_send(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<TrySendOutcome, Error> {
         self.do_send(record, callback, SendWait::Never).await
     }
@@ -2903,8 +2904,10 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
                 now_ms,
                 remaining_wait_ms,
                 &cluster,
+                SendWait::MaxBlock,
             )
-            .await
+            .await?
+            .into_accepted_future()
         }
     }
 }
@@ -3878,17 +3881,17 @@ mod tests {
 
     /// A callback that records every invocation, plus the recorder to read back.
     #[expect(clippy::type_complexity)]
-    fn recording_callback() -> (Callback, Arc<Mutex<Vec<(i32, String)>>>) {
+    fn recording_callback() -> (Box<dyn Callback>, Arc<Mutex<Vec<(i32, String)>>>) {
         let invocations: Arc<Mutex<Vec<(i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&invocations);
-        let callback: Callback = Box::new(move |metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(crate::producer::callback::new(move |metadata, error| {
             let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
             let error = error.expect("Java passes the exception here");
             recorder
                 .lock()
                 .unwrap()
                 .push((metadata.partition(), error.message().to_string()));
-        });
+        }));
         (callback, invocations)
     }
 
@@ -3955,7 +3958,7 @@ mod tests {
         let returned = returned.expect("the caller's callback is handed back");
         let tp = TopicPartition::new(TOPIC.to_string(), 1);
         let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
-        returned(Some(&null_metadata), Some(&Error::timeout("retry")));
+        returned.on_completion(Some(&null_metadata), Some(&Error::timeout("retry")));
         assert_eq!(invocations.lock().unwrap().as_slice(), &[(1, "retry".to_string())]);
     }
 

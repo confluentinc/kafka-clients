@@ -3910,6 +3910,7 @@ typedef struct {
     ListenerCtx* listener;                 // the registered listener's `self`, or NULL
     CommitCbCtx* orphans;                  // see CommitCbCtx
     PinnedBytes* pinned;                   // see PinnedBytes
+    PyObject* client_id;                   // KafkaConsumer: its config's client.id (str), else NULL
 } Consumer;
 
 static Consumer* consumer_from_handle(unsigned long long h) {
@@ -4216,7 +4217,8 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
 // deserializers, so records carry `kafka_Bytes_t *` keys and values. On failure
 // the handle is 0 and `error` the owned error handle (an int, 0 on success);
 // the construction runs with the GIL released (it resolves the bootstrap
-// servers).
+// servers). The handle keeps the configuration's `client.id`, generated when
+// unset, for Consumer_client_id.
 static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     PyObject* config_dict;
@@ -4241,27 +4243,45 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err = (config = kafka_consumer_ConsumerConfig_new(props, &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_Map_destroy_err(props, &ffi_err), ffi_take(&ffi_err)));
     kafka_consumer_KafkaConsumer_t* kc = NULL;
+    PyObject* py_client_id = NULL;
     if (err == NULL) {
         kafka_common_Error_t* destroy_err;
-        Py_BEGIN_ALLOW_THREADS
-        err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
-        Py_END_ALLOW_THREADS
+        const char* client_id = NULL;  // borrowed from config, read before it is destroyed
+        err = (client_id = kafka_consumer_ConsumerConfig_get_string(config, "client.id", &ffi_err), ffi_take(&ffi_err));
+        // client.id is always set once ConsumerConfig_new resolved it.
+        if (err == NULL && client_id != NULL)
+            py_client_id = PyUnicode_FromString(client_id);
+        if (err == NULL && py_client_id != NULL) {
+            Py_BEGIN_ALLOW_THREADS
+            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
+            Py_END_ALLOW_THREADS
+        }
         destroy_err = (kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err));
         ffi_unraisable(destroy_err);
     }
     if (err != NULL) {
+        Py_XDECREF(py_client_id);
         PyObject* py_err = error_handle_to_py(err);
         if (py_err == NULL) { ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err))); return NULL; }
         return Py_BuildValue("(iN)", 0, py_err);
     }
-    Consumer* c = consumer_alloc();
+    if (py_client_id == NULL) {  // kc was not built
+        if (!PyErr_Occurred())
+            PyErr_SetString(PyExc_SystemError, "ConsumerConfig resolved no client.id");
+        return NULL;
+    }
+    Consumer* c = (py_client_id != NULL || !PyErr_Occurred()) ? consumer_alloc() : NULL;
     if (c != NULL) {
         c->kc = kc;  // owned
+        c->client_id = py_client_id;  // owned
         if (ffi_raise((c->consumer = kafka_consumer_KafkaConsumer__as_Consumer_err(c->kc, &ffi_err), ffi_take(&ffi_err)))  // borrowed view
             || ffi_raise((kafka_consumer_Consumer__set_callbacks_notify_err(c->consumer, consumer_callbacks_notify, c, &ffi_err), ffi_take(&ffi_err)))) {
+            Py_XDECREF(py_client_id);
             PyMem_Free(c);
             c = NULL;
         }
+    } else {
+        Py_XDECREF(py_client_id);
     }
     if (c == NULL) {
         Py_BEGIN_ALLOW_THREADS
@@ -4300,6 +4320,7 @@ static PyObject* py_Consumer_destroy(PyObject* self, PyObject* args) {
         c->pinned = next;
     }
     Py_XDECREF(c->notify_cb);
+    Py_XDECREF(c->client_id);
     PyMem_Free(c);
     Py_RETURN_NONE;
 }
@@ -4399,6 +4420,17 @@ static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     PyObject* ret = cvalue_error((PyObject*)obj, NULL);
     Py_DECREF(obj);
     return ret;
+}
+
+// Consumer_client_id(handle) -> str | None: the client.id Consumer_KafkaConsumer_new
+// read from the consumer's ConsumerConfig (generated there when unset); None
+// for a mock. Java's KafkaConsumer.clientId() is package-private, so the core
+// has no getter: the id is the configuration's, read before the consumer is built.
+static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    PyObject* id = consumer_from_handle(h)->client_id;
+    return Py_NewRef(id != NULL ? id : Py_None);
 }
 
 // Consumer_current_lag(handle, topic, partition) -> (int | None, err | None),
@@ -5950,85 +5982,7 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
         ffi_unraisable(err);
         return NULL;
     }
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)a);
-}
-
-static int mock_builder_set_feature_levels(kafka_admin_MockAdminClient_Builder_t* builder, PyObject* spec,
-                                           kafka_common_Error_t** err_out);
-
-// Admin_MockAdminClient_new(num_brokers: int, using_raft_controller: bool,
-//                           feature_levels: [(feature, level, min, max)] | None) -> handle
-static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    int num_brokers;
-    int using_raft_controller;
-    PyObject* feature_levels;
-    if (!PyArg_ParseTuple(args, "ipO", &num_brokers, &using_raft_controller, &feature_levels)) return NULL;
-    // MockAdminClient.create().numBrokers(num_brokers)
-    //     .usingRaftController(using_raft_controller).featureLevels(...)...build();
-    // the builder is freed whether or not a step failed.
-    kafka_admin_MockAdminClient_Builder_t* builder = NULL;
-    kafka_admin_MockAdminClient_t* mock = NULL;
-    kafka_common_Error_t* err = (builder = kafka_admin_MockAdminClient_create_err(&ffi_err), ffi_take(&ffi_err));
-    if (err == NULL) {
-        err = (kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, (int32_t)num_brokers, &ffi_err), ffi_take(&ffi_err));
-    }
-    if (err == NULL) {
-        err = (kafka_admin_MockAdminClient_Builder_set_using_raft_controller_err(builder, (int8_t)(using_raft_controller != 0), &ffi_err), ffi_take(&ffi_err));
-    }
-    if (err == NULL && feature_levels != Py_None && mock_builder_set_feature_levels(builder, feature_levels, &err) < 0) {
-        ffi_unraisable((kafka_admin_MockAdminClient_Builder_destroy_err(builder, &ffi_err), ffi_take(&ffi_err)));
-        return NULL;
-    }
-    if (err == NULL) {
-        err = (mock = kafka_admin_MockAdminClient_Builder_build(builder, &ffi_err), ffi_take(&ffi_err));
-    }
-    if (builder != NULL) {
-        ffi_unraisable((kafka_admin_MockAdminClient_Builder_destroy_err(builder, &ffi_err), ffi_take(&ffi_err)));
-    }
-    if (err != NULL) {
-        const char* msg = NULL;
-        if (!ffi_raise((msg = kafka_common_Error_message_err(err, &ffi_err), ffi_take(&ffi_err)))) {
-            PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create MockAdminClient");
-        }
-        ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err)));
-        return NULL;
-    }
-    AdminHandle* a = admin_alloc();
-    if (a != NULL) {
-        a->mock = mock;
-        if (ffi_raise((a->admin = kafka_admin_MockAdminClient__as_Admin_err(mock, &ffi_err), ffi_take(&ffi_err)))  // borrowed view
-            || ffi_raise((kafka_admin_Admin__set_callbacks_notify_err(a->admin, admin_callbacks_notify, a, &ffi_err), ffi_take(&ffi_err)))) {
-            PyMem_Free(a);
-            a = NULL;
-        }
-    }
-    if (a == NULL) {
-        Py_BEGIN_ALLOW_THREADS
-        err = (kafka_admin_MockAdminClient_destroy_err(mock, &ffi_err), ffi_take(&ffi_err));
-        Py_END_ALLOW_THREADS
-        ffi_unraisable(err);
-        return NULL;
-    }
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)a);
-}
-
-// Admin_close(handle, timeout_ms): Java close() / close(Duration). Blocks
-// (GIL released); -1 is the no-argument form. Does not free the handle. The
-// Python clients use `Admin_close_cb` instead; this stays for callers that
-// want a native block.
-static PyObject* py_Admin_close(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KL", &h, &timeout_ms)) return NULL;
-    AdminHandle* a = admin_from_handle(h);
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
-    if (timeout_ms < 0) err = (kafka_admin_Admin_close_err(a->admin, &ffi_err), ffi_take(&ffi_err));
-    else err = (kafka_admin_Admin_close_with_timeout_err(a->admin, (int64_t)timeout_ms, &ffi_err), ffi_take(&ffi_err));
-    Py_END_ALLOW_THREADS
-    if (ffi_raise(err)) return NULL;
-    Py_RETURN_NONE;
+    return Py_BuildValue("(KK)", (unsigned long long)(uintptr_t)a, 0ULL);
 }
 
 // Completion of `Admin_close_cb`: `cb()` runs from `Admin__execute_callbacks`
@@ -10819,116 +10773,9 @@ static PyObject* py_Admin_force_terminate_transaction(PyObject* self, PyObject* 
     void* o = admin_options_build(&TerminateTransactionOptions_desc, opts);
     if (o == NULL) return NULL;
     kafka_admin_TerminateTransactionResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_force_terminate_transaction_with_options_err(a->admin, tid, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_TerminateTransactionOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(TerminateTransaction), assemble_single);
-    if (job == NULL) { ffi_unraisable((kafka_admin_TerminateTransactionResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_TerminateTransactionResult_result_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, NULL, 0)); }
-    return job_or_error(job, NULL);
-}
-
-// ---- MockAdminClient drivers ---------------------------------------------------------------
-//
-// Each returns an owned kafka_common_Error_t* as an int (0 = ok), the setter's
-// own `_err` result included; a handle that is not a mock gets an
-// illegal-argument error, as the setters only exist on the concrete
-// MockAdminClient.
-
-// The owned error `e` (NULL = ok) as the int the drivers return.
-static PyObject* owned_error_int(kafka_common_Error_t* e) {
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
-}
-
-static PyObject* mock_only_error(void) {
-    kafka_common_Error_t *ffi_err = NULL;
-    return owned_error_int(
-        ffi_built(kafka_common_Error_local_illegal_argument_err("this operation is only supported on a MockAdminClient", &ffi_err), &ffi_err));
-}
-
-// MockAdminClient_timeout_next_request(h, n) -> error
-static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int n;
-    if (!PyArg_ParseTuple(args, "Ki", &h, &n)) return NULL;
-    AdminHandle* a = admin_from_handle(h);
-    if (a->mock == NULL) return mock_only_error();
-    return owned_error_int((kafka_admin_MockAdminClient_timeout_next_request_err(a->mock, (int32_t)n, &ffi_err), ffi_take(&ffi_err)));
-}
-
-typedef void (*mock_offsets_fn)(const kafka_admin_MockAdminClient_t*, const kafka_Map_t*, kafka_common_Error_t**);
-
-static PyObject* mock_update_offsets(PyObject* args, mock_offsets_fn fn) {
-    unsigned long long h; PyObject* spec;
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;
-    AdminHandle* a = admin_from_handle(h);
-    if (a->mock == NULL) return mock_only_error();
-    tp_i64_map_t m;
-    if (tp_i64_map_build(spec, &m) < 0) return NULL;
-    kafka_common_Error_t* err = NULL;
-    fn(a->mock, m.map, &err);  // copied
-    tp_i64_map_free(&m);
-    return owned_error_int(err);
-}
-
-// MockAdminClient_update_beginning_offsets(h, [(topic, partition, offset)]) -> error
-static PyObject* py_MockAdminClient_update_beginning_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_beginning_offsets_err);
-}
-
-// MockAdminClient_update_end_offsets(h, [(topic, partition, offset)]) -> error
-static PyObject* py_MockAdminClient_update_end_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_end_offsets_err);
-}
-
-// MockAdminClient_update_consumer_group_offsets(h, [(topic, partition, offset)]) -> error
-static PyObject* py_MockAdminClient_update_consumer_group_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_consumer_group_offsets_err);
-}
-
-// Java's `MockAdminClient.Builder` `featureLevels`, `minSupportedFeatureLevels`
-// and `maxSupportedFeatureLevels` from [(feature, level, min, max)]: three
-// borrowed char* -> int16_t* maps the builder copies. -1 with a Python
-// exception set for a malformed spec; otherwise 0, with an FFI failure in
-// *err_out.
-static int mock_builder_set_feature_levels(kafka_admin_MockAdminClient_Builder_t* builder, PyObject* spec,
-                                           kafka_common_Error_t** err_out) {
-    kafka_common_Error_t *ffi_err = NULL;
-    PyObject* fast = fast_rows(spec, "feature levels must be a sequence");
-    if (fast == NULL) return -1;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
-    int16_t* vals = n > 0 ? PyMem_Calloc((size_t)n * 3, sizeof(int16_t)) : NULL;
-    if (n > 0 && vals == NULL) { Py_DECREF(fast); PyErr_NoMemory(); return -1; }
-    kafka_Map_t* levels = NULL;
-    kafka_Map_t* mins = NULL;
-    kafka_Map_t* maxs = NULL;
-    kafka_common_Error_t* err = (levels = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
-    FFI_STEP(err, (mins = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err)));
-    FFI_STEP(err, (maxs = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err)));
-    for (Py_ssize_t i = 0; i < n && err == NULL; i++) {
-        const char* feature; int level, lo, hi;
-        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "siii", &feature, &level, &lo, &hi)) {
-            if (levels) ffi_unraisable((kafka_Map_destroy_err(levels, &ffi_err), ffi_take(&ffi_err)));
-            if (mins) ffi_unraisable((kafka_Map_destroy_err(mins, &ffi_err), ffi_take(&ffi_err)));
-            if (maxs) ffi_unraisable((kafka_Map_destroy_err(maxs, &ffi_err), ffi_take(&ffi_err)));
-            PyMem_Free(vals); Py_DECREF(fast); return -1;
-        }
-        vals[3 * i] = (int16_t)level; vals[3 * i + 1] = (int16_t)lo; vals[3 * i + 2] = (int16_t)hi;
-        FFI_STEP(err, (kafka_Map_put_err(levels, (void*)feature, &vals[3 * i], &ffi_err), ffi_take(&ffi_err)));
-        FFI_STEP(err, (kafka_Map_put_err(mins, (void*)feature, &vals[3 * i + 1], &ffi_err), ffi_take(&ffi_err)));
-        FFI_STEP(err, (kafka_Map_put_err(maxs, (void*)feature, &vals[3 * i + 2], &ffi_err), ffi_take(&ffi_err)));
-    }
-    // copied
-    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_feature_levels_err(builder, levels, &ffi_err), ffi_take(&ffi_err)));
-    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels_err(builder, mins, &ffi_err), ffi_take(&ffi_err)));
-    FFI_STEP(err, (kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels_err(builder, maxs, &ffi_err), ffi_take(&ffi_err)));
-    if (levels) ffi_unraisable((kafka_Map_destroy_err(levels, &ffi_err), ffi_take(&ffi_err)));
-    if (mins) ffi_unraisable((kafka_Map_destroy_err(mins, &ffi_err), ffi_take(&ffi_err)));
-    if (maxs) ffi_unraisable((kafka_Map_destroy_err(maxs, &ffi_err), ffi_take(&ffi_err)));
-    PyMem_Free(vals);
-    Py_DECREF(fast);
-    *err_out = err;
-    return 0;
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_force_terminate_transaction_with_options_err(
+        a->admin, tid, (kafka_admin_TerminateTransactionOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+    return admin_rpc_return(&TerminateTransactionOptions_desc, o, err, r, &TerminateTransactionResult_desc);
 }
 
 static PyMethodDef ProducerNativeMethods[] = {
@@ -11033,6 +10880,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "(list[(topic, partition)] | None, err | None)"},
     {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS, "Metrics snapshot as list[dict] with name/group/description/tags/value"},
     {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
+    {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "client.id from the consumer's ConsumerConfig, or None for a mock"},
     {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "(lag int | None, err | None)"},
     {"Consumer_poll", py_Consumer_poll, METH_VARARGS, "poll(h, timeout_ms) -> (ConsumerRecords | None, err | None)"},
     {"Consumer_poll_cb", py_Consumer_poll_cb, METH_VARARGS, "poll twin; cb(ConsumerRecords | None, err | None)"},
@@ -11141,58 +10989,51 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin__set_callbacks_notify", py_Admin__set_callbacks_notify, METH_VARARGS, "Admin__set_callbacks_notify(handle, cb | None): cb() fires when the callback queue goes non-empty (schedule only)"},
     {"Admin__config_future", py_Admin__config_future, METH_VARARGS, "Admin__config_future(result, accessor, [(name, value | None)], post) -> KafkaFuture: tests only, a completed Config future through the result table's converter"},
     {"Admin__execute_callbacks", py_Admin__execute_callbacks, METH_VARARGS, "Admin__execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
-    {"Admin_resolve", py_Admin_resolve, METH_VARARGS, "Admin_resolve(job) -> payload: block on every future (GIL released), convert, free the job"},
-    {"Admin_resolve_cb", py_Admin_resolve_cb, METH_VARARGS, "Admin_resolve_cb(job, cb): cb(payload, None) / cb(None, exc) once every future delivered"},
-    {"Admin_job_discard", py_Admin_job_discard, METH_VARARGS, "Admin_job_discard(job): free an unresolved job"},
-    {"Admin_create_topics", py_Admin_create_topics, METH_VARARGS, "Admin_create_topics(handle, ...) -> (job, error)"},
-    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, ...) -> (job, error)"},
-    {"Admin_list_topics", py_Admin_list_topics, METH_VARARGS, "Admin_list_topics(handle, ...) -> (job, error)"},
-    {"Admin_describe_topics", py_Admin_describe_topics, METH_VARARGS, "Admin_describe_topics(handle, ...) -> (job, error)"},
-    {"Admin_create_partitions", py_Admin_create_partitions, METH_VARARGS, "Admin_create_partitions(handle, ...) -> (job, error)"},
-    {"Admin_delete_records", py_Admin_delete_records, METH_VARARGS, "Admin_delete_records(handle, ...) -> (job, error)"},
-    {"Admin_describe_cluster", py_Admin_describe_cluster, METH_VARARGS, "Admin_describe_cluster(handle, ...) -> (job, error)"},
-    {"Admin_describe_configs", py_Admin_describe_configs, METH_VARARGS, "Admin_describe_configs(handle, ...) -> (job, error)"},
-    {"Admin_incremental_alter_configs", py_Admin_incremental_alter_configs, METH_VARARGS, "Admin_incremental_alter_configs(handle, ...) -> (job, error)"},
-    {"Admin_list_config_resources", py_Admin_list_config_resources, METH_VARARGS, "Admin_list_config_resources(handle, ...) -> (job, error)"},
-    {"Admin_describe_log_dirs", py_Admin_describe_log_dirs, METH_VARARGS, "Admin_describe_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_alter_replica_log_dirs", py_Admin_alter_replica_log_dirs, METH_VARARGS, "Admin_alter_replica_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_describe_replica_log_dirs", py_Admin_describe_replica_log_dirs, METH_VARARGS, "Admin_describe_replica_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_elect_leaders", py_Admin_elect_leaders, METH_VARARGS, "Admin_elect_leaders(handle, ...) -> (job, error)"},
-    {"Admin_alter_partition_reassignments", py_Admin_alter_partition_reassignments, METH_VARARGS, "Admin_alter_partition_reassignments(handle, ...) -> (job, error)"},
-    {"Admin_list_partition_reassignments", py_Admin_list_partition_reassignments, METH_VARARGS, "Admin_list_partition_reassignments(handle, ...) -> (job, error)"},
-    {"Admin_list_offsets", py_Admin_list_offsets, METH_VARARGS, "Admin_list_offsets(handle, ...) -> (job, error)"},
-    {"Admin_list_groups", py_Admin_list_groups, METH_VARARGS, "Admin_list_groups(handle, ...) -> (job, error)"},
-    {"Admin_describe_consumer_groups", py_Admin_describe_consumer_groups, METH_VARARGS, "Admin_describe_consumer_groups(handle, ...) -> (job, error)"},
-    {"Admin_describe_classic_groups", py_Admin_describe_classic_groups, METH_VARARGS, "Admin_describe_classic_groups(handle, ...) -> (job, error)"},
-    {"Admin_list_consumer_group_offsets", py_Admin_list_consumer_group_offsets, METH_VARARGS, "Admin_list_consumer_group_offsets(handle, ...) -> (job, error)"},
-    {"Admin_alter_consumer_group_offsets", py_Admin_alter_consumer_group_offsets, METH_VARARGS, "Admin_alter_consumer_group_offsets(handle, ...) -> (job, error)"},
-    {"Admin_delete_consumer_group_offsets", py_Admin_delete_consumer_group_offsets, METH_VARARGS, "Admin_delete_consumer_group_offsets(handle, ...) -> (job, error)"},
-    {"Admin_delete_consumer_groups", py_Admin_delete_consumer_groups, METH_VARARGS, "Admin_delete_consumer_groups(handle, ...) -> (job, error)"},
-    {"Admin_remove_members_from_consumer_group", py_Admin_remove_members_from_consumer_group, METH_VARARGS, "Admin_remove_members_from_consumer_group(handle, ...) -> (job, error)"},
-    {"Admin_create_acls", py_Admin_create_acls, METH_VARARGS, "Admin_create_acls(handle, ...) -> (job, error)"},
-    {"Admin_describe_acls", py_Admin_describe_acls, METH_VARARGS, "Admin_describe_acls(handle, ...) -> (job, error)"},
-    {"Admin_delete_acls", py_Admin_delete_acls, METH_VARARGS, "Admin_delete_acls(handle, ...) -> (job, error)"},
-    {"Admin_describe_client_quotas", py_Admin_describe_client_quotas, METH_VARARGS, "Admin_describe_client_quotas(handle, ...) -> (job, error)"},
-    {"Admin_alter_client_quotas", py_Admin_alter_client_quotas, METH_VARARGS, "Admin_alter_client_quotas(handle, ...) -> (job, error)"},
-    {"Admin_describe_user_scram_credentials", py_Admin_describe_user_scram_credentials, METH_VARARGS, "Admin_describe_user_scram_credentials(handle, ...) -> (job, error)"},
-    {"Admin_alter_user_scram_credentials", py_Admin_alter_user_scram_credentials, METH_VARARGS, "Admin_alter_user_scram_credentials(handle, ...) -> (job, error)"},
-    {"Admin_create_delegation_token", py_Admin_create_delegation_token, METH_VARARGS, "Admin_create_delegation_token(handle, ...) -> (job, error)"},
-    {"Admin_renew_delegation_token", py_Admin_renew_delegation_token, METH_VARARGS, "Admin_renew_delegation_token(handle, ...) -> (job, error)"},
-    {"Admin_expire_delegation_token", py_Admin_expire_delegation_token, METH_VARARGS, "Admin_expire_delegation_token(handle, ...) -> (job, error)"},
-    {"Admin_describe_delegation_token", py_Admin_describe_delegation_token, METH_VARARGS, "Admin_describe_delegation_token(handle, ...) -> (job, error)"},
-    {"Admin_describe_features", py_Admin_describe_features, METH_VARARGS, "Admin_describe_features(handle, ...) -> (job, error)"},
-    {"Admin_update_features", py_Admin_update_features, METH_VARARGS, "Admin_update_features(handle, ...) -> (job, error)"},
-    {"Admin_describe_producers", py_Admin_describe_producers, METH_VARARGS, "Admin_describe_producers(handle, ...) -> (job, error)"},
-    {"Admin_describe_transactions", py_Admin_describe_transactions, METH_VARARGS, "Admin_describe_transactions(handle, ...) -> (job, error)"},
-    {"Admin_fence_producers", py_Admin_fence_producers, METH_VARARGS, "Admin_fence_producers(handle, ...) -> (job, error)"},
-    {"Admin_list_transactions", py_Admin_list_transactions, METH_VARARGS, "Admin_list_transactions(handle, ...) -> (job, error)"},
-    {"Admin_abort_transaction", py_Admin_abort_transaction, METH_VARARGS, "Admin_abort_transaction(handle, ...) -> (job, error)"},
-    {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, ...) -> (job, error)"},
-    {"Admin_force_terminate_transaction", py_Admin_force_terminate_transaction, METH_VARARGS, "Admin_force_terminate_transaction(handle, ...) -> (job, error)"},
-    {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
-    {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
-    {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
-    {"MockAdminClient_update_consumer_group_offsets", py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
+    {"Admin_create_topics", py_Admin_create_topics, METH_VARARGS, "Admin_create_topics(handle, topics, options) -> AdminResult"},
+    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, names_or_ids, by_ids, options) -> AdminResult"},
+    {"Admin_list_topics", py_Admin_list_topics, METH_VARARGS, "Admin_list_topics(handle, options) -> AdminResult"},
+    {"Admin_describe_topics", py_Admin_describe_topics, METH_VARARGS, "Admin_describe_topics(handle, form, names_or_ids, options) -> AdminResult"},
+    {"Admin_create_partitions", py_Admin_create_partitions, METH_VARARGS, "Admin_create_partitions(handle, rows, options) -> AdminResult"},
+    {"Admin_delete_records", py_Admin_delete_records, METH_VARARGS, "Admin_delete_records(handle, rows, options) -> AdminResult"},
+    {"Admin_describe_cluster", py_Admin_describe_cluster, METH_VARARGS, "Admin_describe_cluster(handle, options) -> AdminResult"},
+    {"Admin_describe_configs", py_Admin_describe_configs, METH_VARARGS, "Admin_describe_configs(handle, resources, options) -> AdminResult"},
+    {"Admin_incremental_alter_configs", py_Admin_incremental_alter_configs, METH_VARARGS, "Admin_incremental_alter_configs(handle, rows, options) -> AdminResult"},
+    {"Admin_list_config_resources", py_Admin_list_config_resources, METH_VARARGS, "Admin_list_config_resources(handle, type_ids, options) -> AdminResult"},
+    {"Admin_describe_log_dirs", py_Admin_describe_log_dirs, METH_VARARGS, "Admin_describe_log_dirs(handle, broker_ids, options) -> AdminResult"},
+    {"Admin_alter_replica_log_dirs", py_Admin_alter_replica_log_dirs, METH_VARARGS, "Admin_alter_replica_log_dirs(handle, rows, options) -> AdminResult"},
+    {"Admin_describe_replica_log_dirs", py_Admin_describe_replica_log_dirs, METH_VARARGS, "Admin_describe_replica_log_dirs(handle, replicas, options) -> AdminResult"},
+    {"Admin_elect_leaders", py_Admin_elect_leaders, METH_VARARGS, "Admin_elect_leaders(handle, election_type, partitions | None, options) -> AdminResult"},
+    {"Admin_alter_partition_reassignments", py_Admin_alter_partition_reassignments, METH_VARARGS, "Admin_alter_partition_reassignments(handle, rows, options) -> AdminResult"},
+    {"Admin_list_partition_reassignments", py_Admin_list_partition_reassignments, METH_VARARGS, "Admin_list_partition_reassignments(handle, partitions | None, options) -> AdminResult"},
+    {"Admin_list_offsets", py_Admin_list_offsets, METH_VARARGS, "Admin_list_offsets(handle, rows, isolation_level, options) -> AdminResult"},
+    {"Admin_list_groups", py_Admin_list_groups, METH_VARARGS, "Admin_list_groups(handle, options) -> AdminResult"},
+    {"Admin_describe_consumer_groups", py_Admin_describe_consumer_groups, METH_VARARGS, "Admin_describe_consumer_groups(handle, group_ids, options) -> AdminResult"},
+    {"Admin_describe_classic_groups", py_Admin_describe_classic_groups, METH_VARARGS, "Admin_describe_classic_groups(handle, group_ids, options) -> AdminResult"},
+    {"Admin_list_consumer_group_offsets", py_Admin_list_consumer_group_offsets, METH_VARARGS, "Admin_list_consumer_group_offsets(handle, group_id, group_specs, options) -> AdminResult"},
+    {"Admin_alter_consumer_group_offsets", py_Admin_alter_consumer_group_offsets, METH_VARARGS, "Admin_alter_consumer_group_offsets(handle, group_id, offsets, options) -> AdminResult"},
+    {"Admin_delete_consumer_group_offsets", py_Admin_delete_consumer_group_offsets, METH_VARARGS, "Admin_delete_consumer_group_offsets(handle, group_id, partitions, options) -> AdminResult"},
+    {"Admin_delete_consumer_groups", py_Admin_delete_consumer_groups, METH_VARARGS, "Admin_delete_consumer_groups(handle, group_ids, options) -> AdminResult"},
+    {"Admin_remove_members_from_consumer_group", py_Admin_remove_members_from_consumer_group, METH_VARARGS, "Admin_remove_members_from_consumer_group(handle, group_id, members, options) -> AdminResult"},
+    {"Admin_create_acls", py_Admin_create_acls, METH_VARARGS, "Admin_create_acls(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_acls", py_Admin_describe_acls, METH_VARARGS, "Admin_describe_acls(handle, ..., options) -> AdminResult"},
+    {"Admin_delete_acls", py_Admin_delete_acls, METH_VARARGS, "Admin_delete_acls(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_client_quotas", py_Admin_describe_client_quotas, METH_VARARGS, "Admin_describe_client_quotas(handle, ..., options) -> AdminResult"},
+    {"Admin_alter_client_quotas", py_Admin_alter_client_quotas, METH_VARARGS, "Admin_alter_client_quotas(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_user_scram_credentials", py_Admin_describe_user_scram_credentials, METH_VARARGS, "Admin_describe_user_scram_credentials(handle, ..., options) -> AdminResult"},
+    {"Admin_alter_user_scram_credentials", py_Admin_alter_user_scram_credentials, METH_VARARGS, "Admin_alter_user_scram_credentials(handle, ..., options) -> AdminResult"},
+    {"Admin_create_delegation_token", py_Admin_create_delegation_token, METH_VARARGS, "Admin_create_delegation_token(handle, ..., options) -> AdminResult"},
+    {"Admin_renew_delegation_token", py_Admin_renew_delegation_token, METH_VARARGS, "Admin_renew_delegation_token(handle, ..., options) -> AdminResult"},
+    {"Admin_expire_delegation_token", py_Admin_expire_delegation_token, METH_VARARGS, "Admin_expire_delegation_token(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_delegation_token", py_Admin_describe_delegation_token, METH_VARARGS, "Admin_describe_delegation_token(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_features", py_Admin_describe_features, METH_VARARGS, "Admin_describe_features(handle, ..., options) -> AdminResult"},
+    {"Admin_update_features", py_Admin_update_features, METH_VARARGS, "Admin_update_features(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_producers", py_Admin_describe_producers, METH_VARARGS, "Admin_describe_producers(handle, ..., options) -> AdminResult"},
+    {"Admin_describe_transactions", py_Admin_describe_transactions, METH_VARARGS, "Admin_describe_transactions(handle, ..., options) -> AdminResult"},
+    {"Admin_fence_producers", py_Admin_fence_producers, METH_VARARGS, "Admin_fence_producers(handle, ..., options) -> AdminResult"},
+    {"Admin_list_transactions", py_Admin_list_transactions, METH_VARARGS, "Admin_list_transactions(handle, ..., options) -> AdminResult"},
+    {"Admin_abort_transaction", py_Admin_abort_transaction, METH_VARARGS, "Admin_abort_transaction(handle, ..., options) -> AdminResult"},
+    {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, controller_id, options) -> AdminResult"},
+    {"Admin_force_terminate_transaction", py_Admin_force_terminate_transaction, METH_VARARGS, "Admin_force_terminate_transaction(handle, ..., options) -> AdminResult"},
     {NULL, NULL, 0, NULL}
 };
 

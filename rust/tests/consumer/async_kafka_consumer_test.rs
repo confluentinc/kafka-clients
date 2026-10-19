@@ -25,7 +25,7 @@
 //!    `AsyncKafkaConsumer::new(config, kd, vd)`.
 //! 2. The full RequestManagers + bg-task scaffold builds and spawns
 //!    without panic.
-//! 3. `Consumer` dispatch works for sync accessors (`client_id`), both on
+//! 3. `Consumer` dispatch works for sync accessors (`assignment`), both on
 //!    the concrete `KafkaConsumer` and boxed as
 //!    `Box<dyn DynConsumer<K, V>>`.
 //! 4. `close().await` through `Box<dyn DynConsumer<K, V>>` cleanly tears
@@ -70,8 +70,9 @@ fn make_smoke_config() -> ConsumerConfig {
 
 /// Smoke: the production ctor succeeds against a refuses-connection
 /// broker (metadata.bootstrap is non-connecting), trait dispatch works
-/// for a sync accessor, and `close().await` cleanly tears down the bg
-/// task. Covers commit (4/N) of Phase 12.
+/// for a sync accessor on the concrete type and through `DynConsumer`, and
+/// `close().await` through `DynConsumer` cleanly tears down the bg task.
+/// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
     let consumer = KafkaConsumer::<String, String>::new(
@@ -81,17 +82,16 @@ async fn new_consumer_builds_and_closes_against_refused_broker() {
     )
     .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
-    // Trait dispatch through `Box<dyn Consumer<K, V>>`: a fresh consumer has
-    // no assignment.
+    // Static trait dispatch on the concrete type: a fresh consumer has no
+    // assignment.
     assert!(consumer.assignment().is_empty(), "a new consumer has no assignment");
 
     // Dynamic dispatch through `Box<dyn DynConsumer<K, V>>`: the same
     // production consumer behind the type-erased view.
     let mut consumer: Box<dyn confluent_kafka::consumer::DynConsumer<String, String>> = Box::new(consumer);
-    assert_eq!(
-        consumer.client_id(),
-        "smoke-test-consumer",
-        "client_id() through DynConsumer should match the concrete call",
+    assert!(
+        consumer.assignment().is_empty(),
+        "assignment() through DynConsumer should match the concrete call",
     );
 
     // Bg-task graceful shutdown: signal close + drop the join handle.
