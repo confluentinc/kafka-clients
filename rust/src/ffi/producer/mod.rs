@@ -1592,8 +1592,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// callback vector when the record is acknowledged or fails, exactly once,
 /// with a `callback_id` it reports through
 /// [`kafka_producer_Producer__set_callback_result`] once it finished. The
-/// callback's `self` must stay alive until then; the registration handle
-/// itself is read during the call.
+/// callback's `self` must stay alive until then. The registration handle
+/// `callback` is consumed by the call, whatever its outcome (an error in
+/// `*out_err` included): the caller must not use it or pass it to
+/// `kafka_producer_Callback_destroy` afterwards.
 ///
 /// With a callback, the delivered future completes with the record's
 /// outcome only once the callback reported, as Java completes the future
@@ -1666,6 +1668,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// callback fires, once, when the queued send resolves the record. With a
 /// callback, the future `cb` receives completes once the callback reported,
 /// as for [`kafka_producer_Producer_send_with_callback`].
+///
+/// As there, the registration handle `callback` is consumed by the call,
+/// whatever its outcome (an error delivered to `cb` included): the caller must
+/// not use it or pass it to `kafka_producer_Callback_destroy` afterwards.
 ///
 /// # Safety
 ///
