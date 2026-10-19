@@ -68,11 +68,11 @@ import socket
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._async import (
     LoopBinding,
     OffLoopPump,
@@ -84,13 +84,14 @@ from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _PENDING, AsyncKafkaFuture, _FutureState
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
     FLUSH_IN_CALLBACK_MESSAGE,
     LONG_MAX_VALUE,
     _ProducerState,
     check_group_metadata,
+    check_offsets,
+    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -726,6 +727,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.send_offsets_to_transaction`."""
         self._check_not_closed()
         check_group_metadata(group_metadata)
+        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         await self._run_async(_lib.Producer_send_offsets_to_transaction_cb, spec, native)
@@ -749,8 +751,13 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         await self._run_async(_lib.Producer_abort_transaction_cb, reports="EndTxn(false)")
 
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+                   ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = UNSET
+                   callback: _AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for the record to reach
         the producer, without blocking the loop, and raises what
@@ -785,9 +792,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         after its event loop has closed is dropped with a warning on the
         ``confluent_kafka.producer`` logger: its callback does not run (or an
         awaited one does not finish) and its future does not complete."""
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
+        check_record(record)
         # Before the serializers, so a call from another loop has no effect.
         # The pump runs on every _PUMP_EVERY-th send taken at once in a row
         # and on the first after a suspension; the others only count.
@@ -915,7 +923,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.partitions_for`."""
         self._check_not_closed()
         if topic is None:
-            raise NullPointerError(message="topic cannot be null")
+            raise TypeError("topic must not be None")
         partitions, error = await self._await_payload(_lib.Producer_partitions_for_cb, topic)
         raise_if_error(error)
         return [to_partition_info(t) for t in partitions]
@@ -926,7 +934,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
-    async def close(self, *, timeout: Duration | None = None) -> None:
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, timeout: Duration) -> None: ...
+    async def close(self, *, timeout: Duration = MISSING) -> None:
         """See :meth:`Producer.close`: it waits for the callbacks of the
         records sent before it, ``async def`` ones included. From an ``async
         def`` callback it does not wait and is equivalent to

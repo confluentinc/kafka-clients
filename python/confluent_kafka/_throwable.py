@@ -28,9 +28,12 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Collection, Iterable, Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from ._args import UNSET
+from ._args import MISSING
+
+if TYPE_CHECKING:
+    from .common.headers import Headers
 
 __all__ = [
     "cause_message",
@@ -94,8 +97,8 @@ def cause_message(cause: BaseException | None) -> str | None:
 
 
 def kwargs(**given: Any) -> dict[str, Any]:
-    """The constructor arguments to rebuild from, ``UNSET`` ones left out."""
-    return {k: v for k, v in given.items() if v is not UNSET}
+    """The constructor arguments to rebuild from, ``MISSING`` ones left out."""
+    return {k: v for k, v in given.items() if v is not MISSING}
 
 
 def rebuild(cls: type[BaseException], arguments: dict[str, Any]) -> BaseException:
@@ -166,9 +169,14 @@ _I = TypeVar("_I", bound="Iterable[Any] | None")
 
 def materialize(value: _I) -> _I:
     """An ``Iterable`` argument read once, as Java's ``Set.copyOf`` does: a
-    collection (or ``None``, ``UNSET``) as it is, any other iterable (a
+    collection (or ``None``, ``MISSING``) as it is, any other iterable (a
     generator) as a tuple of its elements, in order."""
-    if value is None or value is UNSET or isinstance(value, Collection):
+    if value is None or value is MISSING or isinstance(value, Collection):
+        return value
+    from .common.headers import Headers
+
+    if isinstance(value, Headers):
+        # Kept as it is, as Java keeps a `Headers` argument.
         return value
     return cast(_I, tuple(value))
 
@@ -188,9 +196,10 @@ def view(value: bytes | bytearray | memoryview | None) -> memoryview | None:
     return None if value is None else memoryview(value)
 
 
-def headers(value: Iterable[tuple[str, bytes | bytearray | memoryview | None]]
-            ) -> tuple[tuple[str, memoryview | None], ...]:
-    """A ``Headers`` field: the read form, header values as ``memoryview``."""
-    from .common.headers import _read_headers
+def headers(value: Iterable[Any]) -> Headers:
+    """A ``Headers`` field: a ``Headers`` argument as it is, as Java keeps the
+    object it is given; any other iterable of ``Header`` s or ``(key, value)``
+    pairs as a new ``Headers`` (header values viewed, never copied)."""
+    from .common.headers import _kept
 
-    return _read_headers(value)
+    return _kept(value)

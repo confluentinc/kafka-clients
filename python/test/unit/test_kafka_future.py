@@ -332,23 +332,23 @@ def test_complete_futures_via_cancellation(kind: Kind) -> None:
 
 def test_to_string(kind: Kind) -> None:
     success_impl, success = new_future(kind)
-    assert str(success) == "KafkaFuture{value=null,exception=null,done=false}"
+    assert str(success) == "KafkaFuture{value=None,exception=None,done=False}"
     success_impl.complete(12)
-    assert str(success) == "KafkaFuture{value=12,exception=null,done=true}"
+    assert str(success) == "KafkaFuture{value=12,exception=None,done=True}"
 
     failure_impl, failure = new_future(kind)
     failure_impl.complete_with_error(RuntimeError("foo"))
-    assert str(failure) == "KafkaFuture{value=null,exception=builtins.RuntimeError: foo,done=true}"
+    assert str(failure) == "KafkaFuture{value=None,exception=builtins.RuntimeError: foo,done=True}"
 
     tricky_impl, tricky1 = new_future(kind)
     tricky_impl.complete_with_error(CompletionError(kind.cancelled()))
     name = f"{kind.cancelled.__module__}.{kind.cancelled.__qualname__}"
     assert str(tricky1) == (
-        f"KafkaFuture{{value=null,exception={__name__}.CompletionError: {name},done=true}}")
+        f"KafkaFuture{{value=None,exception={__name__}.CompletionError: {name},done=True}}")
 
     _, cancelled = new_future(kind)
     cancelled.cancel(may_interrupt_if_running=True)
-    assert str(cancelled) == f"KafkaFuture{{value=null,exception={name},done=true}}"
+    assert str(cancelled) == f"KafkaFuture{{value=None,exception={name},done=True}}"
 
 
 def test_completing_futures(kind: Kind) -> None:
@@ -953,9 +953,9 @@ def test_a_failed_native_future_never_waited_on_reports_its_failure(kind: Kind) 
     assert future.is_done()
     assert future.is_completed_exceptionally()
     assert not future.is_cancelled()
-    assert str(future) == "KafkaFuture{value=null,exception=builtins.RuntimeError: boom,done=true}"
+    assert str(future) == "KafkaFuture{value=None,exception=builtins.RuntimeError: boom,done=True}"
     assert str(native_future(kind, _lib.KafkaFuture.completed_future(7))) == (
-        "KafkaFuture{value=7,exception=null,done=true}")
+        "KafkaFuture{value=7,exception=None,done=True}")
 
 
 def test_get_on_a_done_but_undelivered_native_future_answers_at_once(kind: Kind) -> None:

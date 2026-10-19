@@ -91,6 +91,18 @@ def _class_name(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
+def _lacks_no_arg_constructor(cls: type) -> bool:
+    """Whether ``cls()`` cannot even be bound: Java's ``NoSuchMethodException`` case.
+    A class whose signature cannot be read is taken as one that needs arguments."""
+    try:
+        inspect.signature(cls).bind()
+    except TypeError:
+        return True
+    except ValueError:
+        return True
+    return False
+
+
 def _construct_from_class(key: str, cls: type, configs: dict[str, object],
                           is_key: bool) -> Callable[..., object]:
     """No-arg construct ``cls`` and configure it, as Java's
@@ -98,9 +110,17 @@ def _construct_from_class(key: str, cls: type, configs: dict[str, object],
     try:
         instance = cls()
     except TypeError as exc:
-        raise KafkaError(
-            message="Could not find a public no-argument constructor for " + _class_name(cls)
-        ) from exc
+        # Java's Utils.newInstance: NoSuchMethodException is "Could not find a public
+        # no-argument constructor"; an exception thrown by the constructor itself is
+        # "Could not instantiate class". A TypeError tells the two apart by whether the
+        # class can be called with no argument at all.
+        if _lacks_no_arg_constructor(cls):
+            raise KafkaError(
+                message="Could not find a public no-argument constructor for " + _class_name(cls),
+                cause=exc) from exc
+        raise KafkaError(message="Could not instantiate class " + _class_name(cls), cause=exc) from exc
+    except Exception as exc:
+        raise KafkaError(message="Could not instantiate class " + _class_name(cls), cause=exc) from exc
     if not callable(instance):
         base = "Deserializer" if key.endswith("deserializer") else "Serializer"
         raise KafkaError(
@@ -117,6 +137,7 @@ def resolve_serde(
     *,
     is_key: bool,
     default: Callable[..., object],
+    construct_failure: Callable[[Exception], BaseException] | None = None,
 ) -> Callable[..., object]:
     """Pick a serde from the kwarg route, the config route, or the default.
 
@@ -125,6 +146,11 @@ def resolve_serde(
     * ``config[key]`` — a dotted-path string or class object is resolved,
       constructed, and ``configure``-called; an instance in config is rejected.
     * neither → ``default``.
+
+    ``construct_failure`` wraps an error of the construction or ``configure`` step
+    (the client's ``KafkaException("Failed to construct kafka producer", t)``: Java
+    builds the serdes inside its constructor's try); the resolution of the class
+    name is Java's ``ConfigDef`` parsing, before that try, and stays unwrapped.
     """
     if kwarg is not None:
         if inspect.isclass(kwarg):
@@ -142,9 +168,16 @@ def resolve_serde(
     if config_value is None:
         return default
     if isinstance(config_value, str):
-        return _construct_from_class(key, _resolve_class(key, config_value), config, is_key)
-    if inspect.isclass(config_value):
-        return _construct_from_class(key, config_value, config, is_key)
-    # Java's ConfigDef takes a name or a Class for a CLASS key, never an instance.
-    raise ConfigError(name=key, value=config_value,
-                      message="Expected a Class instance or class name.")
+        cls = _resolve_class(key, config_value)
+    elif inspect.isclass(config_value):
+        cls = config_value
+    else:
+        # Java's ConfigDef takes a name or a Class for a CLASS key, never an instance.
+        raise ConfigError(name=key, value=config_value,
+                          message="Expected a Class instance or class name.")
+    try:
+        return _construct_from_class(key, cls, config, is_key)
+    except Exception as exc:
+        if construct_failure is None:
+            raise
+        raise construct_failure(exc) from exc

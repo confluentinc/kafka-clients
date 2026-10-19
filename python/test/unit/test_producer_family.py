@@ -50,7 +50,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.common import (
     AsyncKafkaFuture,
     KafkaError,
@@ -213,10 +213,10 @@ def test_transaction_methods_take_no_timeout() -> None:
 
 def test_send_callback_defaults_to_unset() -> None:
     # Java's send(record) passes null to send(record, callback) (CLAUDE.md,
-    # Signatures, "'Given' means ..."): callback defaults to UNSET. Both sets
+    # Signatures, "'Given' means ..."): callback defaults to MISSING. Both sets
     # are Java overloads, so there is no check, and send fills an omitted one.
     for cls in (Producer, AsyncProducer, MockProducer, AsyncMockProducer):
-        assert inspect.signature(cls.send).parameters["callback"].default is UNSET, cls
+        assert inspect.signature(cls.send).parameters["callback"].default is MISSING, cls
     p = MockProducer(auto_complete=True, partitioner=None)
     assert p.send(record=RECORD).get().offset() == 0
     assert p.send(record=RECORD, callback=None).get().offset() == 1
@@ -518,8 +518,9 @@ def test_the_send_path_copies_no_topic_key_value_or_header_bytes() -> None:
     assert native.topic is record.topic()
     assert topic_address == _utf8_address(record.topic())
     assert (key_address, value_address) == (_bytes_address(key), _bytes_address(value))
-    expected = [(_utf8_address(k), 0 if v is None else _bytes_address(original))
-                for (k, v), original in zip(record.headers(), [*header_values, None])]
+    expected = [(_utf8_address(k), 0 if original is None else _bytes_address(original))
+                for k, original in zip([h.key() for h in record.headers()],
+                                       [*header_values, None])]
     assert headers == expected
 
 
@@ -1807,7 +1808,7 @@ async def test_the_async_send_future_is_its_own_state_in_one_object(
         assert future._impl is future and future._lock is p._fire_lock  # noqa: SLF001
         # No self-reference and no __dict__: freed by its reference count.
         assert future not in gc.get_referents(future) and not hasattr(future, "__dict__")
-        assert str(future) == "KafkaFuture{value=null,exception=null,done=false}"
+        assert str(future) == "KafkaFuture{value=None,exception=None,done=False}"
         assert not future.is_done() and future.get_now(value_if_absent=None) is None
         dependant = future.then_apply(function=RecordMetadata.offset)
         assert isinstance(dependant, AsyncKafkaFuture) and not isinstance(dependant, AsyncRecordFuture)
@@ -2612,7 +2613,7 @@ def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
     with KafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False}) as p:
         with pytest.raises(IllegalArgumentError) as err:
             p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
-        assert str(err.value) == "Consumer group metadata could not be null"
+        assert str(err.value) == "Consumer group metadata could not be None"
         with pytest.raises(IllegalStateError) as err2:
             p.send_offsets_to_transaction(offsets={}, group_metadata=_consumer_group_metadata())
         assert str(err2.value) == NO_TXN

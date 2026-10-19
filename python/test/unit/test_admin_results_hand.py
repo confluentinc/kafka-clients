@@ -48,6 +48,7 @@ from confluent_kafka.admin import (
     UserScramCredentialsDescription,
 )
 from confluent_kafka import ExecutionError
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.admin._internals import (
     _CoordinatorKey,
@@ -90,7 +91,6 @@ from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture, _
 from confluent_kafka.consumer import OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 KINDS = [Sync, Async]
 
@@ -301,7 +301,7 @@ class TestInternals:
         assert hash(identity) == hash(_MemberIdentity(group_instance_id="instance-1"))
         assert identity != _MemberIdentity(group_instance_id="instance-2")
         assert str(identity) == (
-            "MemberIdentity(memberId='', groupInstanceId='instance-1', reason=null)")
+            "MemberIdentity(memberId='', groupInstanceId='instance-1', reason=None)")
 
     def test_response_data_defaults(self) -> None:
         data = _ResponseData()
@@ -397,11 +397,12 @@ class TestAlterUserScramCredentialsResult:
         assert list(result.values()) == ["a"]
 
     def test_require_non_null(self) -> None:
-        with pytest.raises(NullPointerError) as info:
+        with pytest.raises(TypeError) as info:
             AlterUserScramCredentialsResult(futures=None)  # type: ignore[call-overload]
-        assert str(info.value) == ""
-        with pytest.raises(NullPointerError):
+        assert str(info.value) == "futures must not be None"
+        with pytest.raises(TypeError) as none:
             AlterUserScramCredentialsResult._new(futures=None, kind=Sync)  # type: ignore[arg-type]
+        assert str(none.value) == "futures must not be None"
 
     async def test_async(self) -> None:
         result = AlterUserScramCredentialsResult(futures={"a": _done(Async, None)})
@@ -519,7 +520,7 @@ class TestDescribeReplicaLogDirsResult:
             self.Info._new("/a", 0, None, 0)  # type: ignore[call-overload]
 
     def test_replica_log_dir_info_str(self) -> None:
-        assert str(self.Info._new()) == "ReplicaLogDirInfo(currentReplicaLogDir=null)"
+        assert str(self.Info._new()) == "ReplicaLogDirInfo(currentReplicaLogDir=None)"
         assert str(self.Info._new(current_replica_log_dir="/a", current_replica_offset_lag=0,
                                   future_replica_log_dir=None, future_replica_offset_lag=0)
                    ) == "ReplicaLogDirInfo(currentReplicaLogDir=/a)"
@@ -573,7 +574,7 @@ class TestDescribeTopicsResult:
         assert str(info.value) == "topicIdFutures and nameFutures cannot both be specified."
         with pytest.raises(IllegalArgumentError) as info:
             DescribeTopicsResult._new(topic_id_futures=None, name_futures=None, kind=Sync)
-        assert str(info.value) == "topicIdFutures and nameFutures cannot both be null."
+        assert str(info.value) == "topicIdFutures and nameFutures cannot both be None."
 
     @pytest.mark.parametrize("kind", KINDS)
     def test_by_names_and_ids(self, kind: type[Sync] | type[Async]) -> None:
@@ -619,9 +620,10 @@ class TestDescribeUserScramCredentialsResult:
         return DescribeUserScramCredentialsResult._new(data_future=data_future, kind=kind)
 
     def test_require_non_null(self) -> None:
-        with pytest.raises(NullPointerError):
+        with pytest.raises(TypeError) as none:
             DescribeUserScramCredentialsResult._new(data_future=None,  # type: ignore[arg-type]
                                                     kind=Sync)
+        assert str(none.value) == "data_future must not be None"
 
     @pytest.mark.parametrize("kind", KINDS)
     def test_top_level_error(self, kind: type[Sync] | type[Async]) -> None:
@@ -790,7 +792,11 @@ class TestListConsumerGroupOffsetsResult:
             result = ListConsumerGroupOffsetsResult._new(
                 futures={_CoordinatorKey.by_group_id(group_id="g"): future}, kind=kind)
             assert result.partitions_to_offset_and_metadata() is future
-            assert result.partitions_to_offset_and_metadata(group_id=None) is future
+            # An explicit None is Java's partitionsToOffsetAndMetadata(null): not requested.
+            with pytest.raises(IllegalArgumentError) as info:
+                result.partitions_to_offset_and_metadata(group_id=None)
+            assert str(info.value) == "Offsets for consumer group 'None' were not requested."
+            assert result.partitions_to_offset_and_metadata(group_id=MISSING) is future
             assert result.partitions_to_offset_and_metadata(group_id="g") is future
             assert _value(result.all()) == {"g": offsets}
         _run_kind(kind, body)
@@ -940,7 +946,7 @@ class TestRemoveMembersFromConsumerGroupResult:
         all_error = _exception(missing_member_result.all())
         assert isinstance(all_error, IllegalArgumentError)
         assert str(all_error) == (
-            "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" "
+            "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=None)\" "
             "was not included in the removal response")
         assert _result(missing_member_result.member_result(member=self.instance_one)) is None
         assert isinstance(
@@ -987,7 +993,7 @@ class TestRemoveMembersFromConsumerGroupResult:
         assert type(all_error) is KafkaError
         assert str(all_error) == (
             "Encounter exception when trying to remove: "
-            "MemberIdentity(memberId='m-1', groupInstanceId=null, reason=null)")
+            "MemberIdentity(memberId='m-1', groupInstanceId=None, reason=None)")
         assert all_error.__cause__ is error
         with pytest.raises(IllegalArgumentError) as info:
             result.member_result(member=self.instance_one)

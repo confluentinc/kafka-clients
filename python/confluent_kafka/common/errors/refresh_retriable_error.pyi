@@ -14,9 +14,18 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.RefreshRetriableError).
 
+from typing import overload
+
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
 __all__ = ["RefreshRetriableError"]
 
 class RefreshRetriableError(RetriableError):
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...

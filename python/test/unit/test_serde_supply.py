@@ -156,6 +156,23 @@ class TestResolveSerde:
             "Could not find a public no-argument constructor for "
             f"{NeedsArgument.__module__}.{NeedsArgument.__qualname__}")
 
+    def test_config_class_whose_constructor_raises(self) -> None:
+        # Java's Utils.newInstance: KafkaException("Could not instantiate class <name>", e).
+        class Exploding:
+            def __init__(self) -> None:
+                raise RuntimeError("boom")
+
+        class ExplodingWithTypeError:
+            def __init__(self) -> None:
+                raise TypeError("inside the constructor")
+
+        for cls in (Exploding, ExplodingWithTypeError):
+            with pytest.raises(KafkaError) as exc:
+                resolve_serde(None, {KEY: cls}, KEY, is_key=False, default=bytes_deserializer())
+            assert str(exc.value) == f"Could not instantiate class {cls.__module__}.{cls.__qualname__}"
+            assert exc.value.__cause__ is not None
+            assert str(exc.value.__cause__) in ("boom", "inside the constructor")
+
     def test_config_class_that_is_not_a_serde(self) -> None:
         class NotCallable:
             pass

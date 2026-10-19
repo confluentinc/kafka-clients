@@ -1110,6 +1110,10 @@ message LogDirDescription {
   optional int64 total_bytes = 2;
   optional int64 usable_bytes = 3;
   repeated ReplicaInfoEntry replica_infos = 4;
+  // Java's `isCordoned()` (KIP-1066): whether the broker has cordoned this
+  // directory, so no new replica is placed on it. DescribeLogDirs v5 carries
+  // it; a broker answering an older version reports false, as Java does.
+  bool is_cordoned = 5;
 }
 
 // Java's per-broker value, `Map<String, LogDirDescription>` keyed by log dir

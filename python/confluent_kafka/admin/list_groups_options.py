@@ -19,8 +19,8 @@ field, named after the field, not the setter: ``group_states`` calls
 ``in_group_states``, ``types`` calls ``with_types``, ``protocol_types`` calls
 ``with_protocol_types`` (CLAUDE.md, Python Binding Conventions, Signatures). The
 setters store a changed value: ``null`` or empty becomes ``Set.of()``, anything else a
-``Set.copyOf`` copy. ``Set.copyOf``'s ``NullPointerException`` on a ``null`` element is an
-implicit dereference of the argument, not a check, so it is not translated.
+``Set.copyOf`` copy, whose ``NullPointerException`` on a ``null`` element is
+``TypeError("<argument> must not contain None")``.
 Java's sets are immutable, so the getters return a new ``set`` each call. The static
 factories are ``@staticmethod``\\ s.
 """
@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, TypeVar
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 if TYPE_CHECKING:
@@ -44,11 +44,15 @@ _E = TypeVar("_E")
 _CONSUMER_PROTOCOL_TYPE = "consumer"
 
 
-def _copy_of(values: Iterable[_E] | None) -> frozenset[_E]:
-    """``(values == null || values.isEmpty()) ? Set.of() : Set.copyOf(values)``."""
+def _copy_of(values: Iterable[_E] | None, name: str) -> frozenset[_E]:
+    """``(values == null || values.isEmpty()) ? Set.of() : Set.copyOf(values)``;
+    ``Set.copyOf`` throws on a null element (``TypeError`` naming ``name``)."""
     if values is None:
         return frozenset()
-    return frozenset(values)
+    copied = frozenset(values)
+    if None in copied:
+        raise TypeError(f"{name} must not contain None")
+    return copied
 
 
 class ListGroupsOptions(AbstractOptions):
@@ -59,21 +63,21 @@ class ListGroupsOptions(AbstractOptions):
 
     __slots__ = ("_group_states", "_types", "_protocol_types")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 group_states: Iterable[GroupState] | None = UNSET,
-                 types: Iterable[GroupType] | None = UNSET,
-                 protocol_types: Iterable[str] | None = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 group_states: Iterable[GroupState] | None = MISSING,
+                 types: Iterable[GroupType] | None = MISSING,
+                 protocol_types: Iterable[str] | None = MISSING) -> None:
         super().__init__()
         self._group_states: frozenset[GroupState] = frozenset()
         self._types: frozenset[GroupType] = frozenset()
         self._protocol_types: frozenset[str] = frozenset()
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if group_states is not UNSET:
+        if group_states is not MISSING:
             self.in_group_states(group_states=group_states)
-        if types is not UNSET:
+        if types is not MISSING:
             self.with_types(types=types)
-        if protocol_types is not UNSET:
+        if protocol_types is not MISSING:
             self.with_protocol_types(protocol_types=protocol_types)
 
     @staticmethod
@@ -111,21 +115,23 @@ class ListGroupsOptions(AbstractOptions):
         ``list_groups()``. Otherwise, all groups are returned.
 
         This operation is supported by brokers with version 2.6.0 or later."""
-        self._group_states = _copy_of(group_states)
+        self._group_states = _copy_of(group_states, "group_states")
         self._record("in_group_states", self._group_states)
         return self
 
     def with_protocol_types(self, *, protocol_types: Iterable[str] | None) -> ListGroupsOptions:
         """If protocol types is set, only groups of these protocol types will be
         returned by ``list_groups()``. Otherwise, all groups are returned."""
-        self._protocol_types = _copy_of(protocol_types)
+        if protocol_types is not None:
+            reject_str("protocol_types", protocol_types)
+        self._protocol_types = _copy_of(protocol_types, "protocol_types")
         self._record("with_protocol_types", self._protocol_types)
         return self
 
     def with_types(self, *, types: Iterable[GroupType] | None) -> ListGroupsOptions:
         """If types is set, only groups of these types will be returned by
         ``list_groups()``. Otherwise, all groups are returned."""
-        self._types = _copy_of(types)
+        self._types = _copy_of(types, "types")
         self._record("with_types", self._types)
         return self
 

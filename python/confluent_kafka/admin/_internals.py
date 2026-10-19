@@ -199,7 +199,7 @@ _UNKNOWN_MEMBER_ID = ""
 
 def _str_field(value: str | None) -> str:
     """A generated message's ``toString`` of a string field."""
-    return "null" if value is None else "'" + value + "'"
+    return "None" if value is None else "'" + value + "'"
 
 
 class _MemberIdentity:

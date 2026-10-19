@@ -44,6 +44,7 @@ from collections.abc import Mapping
 from typing import Any, Callable, NamedTuple, cast
 
 from confluent_kafka.common.errors.record_deserialization_error import RecordDeserializationError
+from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.timestamp_type import TimestampType
 from confluent_kafka.common.topic_partition import TopicPartition
 
@@ -92,7 +93,7 @@ def fetched_positions(native_records: Any) -> list[tuple[TopicPartition, int]]:
 def _deserialization_error(
     origin: RecordDeserializationError.DeserializationExceptionOrigin,
     tp: TopicPartition, nr: Any, key_buffer: memoryview | None,
-    value_buffer: memoryview | None, headers: Any, cause: Exception,
+    value_buffer: memoryview | None, headers: Headers, cause: Exception,
 ) -> RecordDeserializationError:
     """Java's ``CompletedFetch.newRecordDeserializationException``: the full
     constructor, with the record's position, timestamp, bytes and headers."""
@@ -152,10 +153,11 @@ def deserialize_batch(
         nr = native_records.get(i)
         topic = nr.topic
         tp = TopicPartition(topic=topic, partition=nr.partition)
-        # Zero-copy: key/value are memoryviews borrowing the batch.
+        # Zero-copy: key/value, and the header values of `headers` (a
+        # `Headers` the extension builds), are memoryviews borrowing the batch.
         key_buffer: memoryview | None = nr.key
         value_buffer: memoryview | None = nr.value
-        headers = nr.headers
+        headers: Headers = nr.headers
         error: RecordDeserializationError | None = None
         # Java's CompletedFetch.parseRecord: `keyBytes == null ? null :
         # deserialize(...)`, and the same for the value.
@@ -173,6 +175,8 @@ def deserialize_batch(
             except Exception as exc:  # noqa: BLE001 - wrapped as Java does
                 error = _deserialization_error(
                     origin.VALUE, tp, nr, key_buffer, value_buffer, headers, exc)
+        # The headers stay writable, as Java's CompletedFetch leaves them
+        # (only KafkaProducer.doSend seals a record's headers).
         if error is not None:
             # Each partition's first record not returned: this one, and the
             # first of every partition after it in the batch.
@@ -194,7 +198,7 @@ def deserialize_batch(
             serialized_value_size=nr.serialized_value_size,
             key=key,
             value=value,
-            headers=tuple(headers),
+            headers=headers,
             leader_epoch=nr.leader_epoch,
         )
         grouped.setdefault(tp, []).append(record)

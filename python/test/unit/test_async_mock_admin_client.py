@@ -62,7 +62,6 @@ from confluent_kafka.common.errors.unsupported_version_error import UnsupportedV
 from confluent_kafka.execution_error import ExecutionError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from .admin_futures import async_assert_future_throws, async_value
 
@@ -232,8 +231,9 @@ async def test_consumer_group_offsets() -> None:
         group_specs={"g": ListConsumerGroupOffsetsSpec(topic_partitions=[])})
     listed = (await result.partitions_to_offset_and_metadata(group_id="g").get())[tp]
     assert listed is not None and listed.offset() == 4
-    with pytest.raises(NullPointerError):  # Java's default spec
+    with pytest.raises(TypeError) as none:  # Java's default spec: NullPointerException
         client.list_consumer_group_offsets(group_id="g")
+    assert str(none.value) == "ListConsumerGroupOffsetsSpec.topic_partitions must not be None"
     with pytest.raises(UnsupportedVersionError) as e:
         client.describe_consumer_groups(group_ids=["g"])
     assert str(e.value) == "Not implemented yet"
@@ -250,8 +250,9 @@ async def test_delegation_tokens() -> None:
     described = client.describe_delegation_token(
         options=DescribeDelegationTokenOptions(owners=[alice]))
     assert await described.delegation_tokens().get() == [token]
-    with pytest.raises(NullPointerError):  # Java's default null owners
+    with pytest.raises(TypeError) as none:  # Java's default null owners: NullPointerException
         client.describe_delegation_token()
+    assert str(none.value) == "DescribeDelegationTokenOptions.owners must not be None"
     expired = client.expire_delegation_token(hmac=token.hmac())
     assert await expired.expiry_timestamp().get() == -1
 

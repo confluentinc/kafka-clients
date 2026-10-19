@@ -23,7 +23,6 @@ from confluent_kafka._java import java_str
 from confluent_kafka.common.access_control_entry import AccessControlEntry
 from confluent_kafka.common.acl_binding_filter import AclBindingFilter
 from confluent_kafka.common.resource_pattern import ResourcePattern
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["AclBinding"]
 
@@ -41,10 +40,10 @@ class AclBinding:
         """Create an instance of this class with the provided parameters:
         ``pattern`` a non-null resource pattern, ``entry`` a non-null entry."""
         if pattern is None:
-            raise NullPointerError(message="pattern")
+            raise TypeError("pattern must not be None")
         self._pattern = pattern
         if entry is None:
-            raise NullPointerError(message="entry")
+            raise TypeError("entry must not be None")
         self._entry = entry
 
     def is_unknown(self) -> bool:

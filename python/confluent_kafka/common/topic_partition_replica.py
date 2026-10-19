@@ -25,7 +25,6 @@ from __future__ import annotations
 import functools
 from typing import Any
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["TopicPartitionReplica"]
 
@@ -40,7 +39,7 @@ class TopicPartitionReplica:
 
     def __init__(self, *, topic: str, partition: int, broker_id: int) -> None:
         if topic is None:
-            raise NullPointerError()
+            raise TypeError("topic must not be None")
         self._topic = topic
         self._partition = partition
         self._broker_id = broker_id

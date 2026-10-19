@@ -64,6 +64,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._args import MISSING
+
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 # The slice waits live in the shared ``_wait`` module; re-exported for the producers.
@@ -100,7 +102,15 @@ FLUSH_IN_CALLBACK_MESSAGE = ("KafkaProducer.flush() invocation inside a callback
 
 # Java's KafkaProducer.throwIfInvalidGroupMetadata() message for a null argument;
 # the core cannot receive a null, so the binding checks it.
-NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be null"
+NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be None"
+
+
+def _construct_failure(exc: Exception) -> BaseException:
+    """Java's ``KafkaException("Failed to construct kafka producer", t)`` for a
+    serializer the config route fails to build or configure."""
+    from confluent_kafka.common.kafka_error import KafkaError
+
+    return KafkaError(message="Failed to construct kafka producer", cause=exc)
 
 # A ConsumerGroupMetadata without the core's handle (a mock consumer's): the
 # FFI takes only the handle, so the binding cannot send it.
@@ -205,11 +215,32 @@ def group_metadata_handle(group_metadata: ConsumerGroupMetadata) -> object:
     return native
 
 
-def close_timeout_ms(timeout: Duration | None) -> int | None:
-    """``close(Duration)``'s timeout in milliseconds (``None`` for ``close()``);
-    a negative one raises ``IllegalArgumentError`` with Java's message before
-    anything else, as ``KafkaProducer.close(Duration, boolean)`` does."""
-    return None if timeout is None else duration_to_ms(timeout, default_ms=0)
+def close_timeout_ms(timeout: Duration) -> int | None:
+    """``close(Duration)``'s timeout in milliseconds (``None`` for ``close()``,
+    the timeout left out, ``MISSING``); a negative one raises
+    ``IllegalArgumentError`` with Java's message before anything else, as
+    ``KafkaProducer.close(Duration, boolean)`` does, and a ``None`` is Java's
+    null ``Duration``, whose ``timeout.toMillis()`` throws (``TypeError``)."""
+    if timeout is MISSING:
+        return None
+    if timeout is None:
+        raise TypeError("timeout must not be None")
+    return duration_to_ms(timeout, default_ms=0)
+
+
+def check_record(record: object) -> None:
+    """``send(null)``: Java's ``doSend`` reads ``record.topic()`` after the
+    closed check (``KafkaProducer.java:1069``), a ``NullPointerException``
+    (``TypeError``, CLAUDE.md, Types)."""
+    if record is None:
+        raise TypeError("record must not be None")
+
+
+def check_offsets(offsets: object) -> None:
+    """``sendOffsetsToTransaction(null, groupMetadata)``: Java's
+    ``offsets.isEmpty()`` after the group-metadata and closed checks."""
+    if offsets is None:
+        raise TypeError("offsets must not be None")
 
 
 def serialize(serializer: Serializer[Any], topic: str, data: object,
@@ -439,12 +470,13 @@ class _ProducerState:
                  if argument is not None]
         originals, native = prepare(configs, client="producer", given_serdes=given)
         key = cast("Serializer[Any]", resolve_serde(
-            key_serializer, originals, _KEY_SERIALIZER, is_key=True, default=bytes_serializer()))
+            key_serializer, originals, _KEY_SERIALIZER, is_key=True, default=bytes_serializer(),
+            construct_failure=_construct_failure))
         value: Serializer[Any] | None = None
         try:
             value = cast("Serializer[Any]", resolve_serde(
                 value_serializer, originals, _VALUE_SERIALIZER, is_key=False,
-                default=bytes_serializer()))
+                default=bytes_serializer(), construct_failure=_construct_failure))
             handle, error = _lib.KafkaProducer_new(native, self._notify_hook())
         except BaseException:
             close_if_defined(key)
@@ -521,10 +553,13 @@ class _ProducerState:
         value = serialize(self._value_serializer, topic, record.value(), headers)
         partition = record.partition()
         timestamp = record.timestamp()
+        # KafkaProducer.doSend: `setReadOnly(record.headers())` once the
+        # serializers ran, then `record.headers().toArray()`.
+        headers._read_only = True  # RecordHeaders.setReadOnly()
         native = _lib.ProducerRecord(topic, value, key,
                                      -1 if partition is None else partition,
                                      -1 if timestamp is None else timestamp,
-                                     headers)
+                                     headers._pairs())
         return native, topic, partition
 
     def _track(self, future: _FutureState[Any]) -> None:
