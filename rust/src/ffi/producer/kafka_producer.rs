@@ -514,9 +514,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     unsafe { kafka_producer_Producer_send_with_callback(producer(self_), record, callback, out_err) }
 }
 
-/// `KafkaProducer.send(ProducerRecord, Callback)`, completed through `cb`,
-/// inside the call for a record the producer takes or refuses at once and
-/// later for one it would have to wait for: see
+/// `KafkaProducer.send(ProducerRecord, Callback)`, completed through `cb`:
+/// when both serializers are built-in, inside the call for a record the
+/// producer takes or refuses at once and later for one it would have to wait
+/// for; with a C serializer, later for every record. See
 /// [`kafka_producer_Producer_send_with_callback_cb`].
 ///
 /// # Safety
