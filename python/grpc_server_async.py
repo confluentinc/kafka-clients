@@ -492,11 +492,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     async def CommitSync(self, request, context):
         async def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
-            timeout = _consumer_timeout(request)
+            timeout_kwargs = _consumer_timeout(request)
             if offsets:
-                await c.commit(offsets=offsets, timeout=timeout)
+                await c.commit(offsets=offsets, **timeout_kwargs)
             else:
-                await c.commit(timeout=timeout)
+                await c.commit(**timeout_kwargs)
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
@@ -530,7 +530,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.CommittedResponse(error=self._unknown_consumer(request.consumer_id))
         try:
             result = await consumer.committed(partitions=[_tp(p) for p in request.partitions],
-                                            timeout=_consumer_timeout(request))
+                                            **_consumer_timeout(request))
         except KafkaError as e:
             return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
@@ -543,7 +543,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.PositionResponse(error=self._unknown_consumer(request.consumer_id))
         try:
             offset = await consumer.position(partition=_tp(request.partition),
-                                            timeout=_consumer_timeout(request))
+                                            **_consumer_timeout(request))
         except KafkaError as e:
             return cpb.PositionResponse(error=_kafka_error_to_proto(e))
         return cpb.PositionResponse(offset=offset)
@@ -593,9 +593,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         parts = [_tp(p) for p in request.partitions]
         try:
             # The timed overloads; absent timeout_ms selects the untimed ones.
-            timeout = _consumer_timeout(request)
-            result = await (consumer.end_offsets(partitions=parts, timeout=timeout) if end
-                            else consumer.beginning_offsets(partitions=parts, timeout=timeout))
+            timeout_kwargs = _consumer_timeout(request)
+            result = await (consumer.end_offsets(partitions=parts, **timeout_kwargs) if end
+                            else consumer.beginning_offsets(partitions=parts, **timeout_kwargs))
         except KafkaError as e:
             return cpb.LongOffsetsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.LongOffsetMapEntry(partition=_tp_to_proto(tp), offset=off) for tp, off in result.items()]
@@ -614,7 +614,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         spec = {_tp(e.partition): e.timestamp for e in request.timestamps}
         try:
             result = await consumer.offsets_for_times(timestamps_to_search=spec,
-                                                     timeout=_consumer_timeout(request))
+                                                     **_consumer_timeout(request))
         except KafkaError as e:
             return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
         # New value type: accessors are methods; a partition with no offset at or
@@ -728,7 +728,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             # Java's close() or close(CloseOptions); its deprecated
             # close(Duration) is not translated (CLAUDE.md, Python Binding
             # Conventions, Class family).
-            await consumer.close(option=_consumer_close_options(request))
+            await consumer.close(**_consumer_close_options(request))
         except KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()

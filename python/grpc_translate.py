@@ -386,31 +386,38 @@ def _group_metadata_to_proto(group_metadata):
 
 
 def _consumer_timeout(request):
-    """The optional ``timeout_ms`` of a ConsumerService request as the
-    binding's ``timeout`` (seconds): ``None`` (not given) selects the Java
-    overload without a ``Duration``."""
-    return request.timeout_ms / 1000.0 if request.HasField("timeout_ms") else None
+    """The optional ``timeout_ms`` of a ConsumerService request as the keyword
+    arguments of the binding's timed overload: ``{"timeout": seconds}``, or ``{}``
+    when absent, which leaves the argument out and selects the Java overload
+    without a ``Duration`` (a ``None`` would be Java's null ``Duration``)."""
+    return {"timeout": request.timeout_ms / 1000.0} if request.HasField("timeout_ms") else {}
 
 
 def _consumer_subscribe_kwargs(request, listener):
     """SubscribeRequest -> the keyword arguments of ``Consumer.subscribe``:
     ``pattern`` (a ``SubscriptionPattern``, Java's ``subscribe(SubscriptionPattern
     [, listener])``) when the request carries one, else ``topics``."""
-    if request.HasField("pattern"):
-        return {"pattern": SubscriptionPattern(pattern=request.pattern), "callback": listener}
-    return {"topics": list(request.topics), "callback": listener}
+    kwargs: dict = ({"pattern": SubscriptionPattern(pattern=request.pattern)}
+                    if request.HasField("pattern") else {"topics": list(request.topics)})
+    # No listener: the argument is left out (Java's one-argument overload); a
+    # None would be Java's subscribe(..., null), which Java rejects.
+    if listener is not None:
+        kwargs["callback"] = listener
+    return kwargs
 
 
 def _consumer_close_options(request):
-    """ConsumerCloseRequest -> the ``CloseOptions`` of Java's
-    ``close(CloseOptions)``, or ``None`` for the no-argument ``close()``. The
+    """ConsumerCloseRequest -> the keyword arguments of ``close``:
+    ``{"option": CloseOptions}`` for Java's ``close(CloseOptions)``, or ``{}`` for
+    the no-argument ``close()`` (a ``None`` option would be Java's null). The
     operation crosses as its enum constant name; the timeout is optional."""
     if not request.HasField("group_membership_operation"):
-        return None
+        return {}
     operation = CloseOptions.GroupMembershipOperation[request.group_membership_operation]
-    timeout = (request.close_timeout_ms / 1000.0
-               if request.HasField("close_timeout_ms") else None)
-    return CloseOptions(operation=operation, timeout=timeout)
+    if request.HasField("close_timeout_ms"):
+        return {"option": CloseOptions(operation=operation,
+                                       timeout=request.close_timeout_ms / 1000.0)}
+    return {"option": CloseOptions(operation=operation)}
 
 
 def _current_lag_response(lag):
@@ -2344,8 +2351,11 @@ class _AdminOps:
         return (yield from _collect(res.values()))
 
     def g_list_partition_reassignments(self, partitions, timeout=None):
+        # Absent partitions is Java's listPartitionReassignments(options), every
+        # reassignment: the argument is left out (a None is Java's null Set).
+        targets = {} if partitions is None else {"partitions": partitions}
         res = yield self._a.list_partition_reassignments(
-            partitions=partitions, options=_opts(ka.ListPartitionReassignmentsOptions, timeout))
+            **targets, options=_opts(ka.ListPartitionReassignmentsOptions, timeout))
         return (yield res.reassignments())
 
     def g_list_offsets(self, specs, timeout=None, isolation_level=0):
