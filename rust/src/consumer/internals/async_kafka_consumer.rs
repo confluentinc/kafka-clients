@@ -68,6 +68,7 @@ use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::Time;
+use crate::common::utils::Utils;
 use crate::common::utils::internals::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerConfig;
@@ -2755,10 +2756,9 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
 /// the background task is spawned by the infallible `with_components`, so no
 /// task or socket exists on any error path, and the rest is released on drop.
 ///
-/// `new` is synchronous and [`Deserializers::close`] is async. The close is
-/// polled once on the constructor's task, which completes it for any
-/// deserializer whose `close` does not wait. One that does wait is finished on
-/// the ambient Tokio runtime; without one, it cannot be driven and is logged.
+/// `new` is synchronous and [`Deserializers::close`] is async, so the close
+/// runs through [`Utils::close_quietly_from_sync`], which the producer's
+/// constructor shares for its serializers.
 struct CloseDeserializersOnError<K: 'static, V: 'static> {
     deserializers: Option<Arc<Deserializers<K, V>>>,
 }
@@ -2781,8 +2781,6 @@ where
 
 impl<K: 'static, V: 'static> Drop for CloseDeserializersOnError<K, V> {
     fn drop(&mut self) {
-        use futures_util::FutureExt;
-
         let Some(deserializers) = self.deserializers.take() else {
             return;
         };
@@ -2792,23 +2790,15 @@ impl<K: 'static, V: 'static> Drop for CloseDeserializersOnError<K, V> {
             log::error!("Failed to close consumer deserializers: they are still shared");
             return;
         };
-        let mut close = Box::pin(async move {
-            if let Err(error) = deserializers.close().await {
-                // Java's `closeQuietly` (`Utils.java:1131`).
-                log::error!("Failed to close consumer deserializers: {error}");
-            }
-        });
-        if close.as_mut().now_or_never().is_some() {
-            return;
-        }
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(close);
-            },
-            Err(_) => log::error!(
-                "Failed to close consumer deserializers: their close is pending and no Tokio runtime can finish it"
-            ),
-        }
+        Utils::close_quietly_from_sync(
+            Box::pin(async move {
+                if let Err(error) = deserializers.close().await {
+                    // Java's `closeQuietly` (`Utils.java:1143-1152`).
+                    log::error!("Failed to close consumer deserializers: {error}");
+                }
+            }),
+            "consumer deserializers",
+        );
     }
 }
 

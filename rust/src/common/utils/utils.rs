@@ -128,6 +128,36 @@ impl Utils {
 
         h
     }
+
+    /// Runs an async `close` from synchronous code, for the clients' failed
+    /// constructors: Java's constructor `catch` closes what it already built
+    /// with `closeQuietly` (`Utils.java:1143-1152`), but a Rust constructor is
+    /// synchronous while a serde's `close` is async. `close` logs its own
+    /// failures, as `closeQuietly` does.
+    ///
+    /// Rust-only (DoD #7). The close is polled once on the calling task, which
+    /// completes it for any closeable that does not wait. One that does wait is
+    /// finished on the ambient Tokio runtime; without one it cannot be driven,
+    /// and that is logged under `name`.
+    pub(crate) fn close_quietly_from_sync(
+        close: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        name: &str,
+    ) {
+        use futures_util::FutureExt;
+
+        let mut close = close;
+        if close.as_mut().now_or_never().is_some() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(close);
+            },
+            Err(_) => {
+                log::error!("Failed to close {name}: the close is pending and no Tokio runtime can finish it")
+            },
+        }
+    }
 }
 
 #[cfg(test)]

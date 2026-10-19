@@ -56,7 +56,7 @@ use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::DynSerializer;
 use crate::common::utils::internals::LogContext;
-use crate::common::utils::{SystemTime, Time};
+use crate::common::utils::{SystemTime, Time, Utils};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::panic_payload_message;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
@@ -951,11 +951,13 @@ impl<K, V> KafkaProducer<K, V> {
         // the caller as something for which `is_kafka_error()` is `false`.
         //
         // The `close(Duration.ofMillis(0), true)` half of Java's catch (KAFKA-2121)
-        // matters for one resource only. No socket and no spawned task can leak: the
-        // sender task is spawned by the final, infallible step, and an unconnected
-        // `Selector` / `NetworkClient` dropped on an error owns no socket. But a
-        // configured custom partitioner must be closed (`KafkaProducer.java:1533`),
-        // and `new_inner` does that for every fallible step after it is configured.
+        // matters for the serializers and the partitioner only. No socket and no
+        // spawned task can leak: the sender task is spawned by the final, infallible
+        // step, and an unconnected `Selector` / `NetworkClient` dropped on an error
+        // owns no socket. But the serializers (`KafkaProducer.java:1531-1532`) and a
+        // configured custom partitioner (`:1533`) must be closed: `new_inner` closes
+        // the serializers on every failure (`CloseSerializersOnError`) and the
+        // partitioner on every fallible step after it is configured.
         Self::new_inner(config, key_serializer, value_serializer)
             .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
@@ -982,6 +984,10 @@ impl<K, V> KafkaProducer<K, V> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");
+
+        // From here on, a failed construction closes the serializers (Java's
+        // catch, `KafkaProducer.java:519-523`); see `CloseSerializersOnError`.
+        let serializers = CloseSerializersOnError::new(key_serializer, value_serializer, log_context.clone());
 
         // 1. (KIP-909) Bootstrap address resolution moved below, to
         //    `ClientUtils::maybe_bootstrap_metadata_synchronously` right after the
@@ -1145,6 +1151,9 @@ impl<K, V> KafkaProducer<K, V> {
         ) {
             Ok(accumulator) => accumulator,
             Err(error) => {
+                // Java's `close` closes the serializers, then the partitioner
+                // (`KafkaProducer.java:1531-1533`).
+                drop(serializers);
                 if let Some(partitioner) = partitioner.as_ref() {
                     partitioner.close();
                 }
@@ -1166,7 +1175,9 @@ impl<K, V> KafkaProducer<K, V> {
         client.set_throttle_time_sensor(throttle_sensor);
         client.set_time(Arc::clone(&time));
 
-        // 12. Wire up the Sender and spawn the I/O background task
+        // 12. Wire up the Sender and spawn the I/O background task. Every
+        //     fallible step is behind us.
+        let (key_serializer, value_serializer) = serializers.disarm();
         Ok(Self::with_client_options(
             KafkaProducerClientOptionsBuilder::new()
                 .set_config(&config)
@@ -3066,36 +3077,110 @@ impl<K, V> KafkaProducer<K, V> {
     }
 
     /// `Utils.closeQuietly(keySerializerPlugin, "producer keySerializer", firstException)`
-    /// then the same for the value serializer (`KafkaProducer.java:1531-1532`):
-    /// both are closed, each panic is logged as `closeQuietly` logs a failure
-    /// (`Utils.java:1131`), and the first one is returned. Only the first call
-    /// closes them.
+    /// then the same for the value serializer (`KafkaProducer.java:1531-1532`),
+    /// through [`close_serializers_quietly`](Self::close_serializers_quietly).
+    /// Only the first call closes them.
     async fn close_serializers(&self) -> Option<Error> {
         if self.serializers_closed.swap(true, Ordering::AcqRel) {
             return None;
         }
+        Self::close_serializers_quietly(&*self.key_serializer, &*self.value_serializer, &self.log_context).await
+    }
+
+    /// `Utils.closeQuietly(keySerializerPlugin, "producer keySerializer", firstException)`
+    /// then `Utils.closeQuietly(valueSerializerPlugin, "producer valueSerializer", firstException)`
+    /// (`KafkaProducer.java:1531-1532`): both are closed, each panic is logged
+    /// as `closeQuietly` logs a failure (`Utils.java:1143-1152`), and the first
+    /// one is returned. Shared by `close` and a failed constructor
+    /// (`CloseSerializersOnError`).
+    async fn close_serializers_quietly(
+        key_serializer: &dyn DynSerializer<K>,
+        value_serializer: &dyn DynSerializer<V>,
+        log_context: &LogContext,
+    ) -> Option<Error> {
         let mut first_error = None;
-        if let Err(payload) = AssertUnwindSafe(DynSerializer::close(&*self.key_serializer))
-            .catch_unwind()
-            .await
-        {
-            first_error.get_or_insert(self.serializer_close_failure("key serializer", &*payload));
+        if let Err(payload) = AssertUnwindSafe(key_serializer.close()).catch_unwind().await {
+            first_error.get_or_insert(Self::serializer_close_failure(log_context, "producer keySerializer", &*payload));
         }
-        if let Err(payload) = AssertUnwindSafe(DynSerializer::close(&*self.value_serializer))
-            .catch_unwind()
-            .await
-        {
-            first_error.get_or_insert(self.serializer_close_failure("value serializer", &*payload));
+        if let Err(payload) = AssertUnwindSafe(value_serializer.close()).catch_unwind().await {
+            first_error.get_or_insert(Self::serializer_close_failure(
+                log_context,
+                "producer valueSerializer",
+                &*payload,
+            ));
         }
         first_error
     }
 
     /// The error `closeQuietly` records for a serializer whose `close`
-    /// panicked, logged as it logs one.
-    fn serializer_close_failure(&self, name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
+    /// panicked, logged as it logs one (`Utils.java:1149`).
+    fn serializer_close_failure(log_context: &LogContext, name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
         let message = panic_payload_message(payload);
-        kafka_error!(self.log_context, "Failed to close {}: {}", name, message);
+        kafka_error!(log_context, "Failed to close {}: {}", name, message);
         Error::kafka_message(message.to_string())
+    }
+}
+
+/// Closes the producer's serializers when construction fails, as the `catch
+/// (Throwable t)` of Java's constructor does (`KafkaProducer.java:519-523`):
+/// it calls `close(Duration.ofMillis(0), true)`, whose `closeQuietly` of the
+/// key and value serializers (`:1531-1532`) closes them and only logs a
+/// failure, since `swallowException` is `true`.
+///
+/// Rust-only (DoD #7): an RAII stand-in for that `catch`, the producer's twin
+/// of the consumer's `CloseDeserializersOnError`. `new_inner` returns through
+/// many `?`s; holding the serializers in this guard covers every one of them,
+/// and any step added later. It is disarmed when the serializers are handed to
+/// the producer. `new` is synchronous and a serializer's `close` is async, so
+/// the close runs through [`Utils::close_quietly_from_sync`].
+///
+/// Java wraps the serializers after resolving the partitioner
+/// (`KafkaProducer.java:388-404`), so a partitioner that cannot be
+/// instantiated leaves a caller-supplied serializer unclosed there. Here the
+/// producer owns the serializers from the start of `new_inner`, so the caller
+/// can no longer close them: every failure closes them.
+struct CloseSerializersOnError<K: 'static, V: 'static> {
+    serializers: Option<KeyAndValueSerializers<K, V>>,
+    log_context: LogContext,
+}
+
+/// The key and the value serializer held by [`CloseSerializersOnError`].
+type KeyAndValueSerializers<K, V> = (Box<dyn DynSerializer<K>>, Box<dyn DynSerializer<V>>);
+
+impl<K: 'static, V: 'static> CloseSerializersOnError<K, V> {
+    fn new(
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
+        log_context: LogContext,
+    ) -> Self {
+        Self { serializers: Some((key_serializer, value_serializer)), log_context }
+    }
+
+    /// Construction succeeded: hands the serializers on, so nothing closes
+    /// them here.
+    fn disarm(mut self) -> KeyAndValueSerializers<K, V> {
+        self.serializers.take().expect("the guard is disarmed once")
+    }
+}
+
+impl<K: 'static, V: 'static> Drop for CloseSerializersOnError<K, V> {
+    fn drop(&mut self) {
+        let Some((key_serializer, value_serializer)) = self.serializers.take() else {
+            return;
+        };
+        let log_context = self.log_context.clone();
+        Utils::close_quietly_from_sync(
+            Box::pin(async move {
+                // `swallowException` is `true`: the failures are only logged.
+                let _ = KafkaProducer::<K, V>::close_serializers_quietly(
+                    &*key_serializer,
+                    &*value_serializer,
+                    &log_context,
+                )
+                .await;
+            }),
+            "producer serializers",
+        );
     }
 }
 
@@ -4631,6 +4716,59 @@ mod tests {
 
         producer.close().await.expect("the serializers are not closed again");
         assert_eq!(2, close_count.load(Ordering::SeqCst));
+    }
+
+    /// KAFKA-2121: a failed constructor closes the serializers, as Java's
+    /// `catch (Throwable t)` calls `close(Duration.ofMillis(0), true)`
+    /// (`KafkaProducer.java:519-523`), whose `closeQuietly` closes both
+    /// serializers (`:1531-1532`). Here the first fallible step fails
+    /// (`configureDeliveryTimeout`'s `ConfigException`), without a Tokio
+    /// runtime: a serializer whose `close` does not wait is closed inline.
+    #[test]
+    fn test_serializers_closed_when_construction_fails() {
+        let init_count = AtomicUsize::new(0);
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())]);
+        props.insert("delivery.timeout.ms".to_string(), "1".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+
+        let error = KafkaProducer::<String, String>::new(
+            config,
+            Box::new(MockSerializer::new(&init_count, &close_count)),
+            Box::new(MockSerializer::new(&init_count, &close_count)),
+        )
+        .err()
+        .expect("delivery.timeout.ms below linger.ms + request.timeout.ms fails construction");
+
+        assert_eq!("Failed to construct kafka producer", error.message());
+        assert_eq!(2, init_count.load(Ordering::SeqCst));
+        assert_eq!(2, close_count.load(Ordering::SeqCst), "both serializers are closed once");
+    }
+
+    /// A serializer `close` that panics on a failed constructor is logged, not
+    /// propagated (`swallowException` is `true`, `KafkaProducer.java:1536`), and
+    /// the other serializer is still closed; the constructor's error is
+    /// unchanged.
+    #[test]
+    fn test_serializer_close_failure_on_failed_construction_is_swallowed() {
+        let init_count = AtomicUsize::new(0);
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let mut key = MockSerializer::new(&init_count, &close_count);
+        key.panic_on_close = Some("key close failed");
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())]);
+        props.insert("delivery.timeout.ms".to_string(), "1".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+
+        let error = KafkaProducer::<String, String>::new(
+            config,
+            Box::new(key),
+            Box::new(MockSerializer::new(&init_count, &close_count)),
+        )
+        .err()
+        .expect("the construction fails");
+
+        assert_eq!("Failed to construct kafka producer", error.message());
+        assert_eq!(2, close_count.load(Ordering::SeqCst), "the value serializer is closed too");
     }
 
     /// Translated from `KafkaProducerTest.negativePartitionShouldThrow` (`:2410-2427`).
@@ -8720,14 +8858,22 @@ mod tests {
             let config = ProducerConfig::new(&guard_props(&[("partitioner.rack.aware", "true")]))
                 .expect("valid config")
                 .set_partitioner(partitioner);
-            let error =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .err()
-                    .expect("rack-aware without client.rack must fail construction");
+            let init_count = AtomicUsize::new(0);
+            let serializer_closes = Arc::new(AtomicUsize::new(0));
+            let error = KafkaProducer::<String, String>::new(
+                config,
+                Box::new(MockSerializer::new(&init_count, &serializer_closes)),
+                Box::new(MockSerializer::new(&init_count, &serializer_closes)),
+            )
+            .err()
+            .expect("rack-aware without client.rack must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer");
 
             assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
             assert_eq!(1, MockPartitioner::close_count().load(Ordering::SeqCst));
+            // `close(Duration.ofMillis(0), true)` closes the serializers too
+            // (`KafkaProducer.java:1531-1532`).
+            assert_eq!(2, serializer_closes.load(Ordering::SeqCst));
         });
 
         MockPartitioner::reset_counters();
