@@ -3155,7 +3155,7 @@ mod tests {
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
     ) -> KafkaProducer<String, String> {
-        create_producer_with_config(ProducerConfig::default(), metadata, accumulator)
+        create_producer_with_config(ProducerConfig::defaults(), metadata, accumulator)
     }
 
     fn create_producer_with_config(
@@ -3205,7 +3205,7 @@ mod tests {
     ) -> KafkaProducer<String, String> {
         KafkaProducer::with_options(
             KafkaProducerOptionsBuilder::new()
-                .set_config(&ProducerConfig::default())
+                .set_config(&ProducerConfig::defaults())
                 .set_key_serializer(key_serializer)
                 .set_value_serializer(Box::new(StringSerializer))
                 .set_metadata(metadata)
@@ -3304,7 +3304,7 @@ mod tests {
         for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
             let producer: KafkaProducer<String, String> = KafkaProducer::with_options(
                 KafkaProducerOptionsBuilder::new()
-                    .set_config(&ProducerConfig::default())
+                    .set_config(&ProducerConfig::defaults())
                     .set_key_serializer(Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))))
                     .set_value_serializer(Box::new(StringSerializer))
                     .set_metadata(create_metadata_with_topic(TOPIC, 3))
@@ -3328,7 +3328,7 @@ mod tests {
 
         // A metadata-wait timeout: the record names a partition the topic does not have,
         // and `max.block.ms = 0` fails the wait at once.
-        let config = || ProducerConfig { max_block_ms: 0, ..Default::default() };
+        let config = || ProducerConfig { max_block_ms: 0, ..ProducerConfig::defaults() };
         let producer =
             create_producer_with_config(config(), create_metadata_with_topic(TOPIC, 1), create_accumulator());
         let seen = Arc::new(Mutex::new(None));
@@ -3461,13 +3461,14 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testMetricConfigRecordingLevel")]
     fn test_metric_config_recording_level() {
         let default_producer = create_producer_with_config(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic(TOPIC, 1),
             create_accumulator(),
         );
         assert_eq!(default_producer.metrics.config().record_level(), RecordingLevel::Info);
 
-        let debug_config = ProducerConfig { metrics_recording_level: "DEBUG".to_string(), ..Default::default() };
+        let debug_config =
+            ProducerConfig { metrics_recording_level: "DEBUG".to_string(), ..ProducerConfig::defaults() };
         let debug_producer =
             create_producer_with_config(debug_config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
         assert_eq!(debug_producer.metrics.config().record_level(), RecordingLevel::Debug);
@@ -3478,7 +3479,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_records_producer_metrics() {
         let producer = create_producer_with_config(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic(TOPIC, 1),
             create_accumulator(),
         );
@@ -3639,7 +3640,7 @@ mod tests {
     /// via a completed-with-error future, not propagated as Err from send().
     #[tokio::test]
     async fn test_ensure_valid_record_size_rejects_too_large() {
-        let config = ProducerConfig { max_request_size: 10, ..Default::default() };
+        let config = ProducerConfig { max_request_size: 10, ..ProducerConfig::defaults() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
 
@@ -3675,7 +3676,7 @@ mod tests {
     /// via a completed-with-error future, not propagated as Err from send().
     #[tokio::test]
     async fn test_ensure_valid_record_size_rejects_larger_than_buffer_memory() {
-        let config = ProducerConfig { buffer_memory: 10, ..Default::default() };
+        let config = ProducerConfig { buffer_memory: 10, ..ProducerConfig::defaults() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
 
@@ -3791,7 +3792,7 @@ mod tests {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         accumulator.close();
-        let producer = create_producer_with_config(ProducerConfig::default(), metadata, accumulator);
+        let producer = create_producer_with_config(ProducerConfig::defaults(), metadata, accumulator);
 
         let invoked = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&invoked);
@@ -3825,7 +3826,7 @@ mod tests {
             buffer_memory: BATCH_SIZE as i64,
             max_block_ms,
             linger_ms: 0,
-            ..Default::default()
+            ..ProducerConfig::defaults()
         };
         let metadata = create_metadata_with_topic(TOPIC, 2);
         let accumulator = Arc::new(RecordAccumulator::new(
@@ -3968,7 +3969,7 @@ mod tests {
         const UNKNOWN_TOPIC: &str = "not-in-metadata-yet";
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let producer =
-            create_producer_with_config(ProducerConfig::default(), Arc::clone(&metadata), create_accumulator());
+            create_producer_with_config(ProducerConfig::defaults(), Arc::clone(&metadata), create_accumulator());
         assert!(!metadata.contains_topic(UNKNOWN_TOPIC));
 
         let (callback, invocations) = recording_callback();
@@ -3999,7 +4000,7 @@ mod tests {
     /// `Accepted`, with the callback already fired and the future already failed.
     #[tokio::test]
     async fn try_send_resolves_a_rejected_record_as_accepted_with_a_failed_future() {
-        let config = ProducerConfig { max_request_size: 64, ..Default::default() };
+        let config = ProducerConfig { max_request_size: 64, ..ProducerConfig::defaults() };
         let producer = create_producer_with_config(config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
 
         let (callback, invocations) = recording_callback();
@@ -4026,7 +4027,7 @@ mod tests {
     #[tokio::test]
     async fn try_send_on_a_closed_producer_is_an_error_not_a_would_block() {
         let producer = create_producer_with_config(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic(TOPIC, 1),
             create_accumulator(),
         );
@@ -4099,7 +4100,7 @@ mod tests {
     /// Tests that the partition() method ignores keys when partitioner_ignore_keys is true.
     #[test]
     fn test_partition_ignores_keys_when_configured() {
-        let config = ProducerConfig { partitioner_ignore_keys: true, ..Default::default() };
+        let config = ProducerConfig { partitioner_ignore_keys: true, ..ProducerConfig::defaults() };
         let metadata = create_metadata_with_topic(TOPIC, 3);
         let accumulator = create_accumulator();
 
@@ -4448,7 +4449,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let producer = create_producer_with_partitioner(
-                ProducerConfig::default(),
+                ProducerConfig::defaults(),
                 create_metadata_with_topic(TOPIC, 1),
                 create_accumulator(),
                 Box::new(MockPartitioner::new()),
@@ -4474,7 +4475,7 @@ mod tests {
     #[tokio::test]
     async fn negative_partition_should_throw() {
         let producer = create_producer_with_partitioner(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic("topic", 1),
             create_accumulator(),
             Box::new(BuggyPartitioner),
@@ -4586,7 +4587,7 @@ mod tests {
         let partitioner =
             RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
         let producer = create_producer_with_partitioner(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic("topic", 3),
             create_accumulator(),
             Box::new(partitioner),
@@ -4616,7 +4617,7 @@ mod tests {
         let partitioner =
             RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
         let producer = create_producer_with_partitioner(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic("topic", 3),
             create_accumulator(),
             Box::new(partitioner),
@@ -4646,7 +4647,7 @@ mod tests {
         let partitioner =
             RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
         let producer = create_producer_with_partitioner(
-            ProducerConfig::default(),
+            ProducerConfig::defaults(),
             create_metadata_with_topic("topic", 3),
             create_accumulator(),
             Box::new(partitioner),
@@ -4832,7 +4833,7 @@ mod tests {
         let log_context = LogContext::new("[test] ".to_string());
 
         // Default values: delivery=120000, linger=5, request=30000
-        let config = ProducerConfig::default();
+        let config = ProducerConfig::defaults();
         let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 120_000);
@@ -4842,7 +4843,7 @@ mod tests {
             delivery_timeout_ms: 30_010,
             linger_ms: 10,
             request_timeout_ms: 30_000,
-            ..Default::default()
+            ..ProducerConfig::defaults()
         };
         let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
@@ -4918,7 +4919,7 @@ mod tests {
     /// Translated from `KafkaProducerTest.getClientId` (via visible for testing).
     #[test]
     fn test_get_client_id() {
-        let config = ProducerConfig { client_id: "my-producer".to_string(), ..Default::default() };
+        let config = ProducerConfig { client_id: "my-producer".to_string(), ..ProducerConfig::defaults() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
 
@@ -4994,7 +4995,7 @@ mod tests {
     /// a non-null RecordMetadata with appropriate defaults.
     #[tokio::test]
     async fn test_callback_invoked_on_api_error() {
-        let config = ProducerConfig { max_request_size: 10, ..Default::default() };
+        let config = ProducerConfig { max_request_size: 10, ..ProducerConfig::defaults() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer_with_config(config, metadata, accumulator);
@@ -5071,7 +5072,7 @@ mod tests {
 
         // `max.block.ms = 0` so the second allocation fails immediately
         // instead of waiting for memory that will never be freed.
-        let config = ProducerConfig { max_block_ms: 0, ..Default::default() };
+        let config = ProducerConfig { max_block_ms: 0, ..ProducerConfig::defaults() };
         // Two partitions so the second record needs a *new* batch (and hence a
         // new buffer) instead of appending to the first one.
         let metadata = create_metadata_with_topic(TOPIC, 2);
@@ -5242,7 +5243,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
             KafkaProducerOptionsBuilder::new()
-                .set_config(&ProducerConfig::default())
+                .set_config(&ProducerConfig::defaults())
                 .set_key_serializer(Box::new(ByteArraySerializer))
                 .set_value_serializer(Box::new(ByteArraySerializer))
                 .set_metadata(metadata)
@@ -5573,7 +5574,7 @@ mod tests {
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
-            let config = ProducerConfig::default();
+            let config = ProducerConfig::defaults();
             let producer = KafkaProducer::<String, String>::with_options(
                 KafkaProducerOptionsBuilder::new()
                     .set_config(&config)
@@ -5679,7 +5680,7 @@ mod tests {
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
-            let config = ProducerConfig::default();
+            let config = ProducerConfig::defaults();
             let producer = KafkaProducer::<String, String>::with_options(
                 KafkaProducerOptionsBuilder::new()
                     .set_config(&config)
@@ -5772,7 +5773,7 @@ mod tests {
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
             None,
         ));
-        let config = ProducerConfig::default();
+        let config = ProducerConfig::defaults();
         let partitioner: Option<Box<dyn Partitioner<Vec<u8>, Vec<u8>>>> = Some(Box::new(RoundRobinPartitioner::new()));
         let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::with_options(
             KafkaProducerOptionsBuilder::new()
@@ -8811,7 +8812,7 @@ mod tests {
             ClusterResourceListeners::new(),
         ));
         let accumulator = create_accumulator();
-        let config = ProducerConfig { max_block_ms: 30_000, ..Default::default() };
+        let config = ProducerConfig { max_block_ms: 30_000, ..ProducerConfig::defaults() };
         let producer = create_producer_with_config(config, Arc::clone(&metadata), accumulator);
 
         metadata.close();

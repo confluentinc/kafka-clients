@@ -121,6 +121,15 @@ impl ClientDnsLookup {
         }
     }
 
+    /// The configuration value, Java's private `clientDnsLookup` field
+    /// (`ClientDnsLookup.java:24`), which `toString()` returns.
+    pub(crate) fn config_value(self) -> &'static str {
+        match self {
+            Self::UseAllDnsIps => "use_all_dns_ips",
+            Self::ResolveCanonicalBootstrapServersOnly => "resolve_canonical_bootstrap_servers_only",
+        }
+    }
+
     /// Logs a warning if `self` is
     /// [`ClientDnsLookup::ResolveCanonicalBootstrapServersOnly`], the security
     /// protocol uses TLS (`SSL` / `SASL_SSL`), and hostname verification is on
@@ -162,10 +171,7 @@ impl fmt::Display for ClientDnsLookup {
     /// derived `Debug` already identify the constant, and nothing in the
     /// client reads `name()`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::UseAllDnsIps => "use_all_dns_ips",
-            Self::ResolveCanonicalBootstrapServersOnly => "resolve_canonical_bootstrap_servers_only",
-        })
+        f.write_str(self.config_value())
     }
 }
 

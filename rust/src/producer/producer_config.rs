@@ -336,7 +336,7 @@ pub struct ProducerConfig {
     ///   `Partitioner.configure(...)`.
     ///
     /// `pub(crate)` like every other field on this struct, so in-crate struct
-    /// literals using `..Default::default()` still compile.
+    /// literals using `..ProducerConfig::defaults()` still compile.
     pub(crate) originals: HashMap<String, String>,
 }
 
@@ -354,8 +354,14 @@ pub(crate) struct ConfiguredPartitioner {
     type_name: &'static str,
 }
 
-impl Default for ProducerConfig {
-    fn default() -> Self {
+impl ProducerConfig {
+    /// Default values match Java's `ConfigDef.define(...)` second argument
+    /// for every key.
+    ///
+    /// Crate-private, and not `Default`: Java builds a configuration only
+    /// through its constructor, and a public default would hand out one that
+    /// skipped `new`'s validation, including the required `bootstrap.servers`.
+    pub(crate) fn defaults() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
@@ -682,7 +688,7 @@ impl ProducerConfig {
         // Java's `AbstractConfig.originals()` is the user-supplied map captured
         // verbatim, before any derived default (e.g. a generated `client.id`) is
         // computed. Clone it up front, before `maybe_override_client_id` runs.
-        let mut config = Self { originals: props.clone(), ..Default::default() };
+        let mut config = Self { originals: props.clone(), ..Self::defaults() };
 
         // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
@@ -1285,7 +1291,7 @@ mod tests {
 
     #[test]
     fn test_default_values() {
-        let config = ProducerConfig::default();
+        let config = ProducerConfig::defaults();
         assert_eq!(config.batch_size, 16384);
         assert_eq!(config.linger_ms, 5);
         assert_eq!(config.buffer_memory, 32 * 1024 * 1024);
@@ -2632,7 +2638,7 @@ mod tests {
         assert_eq!(declared.first(), Some(&"bootstrap_servers"), "{declared:?}");
         assert!(declared.contains(&"originals"), "{declared:?}");
 
-        let rendered = format!("{:#?}", ProducerConfig::default());
+        let rendered = format!("{:#?}", ProducerConfig::defaults());
         assert!(rendered.starts_with("ProducerConfig {\n"), "{rendered}");
         // Top-level fields are the lines indented exactly one level.
         let rendered_fields: Vec<&str> = rendered

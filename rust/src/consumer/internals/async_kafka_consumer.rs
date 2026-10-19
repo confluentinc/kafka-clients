@@ -2881,11 +2881,14 @@ where
         // hands that one instance to every component it builds.
         let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
 
-        // A config built with `ConsumerConfig::default()` and the fluent
-        // setters never went through `ConsumerConfig::new`, so it may still
-        // carry an empty `client.id`. Java's config is immutable and always
-        // finalised by `postProcessParsedConfig`; construction is the Rust
-        // equivalent point, so apply the same `maybeOverrideClientId` rule.
+        // `ConsumerConfig::new`, the only public way to build a config, already
+        // derives `client.id`. A crate-internal config built from
+        // `ConsumerConfig::defaults()` with its fields written directly (the
+        // unit tests do this) skips `new` and may still carry an empty
+        // `client.id`. Java's config is immutable and always finalised by
+        // `postProcessParsedConfig`; construction is the Rust equivalent
+        // point, so apply the same `maybeOverrideClientId` rule. It is
+        // idempotent on a config `new` built.
         config.maybe_override_client_id()?;
 
         // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
@@ -7514,7 +7517,10 @@ mod tests {
         group_instance_id: Option<&str>,
         invoker_interceptors: Vec<Box<dyn crate::consumer::ConsumerInterceptor<Vec<u8>, Vec<u8>>>>,
     ) -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
-        let mut config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let mut config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         config.client_id = "test-client".to_string();
         config.group_id = group_id.map(str::to_string);
         config.group_instance_id = group_instance_id.map(str::to_string);
@@ -8455,7 +8461,7 @@ mod tests {
         assert!(elapsed < Duration::from_secs(5), "close_with_options(1 s) took {elapsed:?}");
     }
 
-    /// A config built inside the crate from `ConsumerConfig::default()` skips
+    /// A config built inside the crate from `ConsumerConfig::defaults()` skips
     /// `ConsumerConfig::new`, so the constructor derives the `client.id` with
     /// the same `maybeOverrideClientId` rule instead of sending an empty id.
     #[tokio::test(flavor = "multi_thread")]
@@ -8473,7 +8479,7 @@ mod tests {
         let config = ConsumerConfig {
             bootstrap_servers: vec!["127.0.0.1:1".to_string()],
             group_id: Some("g".to_string()),
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         };
         assert_eq!(
             config.client_id(),

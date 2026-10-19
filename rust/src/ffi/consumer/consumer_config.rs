@@ -106,8 +106,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
 /// `getString(String key)`: the value of the `STRING` key `key`, borrowed
 /// from the handle and valid until it is destroyed, or `NULL` with `*out_err` still
 /// `NULL` when the key has no value (Java's `null`). `client.id` is the
-/// resolved id, generated when the property is unset. A key that is not a
-/// `STRING` key is Java's `ConfigException`, delivered through `out_err`.
+/// resolved id, generated when the property is unset. A key of another type
+/// (`max.poll.records`) fails as Java's cast does, with an
+/// `IllegalArgumentError`, and a key the configuration does not hold is Java's
+/// `ConfigException` (`Unknown configuration '<key>'`), both delivered through
+/// `out_err`.
 ///
 /// # Safety
 ///
@@ -134,7 +137,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_string(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .entry(key)
-            .or_insert_with(|| CString::new(value).expect("a value parsed from NUL-terminated C strings has no NUL"))
+            .or_insert_with(|| {
+                CString::new(value)
+                    .expect("a value parsed from NUL-terminated C strings, or a constant name, has no NUL")
+            })
             .as_ptr(),
         Ok(None) => std::ptr::null(),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -165,6 +171,9 @@ mod tests {
 
     use super::*;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
+    use crate::ffi::error_predicates::{
+        kafka_common_Error_is_config_error, kafka_common_Error_is_local_illegal_argument_error,
+    };
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
 
     /// A map of C string literals, which outlive it; the map does not own them.
@@ -205,11 +214,18 @@ mod tests {
     }
 
     /// `getString` lends a set value out of the handle, the same pointer on
-    /// every call, answers `NULL` with no error for an unset nullable key, and
-    /// delivers `Unknown configuration` for a key that is not a `STRING` key.
+    /// every call, answers `NULL` with no error for an unset nullable key,
+    /// reads a key the configuration holds as a parsed value
+    /// (`security.protocol`), fails a key of another type as Java's cast does,
+    /// and delivers `Unknown configuration` for a key it does not hold.
     #[test]
     fn get_string_reads_a_string_key() {
-        let props = props(&[(c"bootstrap.servers", c"localhost:9092"), (c"client.id", c"c1")]);
+        let props = props(&[
+            (c"bootstrap.servers", c"localhost:9092"),
+            (c"client.id", c"c1"),
+            (c"security.protocol", c"sasl_ssl"),
+            (c"sasl.mechanism", c"PLAIN"),
+        ]);
         let mut err = std::ptr::null_mut();
         // SAFETY: Test code: `props` is a live map of `char *` keys and values, `err` a valid slot
         // pointing at null and the keys C string literals; every returned string is read before
@@ -227,11 +243,27 @@ mod tests {
             let group_id = kafka_consumer_ConsumerConfig_get_string(config, c"group.id".as_ptr(), &mut err);
             assert!(group_id.is_null());
             assert!(err.is_null());
-            let unknown = kafka_consumer_ConsumerConfig_get_string(config, c"max.poll.records".as_ptr(), &mut err);
-            assert!(unknown.is_null());
+            let protocol = kafka_consumer_ConsumerConfig_get_string(config, c"security.protocol".as_ptr(), &mut err);
+            assert!(err.is_null());
+            assert_eq!(CStr::from_ptr(protocol).to_str().unwrap(), "SASL_SSL");
+            let mechanism = kafka_consumer_ConsumerConfig_get_string(config, c"sasl.mechanism".as_ptr(), &mut err);
+            assert!(err.is_null());
+            assert_eq!(CStr::from_ptr(mechanism).to_str().unwrap(), "PLAIN");
+            let other_type = kafka_consumer_ConsumerConfig_get_string(config, c"max.poll.records".as_ptr(), &mut err);
+            assert!(other_type.is_null());
+            assert_eq!(kafka_common_Error_is_local_illegal_argument_error(err), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
-                "Unknown configuration 'max.poll.records'"
+                "Configuration 'max.poll.records' is of type INT, not STRING"
+            );
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
+            let unknown = kafka_consumer_ConsumerConfig_get_string(config, c"no.such.key".as_ptr(), &mut err);
+            assert!(unknown.is_null());
+            assert_eq!(kafka_common_Error_is_config_error(err), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
+                "Unknown configuration 'no.such.key'"
             );
             kafka_common_Error_destroy(err);
             kafka_consumer_ConsumerConfig_destroy(config);

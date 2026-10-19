@@ -57,10 +57,13 @@ static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
 /// As in Java, the configuration is built from the string map, by
-/// [`ConsumerConfig::new`], which validates every key as Java's `ConfigDef`
-/// does. There are no typed getters or setters: a key's type and validators
-/// change across Kafka releases, so a getter would freeze the type and a
-/// setter would skip the validation.
+/// [`ConsumerConfig::new`], which parses every key it knows to its Java
+/// `ConfigDef` type and applies the `ConfigDef` validators translated so far;
+/// `new` lists the validators and `postProcessParsedConfig` steps it does not
+/// apply yet. String values are read back with [`ConsumerConfig::get_string`],
+/// as with Java's `AbstractConfig.getString`. There are no typed getters or
+/// setters: a key's type and validators change across Kafka releases, so a
+/// getter would freeze the type and a setter would skip the validation.
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 // `Debug` is derived: every secret this struct holds is a `Password` inside
@@ -212,10 +215,14 @@ pub struct ConsumerConfig {
     pub(crate) config_providers: Vec<String>,
 }
 
-impl Default for ConsumerConfig {
+impl ConsumerConfig {
     /// Default values match Java's `ConfigDef.define(...)` second argument
     /// for every key.
-    fn default() -> Self {
+    ///
+    /// Crate-private, and not `Default`: Java builds a configuration only
+    /// through its constructor, and a public default would hand out one that
+    /// skipped `new`'s validation, including the required `bootstrap.servers`.
+    pub(crate) fn defaults() -> Self {
         Self {
             group_id: None,
             group_instance_id: None,
@@ -492,12 +499,21 @@ impl ConsumerConfig {
     ///
     /// `client.id` answers the resolved id: when the property is unset, `new`
     /// derives it the way Java's `maybeOverrideClientId` does, so this is the
-    /// id the consumer reports to the brokers.
+    /// id the consumer reports to the brokers. `security.protocol` answers the
+    /// protocol's canonical upper-case name (`"SASL_SSL"`): Java accepts the
+    /// value case-insensitively and returns it as written, while this
+    /// configuration keeps only the parsed protocol.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`] with Java's `Unknown configuration '<key>'`
-    /// when `key` is not a `STRING`-typed `ConsumerConfig` key.
+    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
+    ///   another type (`max.poll.records`, `ssl.truststore.password`). Java's
+    ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
+    ///   and fails with a `ClassCastException`, which, like
+    ///   `IllegalArgumentException`, is not a `KafkaException`.
+    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'`
+    ///   (`AbstractConfig.java:176-181`) when `key` is not a configuration this
+    ///   client holds.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         let value = match key {
@@ -505,6 +521,7 @@ impl ConsumerConfig {
             Self::GROUP_INSTANCE_ID_CONFIG => self.group_instance_id.as_deref(),
             Self::GROUP_PROTOCOL_CONFIG => Some(self.group_protocol.as_str()),
             Self::GROUP_REMOTE_ASSIGNOR_CONFIG => self.group_remote_assignor.as_deref(),
+            Self::CLIENT_DNS_LOOKUP_CONFIG => Some(self.client_dns_lookup.config_value()),
             Self::CLIENT_ID_CONFIG => Some(self.client_id.as_str()),
             Self::CLIENT_RACK_CONFIG => Some(self.client_rack.as_str()),
             Self::AUTO_OFFSET_RESET_CONFIG => Some(self.auto_offset_reset.as_str()),
@@ -514,9 +531,79 @@ impl ConsumerConfig {
             Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
             Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
             Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
-            _ => return Err(Error::config_message(format!("Unknown configuration '{key}'"))),
+            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => Some(self.security_protocol.name()),
+            SaslConfigs::SASL_MECHANISM => Some(self.sasl_config.mechanism.as_str()),
+            SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => self.ssl_config.truststore_location.as_deref(),
+            SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG => Some(self.ssl_config.truststore_type.as_str()),
+            SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG => self.ssl_config.keystore_location.as_deref(),
+            SslConfigs::SSL_KEYSTORE_TYPE_CONFIG => Some(self.ssl_config.keystore_type.as_str()),
+            SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
+                Some(self.ssl_config.endpoint_identification_algorithm.as_str())
+            },
+            _ => {
+                return Err(match Self::non_string_config_type(key) {
+                    Some(config_type) => Error::local_illegal_argument(format!(
+                        "Configuration '{key}' is of type {config_type}, not STRING"
+                    )),
+                    None => Error::config_message(format!("Unknown configuration '{key}'")),
+                });
+            },
         };
         Ok(value.map(str::trim))
+    }
+
+    /// The `ConfigDef.Type` name of a configuration this client holds whose
+    /// type is not `STRING` (`ConsumerConfig.java` `CONFIG` definitions,
+    /// `SaslConfigs.addClientSaslSupport`, `SslConfigs.addClientSslSupport`),
+    /// or `None` for any other key.
+    fn non_string_config_type(key: &str) -> Option<&'static str> {
+        match key {
+            Self::MAX_POLL_RECORDS_CONFIG
+            | Self::MAX_POLL_INTERVAL_MS_CONFIG
+            | Self::SESSION_TIMEOUT_MS_CONFIG
+            | Self::HEARTBEAT_INTERVAL_MS_CONFIG
+            | Self::AUTO_COMMIT_INTERVAL_MS_CONFIG
+            | Self::FETCH_MIN_BYTES_CONFIG
+            | Self::FETCH_MAX_BYTES_CONFIG
+            | Self::FETCH_MAX_WAIT_MS_CONFIG
+            | Self::MAX_PARTITION_FETCH_BYTES_CONFIG
+            | Self::SEND_BUFFER_CONFIG
+            | Self::RECEIVE_BUFFER_CONFIG
+            | Self::REQUEST_TIMEOUT_MS_CONFIG
+            | Self::DEFAULT_API_TIMEOUT_MS_CONFIG
+            | Self::METRICS_NUM_SAMPLES_CONFIG => Some("INT"),
+            Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+            | Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+            | Self::CONNECTIONS_MAX_IDLE_MS_CONFIG
+            | Self::RECONNECT_BACKOFF_MS_CONFIG
+            | Self::RECONNECT_BACKOFF_MAX_MS_CONFIG
+            | Self::RETRY_BACKOFF_MS_CONFIG
+            | Self::RETRY_BACKOFF_MAX_MS_CONFIG
+            | Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
+            | Self::METADATA_MAX_AGE_CONFIG
+            | CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG
+            | Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => Some("LONG"),
+            Self::ENABLE_AUTO_COMMIT_CONFIG
+            | Self::CHECK_CRCS_CONFIG
+            | Self::EXCLUDE_INTERNAL_TOPICS_CONFIG
+            | Self::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED
+            | Self::ALLOW_AUTO_CREATE_TOPICS_CONFIG
+            | Self::ENABLE_METRICS_PUSH_CONFIG
+            | CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => Some("BOOLEAN"),
+            Self::BOOTSTRAP_SERVERS_CONFIG
+            | Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG
+            | Self::CONFIG_PROVIDERS_CONFIG
+            | SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG
+            | SslConfigs::SSL_CIPHER_SUITES_CONFIG => Some("LIST"),
+            SaslConfigs::SASL_JAAS_CONFIG
+            | SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG
+            | SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG
+            | SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG
+            | SslConfigs::SSL_KEYSTORE_KEY_CONFIG
+            | SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG
+            | SslConfigs::SSL_KEY_PASSWORD_CONFIG => Some("PASSWORD"),
+            _ => None,
+        }
     }
 
     /// `bootstrap.servers`.
@@ -598,11 +685,20 @@ impl ConsumerConfig {
     /// Mirrors Java's `new ConsumerConfig(Map<String, String>)`. Unknown keys
     /// are logged as warnings and ignored, matching Java's behavior.
     ///
-    /// Construction-time validation matches the Java `ConfigDef` validators
-    /// that we have translated so far. Cross-field validation (e.g.
-    /// `partition.assignment.strategy` being forbidden under
-    /// `group.protocol=consumer`) is deferred until a later phase per
-    /// `consumer-threading.md` §20.
+    /// Each value is parsed to its Java `ConfigDef` type and checked by the
+    /// validators translated so far. Not applied yet, so a value Java rejects
+    /// may be accepted here:
+    ///
+    /// - the fifteen `atLeast(..)` numeric validators listed in the note at the
+    ///   top of this function's body;
+    /// - the `postProcessParsedConfig` steps (`ConsumerConfig.java:749-758`)
+    ///   other than `maybeOverrideClientId`: `maybeOverrideEnableAutoCommit`
+    ///   (an unset `group.id` with `enable.auto.commit=true` is accepted, and
+    ///   `enable.auto.commit` keeps its `true` default without a `group.id`),
+    ///   `checkUnsupportedConfigsPostProcess` (the keys a group protocol does
+    ///   not support are accepted silently, `consumer-threading.md` §20),
+    ///   `postValidateSaslMechanismConfig`,
+    ///   `postProcessReconnectBackoffConfigs` and the two warnings.
     ///
     /// # Errors
     ///
@@ -610,11 +706,10 @@ impl ConsumerConfig {
     /// for its expected type, or fails its validator.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        // NOTE: 13 of Java's per-field `atLeast(..)` numeric validators
-        // (ConsumerConfig.java lines 415-710) are intentionally deferred to
-        // Phase 11, when `post_process_parsed_config` is translated. Until
-        // that lands, negative / out-of-range values are silently accepted
-        // for the following keys (Java line numbers in parentheses):
+        // NOTE: 15 of Java's per-field `atLeast(..)` numeric validators
+        // (ConsumerConfig.java lines 415-710) are not translated yet, so
+        // negative / out-of-range values are silently accepted for the
+        // following keys (Java line numbers in parentheses):
         // (Phase M7 added the `metrics.num.samples` >= 1 and
         //  `metrics.sample.window.ms` >= 0 validators — see below — so they
         //  are no longer in this deferred list.)
@@ -637,7 +732,7 @@ impl ConsumerConfig {
         // `metrics.num.samples >= 1`, `metrics.sample.window.ms >= 0`,
         // `metadata.recovery.rebootstrap.trigger.ms >= 0`,
         // and the string-enum keys.
-        let mut config = Self::default();
+        let mut config = Self::defaults();
 
         // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
@@ -1004,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_default_values() {
-        let c = ConsumerConfig::default();
+        let c = ConsumerConfig::defaults();
         assert_eq!(c.max_poll_records, 500);
         assert_eq!(c.max_poll_interval_ms(), 300_000);
         assert_eq!(c.session_timeout_ms, 45_000);
@@ -1694,8 +1789,9 @@ mod tests {
     }
 
     /// `getString` answers a `STRING` key's value, `null` for an unset
-    /// nullable one, the generated `client.id` when the property is unset, and
-    /// `Unknown configuration` for a key that is not a `STRING` key.
+    /// nullable one, the generated `client.id` when the property is unset, a
+    /// cast failure for a key of another type, and `Unknown configuration` for
+    /// a key the configuration does not hold.
     #[test]
     fn test_get_string() {
         let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")])).unwrap();
@@ -1704,8 +1800,87 @@ mod tests {
         let client_id = config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap().unwrap();
         assert_eq!(config.client_id(), client_id);
         sequence_suffix(client_id, "consumer-test-group-");
-        match config.get_string(ConsumerConfig::MAX_POLL_RECORDS_CONFIG) {
-            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'max.poll.records'", e.message()),
+
+        // Every other `STRING` key, at its Java default.
+        let defaults: &[(&str, Option<&str>)] = &[
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, Some("classic")),
+            (ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, None),
+            (ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG, Some("use_all_dns_ips")),
+            (ConsumerConfig::CLIENT_RACK_CONFIG, Some("")),
+            (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, Some("latest")),
+            (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, Some("rebootstrap")),
+            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, Some("read_uncommitted")),
+            (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, Some("INFO")),
+            (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, Some("implicit")),
+            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("batch_optimized")),
+            (ConsumerConfig::SECURITY_PROVIDERS_CONFIG, None),
+            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, Some("PLAINTEXT")),
+            (SaslConfigs::SASL_MECHANISM, Some("GSSAPI")),
+            (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, None),
+            (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, Some("PEM")),
+            (SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, None),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, Some("PEM")),
+            (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, Some("https")),
+        ];
+        for (key, expected) in defaults {
+            assert_eq!(*expected, config.get_string(key).unwrap(), "for {key}");
+        }
+
+        // Every other `STRING` key, set (padded, as `getString` trims).
+        let set: &[(&str, &str, &str)] = &[
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "consumer", "consumer"),
+            (ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, " uniform ", "uniform"),
+            (
+                ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG,
+                "resolve_canonical_bootstrap_servers_only",
+                "resolve_canonical_bootstrap_servers_only",
+            ),
+            (ConsumerConfig::CLIENT_RACK_CONFIG, " rack-1 ", "rack-1"),
+            (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, "earliest", "earliest"),
+            (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, "none", "none"),
+            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, "read_committed", "read_committed"),
+            (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, "DEBUG", "DEBUG"),
+            (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, "explicit", "explicit"),
+            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, "record_limit", "record_limit"),
+            (ConsumerConfig::SECURITY_PROVIDERS_CONFIG, "my.Provider", "my.Provider"),
+            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, "sasl_ssl", "SASL_SSL"),
+            (SaslConfigs::SASL_MECHANISM, " PLAIN ", "PLAIN"),
+            (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, " /trust.pem ", "/trust.pem"),
+            (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "JKS", "JKS"),
+            (SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/key.pem", "/key.pem"),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "PKCS12", "PKCS12"),
+            (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "", ""),
+        ];
+        for (key, value, expected) in set {
+            let config = ConsumerConfig::new(&props_with(&[(key, value)])).unwrap();
+            assert_eq!(Some(*expected), config.get_string(key).unwrap(), "for {key}={value:?}");
+        }
+
+        // A key of another type fails the cast, outside the `KafkaException`
+        // hierarchy as Java's `ClassCastException` is.
+        let other_types: &[(&str, &str)] = &[
+            (ConsumerConfig::MAX_POLL_RECORDS_CONFIG, "INT"),
+            (ConsumerConfig::METADATA_MAX_AGE_CONFIG, "LONG"),
+            (ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG, "BOOLEAN"),
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "LIST"),
+            (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "PASSWORD"),
+            (SaslConfigs::SASL_JAAS_CONFIG, "PASSWORD"),
+        ];
+        for (key, config_type) in other_types {
+            match config.get_string(key) {
+                Err(e @ Error::LocalIllegalArgument(_)) => {
+                    assert_eq!(
+                        format!("Configuration '{key}' is of type {config_type}, not STRING"),
+                        e.message()
+                    );
+                    assert!(!e.is_kafka_error());
+                },
+                other => panic!("expected an IllegalArgumentError for {key}, got {other:?}"),
+            }
+        }
+
+        match config.get_string("no.such.key") {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'no.such.key'", e.message()),
             other => panic!("expected a ConfigError, got {other:?}"),
         }
     }
@@ -1763,19 +1938,20 @@ mod tests {
 
     // -------- Translated from `org.apache.kafka.clients.consumer.ConsumerConfigTest` --------
     //
-    // Java reads values back through `AbstractConfig`'s keyed getters
-    // (`getString(GROUP_PROTOCOL_CONFIG)`, `getList`, `getBoolean`, `originals()`),
-    // which are not translated; the crate-private getters and fields stand in for
-    // them, which is why these tests live in the crate rather than in
-    // `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
+    // Java reads values back through `AbstractConfig`'s keyed getters. Of
+    // those, `getString` is translated as [`ConsumerConfig::get_string`]; the
+    // others (`getList`, `getBoolean`, `getInt`, `originals()`) are not, and the
+    // crate-private getters and fields stand in for them, which is why these
+    // tests live in the crate rather than in `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
     // every property map (`ConsumerConfigTest.java:60`) because its `ConfigDef`
     // defines them with no default; Rust takes the deserializers as constructor
     // arguments to the consumer, and `ConsumerConfig` holds no deserializer state,
     // so the two keys are absent from `base_props`.
     //
     // Skipped tests:
-    // - `testOverrideEnableAutoCommit` — exercises Java's `postProcessParsedConfig`
-    //   auto-commit override, deferred (PLAN.md "Cross-field validation").
+    // - `testOverrideEnableAutoCommit` — exercises Java's
+    //   `maybeOverrideEnableAutoCommit` (`ConsumerConfig.java:806-817`), which
+    //   `ConsumerConfig::new` does not apply yet (listed in `new`'s rustdoc).
     // - `testAppendDeserializerToConfig`, `testAppendDeserializerToConfigWithException`
     //   — exercise the Java static `appendDeserializerToConfig` helper that mutates a
     //   typed `Map<String, Object>`; there is no equivalent function to test.

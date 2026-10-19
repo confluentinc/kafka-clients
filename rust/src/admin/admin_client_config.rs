@@ -135,7 +135,7 @@ impl AdminClientConfig {
     /// client with no bootstrap address at all.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let mut config = Self::default();
+        let mut config = Self::defaults();
         let mut bootstrap_controllers: Vec<String> = Vec::new();
 
         for (key, value) in props {
@@ -336,9 +336,13 @@ impl AdminClientConfig {
     }
 }
 
-impl Default for AdminClientConfig {
+impl AdminClientConfig {
     /// Defaults match `AdminClientConfig`'s `ConfigDef` (Apache Kafka 4.2).
-    fn default() -> Self {
+    ///
+    /// Crate-private, and not `Default`: Java builds a configuration only
+    /// through its constructor, and a public default would hand out one that
+    /// skipped `new`'s validation, including the required `bootstrap.servers`.
+    pub(crate) fn defaults() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,

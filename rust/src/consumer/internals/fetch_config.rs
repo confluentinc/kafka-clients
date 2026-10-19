@@ -166,7 +166,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfigTest#testBasicFromConsumerConfig")]
     fn test_basic_from_consumer_config() {
-        let consumer_config = ConsumerConfig::default();
+        let consumer_config = ConsumerConfig::defaults();
         let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         // Same as the explicit-values test — defaults agree.
         assert_eq!(1, fetch_config.min_bytes);
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_new_consumer_config_read_committed() {
         let consumer_config =
-            ConsumerConfig { isolation_level: "read_committed".to_string(), ..ConsumerConfig::default() };
+            ConsumerConfig { isolation_level: "read_committed".to_string(), ..ConsumerConfig::defaults() };
         let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         assert_eq!(IsolationLevel::ReadCommitted, fetch_config.isolation_level);
     }
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn test_new_consumer_config_rejects_unknown_isolation_level() {
         let consumer_config =
-            ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::default() };
+            ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::defaults() };
         let err = FetchConfig::with_consumer_config(&consumer_config).unwrap_err();
         let msg = err.message();
         assert!(msg.contains("isolation.level"), "{msg}");

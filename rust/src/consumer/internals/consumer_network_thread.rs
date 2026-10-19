@@ -1368,7 +1368,10 @@ mod tests {
     }
 
     fn make_config() -> ConsumerConfig {
-        ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
+        ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        }
     }
 
     fn make_metadata(config: &ConsumerConfig, subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {

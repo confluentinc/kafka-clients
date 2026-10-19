@@ -2961,7 +2961,10 @@ mod tests {
     const GROUP_ID: &str = "group-1";
 
     fn test_config(enable_auto_commit: bool) -> ConsumerConfig {
-        let mut cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let mut cfg = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         cfg.enable_auto_commit = enable_auto_commit;
         cfg.auto_commit_interval_ms = 1_000;
         cfg
