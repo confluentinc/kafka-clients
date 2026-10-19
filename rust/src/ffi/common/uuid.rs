@@ -224,6 +224,25 @@ mod tests {
         }
     }
 
+    /// A topic id with a multi-byte character straddling byte 24 made `Uuid::from_string`
+    /// panic. #207's guard keeps that from aborting the process, but reported it as a
+    /// `LocalIllegalStateError`; Java throws `IllegalArgumentException`, which is what a C
+    /// caller must be able to classify it as.
+    #[test]
+    fn from_string_of_multibyte_input_is_an_illegal_argument_error() {
+        let mut error = ptr::null_mut();
+        let multibyte = CString::new("a\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}").unwrap();
+        // SAFETY: Test code: `multibyte` outlives the call reading it, `error` is a valid slot
+        // pointing at null before the call, and the error the failing call stores is destroyed once.
+        unsafe {
+            let out = kafka_common_Uuid_from_string(multibyte.as_ptr(), &mut error);
+            assert!(out.is_null(), "nothing is returned on failure");
+            assert!(!error.is_null());
+            assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
+            kafka_common_Error_destroy(error);
+        }
+    }
+
     #[test]
     fn uuid_list_owns_its_elements() {
         let ids = [Uuid::new(1, 2), Uuid::new(3, 4)];
