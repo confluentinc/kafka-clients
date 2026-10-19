@@ -52,10 +52,8 @@ use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
-use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
-use crate::common::utils::internals::ByteUtils;
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::consumer::OffsetAndMetadata;
@@ -2264,23 +2262,15 @@ impl<K, V> KafkaProducer<K, V> {
         // `None` typed) is the faithful call there.
         let partition = self.compute_partition(topic, partition, None, key, None, value, cluster)?;
 
-        // In Java, key, value and header sizes are `byte[]` lengths and always fit
-        // in an `int`; a slice length may not. The size is therefore first computed
-        // in `i64`. A size above `i32::MAX` exceeds any valid `max.request.size` and
-        // is rejected by `ensure_valid_record_size`; otherwise the Java estimate is used.
-        let wide_size =
-            Self::estimate_size_in_bytes_upper_bound_wide(key.map(<[u8]>::len), value.map(<[u8]>::len), headers);
-        let serialized_size = if wide_size > i32::MAX as i64 {
-            wide_size
-        } else {
-            AbstractRecords::estimate_size_in_bytes_upper_bound(
-                RecordBatch::CURRENT_MAGIC_VALUE,
-                self.compression_type,
-                key,
-                value,
-                headers,
-            ) as i64
-        };
+        // An `i64`: unlike a Java `byte[]`, a key or value slice can be longer than
+        // `i32::MAX`, and such a record must still be rejected below.
+        let serialized_size = AbstractRecords::estimate_size_in_bytes_upper_bound(
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            self.compression_type,
+            key,
+            value,
+            headers,
+        );
         if let Err(err) = self.ensure_valid_record_size(serialized_size) {
             return self
                 .handle_api_error(err, topic, partition, callback)
@@ -2685,8 +2675,9 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Translated from `KafkaProducer.ensureValidRecordSize()`.
     ///
-    /// Takes an `i64` so that sizes above `i32::MAX`, computed by
-    /// [`Self::estimate_size_in_bytes_upper_bound_wide`], can be reported.
+    /// Takes an `i64` so that a size above `i32::MAX`, which
+    /// `AbstractRecords::estimate_size_in_bytes_upper_bound` can return, is rejected
+    /// and reported exactly.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#ensureValidRecordSize")]
     fn ensure_valid_record_size(&self, size: i64) -> Result<(), Error> {
         if size > self.max_request_size as i64 {
@@ -2705,42 +2696,6 @@ impl<K, V> KafkaProducer<K, V> {
             )));
         }
         Ok(())
-    }
-
-    /// Returns an upper bound on the size of a batch containing a single record with
-    /// the given key size, value size and headers, computed in `i64`. A `None` size
-    /// denotes a null key or value.
-    ///
-    /// For any record whose size fits in an `i32`, the result equals
-    /// `AbstractRecords::estimate_size_in_bytes_upper_bound` for the current magic.
-    fn estimate_size_in_bytes_upper_bound_wide(
-        key_size: Option<usize>,
-        value_size: Option<usize>,
-        headers: &[RecordHeader],
-    ) -> i64 {
-        use crate::common::header::Header;
-
-        // For lengths up to `i32::MAX`, `size_of_varlong` returns the same value as
-        // `size_of_varint`.
-        fn length(size: usize) -> i64 {
-            i64::try_from(size).unwrap_or(i64::MAX)
-        }
-        fn field_size(size: Option<usize>) -> i64 {
-            match size {
-                None => ByteUtils::size_of_varint(-1) as i64,
-                Some(size) => (ByteUtils::size_of_varlong(length(size)) as i64).saturating_add(length(size)),
-            }
-        }
-
-        let mut size = RecordBatch::RECORD_BATCH_OVERHEAD as i64 + DefaultRecord::MAX_RECORD_OVERHEAD as i64;
-        size = size.saturating_add(field_size(key_size));
-        size = size.saturating_add(field_size(value_size));
-        size = size.saturating_add(ByteUtils::size_of_varlong(length(headers.len())) as i64);
-        for header in headers {
-            size = size.saturating_add(field_size(Some(header.key().len())));
-            size = size.saturating_add(field_size(header.value().map(<[u8]>::len)));
-        }
-        size
     }
 
     /// Resolve the key-based partition when no explicit partition was supplied,
@@ -3799,78 +3754,6 @@ mod tests {
         }
     }
 
-    /// The `i64` bound equals `AbstractRecords::estimate_size_in_bytes_upper_bound`
-    /// for null, empty and non-empty keys, values and headers.
-    #[test]
-    fn test_wide_size_estimate_matches_i32_estimate() {
-        let value_2mb = vec![b'v'; 2 * 1024 * 1024];
-        let headers = vec![
-            RecordHeader::new("h1".to_string(), Some(b"header-value".to_vec())),
-            RecordHeader::new("h2-\u{e9}".to_string(), None),
-            RecordHeader::new(String::new(), Some(Vec::new())),
-        ];
-        let check = |key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]| {
-            let expected = AbstractRecords::estimate_size_in_bytes_upper_bound(
-                RecordBatch::CURRENT_MAGIC_VALUE,
-                CompressionType::None,
-                key,
-                value,
-                headers,
-            );
-            assert_eq!(
-                KafkaProducer::<String, String>::estimate_size_in_bytes_upper_bound_wide(
-                    key.map(<[u8]>::len),
-                    value.map(<[u8]>::len),
-                    headers
-                ),
-                expected as i64,
-                "key={:?} value={:?} headers={}",
-                key.map(<[u8]>::len),
-                value.map(<[u8]>::len),
-                headers.len()
-            );
-        };
-        check(None, None, &[]);
-        check(Some(b""), Some(b""), &[]);
-        check(Some(b"key"), None, &[]);
-        check(None, Some(b"value"), &headers);
-        check(Some(&[b'k'; 200]), Some(&[b'v'; 20_000]), &headers);
-        check(Some(b"key"), Some(&value_2mb), &headers);
-    }
-
-    /// The `i64` bound is exact for sizes above `i32::MAX`, whether in a single field
-    /// or in the sum of fields.
-    #[test]
-    fn test_wide_size_estimate_beyond_i32_max() {
-        let overhead = RecordBatch::RECORD_BATCH_OVERHEAD as i64 + DefaultRecord::MAX_RECORD_OVERHEAD as i64;
-        let null_size = ByteUtils::size_of_varint(-1) as i64;
-        let no_headers = ByteUtils::size_of_varint(0) as i64;
-
-        // 4 GiB + 10 bytes.
-        let key_size = (1usize << 32) + 10;
-        assert_eq!(
-            KafkaProducer::<String, String>::estimate_size_in_bytes_upper_bound_wide(Some(key_size), None, &[]),
-            overhead + 5 + key_size as i64 + null_size + no_headers
-        );
-
-        // 3 GiB.
-        let value_size = 3usize << 30;
-        assert_eq!(
-            KafkaProducer::<String, String>::estimate_size_in_bytes_upper_bound_wide(None, Some(value_size), &[]),
-            overhead + null_size + 5 + value_size as i64 + no_headers
-        );
-
-        // 1.5 GiB key and value: each fits in an `i32`; the total does not.
-        let half_size = 3usize << 29;
-        let size = KafkaProducer::<String, String>::estimate_size_in_bytes_upper_bound_wide(
-            Some(half_size),
-            Some(half_size),
-            &[],
-        );
-        assert_eq!(size, overhead + 2 * (5 + half_size as i64) + no_headers);
-        assert!(size > i32::MAX as i64);
-    }
-
     /// A size above `i32::MAX` is rejected with the `max.request.size` message.
     #[tokio::test]
     async fn test_ensure_valid_record_size_rejects_size_beyond_i32_max() {
@@ -3884,6 +3767,45 @@ mod tests {
             err.message(),
             "The message is 4294967394 bytes when serialized which is larger than 1048576, which is the value of \
              the max.request.size configuration."
+        );
+    }
+
+    /// With `max.request.size` at `i32::MAX`, a size of exactly `i32::MAX` is valid and
+    /// `i32::MAX + 1` is not: the size does not wrap to a negative `i32` and pass.
+    #[tokio::test]
+    async fn test_ensure_valid_record_size_at_i32_max() {
+        let config = ProducerConfig { max_request_size: i32::MAX, buffer_memory: i64::MAX, ..Default::default() };
+        let producer = create_producer_with_config(config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+
+        producer
+            .ensure_valid_record_size(i32::MAX as i64)
+            .expect("exactly max.request.size is valid");
+        let err = producer
+            .ensure_valid_record_size(i32::MAX as i64 + 1)
+            .expect_err("one byte too large");
+        assert!(matches!(err, Error::RecordTooLarge(_)), "Expected RecordTooLarge, got: {err:?}");
+        assert_eq!(
+            err.message(),
+            "The message is 2147483648 bytes when serialized which is larger than 2147483647, which is the value of \
+             the max.request.size configuration."
+        );
+    }
+
+    /// A size the estimate saturated at `i64::MAX` is rejected and reported as is.
+    #[tokio::test]
+    async fn test_ensure_valid_record_size_rejects_saturated_size() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+
+        let err = producer.ensure_valid_record_size(i64::MAX).expect_err("too large");
+        assert!(matches!(err, Error::RecordTooLarge(_)), "Expected RecordTooLarge, got: {err:?}");
+        assert_eq!(
+            err.message(),
+            "The message is 9223372036854775807 bytes when serialized which is larger than 1048576, which is the \
+             value of the max.request.size configuration."
         );
     }
 

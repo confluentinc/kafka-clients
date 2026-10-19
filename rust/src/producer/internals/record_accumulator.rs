@@ -930,13 +930,16 @@ impl RecordAccumulator {
             // `finally` guard — Java's `ByteBuffer buffer = null` local — not in a
             // plain local, so the pool gets it back however this function exits.
             if guard.buffer.is_none() {
-                let estimated = AbstractRecords::estimate_size_in_bytes_upper_bound(
+                // `KafkaProducer` rejected any record larger than `max.request.size`, an
+                // `i32`, so the estimate fits.
+                let estimated = i32::try_from(AbstractRecords::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     self.compression.compression_type(),
                     key,
                     value,
                     headers,
-                );
+                ))
+                .unwrap_or(i32::MAX);
                 let size = self.batch_size.max(estimated);
 
                 kafka_trace!(

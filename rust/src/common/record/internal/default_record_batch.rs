@@ -619,9 +619,13 @@ impl DefaultRecordBatch {
     ///
     /// This is only an estimate because it does not take into account
     /// overhead from the compression algorithm used.
+    ///
+    /// Returns an `i64` where Java returns an `int`, as
+    /// [`DefaultRecord::record_size_upper_bound`] does.
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#estimateBatchSizeUpperBound")]
-    pub fn estimate_batch_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
-        RecordBatch::RECORD_BATCH_OVERHEAD as i32 + DefaultRecord::record_size_upper_bound(key, value, headers)
+    pub fn estimate_batch_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i64 {
+        (RecordBatch::RECORD_BATCH_OVERHEAD as i64)
+            .saturating_add(DefaultRecord::record_size_upper_bound(key, value, headers))
     }
 
     /// Write an empty batch header (no records) to the given buffer.
