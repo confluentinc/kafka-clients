@@ -52,7 +52,7 @@ use tokio::sync::Notify;
 
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
-use crate::{kafka_debug, kafka_error, kafka_trace};
+use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
 
 use std::collections::{HashMap, LinkedList};
 use std::future::Future;
@@ -490,8 +490,10 @@ impl Selector {
         if self.channels.contains_key(id) {
             return Err(format!("There is already a connection for id {id}"));
         }
+        // A connection still in its handshake is already in Java's `channels` (registered with
+        // `OP_CONNECT`), so it gets the same message.
         if self.pending_connects.contains_key(id) {
-            return Err(format!("There is already a connection for id {id} that is still connecting"));
+            return Err(format!("There is already a connection for id {id}"));
         }
         if self.closing_channels.contains_key(id) {
             return Err(format!("There is already a connection for id {id} that is still being closed"));
@@ -507,12 +509,15 @@ impl Selector {
     ///
     /// Must run after `clear()` (which empties `disconnected`). The connects are polled with a
     /// [`ConnectWaker`], so a handshake that finishes while `poll()` is blocked wakes it.
-    fn poll_pending_connects(&mut self) {
+    ///
+    /// Returns whether a channel was registered.
+    fn poll_pending_connects(&mut self) -> bool {
         if self.pending_connects.is_empty() {
-            return;
+            return false;
         }
-        let waker = Waker::from(Arc::new(ConnectWaker { notify: Arc::clone(&self.notify) }));
+        let waker = self.connect_waker();
         let mut cx = Context::from_waker(&waker);
+        let mut any_registered = false;
         let mut finished = Vec::new();
         for (id, pending) in self.pending_connects.iter_mut() {
             if let Poll::Ready(result) = pending.connect.as_mut().poll(&mut cx) {
@@ -523,12 +528,30 @@ impl Selector {
             let Some(pending) = self.pending_connects.remove(&id) else {
                 continue;
             };
-            let registered = result.and_then(|stream| self.register_connected(&id, stream, &pending.peer_host));
-            if let Err(e) = registered {
-                kafka_debug!(self.log_context, "Connection {} failed to connect: {}", id, e);
-                self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+            match result {
+                // `finishConnect()` failing is an `IOException`, which Java's `Selector` logs at
+                // debug when it closes the channel.
+                Err(e) => {
+                    kafka_debug!(self.log_context, "Connection {} failed to connect: {}", id, e);
+                    self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+                },
+                Ok(stream) => match self.register_connected(&id, stream, &pending.peer_host) {
+                    Ok(()) => any_registered = true,
+                    // Java builds the channel inside `connect()`, so this failure is thrown to
+                    // `NetworkClient.initiateConnect`, which logs it at warn with its cause.
+                    Err(e) => {
+                        kafka_warn!(self.log_context, "Error connecting to node {}: {}", id, e);
+                        self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+                    },
+                },
             }
         }
+        any_registered
+    }
+
+    /// The waker handed to every pending connect (see [`ConnectWaker`]).
+    fn connect_waker(&self) -> Waker {
+        Waker::from(Arc::new(ConnectWaker { notify: Arc::clone(&self.notify) }))
     }
 
     /// Wraps a connected stream in a channel (plaintext or TLS transport, per the channel builder)
@@ -1252,14 +1275,23 @@ impl Selectable for Selector {
         socket.set_nodelay(true)?;
 
         // Begin connecting without waiting for the handshake: `poll()` drives it (see
-        // `PendingConnect`). The socket is created and configured above, so errors there are still
-        // returned here, as Java's `connect` throws for them; everything the network reports
-        // later (refused, unreachable, timed out) arrives through `disconnected()`.
-        self.pending_connects.insert(
-            Arc::from(id),
-            PendingConnect { connect: Box::pin(socket.connect(address)), peer_host: peer_host.to_string() },
-        );
-        Ok(())
+        // `PendingConnect`). tokio's connect is lazy, so it is polled once here to start it. Java's
+        // `connect()` has the same three outcomes: an error the kernel reports at once
+        // (`ENETUNREACH`, ...) is returned, a connection that is already established is
+        // registered as immediately connected, and anything else stays pending until `poll()`
+        // (refused, unreachable, timed out arrive through `disconnected()`).
+        let waker = self.connect_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut connect = Box::pin(socket.connect(address));
+        let id: Arc<str> = Arc::from(id);
+        match connect.as_mut().poll(&mut cx) {
+            Poll::Pending => {
+                self.pending_connects
+                    .insert(id, PendingConnect { connect, peer_host: peer_host.to_string() });
+                Ok(())
+            },
+            Poll::Ready(result) => self.register_connected(&id, result?, peer_host),
+        }
     }
 
     fn wakeup(&self) {
@@ -1647,6 +1679,12 @@ impl Selectable for Selector {
                             // channel is processed (correctness > optimization;
                             // this path is rare — a wakeup landing mid-frame).
                             process_all = true;
+                        } else if self.poll_pending_connects() {
+                            // The wake was a handshake finishing (see `ConnectWaker`), not a
+                            // `wakeup()` call: Java's `finishConnect()` registers the channel in
+                            // this same `poll()`, so process it now. Honor the wakeup on the
+                            // next pass, as above, in case it was a real one.
+                            deferred_wakeup = true;
                         } else {
                             break;
                         }
@@ -2601,21 +2639,130 @@ mod tests {
         selector.close().await;
     }
 
-    /// A refused connection is reported by `poll()` through `disconnected()`, as in Java
-    /// (`finishConnect` failing), not by `connect()` returning an error.
+    /// A connection still in its handshake is already registered in Java (`OP_CONNECT`), so
+    /// connecting the same id again gets `ensureNotRegistered`'s plain message.
     #[tokio::test]
-    async fn test_refused_connect_is_reported_as_disconnected() {
-        let port = {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            listener.local_addr().unwrap().port()
-        };
+    async fn test_connect_while_connecting_is_rejected_as_already_connected() {
+        let server = EchoServer::new().await.unwrap();
         let mut selector = create_selector().await;
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
 
         selector
             .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
             .await
-            .expect("a refused connection is reported by poll()");
+            .unwrap();
+        let error = selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .expect_err("the id is already registered");
+
+        assert_eq!(io::ErrorKind::AlreadyExists, error.kind());
+        assert_eq!("There is already a connection for id 0", error.to_string());
+        selector.close().await;
+    }
+
+    /// Java's `connect()` throws what the kernel reports at once (`ENETUNREACH`, ...). tokio's
+    /// connect is lazy, so it is polled once inside `connect()`; before that, such an error only
+    /// showed up on the next `poll()` as a disconnect. The broadcast address fails at once on
+    /// Linux (`ENETUNREACH`) and macOS (`EAFNOSUPPORT`).
+    #[tokio::test]
+    async fn test_error_the_kernel_reports_at_once_is_returned_by_connect() {
+        let mut selector = create_selector().await;
+        let addr: SocketAddr = "255.255.255.255:9092".parse().unwrap();
+
+        let result = selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE).await;
+
+        assert!(result.is_err(), "connect() must return the immediate error");
+        assert!(selector.pending_connects.is_empty());
+        selector.poll(0).await.unwrap();
+        assert!(selector.disconnected().is_empty(), "nothing is left to report from poll()");
+    }
+
+    /// Java's `finishConnect()` registers the channel in the same `poll()`. The handshake finishing
+    /// while `poll()` is blocked wakes it through the selector's `Notify`, which used to take the
+    /// `wakeup()` exit before the channel was registered, so `connected()` only showed it on the
+    /// next `poll()`.
+    #[tokio::test]
+    async fn test_handshake_finishing_during_poll_is_registered_in_the_same_poll() {
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
+        // A handshake that is still in progress when `poll()` blocks. It runs in its own task,
+        // so the pending connect is woken once, when the handshake has finished.
+        let handshake = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            TcpSocket::new_v4()?.connect(addr).await
+        });
+        selector.pending_connects.insert(
+            Arc::from("0"),
+            PendingConnect {
+                connect: Box::pin(async move { handshake.await.expect("the handshake task panicked") }),
+                peer_host: "localhost".to_string(),
+            },
+        );
+
+        selector.poll(5_000).await.unwrap();
+
+        assert!(
+            selector.connected().contains(&"0".to_string()),
+            "the channel must be connected by the poll that saw the handshake finish"
+        );
+        selector.close().await;
+    }
+
+    static CAPTURED_LOGS: StdMutex<Vec<(log::Level, String)>> = StdMutex::new(Vec::new());
+
+    struct CapturingLogger;
+
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            CAPTURED_LOGS.lock().unwrap().push((record.level(), record.args().to_string()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    struct FailingChannelBuilder;
+
+    impl ChannelBuilder for FailingChannelBuilder {
+        fn build_channel(
+            &self,
+            _id: &str,
+            _stream: tokio::net::TcpStream,
+            _peer_host: &str,
+            _max_receive_size: i32,
+            _metadata_registry: Box<dyn ChannelMetadataRegistry>,
+        ) -> io::Result<KafkaChannel> {
+            Err(io::Error::other("channel builder exploded"))
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// Java builds the channel inside `connect()`, so a failure there reaches
+    /// `NetworkClient.initiateConnect`, which logs it at WARN with its cause. A failure to build the
+    /// channel after the handshake must not be reduced to a debug line.
+    #[tokio::test]
+    async fn test_channel_build_failure_is_logged_at_warn_with_its_cause() {
+        log::set_logger(&CapturingLogger).ok();
+        log::set_max_level(log::LevelFilter::Warn);
+
+        let server = EchoServer::new().await.unwrap();
+        let log_context = LogContext::new("[selector-build-failure-test] ");
+        let mut selector = Selector::with_defaults_and_log_context(
+            CONNECTION_MAX_IDLE_MS,
+            Box::new(FailingChannelBuilder),
+            log_context,
+        );
+        let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
 
         for _ in 0..50 {
             selector.poll(100).await.unwrap();
@@ -2623,12 +2770,18 @@ mod tests {
                 break;
             }
         }
+
         assert_eq!(
             ChannelState::NOT_CONNECTED,
-            *selector.disconnected().get("0").expect("the refused connection is reported")
+            *selector.disconnected().get("0").expect("the failure is reported")
         );
-        assert!(!selector.is_channel_ready("0"));
-        assert!(selector.connected().is_empty());
+        let logs = CAPTURED_LOGS.lock().unwrap();
+        assert!(
+            logs.iter().any(|(level, message)| *level == log::Level::Warn
+                && message.starts_with("[selector-build-failure-test] ")
+                && message.contains("Error connecting to node 0: channel builder exploded")),
+            "expected a WARN with the cause, got: {logs:?}"
+        );
     }
 
     /// Translated from `SelectorTest.testCantSendWithInProgress`.
@@ -2685,23 +2838,32 @@ mod tests {
     async fn test_connection_refused() {
         let mut selector = create_selector().await;
 
-        // Bind a socket but don't listen/accept
+        // Bind a socket, then close the listener so connections to its port are refused.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener); // Close the listener so connections are refused
+        drop(listener);
 
+        // The connect only begins here: the refusal is reported by `poll()` through
+        // `disconnected()`, as Java's `finishConnect()` failing is, not by `connect()` returning
+        // an error.
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let result = selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE).await;
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .expect("a refused connection is reported by poll()");
 
-        // Connection refused can manifest either as an error from connect()
-        // or as a disconnect detected during poll()
-        if result.is_ok() {
-            let mut attempts = 0;
-            while !selector.disconnected().contains_key("0") && attempts < 30 {
-                let _ = selector.poll(100).await;
-                attempts += 1;
+        for _ in 0..50 {
+            selector.poll(100).await.unwrap();
+            if selector.disconnected().contains_key("0") {
+                break;
             }
         }
+        assert_eq!(
+            ChannelState::NOT_CONNECTED,
+            *selector.disconnected().get("0").expect("the refused connection is reported")
+        );
+        assert!(!selector.is_channel_ready("0"));
+        assert!(selector.connected().is_empty());
 
         selector.poll(0).await.unwrap();
     }
