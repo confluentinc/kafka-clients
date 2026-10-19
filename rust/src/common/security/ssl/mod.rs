@@ -24,11 +24,6 @@
 
 #![cfg_attr(not(test), expect(dead_code))]
 
-mod base64;
-mod encrypted_private_key_info;
-mod pem_parser;
-#[cfg(test)]
-mod private_key_test_vectors;
 mod ssl_factory;
 
 pub use ssl_factory::SslFactory;

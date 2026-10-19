@@ -29,15 +29,13 @@
 //!   hostname matching.
 
 use crate::common::config::SslConfigs;
-use crate::common::security::ssl::encrypted_private_key_info::EncryptedPrivateKeyInfo;
-use crate::common::security::ssl::pem_parser::PemParser;
 
 use std::io;
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 /// SSL/TLS factory that builds `Arc<rustls::ClientConfig>` from [`SslConfigs`].
@@ -291,53 +289,41 @@ fn load_client_identity(
     };
 
     let key = if let Some(ref key_pem) = ssl_config.keystore_key {
-        if let Some(ref key_password) = ssl_config.key_password {
-            // Java (`PemStore.privateKey`) reads the entry as an `EncryptedPrivateKeyInfo`
-            // as soon as `ssl.key.password` is set.
-            Some(decrypt_private_key(key_pem.value(), key_password.value())?)
-        } else {
-            // `.next().transpose()` yields `Result<Option<PrivateKeyDer>, pem::Error>` —
-            // the same shape the old `rustls_pemfile::private_key` returned — so a PEM
-            // with no key section stays `Ok(None)` and produces the "No private key found"
-            // message below rather than a parse error.
-            let key = PrivateKeyDer::pem_slice_iter(key_pem.value().as_bytes())
-                .next()
-                .transpose()
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Failed to parse inline keystore private key: {e}"),
-                    )
-                })?
-                .ok_or_else(|| {
-                    no_private_key_error(key_pem.value(), "No private key found in inline keystore key".to_string())
-                })?;
-            Some(key)
-        }
+        // `.next().transpose()` yields `Result<Option<PrivateKeyDer>, pem::Error>` —
+        // the same shape the old `rustls_pemfile::private_key` returned — so a PEM
+        // with no key section stays `Ok(None)` and produces the "No private key
+        // found" message below rather than a parse error.
+        let key = PrivateKeyDer::pem_slice_iter(key_pem.value().as_bytes())
+            .next()
+            .transpose()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse inline keystore private key: {e}"),
+                )
+            })?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No private key found in inline keystore key"))?;
+        Some(key)
     } else if let Some(ref path) = ssl_config.keystore_location {
         // When keystore_location is used, key is expected in the same file
-        if let Some(ref key_password) = ssl_config.key_password {
-            let pem = std::fs::read_to_string(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file for key '{path}': {e}")))?;
-            Some(decrypt_private_key(&pem, key_password.value())?)
-        } else {
-            let file = std::fs::File::open(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file for key '{path}': {e}")))?;
-            let key = PrivateKeyDer::pem_reader_iter(file)
-                .next()
-                .transpose()
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Failed to parse private key from keystore file '{path}': {e}"),
-                    )
-                })?
-                .ok_or_else(|| {
-                    let pem = std::fs::read_to_string(path).unwrap_or_default();
-                    no_private_key_error(&pem, format!("No private key found in keystore file '{path}'"))
-                })?;
-            Some(key)
-        }
+        let file = std::fs::File::open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file for key '{path}': {e}")))?;
+        let key = PrivateKeyDer::pem_reader_iter(file)
+            .next()
+            .transpose()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse private key from keystore file '{path}': {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("No private key found in keystore file '{path}'"),
+                )
+            })?;
+        Some(key)
     } else {
         None
     };
@@ -354,53 +340,6 @@ fn load_client_identity(
             "Private key provided but no client certificate chain configured",
         )),
     }
-}
-
-/// What Java wraps every failure of reading the keystore PEM in: `createKeyStoreFromPem` catches the
-/// `Exception` of reading the key and the certificates and throws
-/// `new InvalidConfigurationException("Invalid PEM keystore configs", e)`. A Rust error shows the
-/// cause in its text, after a colon.
-const INVALID_PEM_KEYSTORE_CONFIGS: &str = "Invalid PEM keystore configs";
-
-fn invalid_pem_keystore_configs(cause: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("{INVALID_PEM_KEYSTORE_CONFIGS}: {cause}"))
-}
-
-/// The error for a PEM without a private key `rustls-pki-types` reads. When it does hold a `PRIVATE KEY`
-/// entry that is encrypted, Java reads it as a PKCS#8 key spec and fails with
-/// `Private key could not be loaded`; the reason is added, as the key password is missing.
-fn no_private_key_error(pem: &str, not_found: String) -> io::Error {
-    let encrypted = PemParser::new("PRIVATE KEY")
-        .pem_entries(pem)
-        .is_ok_and(|entries| entries.iter().any(|der| EncryptedPrivateKeyInfo::looks_encrypted(der)));
-    if encrypted {
-        invalid_pem_keystore_configs(
-            "Private key could not be loaded: the private key is encrypted, but ssl.key.password is not set",
-        )
-    } else {
-        io::Error::new(io::ErrorKind::InvalidData, not_found)
-    }
-}
-
-/// Decrypts the one private key of `pem` with `ssl.key.password`, as
-/// `DefaultSslEngineFactory.PemStore.privateKey` does when a key password is set: the entry is read
-/// as an `EncryptedPrivateKeyInfo` and decrypted into a PKCS#8 key.
-fn decrypt_private_key(pem: &str, key_password: &str) -> io::Result<PrivateKeyDer<'static>> {
-    let entries = PemParser::new("PRIVATE KEY")
-        .pem_entries(pem)
-        .map_err(invalid_pem_keystore_configs)?;
-    // `if (keyEntries.isEmpty()) throw new InvalidConfigurationException("Private key not provided")`
-    // cannot happen: `pemEntries` throws first when there is no entry.
-    if entries.len() != 1 {
-        return Err(invalid_pem_keystore_configs(format!(
-            "Expected one private key, but found {}",
-            entries.len()
-        )));
-    }
-    let pkcs8 = EncryptedPrivateKeyInfo::new(&entries[0])
-        .and_then(|info| info.decrypt(key_password))
-        .map_err(invalid_pem_keystore_configs)?;
-    Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8)))
 }
 
 /// Resolves TLS protocol version strings to rustls `SupportedProtocolVersion` references.
@@ -1057,271 +996,5 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
 
         let result = verifier.verify_server_cert(end_entity, &[], &server_name, &[], now);
         assert!(result.is_err(), "NoHostnameVerifier should reject a cert from an untrusted CA");
-    }
-
-    // -----------------------------------------------------------------------
-    // Encrypted private keys (`ssl.key.password`)
-    //
-    // `DefaultSslEngineFactory.PemStore.privateKey` reads the one `PRIVATE KEY` /
-    // `ENCRYPTED PRIVATE KEY` entry of `ssl.keystore.key`; with `ssl.key.password` set it
-    // decrypts it as a PKCS#8 `EncryptedPrivateKeyInfo`. The vectors are checked to load
-    // in Java with that logic, see `private_key_test_vectors`.
-    //
-    // Whatever goes wrong there reaches the caller wrapped by `createKeyStoreFromPem` as
-    // `InvalidConfigurationException("Invalid PEM keystore configs", cause)`; the messages
-    // below are that text, then the cause (`: ` as the Rust errors render a cause).
-    // -----------------------------------------------------------------------
-
-    use crate::common::security::ssl::private_key_test_vectors as vectors;
-
-    /// An mTLS client configuration made of the given inline PEM chain and key.
-    fn client_identity_config(chain: &str, key: &str, key_password: Option<&str>) -> SslConfigs {
-        SslConfigs {
-            keystore_certificate_chain: Some(Password::new(chain)),
-            keystore_key: Some(Password::new(key)),
-            key_password: key_password.map(Password::new),
-            ..SslConfigs::default()
-        }
-    }
-
-    fn factory_error(config: &SslConfigs) -> String {
-        match SslFactory::new(config) {
-            Ok(_) => panic!("the configuration should have been rejected"),
-            Err(e) => e.to_string(),
-        }
-    }
-
-    /// `ssl.key.password` decrypts the `ENCRYPTED PRIVATE KEY` of every PBES2 variant the JDK reads:
-    /// PBKDF2 with HMAC-SHA1 (the default PRF, which OpenSSL leaves out of the parameters), SHA-224,
-    /// -256, -384 and -512, and AES-128-CBC or AES-256-CBC. rustls refuses a key that does not match the
-    /// certificate, so a wrong decryption cannot go through.
-    #[test]
-    fn test_encrypted_pkcs8_key_with_key_password_loads_for_every_pbes2_variant() {
-        for (name, key) in [
-            ("aes-256-cbc / hmacWithSHA256", vectors::EC_ENC_AES256_SHA256),
-            ("aes-128-cbc / hmacWithSHA1 (default prf)", vectors::EC_ENC_AES128_SHA1),
-            ("aes-128-cbc / hmacWithSHA256", vectors::EC_ENC_AES128_SHA256),
-            ("aes-256-cbc / hmacWithSHA224", vectors::EC_ENC_AES256_SHA224),
-            ("aes-256-cbc / hmacWithSHA384", vectors::EC_ENC_AES256_SHA384),
-            ("aes-256-cbc / hmacWithSHA512", vectors::EC_ENC_AES256_SHA512),
-        ] {
-            let config = client_identity_config(vectors::EC_CERT, key, Some(vectors::PASSWORD));
-            if let Err(e) = SslFactory::new(&config) {
-                panic!("{name}: the encrypted key was not loaded: {e}");
-            }
-        }
-    }
-
-    /// Same with an RSA key, whose PKCS#8 is long enough to span many AES blocks.
-    #[test]
-    fn test_encrypted_rsa_pkcs8_key_with_key_password_loads() {
-        let config = client_identity_config(vectors::RSA_CERT, vectors::RSA_ENC_AES256_SHA256, Some(vectors::PASSWORD));
-        SslFactory::new(&config).expect("the encrypted RSA key loads");
-    }
-
-    /// The control: the same key unencrypted, with no key password, as always.
-    #[test]
-    fn test_unencrypted_pkcs8_key_without_key_password_loads() {
-        SslFactory::new(&client_identity_config(vectors::EC_CERT, vectors::EC_PLAIN, None)).expect("loads");
-        SslFactory::new(&client_identity_config(vectors::RSA_CERT, vectors::RSA_PLAIN, None)).expect("loads");
-    }
-
-    /// A wrong `ssl.key.password` is an error (Java: `InvalidKeySpecException: Cannot retrieve the
-    /// PKCS8EncodedKeySpec`), for each cipher, not a garbage key.
-    #[test]
-    fn test_encrypted_key_with_wrong_key_password_is_rejected() {
-        for key in [
-            vectors::EC_ENC_AES256_SHA256,
-            vectors::EC_ENC_AES128_SHA1,
-            vectors::RSA_ENC_AES256_SHA256,
-        ] {
-            let cert = if key == vectors::RSA_ENC_AES256_SHA256 {
-                vectors::RSA_CERT
-            } else {
-                vectors::EC_CERT
-            };
-            assert_eq!(
-                "Invalid PEM keystore configs: ssl.key.password is wrong, or the key is corrupt",
-                factory_error(&client_identity_config(cert, key, Some("wrong")))
-            );
-        }
-    }
-
-    /// An `ENCRYPTED PRIVATE KEY` with no `ssl.key.password` (Java: `Private key could not be loaded`).
-    /// This used to be reported as `No private key found in inline keystore key`, which is false.
-    #[test]
-    fn test_encrypted_key_without_key_password_is_rejected_with_the_reason() {
-        assert_eq!(
-            "Invalid PEM keystore configs: Private key could not be loaded: the private key is encrypted, but ssl.key.password is not set",
-            factory_error(&client_identity_config(vectors::EC_CERT, vectors::EC_ENC_AES256_SHA256, None))
-        );
-    }
-
-    /// With `ssl.key.password` Java reads the entry as an `EncryptedPrivateKeyInfo` and fails on a key
-    /// that is not one (`IOException: overrun`).
-    #[test]
-    fn test_unencrypted_key_with_key_password_is_rejected() {
-        assert_eq!(
-            "Invalid PEM keystore configs: the private key is not encrypted, but ssl.key.password is set",
-            factory_error(&client_identity_config(
-                vectors::EC_CERT,
-                vectors::EC_PLAIN,
-                Some(vectors::PASSWORD)
-            ))
-        );
-    }
-
-    /// The JDK cannot read AES-192-CBC keys either (`expecting the object identifier for AES cipher`).
-    #[test]
-    fn test_encrypted_key_with_unsupported_cipher_is_rejected() {
-        assert_eq!(
-            "Invalid PEM keystore configs: unsupported PBES2 encryption scheme aes192-CBC (2.16.840.1.101.3.4.1.22): AES-128-CBC and AES-256-CBC are supported",
-            factory_error(&client_identity_config(
-                vectors::EC_CERT,
-                vectors::EC_ENC_AES192_SHA512,
-                Some(vectors::PASSWORD)
-            ))
-        );
-    }
-
-    /// A damaged entry is an error, never a panic: a valid base64 body that is not a DER
-    /// `EncryptedPrivateKeyInfo`, and one cut short in the middle of the ciphertext.
-    #[test]
-    fn test_malformed_encrypted_key_is_an_error_not_a_panic() {
-        let garbage =
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAECAwQFBgcICQoLDA0ODw==\n-----END ENCRYPTED PRIVATE KEY-----\n";
-        assert_eq!(
-            "Invalid PEM keystore configs: the entry is not a PKCS#8 EncryptedPrivateKeyInfo",
-            factory_error(&client_identity_config(vectors::EC_CERT, garbage, Some(vectors::PASSWORD)))
-        );
-
-        let body: Vec<&str> = vectors::EC_ENC_AES256_SHA256.lines().collect();
-        let truncated = format!("{}\n{}\n{}\n", body[0], body[1], "-----END ENCRYPTED PRIVATE KEY-----");
-        assert!(
-            factory_error(&client_identity_config(vectors::EC_CERT, &truncated, Some(vectors::PASSWORD)))
-                .starts_with("Invalid PEM keystore configs:")
-        );
-    }
-
-    /// `Expected one private key, but found N` (Java), when a password asks for the encrypted one.
-    #[test]
-    fn test_two_encrypted_keys_are_rejected() {
-        let two = format!("{}{}", vectors::EC_ENC_AES256_SHA256, vectors::EC_ENC_AES128_SHA1);
-        assert_eq!(
-            "Invalid PEM keystore configs: Expected one private key, but found 2",
-            factory_error(&client_identity_config(vectors::EC_CERT, &two, Some(vectors::PASSWORD)))
-        );
-    }
-
-    /// Java: `PemParser.pemEntries` throws `No matching PRIVATE KEY entries in PEM file` when
-    /// the PEM holds no private key entry; with a password that is the cause of the wrapper.
-    #[test]
-    fn test_no_private_key_entry_with_key_password_is_rejected() {
-        assert_eq!(
-            "Invalid PEM keystore configs: No matching PRIVATE KEY entries in PEM file",
-            factory_error(&client_identity_config(
-                vectors::EC_CERT,
-                "nothing here",
-                Some(vectors::PASSWORD)
-            ))
-        );
-    }
-
-    /// A body `Base64.getDecoder()` refuses: the JDK's own message is the cause.
-    #[test]
-    fn test_invalid_base64_in_the_encrypted_key_is_rejected_with_the_jdk_message() {
-        let key = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAQ=\n-----END ENCRYPTED PRIVATE KEY-----\n";
-        assert_eq!(
-            "Invalid PEM keystore configs: Input byte array has wrong 4-byte ending unit",
-            factory_error(&client_identity_config(vectors::EC_CERT, key, Some(vectors::PASSWORD)))
-        );
-    }
-
-    /// `ssl.keystore.location` with `ssl.keystore.type=PEM`: the file holds the chain and the (encrypted) key
-    /// (`FileBasedPemStore`), and `ssl.key.password` decrypts it too.
-    #[test]
-    fn test_encrypted_key_in_a_pem_keystore_file_loads() {
-        let path = std::env::temp_dir().join(format!("kafka-clients-encrypted-key-{}.pem", std::process::id()));
-        std::fs::write(&path, format!("{}{}", vectors::EC_CERT, vectors::EC_ENC_AES256_SHA256)).unwrap();
-        let config = SslConfigs {
-            keystore_location: Some(path.to_str().unwrap().to_string()),
-            keystore_type: "PEM".to_string(),
-            key_password: Some(Password::new(vectors::PASSWORD)),
-            ..SslConfigs::default()
-        };
-        let result = SslFactory::new(&config);
-        let _ = std::fs::remove_file(&path);
-        result.expect("the encrypted key of the PEM keystore file loads");
-    }
-
-    /// The whole point: a TLS handshake with a server that *requires* a client certificate, where the client
-    /// was configured with an encrypted key and `ssl.key.password`. The client signs the handshake with the
-    /// decrypted key, and the server sees the certificate of that key (the audit's `ssl_mtls_encrypted_key`
-    /// scenario, against an in-process server). A client without that identity is turned away by the same server.
-    #[test]
-    fn test_mtls_handshake_with_an_encrypted_client_key() {
-        use rustls::pki_types::ServerName;
-        use rustls::{ClientConnection, ServerConfig, ServerConnection};
-
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let server = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let mut trusted_clients = RootCertStore::empty();
-        for cert in parse_certs(vectors::EC_CERT) {
-            trusted_clients.add(cert).unwrap();
-        }
-        let server_config = Arc::new(
-            ServerConfig::builder()
-                .with_client_cert_verifier(
-                    rustls::server::WebPkiClientVerifier::builder(Arc::new(trusted_clients))
-                        .build()
-                        .unwrap(),
-                )
-                .with_single_cert(
-                    vec![server.cert.der().clone()],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server.key_pair.serialize_der())),
-                )
-                .unwrap(),
-        );
-
-        // Runs both ends of the handshake against each other in memory; the server's view of the client
-        // certificate when it completes.
-        let handshake = |factory: &SslFactory| -> Result<Option<Vec<u8>>, String> {
-            let mut client =
-                ClientConnection::new(Arc::clone(factory.client_config()), ServerName::try_from("localhost").unwrap())
-                    .unwrap();
-            let mut server = ServerConnection::new(Arc::clone(&server_config)).unwrap();
-            for _ in 0..20 {
-                let mut to_server = Vec::new();
-                while client.wants_write() {
-                    client.write_tls(&mut to_server).map_err(|e| e.to_string())?;
-                }
-                server.read_tls(&mut to_server.as_slice()).map_err(|e| e.to_string())?;
-                server.process_new_packets().map_err(|e| e.to_string())?;
-                let mut to_client = Vec::new();
-                while server.wants_write() {
-                    server.write_tls(&mut to_client).map_err(|e| e.to_string())?;
-                }
-                if !to_client.is_empty() {
-                    client.read_tls(&mut to_client.as_slice()).map_err(|e| e.to_string())?;
-                    client.process_new_packets().map_err(|e| e.to_string())?;
-                }
-                if !client.is_handshaking() && !server.is_handshaking() {
-                    return Ok(server.peer_certificates().and_then(|c| c.first()).map(|c| c.as_ref().to_vec()));
-                }
-            }
-            Err("the handshake did not complete".to_string())
-        };
-
-        let mut with_identity =
-            client_identity_config(vectors::EC_CERT, vectors::EC_ENC_AES256_SHA256, Some(vectors::PASSWORD));
-        with_identity.truststore_certificates = Some(Password::new(server.cert.pem()));
-        let seen = handshake(&SslFactory::new(&with_identity).unwrap()).expect("the mTLS handshake completes");
-        assert_eq!(Some(parse_certs(vectors::EC_CERT)[0].as_ref().to_vec()), seen);
-
-        let without_identity = SslConfigs {
-            truststore_certificates: Some(Password::new(server.cert.pem())),
-            ..SslConfigs::default()
-        };
-        assert!(handshake(&SslFactory::new(&without_identity).unwrap()).is_err());
     }
 }
