@@ -26,7 +26,6 @@ from typing import overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from .topic_partition import TopicPartition
 from .uuid import Uuid
@@ -56,7 +55,7 @@ class TopicIdPartition:
         either the topic partition, or the partition id and the topic name (or
         null: ``topic=None`` is given)."""
         if topic_id is None:
-            raise NullPointerError(message="topicId can not be null")
+            raise TypeError("topic_id must not be None")
         self._topic_id = topic_id
         if topic_partition is not None:
             self._topic_partition = topic_partition

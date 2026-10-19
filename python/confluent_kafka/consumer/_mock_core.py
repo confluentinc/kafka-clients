@@ -297,7 +297,7 @@ class MockConsumerCore(Generic[K, V]):
         """Java's private ``subscribe(SubscriptionPattern, Optional)``."""
         if pattern is None or str(pattern) == "":
             raise IllegalArgumentError(
-                message="Topic pattern cannot be " + ("null" if pattern is None else "empty"))
+                message="Topic pattern cannot be " + ("None" if pattern is None else "empty"))
         with self._lock:
             self._ensure_not_closed()
             self._committed_offsets.clear()

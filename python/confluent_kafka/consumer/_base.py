@@ -83,7 +83,6 @@ from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._conversions import (
     offsets_to_spec, timestamps_to_spec, to_long_map, to_metrics_map,
@@ -129,15 +128,21 @@ CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
 # (Objects.requireNonNull), offsetsForTimes, the private
 # seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, and
 # the private beginningOrEndOffset; with whether Java checks before acquire()
-# (only the private seek does). assign's is _assign_partitions.
-_NULL_ARGUMENT: dict[str, tuple[type[NullPointerError] | type[IllegalArgumentError], str, bool]] = {
-    "pause": (NullPointerError, "The partitions to pause must be nonnull", False),
-    "resume": (NullPointerError, "The partitions to resume must be nonnull", False),
-    "offsets_for_times": (NullPointerError, "Timestamps to search cannot be null", False),
-    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be null", True),
-    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be null", True),
-    "beginning_offsets": (NullPointerError, "Partitions cannot be null", False),
-    "end_offsets": (NullPointerError, "Partitions cannot be null", False),
+# (only the private seek does). assign's is _assign_partitions. Java's
+# NullPointerException is Python's TypeError naming the parameter, and Java's
+# "null" reads "None" (CLAUDE.md, Python Binding Conventions, Types).
+_NULL_ARGUMENT: dict[str, tuple[type[TypeError] | type[IllegalArgumentError], str, bool]] = {
+    "pause": (TypeError, "partitions must not be None", False),
+    "resume": (TypeError, "partitions must not be None", False),
+    "offsets_for_times": (TypeError, "timestamps_to_search must not be None", False),
+    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be None", True),
+    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be None", True),
+    "beginning_offsets": (TypeError, "partitions must not be None", False),
+    "end_offsets": (TypeError, "partitions must not be None", False),
+    # Java dereferences these with no check of its own: committed's
+    # partitions.isEmpty() and TopicMetadataEvent's Objects.requireNonNull(topic).
+    "committed": (TypeError, "partitions must not be None", False),
+    "partitions_for": (TypeError, "topic must not be None", False),
 }
 
 # Java's AsyncKafkaConsumer.throwIfGroupIdNotDefined() message.
@@ -1523,7 +1528,7 @@ class _ConsumerState:
         if partitions is None:
             with self._use():
                 raise IllegalArgumentError(
-                    message="Topic partitions collection to assign to cannot be null")
+                    message="Topic partitions collection to assign to cannot be None")
         return blank_null_topic_partitions(partitions)
 
     def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
@@ -1564,11 +1569,22 @@ class _ConsumerState:
         checked = _NULL_ARGUMENT.get(op)
         if value is None and checked is not None:
             error, message, before_acquire = checked
+            raised = error(message) if issubclass(error, TypeError) else error(message=message)
             if before_acquire:
                 self._check_open()
-                raise error(message=message)
+                raise raised
             with self._use():
-                raise error(message=message)
+                raise raised
+
+    def _check_committed_partitions(self, partitions: object) -> None:
+        """Java's ``committed``: ``throwIfGroupIdNotDefined()`` precedes the
+        ``partitions.isEmpty()`` that throws on null, so a consumer without a
+        ``group.id`` reports the group first (the binding knows the group id)."""
+        if partitions is None and not self._group_id_defined:
+            with self._use():
+                pass
+            raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
+        self._check_not_null("committed", partitions)
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's

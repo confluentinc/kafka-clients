@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, NullPointerError
+from confluent_kafka import IllegalArgumentError
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.producer import ProducerRecord, RecordMetadata
 
@@ -51,15 +51,15 @@ def test_equals_and_hash_code() -> None:
 def test_invalid_records() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         ProducerRecord(topic=None, partition=0, key="key", value=1)  # type: ignore[call-overload]
-    assert str(exc.value) == "Topic cannot be null."
+    assert str(exc.value) == "Topic cannot be None."
     with pytest.raises(IllegalArgumentError) as exc:
         ProducerRecord(topic="test", partition=0, timestamp=-1, key="key", value=1)
     assert str(exc.value) == (
-        "Invalid timestamp: -1. Timestamp should always be non-negative or null.")
+        "Invalid timestamp: -1. Timestamp should always be non-negative or None.")
     with pytest.raises(IllegalArgumentError) as exc:
         ProducerRecord(topic="test", partition=-1, key="key", value=1)
     assert str(exc.value) == (
-        "Invalid partition: -1. Partition number should always be non-negative or null.")
+        "Invalid partition: -1. Partition number should always be non-negative or None.")
 
 
 def test_producer_record_forms_and_headers() -> None:
@@ -79,7 +79,7 @@ def test_producer_record_forms_and_headers() -> None:
     assert va.tobytes() == b"H"
     assert str(ProducerRecord(topic="t", partition=1, key="k", value="v")) == (
         "ProducerRecord(topic=t, partition=1, headers=RecordHeaders(headers = [], "
-        "isReadOnly = false), key=k, value=v, timestamp=null)")
+        "isReadOnly = False), key=k, value=v, timestamp=None)")
     # partition and key default to UNSET, so an explicit None is given: Java's
     # (topic, partition, key, value) with a null key, or a null partition.
     null_key = ProducerRecord(topic="t", partition=0, key=None, value=b"v")
@@ -108,10 +108,10 @@ def test_producer_record_forms_and_headers() -> None:
         with pytest.raises(IllegalArgumentError) as exc:
             ProducerRecord(topic="t", value=b"v", **kwargs)
         assert str(exc.value) == forms + got
-    with pytest.raises(NullPointerError) as npe:
+    with pytest.raises(TypeError) as npe:
         ProducerRecord(topic="t", partition=None, key=None, value=1,
                        headers=[(None, b"x")])  # type: ignore[list-item]
-    assert str(npe.value) == "Null header keys are not permitted"
+    assert str(npe.value) == "a header key must not be None"
     with pytest.raises(TypeError):
         ProducerRecord("t", None, None, None, 1)  # type: ignore[call-overload]
 

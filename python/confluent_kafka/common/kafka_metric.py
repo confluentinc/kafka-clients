@@ -35,7 +35,6 @@ import types
 from typing import TYPE_CHECKING, Any, overload
 
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from .measurable import Measurable
@@ -67,7 +66,7 @@ class KafkaMetric:
         self._lock = lock
         # Objects.requireNonNull(valueProvider, "valueProvider must not be null")
         if value_provider is None:
-            raise NullPointerError(message="valueProvider must not be null")
+            raise TypeError("value_provider must not be None")
         self._metric_value_provider = value_provider
         self._config = config
         self._time = time

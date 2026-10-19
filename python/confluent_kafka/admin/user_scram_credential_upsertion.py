@@ -32,7 +32,6 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from .user_scram_credential_alteration import UserScramCredentialAlteration
 
@@ -92,12 +91,12 @@ class UserScramCredentialUpsertion(UserScramCredentialAlteration):
         if salt is None:
             salt = _generate_random_salt()
         if user is None:
-            raise NullPointerError()
+            raise TypeError("user must not be None")
         super().__init__(user=user)
         if credential_info is None:
-            raise NullPointerError()
+            raise TypeError("credential_info must not be None")
         if password is None:
-            raise NullPointerError()
+            raise TypeError("password must not be None")
         self._info = credential_info
         self._password = bytes(password)
         self._salt = bytes(salt)

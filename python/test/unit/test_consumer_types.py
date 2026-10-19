@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, NullPointerError
+from confluent_kafka import IllegalArgumentError
 from confluent_kafka.common import TimestampType, TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
@@ -104,7 +104,7 @@ def test_offset_and_metadata_forms() -> None:
     assert str(OffsetAndMetadata(offset=5, leader_epoch=3, metadata="m")) == (
         "OffsetAndMetadata{offset=5, leaderEpoch=3, metadata='m'}")
     assert str(OffsetAndMetadata(offset=5)) == (
-        "OffsetAndMetadata{offset=5, leaderEpoch=null, metadata=''}")
+        "OffsetAndMetadata{offset=5, leaderEpoch=None, metadata=''}")
     with pytest.raises(TypeError):
         OffsetAndMetadata(5)  # type: ignore[call-arg]
 
@@ -125,7 +125,7 @@ def test_offset_and_timestamp() -> None:
     # sets are Java constructors, so a None one is the three-argument form.
     assert o == OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None)
     assert OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None).leader_epoch() is None
-    assert str(o) == "(timestamp=2, leaderEpoch=null, offset=1)"
+    assert str(o) == "(timestamp=2, leaderEpoch=None, offset=1)"
     with pytest.raises(IllegalArgumentError) as exc:
         OffsetAndTimestamp(offset=-1, timestamp=0)
     assert str(exc.value) == "Invalid negative offset"
@@ -183,15 +183,16 @@ def test_kafka_consumer_group_metadata_deep_copies_to_itself() -> None:
 
 
 def test_operation_should_not_be_null() -> None:
-    with pytest.raises(NullPointerError) as exc:
+    with pytest.raises(TypeError) as exc:
         CloseOptions.group_membership_operation(operation=None)  # type: ignore[arg-type]
-    assert str(exc.value) == "operation should not be null"
-    with pytest.raises(NullPointerError):
+    assert str(exc.value) == "operation must not be None"
+    with pytest.raises(TypeError) as none:
         CloseOptions.timeout(timeout=0).with_group_membership_operation(operation=None)  # type: ignore[arg-type]
+    assert str(none.value) == "operation must not be None"
     # The keyword constructor calls the setter, so an explicit None raises as it does.
-    with pytest.raises(NullPointerError) as exc:
+    with pytest.raises(TypeError) as exc:
         CloseOptions(operation=None)  # type: ignore[arg-type]
-    assert str(exc.value) == "operation should not be null"
+    assert str(exc.value) == "operation must not be None"
 
 
 def test_operation_should_have_default_value() -> None:
@@ -316,13 +317,13 @@ def test_long_constructor() -> None:
 def test_consumer_record_null_checks_and_forms() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic=None, partition=0, offset=0, key=None, value=None)  # type: ignore[call-overload]
-    assert str(exc.value) == "Topic cannot be null"
+    assert str(exc.value) == "Topic cannot be None"
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,  # type: ignore[call-overload]
                        timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=0,
                        serialized_value_size=0, key=None, value=None, headers=None,
                        leader_epoch=None)
-    assert str(exc.value) == "Headers cannot be null"
+    assert str(exc.value) == "Headers cannot be None"
     # A delivery count needs the full form (Java has no shorter one taking it).
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None,  # type: ignore[call-overload]
@@ -348,10 +349,10 @@ def test_consumer_record_null_checks_and_forms() -> None:
                           leader_epoch=None, delivery_count=2)
     assert full.delivery_count() == 2
     assert str(full) == (
-        "ConsumerRecord(topic = t, partition = 0, leaderEpoch = null, offset = 0, "
+        "ConsumerRecord(topic = t, partition = 0, leaderEpoch = None, offset = 0, "
         "NoTimestampType = -1, deliveryCount = 2, serialized key size = -1, "
-        "serialized value size = -1, headers = RecordHeaders(headers = [], isReadOnly = false), "
-        "key = null, value = null)")
+        "serialized value size = -1, headers = RecordHeaders(headers = [], isReadOnly = False), "
+        "key = None, value = None)")
     with pytest.raises(TypeError):
         ConsumerRecord("t", 0, 0, None, None)  # type: ignore[call-overload]
 

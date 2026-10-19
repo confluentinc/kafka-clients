@@ -73,7 +73,6 @@ from confluent_kafka._errors import from_ffi_error
 from confluent_kafka._wait import wait_sliced
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
     FLUSH_IN_CALLBACK_MESSAGE,
@@ -603,11 +602,11 @@ class Producer(Generic[K, V], _ProducerState):
         """Get the partition metadata for the given topic. This can be used for
         custom partitioning. This will attempt to refresh metadata until it
         finds the topic in it, or the configured ``max.block.ms`` expires
-        (``TimeoutError``). Raises ``NullPointerError`` for a ``None`` topic.
+        (``TimeoutError``). Raises ``TypeError`` for a ``None`` topic.
         """
         self._check_not_closed()
         if topic is None:
-            raise NullPointerError(message="topic cannot be null")
+            raise TypeError("topic must not be None")
         partitions, error = self._run_queued(
             f"the metadata of topic {topic}", _lib.Producer_partitions_for_cb, topic,
             free=_free_partitions_payload)

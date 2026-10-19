@@ -25,7 +25,6 @@ from __future__ import annotations
 from enum import IntEnum
 
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["ConfigResource"]
 
@@ -70,9 +69,9 @@ class ConfigResource:
         ``type`` a non-null resource type, ``name`` a non-null resource
         name."""
         if type is None:
-            raise NullPointerError(message="type should not be null")
+            raise TypeError("type must not be None")
         if name is None:
-            raise NullPointerError(message="name should not be null")
+            raise TypeError("name must not be None")
         self._type = type
         self._name = name
 

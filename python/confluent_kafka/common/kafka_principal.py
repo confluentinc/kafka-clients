@@ -31,7 +31,6 @@ from __future__ import annotations
 
 from typing import ClassVar, overload
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["KafkaPrincipal"]
 
@@ -73,10 +72,10 @@ class KafkaPrincipal:
     def __init__(self, *, principal_type: str, name: str,
                  token_authenticated: bool = False) -> None:
         if principal_type is None:
-            raise NullPointerError(message="Principal type cannot be null")
+            raise TypeError("principal_type must not be None")
         self._principal_type = principal_type
         if name is None:
-            raise NullPointerError(message="Principal name cannot be null")
+            raise TypeError("name must not be None")
         self._name = name
         self._token_authenticated = token_authenticated
 

@@ -170,15 +170,15 @@ class ProducerRecord(Generic[K_co, V_co]):
         partition, with a timestamp in milliseconds since epoch (if ``None``,
         the producer assigns it), a key, the value and the headers."""
         if topic is None:
-            raise IllegalArgumentError(message="Topic cannot be null.")
+            raise IllegalArgumentError(message="Topic cannot be None.")
         if timestamp is not None and timestamp < 0:
             raise IllegalArgumentError(
                 message=f"Invalid timestamp: {timestamp}. Timestamp should always be "
-                "non-negative or null.")
+                "non-negative or None.")
         if partition is not None and partition < 0:
             raise IllegalArgumentError(
                 message=f"Invalid partition: {partition}. Partition number should always "
-                "be non-negative or null.")
+                "be non-negative or None.")
         self._topic = topic
         self._partition = partition
         self._key: K_co | None = key

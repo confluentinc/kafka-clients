@@ -173,9 +173,9 @@ def test_nullable_owners_sets_null() -> None:
 
 
 def test_to_string() -> None:
-    assert str(AbortTransactionOptions()) == "AbortTransactionOptions(timeoutMs=null)"
+    assert str(AbortTransactionOptions()) == "AbortTransactionOptions(timeoutMs=None)"
     assert str(AbortTransactionOptions(timeout_ms=5)) == "AbortTransactionOptions(timeoutMs=5)"
-    assert str(FenceProducersOptions()) == "FenceProducersOptions{timeoutMs=null}"
+    assert str(FenceProducersOptions()) == "FenceProducersOptions{timeoutMs=None}"
     assert str(TerminateTransactionOptions(timeout_ms=3)) == "TerminateTransactionOptions{timeoutMs=3}"
 
 

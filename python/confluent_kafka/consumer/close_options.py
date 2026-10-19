@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
 from confluent_kafka import Duration
 from confluent_kafka._args import UNSET
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["CloseOptions"]
 
@@ -128,7 +127,7 @@ class CloseOptions:
             """Java's private ``CloseOptions()``, the ``DEFAULT`` operation and no
             timeout, then each keyword given calls its setter: ``operation`` the
             group membership operation upon shutdown (``None`` raises
-            ``NullPointerError``, as the setter does), ``timeout`` the maximum time
+            ``TypeError``, as the setter does), ``timeout`` the maximum time
             to wait for the consumer to close (``None`` for the default timeout)."""
             self._operation = CloseOptions.GroupMembershipOperation.DEFAULT
             self._timeout: Duration | None = None
@@ -168,7 +167,7 @@ class CloseOptions:
             self, *, operation: CloseOptions.GroupMembershipOperation) -> CloseOptions:
         """Fluent method to set the group membership operation upon shutdown."""
         if operation is None:
-            raise NullPointerError(message="operation should not be null")
+            raise TypeError("operation must not be None")
         self._operation = operation
         return self
 

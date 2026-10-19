@@ -51,7 +51,6 @@ from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._record_future import complete_record
 from ._send import call_callback
@@ -344,7 +343,7 @@ class MockProducerCore(Generic[K, V]):
     def _send_offsets_to_transaction(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                                      group_metadata: ConsumerGroupMetadata) -> None:
         if group_metadata is None:
-            raise NullPointerError()  # Objects.requireNonNull(groupMetadata)
+            raise TypeError("group_metadata must not be None")  # Objects.requireNonNull(groupMetadata)
         self._verify_not_closed()
         self._verify_not_fenced()
         self._verify_transactions_initialized()

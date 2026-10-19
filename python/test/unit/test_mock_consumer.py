@@ -344,7 +344,7 @@ def test_constructor_takes_the_strategy_name() -> None:
 
 
 @pytest.mark.parametrize("strategy, message", [
-    (None, "Auto offset reset strategy is null"),
+    (None, "Auto offset reset strategy is None"),
     ("by_duration", "<:duration> part is missing in by_duration auto offset reset strategy."),
     ("EARLIEST", "Unknown auto offset reset strategy: EARLIEST"),
     ("by_duration:1H", "Unable to parse duration string in by_duration offset reset strategy."),

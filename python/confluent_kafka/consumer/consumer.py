@@ -554,6 +554,7 @@ class Consumer(Generic[K, V], _ConsumerState):
                      timeout: Duration | None = None
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         timeout_ms = self._timeout_ms(timeout, group=True)
+        self._check_committed_partitions(partitions)
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
@@ -570,7 +571,9 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_partitions_for(self, topic: str, timeout: Duration | None = None
                           ) -> list[PartitionInfo]:
-        return self._run_sync(*self._partitions_for_spec(topic, self._timeout_ms(timeout)))
+        timeout_ms = self._timeout_ms(timeout)
+        self._check_not_null("partitions_for", topic)
+        return self._run_sync(*self._partitions_for_spec(topic, timeout_ms))
 
     def _c_list_topics(self, timeout: Duration | None = None) -> dict[str, list[PartitionInfo]]:
         return self._run_sync(*self._list_topics_spec(self._timeout_ms(timeout)))

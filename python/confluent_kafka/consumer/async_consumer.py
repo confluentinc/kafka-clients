@@ -389,6 +389,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                            timeout: Duration | None = None
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         timeout_ms = self._timeout_ms(timeout, group=True)
+        self._check_committed_partitions(partitions)
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
@@ -398,8 +399,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _a_partitions_for(self, topic: str, timeout: Duration | None = None
                                 ) -> list[PartitionInfo]:
-        return await self._run_async(*self._partitions_for_spec(topic,
-                                                                self._timeout_ms(timeout)))
+        timeout_ms = self._timeout_ms(timeout)
+        self._check_not_null("partitions_for", topic)
+        return await self._run_async(*self._partitions_for_spec(topic, timeout_ms))
 
     async def _a_list_topics(self, timeout: Duration | None = None
                              ) -> dict[str, list[PartitionInfo]]:

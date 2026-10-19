@@ -100,7 +100,7 @@ FLUSH_IN_CALLBACK_MESSAGE = ("KafkaProducer.flush() invocation inside a callback
 
 # Java's KafkaProducer.throwIfInvalidGroupMetadata() message for a null argument;
 # the core cannot receive a null, so the binding checks it.
-NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be null"
+NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be None"
 
 # A ConsumerGroupMetadata without the core's handle (a mock consumer's): the
 # FFI takes only the handle, so the binding cannot send it.

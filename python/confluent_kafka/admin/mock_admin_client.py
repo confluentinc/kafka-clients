@@ -449,8 +449,8 @@ class MockAdminClient(MockAdminClientCore, Admin):
                                   options: DescribeDelegationTokenOptions | None = None
                                   ) -> DescribeDelegationTokenResult[Sync]:
         """The tokens of ``options.owners()``, all for an empty list; the default
-        owners (``None``) raise ``NullPointerError()``, as Java's mock (decision
-        10)."""
+        owners (``None``) raise ``TypeError``, where Java's mock throws
+        ``NullPointerException`` (decision 10)."""
         return self._describe_delegation_token(
             options if options is not None else DescribeDelegationTokenOptions())
 
@@ -480,8 +480,8 @@ class MockAdminClient(MockAdminClientCore, Admin):
         for a spec with no partitions, else those of its partitions. More or fewer
         than one group raises ``UnsupportedVersionError("Not implemented yet")``;
         ``group_id`` (Java's ``new ListConsumerGroupOffsetsSpec()``, whose
-        partitions are ``None``) raises ``NullPointerError()`` once an offset is
-        stored, as Java's mock; ``options`` is ignored."""
+        partitions are ``None``) raises ``TypeError`` once an offset is stored,
+        where Java's mock throws ``NullPointerException``; ``options`` is ignored."""
         if group_specs is None:
             assert group_id is not None  # java_forms: one or the other
             group_specs = {group_id: ListConsumerGroupOffsetsSpec()}

@@ -37,7 +37,8 @@ behaviour the mock's bodies rely on is kept: ``List.get`` out of range raises
 ``IndexError`` with Java's ``IndexOutOfBoundsException`` message, ``List.subList``
 checks its range as Java does, ``Integer.parseInt`` raises ``IllegalArgumentError``
 (``NumberFormatException``), and a ``null`` the mock itself looks up and dereferences
-raises ``NullPointerError()``. Java's ``UnsupportedOperationException``
+(Java's ``NullPointerException``) raises ``IllegalStateError`` naming the state the
+mock lacks, or ``TypeError`` for an option left ``None``. Java's ``UnsupportedOperationException``
 is ``UnsupportedVersionError`` (Types), with Java's messages, typo included
 .
 
@@ -59,11 +60,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from confluent_kafka._args import UNSET, reject_str
+from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka._java import java_str, parse_int
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     if sys.version_info >= (3, 11):
@@ -283,16 +284,19 @@ def _timeout() -> Exception:
     return KafkaTimeoutError()
 
 
-def _config(entries: Mapping[str, str] | None) -> Config:
+def _config(entries: Mapping[str, str] | None, resource: object = None) -> Config:
     """The private ``toConfigObject(Map)``: a ``Config`` of one ``ConfigEntry(name,
-    value)`` per entry; it dereferences its map, so ``None`` raises
-    ``NullPointerError()`` (the private ``config(NewTopic)`` checks for ``null`` first
-    and passes an empty map)."""
+    value)`` per entry; it dereferences its map, so Java throws
+    ``NullPointerException`` for ``null``: here ``None`` raises ``IllegalStateError``
+    naming the ``resource`` the mock holds no configs for (the private
+    ``config(NewTopic)`` checks for ``null`` first and passes an empty map)."""
     from confluent_kafka.admin.config import Config
     from confluent_kafka.admin.config_entry import ConfigEntry
 
     if entries is None:
-        raise NullPointerError()
+        raise IllegalStateError(
+            message="MockAdminClient has no configs for "
+                    + ("the resource" if resource is None else java_str(resource)))
     return Config(entries=[ConfigEntry(name=k, value=v) for k, v in entries.items()])
 
 
@@ -980,7 +984,7 @@ class MockAdminClientCore:
                 if broker_id >= len(self._broker_configs):
                     raise InvalidRequestError(
                         message="Broker " + resource.name() + " not found.")
-                return _config(_get(self._broker_configs, broker_id))
+                return _config(_get(self._broker_configs, broker_id), resource)
             if resource_type is ConfigResource.Type.TOPIC:
                 metadata = self._all_topics.get(resource.name())
                 if metadata is not None and not metadata.marked_for_deletion:
@@ -988,14 +992,14 @@ class MockAdminClientCore:
                         metadata.fetches_remaining_until_visible = max(
                             0, metadata.fetches_remaining_until_visible - 1)
                     else:
-                        return _config(metadata.configs)
+                        return _config(metadata.configs, resource)
                 raise UnknownTopicOrPartitionError(
                     message="Resource " + java_str(resource) + " not found.")
             if resource_type is ConfigResource.Type.CLIENT_METRICS:
                 resource_name = resource.name()
                 if not resource_name:
                     raise InvalidRequestError(message="Empty resource name")
-                return _config(self._client_metrics_configs.get(resource_name))
+                return _config(self._client_metrics_configs.get(resource_name), resource)
             if resource_type is ConfigResource.Type.GROUP:
                 resource_name = resource.name()
                 if not resource_name:
@@ -1003,7 +1007,7 @@ class MockAdminClientCore:
                 group_config = self._group_configs.get(resource_name, {})
                 for key, value in self._default_group_configs.items():
                     group_config.setdefault(key, value)
-                return _config(group_config)
+                return _config(group_config, resource)
             raise _unsupported(_NOT_IMPLEMENTED)
 
     def _incremental_alter_configs(
@@ -1146,8 +1150,9 @@ class MockAdminClientCore:
                 for topic_partition_info in metadata.partitions:
                     for node in topic_partition_info.replicas():
                         log_dir_description_map = unwrapped_results.get(node.id())
-                        if log_dir_description_map is None:
-                            raise NullPointerError()
+                        if log_dir_description_map is None:  # Java dereferences it: NullPointerException
+                            raise IllegalStateError(
+                                message=f"MockAdminClient has no log dirs for broker {node.id()}")
                         log_dir = _get(partition_log_dirs, 0)
                         log_dir_description = log_dir_description_map.get(log_dir)
                         if log_dir_description is None:
@@ -1318,7 +1323,7 @@ class MockAdminClientCore:
                                    ) -> DescribeDelegationTokenResult[Any]:
         """Every token for an empty ``owners`` (the mock's own list, as Java's), else
         the tokens of those owners; Java's ``options.owners().isEmpty()`` on the
-        default ``null`` owners raises ``NullPointerError()``."""
+        default ``null`` owners raises ``TypeError`` (Java's ``NullPointerException``)."""
         from confluent_kafka.admin.describe_delegation_token_result import (
             DescribeDelegationTokenResult,
         )
@@ -1326,8 +1331,8 @@ class MockAdminClientCore:
         with self._lock:
             future: KafkaFuture[list[DelegationToken]] | AsyncKafkaFuture[list[DelegationToken]] = self._future()
             owners: list[KafkaPrincipal] | None = options.owners()
-            if owners is None:
-                raise NullPointerError()
+            if owners is None:  # Java's options.owners().isEmpty(): NullPointerException
+                raise TypeError("DescribeDelegationTokenOptions.owners must not be None")
             if not owners:
                 _complete(future, self._all_tokens)
             else:
@@ -1350,7 +1355,7 @@ class MockAdminClientCore:
         """The committed offsets of the one group (all for an empty spec, else those
         of its partitions), keyed by ``CoordinatorKey.byGroupId``; Java's filter
         dereferences the spec's default ``null`` partitions once an offset is stored,
-        so that raises ``NullPointerError()``."""
+        so that raises ``TypeError`` (Java's ``NullPointerException``)."""
         from confluent_kafka.admin._internals import _CoordinatorKey
         from confluent_kafka.admin.list_consumer_group_offsets_result import (
             ListConsumerGroupOffsetsResult,
@@ -1365,8 +1370,8 @@ class MockAdminClientCore:
             topic_partitions = group_specs[group].topic_partitions()
             offsets: dict[TopicPartition, OffsetAndMetadata | None] = {}
             for tp, offset in self._committed_offsets.items():
-                if topic_partitions is None:  # topicPartitions.isEmpty()
-                    raise NullPointerError()
+                if topic_partitions is None:  # topicPartitions.isEmpty(): NullPointerException
+                    raise TypeError("ListConsumerGroupOffsetsSpec.topic_partitions must not be None")
                 if not topic_partitions or tp in topic_partitions:
                     offsets[tp] = OffsetAndMetadata(offset=offset)
             return ListConsumerGroupOffsetsResult._new(
@@ -1506,8 +1511,10 @@ class MockAdminClientCore:
                 offsets = (self._beginning_offsets if isinstance(spec, OffsetSpec.EarliestSpec)
                            else self._end_offsets)
                 offset = offsets.get(tp)
-                if offset is None:  # Java unboxes the missing Long
-                    raise NullPointerError()
+                if offset is None:  # Java unboxes the missing Long: NullPointerException
+                    which = "beginning" if offsets is self._beginning_offsets else "end"
+                    raise IllegalStateError(
+                        message=f"MockAdminClient has no {which} offset for {java_str(tp)}")
                 _complete(future, info_class(offset=offset, timestamp=-1, leader_epoch=None))
                 futures[tp] = future
             return ListOffsetsResult._new(futures=futures, kind=self._kind)
@@ -1537,8 +1544,8 @@ class MockAdminClientCore:
     def _describe_features(self) -> DescribeFeaturesResult[Any]:
         """Not synchronized in Java. Each finalized level as a ``[level, level]``
         range with its supported range, epoch 123; a feature level with no
-        supported min or max raises ``NullPointerError()`` (Java unboxes the
-        missing ``Short``)."""
+        supported min or max raises ``IllegalStateError`` (Java unboxes the
+        missing ``Short``: ``NullPointerException``)."""
         from confluent_kafka.admin.describe_features_result import DescribeFeaturesResult
         from confluent_kafka.admin.feature_metadata import FeatureMetadata
         from confluent_kafka.admin.finalized_version_range import FinalizedVersionRange
@@ -1551,8 +1558,9 @@ class MockAdminClientCore:
                                                                 max_version_level=level)
             min_version = self._min_supported_feature_levels.get(feature)
             max_version = self._max_supported_feature_levels.get(feature)
-            if min_version is None or max_version is None:
-                raise NullPointerError()
+            if min_version is None or max_version is None:  # Java unboxes them: NullPointerException
+                raise IllegalStateError(
+                    message=f"MockAdminClient has no supported version range for feature {feature}")
             supported_features[feature] = SupportedVersionRange(min_version=min_version,
                                                                 max_version=max_version)
         return DescribeFeaturesResult._new(

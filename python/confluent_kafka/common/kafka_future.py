@@ -320,9 +320,9 @@ class _KafkaFutureImpl(_FutureState[T]):
 def _to_string(state: int, outcome: Any) -> str:
     value = outcome if state == _VALUE else None
     error = outcome if state >= _ERROR else None
-    shown_value = "null" if value is None else str(value)
-    shown_error = "null" if error is None else _throwable.to_string(error)
-    done = "true" if (error is not None or value is not None) else "false"
+    shown_value = "None" if value is None else str(value)
+    shown_error = "None" if error is None else _throwable.to_string(error)
+    done = "True" if (error is not None or value is not None) else "False"
     return f"KafkaFuture{{value={shown_value},exception={shown_error},done={done}}}"
 
 

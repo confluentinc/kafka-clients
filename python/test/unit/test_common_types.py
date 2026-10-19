@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError, NoSuchElementError, NullPointerError
+from confluent_kafka import IllegalArgumentError, IllegalStateError, NoSuchElementError
 from confluent_kafka._args import UNSET
 from confluent_kafka._java import java_str
 from confluent_kafka.common import (
@@ -187,7 +187,7 @@ def test_topic_partition_value_semantics() -> None:
     assert a != TopicPartition(topic="u", partition=1)
     assert {a: 1}[TopicPartition(topic="t", partition=1)] == 1
     assert str(a) == "t-1"
-    assert str(TopicPartition(topic=None, partition=0)) == "null-0"  # type: ignore[arg-type]
+    assert str(TopicPartition(topic=None, partition=0)) == "None-0"  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         TopicPartition("t", 0)  # type: ignore[call-arg]
 
@@ -233,7 +233,7 @@ def test_topic_id_partition_hash_code() -> None:
 
 def test_topic_id_partition_to_string() -> None:
     assert str(_TIDP0) == "vDiRhkpVQgmtSLnsAZx7lA:a_topic_name-1"
-    assert str(_TIDP_NULL0) == "vDiRhkpVQgmtSLnsAZx7lA:null-1"
+    assert str(_TIDP_NULL0) == "vDiRhkpVQgmtSLnsAZx7lA:None-1"
 
 
 def test_topic_id_partition_forms() -> None:
@@ -252,9 +252,9 @@ def test_topic_id_partition_forms() -> None:
     with pytest.raises(IllegalArgumentError):
         TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_TOPIC_PARTITION0,  # type: ignore[call-overload]
                          partition=1, topic="t")
-    with pytest.raises(NullPointerError) as npe:
+    with pytest.raises(TypeError) as npe:
         TopicIdPartition(topic_id=None, topic_partition=_TOPIC_PARTITION0)  # type: ignore[call-overload]
-    assert str(npe.value) == "topicId can not be null"
+    assert str(npe.value) == "topic_id must not be None"
     with pytest.raises(TypeError):
         TopicIdPartition(_TOPIC_ID0, _TOPIC_PARTITION0)  # type: ignore[call-overload]
 
@@ -324,12 +324,12 @@ def test_node_constructors_and_accessors() -> None:
     fenced = Node(id=5, host="h", port=9092, rack=None, is_fenced=True)
     assert fenced.is_fenced() and fenced.rack() is None and not fenced.has_rack()
     assert Node(id=5, host="h", port=9092, rack=None) == n
-    assert str(r) == "h:9092 (id: 5 rack: r1 isFenced: false)"
-    assert str(n) == "h:9092 (id: 5 rack: null isFenced: false)"
+    assert str(r) == "h:9092 (id: 5 rack: r1 isFenced: False)"
+    assert str(n) == "h:9092 (id: 5 rack: None isFenced: False)"
     assert n == Node(id=5, host="h", port=9092) and n != r
     assert hash(n) == hash(Node(id=5, host="h", port=9092))
     assert Node.no_node().is_empty()
-    assert str(Node.no_node()) == ":-1 (id: -1 rack: null isFenced: false)"
+    assert str(Node.no_node()) == ":-1 (id: -1 rack: None isFenced: False)"
     with pytest.raises(TypeError):
         Node(5, "h", 9092)  # type: ignore[call-arg]
 
@@ -352,8 +352,9 @@ def test_metric_name() -> None:
     for field in ("name", "group", "description", "tags"):
         args: dict[str, Any] = {"name": "n", "group": "g", "description": "d", "tags": {}}
         args[field] = None
-        with pytest.raises(NullPointerError):
+        with pytest.raises(TypeError) as none:
             MetricName(**args)
+        assert str(none.value) == f"{field} must not be None"
     with pytest.raises(TypeError):
         MetricName("n", "g", "d", {})  # type: ignore[call-arg]
 
@@ -408,10 +409,10 @@ def test_kafka_metric_accepts_non_measurable_non_gauge_provider() -> None:
 
 
 def test_constructor_with_null_provider() -> None:
-    with pytest.raises(NullPointerError) as exc:
+    with pytest.raises(TypeError) as exc:
         KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=None,
                     config=MetricConfig(), time=_MockTime())
-    assert str(exc.value) == "valueProvider must not be null"
+    assert str(exc.value) == "value_provider must not be None"
 
 
 _METRIC_NAME_2 = MetricName(name="request-latency-avg", group="consumer-fetch-manager-metrics",
@@ -523,22 +524,22 @@ def test_read_headers_rejects_a_bad_value_or_shape() -> None:
 
 
 def test_read_headers_rejects_a_null_key_with_javas_message() -> None:
-    with pytest.raises(NullPointerError) as exc:
+    with pytest.raises(TypeError) as exc:
         _read_headers([(None, b"v")])  # type: ignore[list-item]
-    assert str(exc.value) == "Null header keys are not permitted"
+    assert str(exc.value) == "a header key must not be None"
 
 
 def test_headers_to_string_is_record_headers_to_string() -> None:
     assert _headers_to_string(_read_headers([("k", b"\x01\xff"), ("n", None)])) == (
         "RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), "
-        "RecordHeader(key = n, value = null)], isReadOnly = false)")
+        "RecordHeader(key = n, value = None)], isReadOnly = False)")
 
 
 @pytest.mark.parametrize("value,text", [
-    (None, "null"), (True, "true"), (False, "false"), (5, "5"), ("s", "s"),
+    (None, "None"), (True, "True"), (False, "False"), (5, "5"), ("s", "s"),
     (1.0, "1.0"), (0.001, "0.001"), (1e7, "1.0E7"), (1.5e-5, "1.5E-5"), (-2.5e20, "-2.5E20"),
     (float("nan"), "NaN"), (float("inf"), "Infinity"), (-0.0, "-0.0"),
-    ([1, None], "[1, null]"), ({"a": 1}, "{a=1}"),
+    ([1, None], "[1, None]"), ({"a": 1}, "{a=1}"),
     (TopicPartition(topic="t", partition=0), "t-0"),
 ])
 def test_java_str_is_string_value_of(value: object, text: str) -> None:

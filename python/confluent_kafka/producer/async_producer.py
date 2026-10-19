@@ -84,7 +84,6 @@ from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _PENDING, AsyncKafkaFuture, _FutureState
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
     FLUSH_IN_CALLBACK_MESSAGE,
@@ -915,7 +914,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.partitions_for`."""
         self._check_not_closed()
         if topic is None:
-            raise NullPointerError(message="topic cannot be null")
+            raise TypeError("topic must not be None")
         partitions, error = await self._await_payload(_lib.Producer_partitions_for_cb, topic)
         raise_if_error(error)
         return [to_partition_info(t) for t in partitions]

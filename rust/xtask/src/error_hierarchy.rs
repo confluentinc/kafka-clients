@@ -680,12 +680,8 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "",
         &[&[], &[("String", "s")]],
     ),
-    (
-        "java.lang.NullPointerException",
-        "java.lang.RuntimeException",
-        "",
-        &[&[], &[("String", "s")]],
-    ),
+    // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
+    // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
 ];
 
 /// JDK classes at the top of every chain: `Throwable`'s constructors decide the
@@ -3443,8 +3439,9 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins.
-        assert_eq!(classes.len(), 174);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins
+        // (NoSuchElementException, ExecutionException; NullPointerException is Python's TypeError).
+        assert_eq!(classes.len(), 173);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");

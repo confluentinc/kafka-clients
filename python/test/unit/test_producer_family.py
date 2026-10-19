@@ -1807,7 +1807,7 @@ async def test_the_async_send_future_is_its_own_state_in_one_object(
         assert future._impl is future and future._lock is p._fire_lock  # noqa: SLF001
         # No self-reference and no __dict__: freed by its reference count.
         assert future not in gc.get_referents(future) and not hasattr(future, "__dict__")
-        assert str(future) == "KafkaFuture{value=null,exception=null,done=false}"
+        assert str(future) == "KafkaFuture{value=None,exception=None,done=False}"
         assert not future.is_done() and future.get_now(value_if_absent=None) is None
         dependant = future.then_apply(function=RecordMetadata.offset)
         assert isinstance(dependant, AsyncKafkaFuture) and not isinstance(dependant, AsyncRecordFuture)
@@ -2612,7 +2612,7 @@ def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
     with KafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False}) as p:
         with pytest.raises(IllegalArgumentError) as err:
             p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
-        assert str(err.value) == "Consumer group metadata could not be null"
+        assert str(err.value) == "Consumer group metadata could not be None"
         with pytest.raises(IllegalStateError) as err2:
             p.send_offsets_to_transaction(offsets={}, group_metadata=_consumer_group_metadata())
         assert str(err2.value) == NO_TXN

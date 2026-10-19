@@ -144,9 +144,9 @@ class ConsumerRecord(Generic[K_co, V_co]):
         formats) and the optional delivery count (may be empty when deliveries
         are not counted)."""
         if topic is None:
-            raise IllegalArgumentError(message="Topic cannot be null")
+            raise IllegalArgumentError(message="Topic cannot be None")
         if headers is None:
-            raise IllegalArgumentError(message="Headers cannot be null")
+            raise IllegalArgumentError(message="Headers cannot be None")
         self._topic = topic
         self._partition = partition
         self._offset = offset

@@ -104,7 +104,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
+from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
@@ -330,9 +330,9 @@ def test_partitions_for_with_null_topic() -> None:
     props = {"bootstrap.servers": "localhost:9000"}
     with KafkaProducer(configs=props, key_serializer=bytes_serializer(),
                        value_serializer=bytes_serializer()) as producer:
-        with pytest.raises(NullPointerError) as err:
+        with pytest.raises(TypeError) as err:
             producer.partitions_for(topic=None)  # type: ignore[arg-type]
-        assert str(err.value) == "topic cannot be null"
+        assert str(err.value) == "topic must not be None"
 
 
 def test_init_transaction_timeout() -> None:
@@ -351,7 +351,7 @@ def test_init_transaction_timeout() -> None:
 
 
 def test_null_group_metadata_in_send_offsets() -> None:
-    _verify_invalid_group_metadata(None, "Consumer group metadata could not be null")
+    _verify_invalid_group_metadata(None, "Consumer group metadata could not be None")
 
 
 def _verify_invalid_group_metadata(group_metadata: ConsumerGroupMetadata | None,
@@ -405,7 +405,7 @@ def test_null_topic_name() -> None:
     with pytest.raises(IllegalArgumentError) as err:
         ProducerRecord(topic=None, partition=1, key=b"key",  # type: ignore[arg-type]
                        value=b"value")
-    assert str(err.value) == "Topic cannot be null."
+    assert str(err.value) == "Topic cannot be None."
 
 
 def test_callback_and_interceptor_handle_error() -> None:

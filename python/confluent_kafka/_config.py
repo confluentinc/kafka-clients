@@ -126,6 +126,18 @@ def check_type(name: str, value: object, type_name: str) -> object:
     raise ConfigError(name=name, value=value, message=f"Unknown type {type_name}")
 
 
+def _core_str(value: object) -> str:
+    """One value as the text the core parses: Java's ``String.valueOf`` spelling
+    (``null``, ``true``, ``false``), which ``java_str`` no longer uses for ``str()``."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return java_str(value)
+
+
 def convert_to_string(value: object, type_name: str | None) -> str | None:
     """``ConfigDef.convertToString(value, type)``: a type-checked value as the
     text the core parses (a password as its value, since the core needs it)."""
@@ -134,10 +146,10 @@ def convert_to_string(value: object, type_name: str | None) -> str | None:
     if isinstance(value, str):
         return value
     if type_name == "LIST" and isinstance(value, list):
-        return ",".join(java_str(v) for v in value)
+        return ",".join(_core_str(v) for v in value)
     if isinstance(value, type):
         return f"{value.__module__}.{value.__qualname__}"
-    return java_str(value)
+    return _core_str(value)
 
 
 def prepare(configs: Mapping[str, Any], *, client: Client,

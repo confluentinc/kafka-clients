@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, NullPointerError
+from confluent_kafka import IllegalArgumentError
 from confluent_kafka.admin import (
     AbortTransactionSpec,
     AlterConfigOp,
@@ -235,14 +235,14 @@ def test_member_description_null_defaults_and_str() -> None:
                           member_epoch=None, upgraded=None)
     assert (m.consumer_id(), m.client_id(), m.host()) == ("", "", "")
     assert m.assignment() == MemberAssignment(topic_partitions=set())
-    assert str(m) == ("(memberId=, groupInstanceId=null, rackId=null, clientId=, host=, "
+    assert str(m) == ("(memberId=, groupInstanceId=None, rackId=None, clientId=, host=, "
                       "assignment=(topicPartitions=), targetAssignment=Optional.empty, "
-                      "memberEpoch=null, upgraded=null)")
+                      "memberEpoch=None, upgraded=None)")
     m = _member(target_assignment=ASSIGNMENT, member_epoch=3, upgraded=True)
     assert str(m) == ("(memberId=member_id, groupInstanceId=instanceId, rackId=rackId, "
                       "clientId=client_id, host=host, assignment=(topicPartitions=topic-1), "
                       "targetAssignment=Optional[(topicPartitions=topic-1)], memberEpoch=3, "
-                      "upgraded=true)")
+                      "upgraded=True)")
 
 
 # --------------------------------------------------------------------------
@@ -325,18 +325,18 @@ def test_to_string() -> None:
                       replication_factor=REPLICATION_FACTOR)
     expected1 = ("(name=" + TEST_TOPIC + ", numPartitions=" + str(NUM_PARTITIONS)
                  + ", replicationFactor=" + str(REPLICATION_FACTOR)
-                 + ", replicasAssignments=null, configs=null)")
+                 + ", replicasAssignments=None, configs=None)")
     assert str(topic1) == expected1
     topic1.configs(configs={CLEANUP_POLICY_CONFIG_KEY: CLEANUP_POLICY_CONFIG_VALUE})
     expected2 = ("(name=" + TEST_TOPIC + ", numPartitions=" + str(NUM_PARTITIONS)
                  + ", replicationFactor=" + str(REPLICATION_FACTOR)
-                 + ", replicasAssignments=null, configs="
+                 + ", replicasAssignments=None, configs="
                  + "{" + CLEANUP_POLICY_CONFIG_KEY + "=" + CLEANUP_POLICY_CONFIG_VALUE + "})")
     assert str(topic1) == expected2
     topic2 = NewTopic(name=TEST_TOPIC, replicas_assignments={0: BROKER_IDS})
     expected3 = ("(name=" + TEST_TOPIC + ", numPartitions=default"
                  + ", replicationFactor=default, replicasAssignments="
-                 + "{0=[1, 2]}" + ", configs=null)")
+                 + "{0=[1, 2]}" + ", configs=None)")
     assert str(topic2) == expected3
 
 
@@ -415,8 +415,8 @@ def test_config_entry() -> None:
     assert (entry.is_sensitive(), entry.is_read_only(), entry.is_default()) == (
         False, False, False)
     assert entry.documentation() is None
-    assert str(entry) == ("ConfigEntry(name=n, value=v, source=UNKNOWN, isSensitive=false, "
-                          "isReadOnly=false, synonyms=[], type=UNKNOWN, documentation=null)")
+    assert str(entry) == ("ConfigEntry(name=n, value=v, source=UNKNOWN, isSensitive=False, "
+                          "isReadOnly=False, synonyms=[], type=UNKNOWN, documentation=None)")
     synonym = ConfigEntry.ConfigSynonym._new(
         name="s", value=None, source=ConfigEntry.ConfigSource.DEFAULT_CONFIG)
     secret = ConfigEntry(name="n", value="v", source=ConfigEntry.ConfigSource.DEFAULT_CONFIG,
@@ -425,8 +425,8 @@ def test_config_entry() -> None:
     assert secret.is_default()
     assert secret.synonyms() == [synonym]
     assert str(secret) == (
-        "ConfigEntry(name=n, value=Redacted, source=DEFAULT_CONFIG, isSensitive=true, "
-        "isReadOnly=true, synonyms=[ConfigSynonym(name=s, value=null, "
+        "ConfigEntry(name=n, value=Redacted, source=DEFAULT_CONFIG, isSensitive=True, "
+        "isReadOnly=True, synonyms=[ConfigSynonym(name=s, value=None, "
         "source=DEFAULT_CONFIG)], type=PASSWORD, documentation=d)")
     assert synonym == ConfigEntry.ConfigSynonym._new(
         name="s", value=None, source=ConfigEntry.ConfigSource.DEFAULT_CONFIG)
@@ -434,9 +434,9 @@ def test_config_entry() -> None:
         ConfigEntry.ConfigSynonym()
     assert str(t.value) == ("ConfigEntry.ConfigSynonym cannot be constructed directly; use "
                             "ConfigEntry.synonyms()")
-    with pytest.raises(NullPointerError) as n:
+    with pytest.raises(TypeError) as n:
         ConfigEntry(name=None, value="v")  # type: ignore[call-overload]
-    assert str(n.value) == "name should not be null"
+    assert str(n.value) == "name must not be None"
     with pytest.raises(IllegalArgumentError) as e:
         ConfigEntry(name="n", value="v", is_sensitive=True)  # type: ignore[call-overload]
     assert str(e.value) == (
@@ -535,7 +535,7 @@ def test_static_factories_and_private_constructors() -> None:
                             "RecordsToDelete.before_offset(...)")
     p = NewPartitions.increase_to(total_count=6)
     assert (p.total_count(), p.assignments()) == (6, None)
-    assert str(p) == "(totalCount=6, newAssignments=null)"
+    assert str(p) == "(totalCount=6, newAssignments=None)"
     p = NewPartitions.increase_to(total_count=6, new_assignments=[[1, 2], [2, 3], [3, 1]])
     assert p.assignments() == [[1, 2], [2, 3], [3, 1]]
     assert str(p) == "(totalCount=6, newAssignments=[[1, 2], [2, 3], [3, 1]])"
@@ -575,8 +575,9 @@ def test_scram_credentials() -> None:
     assert (info.mechanism(), info.iterations()) == (ScramMechanism.SCRAM_SHA_256, 4096)
     assert info == ScramCredentialInfo(mechanism=ScramMechanism.SCRAM_SHA_256, iterations=4096)
     assert str(info) == "ScramCredentialInfo{mechanism=SCRAM_SHA_256, iterations=4096}"
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         ScramCredentialInfo(mechanism=None, iterations=1)  # type: ignore[arg-type]
+    assert str(none.value) == "mechanism must not be None"
     with pytest.raises(TypeError) as t:
         UserScramCredentialAlteration(user="u")
     assert str(t.value) == ("UserScramCredentialAlteration cannot be constructed directly; use "
@@ -584,8 +585,9 @@ def test_scram_credentials() -> None:
     d = UserScramCredentialDeletion(user="u", mechanism=ScramMechanism.SCRAM_SHA_512)
     assert (d.user(), d.mechanism()) == ("u", ScramMechanism.SCRAM_SHA_512)
     assert isinstance(d, UserScramCredentialAlteration)
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         UserScramCredentialDeletion(user=None, mechanism=ScramMechanism.UNKNOWN)  # type: ignore[arg-type]
+    assert str(none.value) == "user must not be None"
     up = UserScramCredentialUpsertion(user="u", credential_info=info, password="pässword")
     assert up.password() == "pässword".encode()
     salt = up.salt()
@@ -647,11 +649,11 @@ def test_topics_partitions_and_log_dirs() -> None:
     uuid = Uuid(most_sig_bits=1, least_sig_bits=2)
     listing = TopicListing(name="t", topic_id=uuid, internal=False)
     assert (listing.name(), listing.topic_id(), listing.is_internal()) == ("t", uuid, False)
-    assert str(listing) == "(name=t, topicId=" + str(uuid) + ", internal=false)"
+    assert str(listing) == "(name=t, topicId=" + str(uuid) + ", internal=False)"
     d = TopicDescription(name="t", internal=True, partitions=[])
     assert d.authorized_operations() == set()
     assert d.topic_id() == Uuid.ZERO_UUID
-    assert str(d) == "(name=t, internal=true, partitions=, authorizedOperations=[])"
+    assert str(d) == "(name=t, internal=True, partitions=, authorizedOperations=[])"
     d2 = TopicDescription(name="t", internal=True, partitions=[], authorized_operations=None,
                           topic_id=uuid)
     assert d2.authorized_operations() is None
@@ -676,21 +678,21 @@ def test_topics_partitions_and_log_dirs() -> None:
     assert DeletedRecords(low_watermark=9).low_watermark() == 9
     info = ReplicaInfo(size=10, offset_lag=1, is_future=True)
     assert (info.size(), info.offset_lag(), info.is_future()) == (10, 1, True)
-    assert str(info) == "ReplicaInfo(size=10, offsetLag=1, isFuture=true)"
+    assert str(info) == "ReplicaInfo(size=10, offsetLag=1, isFuture=True)"
     tp = TopicPartition(topic="t", partition=0)
     ld = LogDirDescription(error=None, replica_infos={tp: info})
     assert (ld.error(), ld.total_bytes(), ld.usable_bytes()) == (None, None, None)
     assert ld.replica_infos() == {tp: info}
     ld = LogDirDescription(error=None, replica_infos={}, total_bytes=100, usable_bytes=-1)
     assert (ld.total_bytes(), ld.usable_bytes()) == (100, None)
-    assert str(ld) == ("LogDirDescription(replicaInfos={}, error=null, "
+    assert str(ld) == ("LogDirDescription(replicaInfos={}, error=None, "
                        "totalBytes=OptionalLong[100], usableBytes=OptionalLong.empty, "
-                       "isCordoned=false)")
+                       "isCordoned=False)")
     assert ld.is_cordoned() is False
     ld = LogDirDescription(error=None, replica_infos={}, total_bytes=1, usable_bytes=2,
                            is_cordoned=True)
     assert ld.is_cordoned() is True
-    assert str(ld).endswith("isCordoned=true)")
+    assert str(ld).endswith("isCordoned=True)")
     with pytest.raises(IllegalArgumentError) as e:
         LogDirDescription(error=None, replica_infos={}, total_bytes=1)  # type: ignore[call-overload]
     assert str(e.value) == (
@@ -719,10 +721,10 @@ def test_groups() -> None:
     assert c.authorized_operations() is None
     assert c.coordinator() == node
     assert (c.group_epoch(), c.target_assignment_epoch()) == (3, None)
-    assert str(c) == ("(groupId=, isSimpleConsumerGroup=true, members=" + str(member)
+    assert str(c) == ("(groupId=, isSimpleConsumerGroup=True, members=" + str(member)
                       + ", partitionAssignor=, type=" + str(GroupType.CLASSIC) + ", groupState="
                       + str(GroupState.STABLE) + ", coordinator=" + str(node)
-                      + ", authorizedOperations=null, groupEpoch=3, targetAssignmentEpoch=null)")
+                      + ", authorizedOperations=None, groupEpoch=3, targetAssignmentEpoch=None)")
     assert hash(c) == hash(ConsumerGroupDescription(
         group_id="", is_simple_consumer_group=True, members=[member], partition_assignor="",
         type=GroupType.CLASSIC, group_state=GroupState.STABLE, coordinator=node,
@@ -738,7 +740,7 @@ def test_groups() -> None:
                                          coordinator=None, authorized_operations=set())
     assert str(cg) == ("(groupId=g, protocol='', protocolData=, members=, state="
                        + str(ClassicGroupState.EMPTY)
-                       + ", coordinator=null, authorizedOperations=[])")
+                       + ", coordinator=None, authorizedOperations=[])")
     assert ClassicGroupDescription(
         group_id="g", protocol="", protocol_data="", members=[], state=ClassicGroupState.EMPTY,
         coordinator=None, authorized_operations=None).authorized_operations() == set()
@@ -747,7 +749,7 @@ def test_groups() -> None:
         state=ClassicGroupState.EMPTY, coordinator=None, authorized_operations=None)
     assert unknown.authorized_operations() is None
     assert (unknown.group_id(), unknown.protocol_data(), unknown.members()) == ("", "", [])
-    assert str(unknown).endswith("authorizedOperations=null)")
+    assert str(unknown).endswith("authorizedOperations=None)")
     assert unknown != cg
     known = ClassicGroupDescription._new(
         group_id="g", protocol="", protocol_data="", members=[], state=ClassicGroupState.EMPTY,

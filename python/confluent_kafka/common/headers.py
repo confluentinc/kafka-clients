@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["Headers"]
 
@@ -44,7 +43,7 @@ def _read_headers(
 ) -> tuple[tuple[str, memoryview | None], ...]:
     """Java's ``new RecordHeaders(Iterable<Header>)``: the written headers in
     their read form. ``None`` is no headers, as in Java. A ``None`` key raises
-    ``NullPointerError`` with ``RecordHeader``'s message; an element that is not
+    ``TypeError`` (``RecordHeader`` throws ``NullPointerException``); an element that is not
     a ``(str, bytes-like | None)`` pair, or a value that is not one C-contiguous
     run of bytes, is a ``TypeError``; a released ``memoryview`` is a
     ``ValueError``.
@@ -63,7 +62,7 @@ def _read_headers(
         key, value = item
         if key is None:
             # RecordHeader: Objects.requireNonNull(key, "Null header keys are not permitted")
-            raise NullPointerError(message="Null header keys are not permitted")
+            raise TypeError("a header key must not be None")
         if not isinstance(key, str):
             raise TypeError(f"header[{index}] key must be a str; got {type(key).__name__}")
         if value is None:
@@ -91,16 +90,16 @@ def _hand_out(headers: tuple[tuple[str, memoryview | None], ...]) -> Headers:
 
 def _headers_to_string(headers: Sequence[tuple[str, memoryview | None]]) -> str:
     """Java's ``RecordHeaders.toString()``:
-    ``RecordHeaders(headers = [RecordHeader(key = k, value = [1, 2])], isReadOnly = false)``,
+    ``RecordHeaders(headers = [RecordHeader(key = k, value = [1, 2])], isReadOnly = False)``,
     each value as ``Arrays.toString(byte[])`` (signed bytes)."""
     parts = []
     for key, value in headers:
         if value is None:
-            text = "null"
+            text = "None"
         else:
             text = "[" + ", ".join(str(b - 256 if b > 127 else b) for b in value.tobytes()) + "]"
         parts.append(f"RecordHeader(key = {key}, value = {text})")
-    return f"RecordHeaders(headers = [{', '.join(parts)}], isReadOnly = false)"
+    return f"RecordHeaders(headers = [{', '.join(parts)}], isReadOnly = False)"
 
 
 def _headers_hash(headers: Sequence[tuple[str, memoryview | None]]) -> int:

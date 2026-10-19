@@ -33,7 +33,6 @@ from typing import Any, overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["ConfigEntry"]
 
@@ -198,7 +197,7 @@ class ConfigEntry:
         if type is _UNKNOWN_TYPE:
             type = ConfigEntry.ConfigType.UNKNOWN
         if name is None:
-            raise NullPointerError(message="name should not be null")
+            raise TypeError("name must not be None")
         self._name = name
         self._value = value
         self._source = source

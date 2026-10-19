@@ -155,7 +155,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import (
-    ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
+    ConcurrentModificationError, IllegalArgumentError, IllegalStateError, 
 )
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
@@ -269,7 +269,7 @@ def test_assign_on_empty_topic_partition() -> None:
 def test_assign_on_null_topic_partition() -> None:
     with new_consumer(None) as consumer, pytest.raises(IllegalArgumentError) as e:
         consumer.assign(partitions=None)  # type: ignore[arg-type]
-    assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+    assert str(e.value) == "Topic partitions collection to assign to cannot be None"
 
 
 def test_assign_on_null_topic_partition_after_close() -> None:
@@ -285,15 +285,18 @@ def test_assign_on_null_topic_partition_after_close() -> None:
 # (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
 # exception 4): the method, its keyword, Java's error class and message.
 NULL_ARGUMENT_CASES: list[tuple[str, str, type[Exception], str]] = [
-    ("pause", "partitions", NullPointerError, "The partitions to pause must be nonnull"),
-    ("resume", "partitions", NullPointerError, "The partitions to resume must be nonnull"),
-    ("offsets_for_times", "timestamps_to_search", NullPointerError,
-     "Timestamps to search cannot be null"),
+    ("pause", "partitions", TypeError, "partitions must not be None"),
+    ("resume", "partitions", TypeError, "partitions must not be None"),
+    ("offsets_for_times", "timestamps_to_search", TypeError,
+     "timestamps_to_search must not be None"),
     ("seek_to_beginning", "partitions", IllegalArgumentError,
-     "Partitions collection cannot be null"),
-    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be null"),
-    ("beginning_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
-    ("end_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
+     "Partitions collection cannot be None"),
+    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be None"),
+    ("beginning_offsets", "partitions", TypeError, "partitions must not be None"),
+    ("end_offsets", "partitions", TypeError, "partitions must not be None"),
+    # Java dereferences the null with no check of its own (TopicMetadataEvent's
+    # Objects.requireNonNull(topic)): the same TypeError.
+    ("partitions_for", "topic", TypeError, "topic must not be None"),
 ]
 
 
@@ -304,6 +307,33 @@ def test_a_null_argument_raises_java_s_error(method: str, keyword: str,
         getattr(consumer, method)(**{keyword: None})
     assert type(e.value) is error
     assert str(e.value) == message
+
+
+def test_committed_with_null_partitions() -> None:
+    # Java: throwIfGroupIdNotDefined(), then partitions.isEmpty() dereferences the
+    # null with no check of its own; the group-less consumer reports the group first.
+    with new_consumer() as consumer, pytest.raises(TypeError) as e:
+        consumer.committed(partitions=None)  # type: ignore[arg-type]
+    assert str(e.value) == "partitions must not be None"
+    with new_consumer(None) as consumer, pytest.raises(InvalidGroupIdError) as g:
+        consumer.committed(partitions=None)  # type: ignore[arg-type]
+    assert str(g.value) == NO_GROUP_ID
+
+
+def test_async_committed_with_null_partitions() -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        with pytest.raises(TypeError) as e:
+            await consumer.committed(partitions=None)  # type: ignore[arg-type]
+        assert str(e.value) == "partitions must not be None"
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+        groupless: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs(None))
+        with pytest.raises(InvalidGroupIdError) as g:
+            await groupless.committed(partitions=None)  # type: ignore[arg-type]
+        assert str(g.value) == NO_GROUP_ID
+        await groupless.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize("method, keyword, error, message", NULL_ARGUMENT_CASES)
@@ -2134,7 +2164,7 @@ def test_async_consumer_surface_without_a_broker() -> None:
                                 "empty topic")
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=None)  # type: ignore[arg-type]
-        assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+        assert str(e.value) == "Topic partitions collection to assign to cannot be None"
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=[None])  # type: ignore[list-item]
         assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
