@@ -2132,9 +2132,10 @@ fn with_ffi_macros_stripped(package: impl FnOnce() -> anyhow::Result<()>) -> any
 /// optional one whose only user, `src/ffi`, is not packaged; `ffi-macros` is not
 /// published. So the manifest loses its line and its entry in the `ffi` feature,
 /// and the lock file the line listing it, which keeps the lock file valid under
-/// `--locked`. `.semaphore/publish-crates-io.yml` makes the same edit with
-/// `sed`, because no code built from the repository may run on its publish VM;
-/// `test_publish_pipeline_strips_the_same_lines` keeps the two in step.
+/// `--locked`. The crates.io release blocks in `.semaphore/semaphore.yml` make
+/// the same edit with `sed`, because no code built from the repository may run
+/// on the publish VM; `test_publish_pipeline_strips_the_same_lines` keeps the
+/// two in step.
 ///
 /// Each of the three must occur exactly once, so a reformatted manifest, or
 /// files an interrupted run left stripped, stop the check instead of packaging
@@ -2173,7 +2174,7 @@ fn strip_error(file: &str, pattern: &str, found: usize) -> String {
         "expected `{pattern}` once in {file}, found it {found} times. A `cargo xtask package-check` \
          interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: `git diff` shows what \
          to restore. Otherwise update `strip_ffi_macros` in xtask/src/main.rs and the `sed` in \
-         .semaphore/publish-crates-io.yml together."
+         .semaphore/semaphore.yml together."
     )
 }
 
@@ -2752,7 +2753,7 @@ version = "0.1.0"
             "expected `ffi-macros = ` once in Cargo.toml, found it 0 times. A `cargo xtask \
              package-check` interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: \
              `git diff` shows what to restore. Otherwise update `strip_ffi_macros` in \
-             xtask/src/main.rs and the `sed` in .semaphore/publish-crates-io.yml together."
+             xtask/src/main.rs and the `sed` in .semaphore/semaphore.yml together."
         );
         let second_line = MANIFEST.replace("flate2", "ffi-macros = { path = \"ffi-macros\" }\nflate2");
         assert_eq!(
@@ -2785,12 +2786,12 @@ version = "0.1.0"
         for pattern in [FFI_MACROS_DEPENDENCY, FFI_MACROS_FEATURE_ENTRY, FFI_MACROS_LOCK_LINE] {
             assert!(!pattern.contains(['.', '*', '[', ']', '^', '$', '\\', '/']), "{pattern}");
         }
-        let pipeline = read("../.semaphore/publish-crates-io.yml");
+        let pipeline = read("../.semaphore/semaphore.yml");
         for command in [
             format!("sed -i -e '/^{FFI_MACROS_DEPENDENCY}/d' -e 's/{FFI_MACROS_FEATURE_ENTRY}//' rust/Cargo.toml"),
             format!("sed -i -e '/^{FFI_MACROS_LOCK_LINE}$/d' rust/Cargo.lock"),
         ] {
-            assert!(pipeline.contains(&command), "publish-crates-io.yml does not run `{command}`");
+            assert!(pipeline.contains(&command), "semaphore.yml does not run `{command}`");
         }
     }
 
