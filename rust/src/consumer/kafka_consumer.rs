@@ -439,7 +439,7 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::serialization::Deserializer;
     use crate::consumer::CloseOptions;
-    use crate::test_fake_broker::{FakeBroker, ListOffsetsAnswer};
+    use crate::test_fake_broker::{FakeBroker, FetchAnswer, ListOffsetsAnswer};
     use crate::test_thread_safety::{is_send, is_sync};
 
     const TOPIC: &str = "current-lag-topic";
@@ -560,13 +560,9 @@ mod tests {
 
     /// Translated from `KafkaConsumerTest.testCurrentLag` (CONSUMER arm),
     /// through the public API and the background task, against a fake broker
-    /// in place of Java's `MockClient`.
-    ///
-    /// The tail of the Java test, where a FETCH response moves the position to
-    /// 55 and the lag to 45, is not translated: the fake broker serves no
-    /// FETCH. The lag after the LIST_OFFSETS response is what `currentLag`
-    /// computes; the high watermark a fetch would set takes the same path
-    /// (`SubscriptionState.partitionLag`).
+    /// in place of Java's `MockClient`. The fake answers the FETCHes sent
+    /// before the test's own one empty, with unknown offsets the consumer does
+    /// not apply, so they leave the lag as Java's unanswered FETCH does.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_current_lag() {
         let broker = FakeBroker::start("fake-cluster", TOPIC).await;
@@ -576,7 +572,13 @@ mod tests {
         assert_eq!(None, consumer.current_lag(&tp0()).await.expect("lag"));
         // poll once again, which should send the list-offset request
         consumer.seek_with_offset(tp0(), 50).await.expect("seek");
-        wait_for_latest_list_offsets(&mut consumer, &broker, 1, true).await;
+        // requests: list-offset, fetch
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while latest_list_offsets(&broker) < 1 || broker.fetch_requests() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "No list-offset & fetch request sent");
+            consumer.poll(Duration::ZERO).await.expect("poll");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         // no error for no end offset (so unknown lag)
         assert_eq!(None, consumer.current_lag(&tp0()).await.expect("lag"));
@@ -594,6 +596,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(1, latest_list_offsets(&broker), "one LIST_OFFSETS for the end offset");
+
+        // one successful fetch should update the log end offset and the position
+        broker.answer_fetch(FetchAnswer { log_first_offset: 1, log_last_offset: 99, offset: 50, count: 5 });
+        // requests: fetch
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let records = loop {
+            assert!(tokio::time::Instant::now() < deadline, "No fetch request sent");
+            let records = consumer.poll(Duration::from_millis(1)).await.expect("poll");
+            if !records.is_empty() {
+                break records;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(5, records.count());
+        assert_eq!(55, consumer.position(&tp0()).await.expect("position"));
+        assert_eq!(1, records.next_offsets().len());
+        assert_eq!(
+            Some(&OffsetAndMetadata::new(55).expect("valid offset")),
+            records.next_offsets().get(&tp0())
+        );
+
+        // correct lag result
+        assert_eq!(Some(45), consumer.current_lag(&tp0()).await.expect("lag"));
 
         close_and_assert_current_lag_fails(consumer).await;
     }
