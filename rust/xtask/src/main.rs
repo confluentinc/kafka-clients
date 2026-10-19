@@ -2639,7 +2639,7 @@ fn print_help() {
                   cargo-semver-checks, the C ABI with libabigail's abidiff; a breaking
                   change fails unless the Cargo.toml version allows it over the tag's
                     --baseline TAG (default $API_COMPAT_BASELINE, else the highest
-                    vX.Y.Z tag not above the current version)
+                    rust/X.Y.Z or vX.Y.Z tag not above the current version)
   bump-version    Set one version on the Rust crates released together, Cargo.lock and
                   the Python packages: semver in Cargo manifests, PEP 440 in Python
                     e.g. cargo xtask bump-version 0.3.0-rc.1 (Python gets 0.3.0rc1);
