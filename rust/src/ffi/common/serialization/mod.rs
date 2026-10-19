@@ -59,7 +59,8 @@
 //! the calling thread, parking it while a report is awaited
 //! ([`block_on_thread`]), and [`ready`] drives the built-ins.
 
-use std::ffi::c_void;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{c_char, c_void};
 use std::pin::{Pin, pin};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
@@ -70,7 +71,7 @@ use futures_util::FutureExt;
 
 use crate::common::Error;
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::callback_result::{CallbackResults, KeepAlive, WaitReport};
+use crate::ffi::callback_result::{CallbackResults, KeepAlive, ResultSink, WaitReport};
 use crate::ffi::common::header::internals::record_headers::RecordHeadersInner;
 use crate::ffi::common::panic_error;
 use crate::ffi::common::serialization::deserializer::{
@@ -79,7 +80,10 @@ use crate::ffi::common::serialization::deserializer::{
 use crate::ffi::common::serialization::serializer::{
     FfiSerializer, SerializerInner, kafka_common_serialization_Serializer_t,
 };
-use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
+use crate::ffi::util::{
+    box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_destroy, kafka_Map_t,
+    map_entries,
+};
 
 pub(crate) mod byte_array_deserializer;
 pub(crate) mod byte_array_serializer;
@@ -445,6 +449,59 @@ pub(crate) fn dispatch<'a, R: Send + 'static>(
 /// A `void *` the C side owns, carried to the blocking pool.
 pub(crate) fn send_ptr<T>(ptr: *const T) -> SendPtr {
     SendPtr(ptr.cast_mut().cast::<c_void>())
+}
+
+/// The owned map a C `configure` reads: sorted by key, since Java's map is
+/// unordered and index addressing through the C map is not.
+pub(crate) fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map_t {
+    let sorted: BTreeMap<&str, &str> = configs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    box_string_keyed_map(
+        sorted.into_iter().map(|(k, v)| (k, into_c_string(v) as *mut c_void)),
+        Some(destroy_string_element),
+    )
+}
+
+/// The configs a C caller passed, copied.
+///
+/// # Safety
+///
+/// `configs` must be null or a valid map of NUL-terminated strings.
+pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `map_entries`
+    // requires (null reads as empty); the borrow of its entries ends when they are collected.
+    unsafe { map_entries(configs) }
+        .iter()
+        .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid
+            // NUL-terminated string, as `c_str_to_string` requires; both are copied.
+            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
+                c_str_to_string(v as *const c_char)
+            })
+        })
+        .collect()
+}
+
+/// Logs the failure of a `void` method (`configure` or `close`) of the
+/// `serde` (`"serializer"` or `"deserializer"`), which has nowhere to report
+/// it.
+pub(crate) fn log_failure(what: &str, serde: &str, result: Result<(), Error>) {
+    if let Err(error) = result {
+        log::warn!("Failed to {what} the {serde}: {error}");
+    }
+}
+
+/// Completion of the `void` `_cb` twins.
+pub(crate) type OpaqueCb = unsafe extern "C" fn(opaque: *mut c_void);
+
+/// Fires a `void` completion, logging a failure.
+pub(crate) fn opaque_sink(what: &'static str, serde: &'static str, cb: OpaqueCb, opaque: *mut c_void) -> ResultSink {
+    let opaque = SendPtr(opaque);
+    Box::new(move |result| {
+        log_failure(what, serde, result.map(|_| ()));
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to the `_cb` twin, a valid
+        // completion until it fires; this `FnOnce` fires it once.
+        unsafe { cb(opaque.get()) }
+    })
 }
 
 #[cfg(test)]

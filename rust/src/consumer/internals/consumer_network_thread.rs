@@ -113,11 +113,11 @@ use super::NetworkClientDelegate;
 use super::RequestManager;
 use super::RequestManagers;
 use super::WakeupTrigger;
-use super::consumer_interceptors::panic_payload_message;
 use super::events::ApplicationEventEnvelope;
 use super::events::ApplicationEventProcessor;
 use super::events::CompletableEventReaper;
 use super::events::EventProcessor;
+use super::panic_payload_message;
 
 /// Consumer background task — single `tokio::spawn` per consumer instance
 /// per `consumer-threading.md` §10. Owns the request managers, the

@@ -57,6 +57,7 @@ use crate::common::serialization::DynSerializer;
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::panic_payload_message;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 use crate::producer::Callback;
 use crate::producer::Partitioner;
@@ -79,7 +80,9 @@ use crate::producer::internals::TransactionManager;
 use crate::producer::internals::buffer_pool::AllocationMode;
 use crate::producer::internals::{BuiltInPartitioner, KeyHasher, PartitionerConfig, RecordAccumulator};
 use crate::{ApiVersions, DefaultHostResolver};
-use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
+use futures_util::FutureExt;
+use std::panic::AssertUnwindSafe;
 
 /// Metadata and time spent waiting for it.
 #[derive(Debug)]
@@ -187,6 +190,9 @@ pub struct KafkaProducer<K, V> {
     key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer.
     value_serializer: Box<dyn DynSerializer<V>>,
+    /// Set by the first `close`, which closes both serializers: `close` is
+    /// idempotent, and a serializer's `close` runs at most once.
+    serializers_closed: AtomicBool,
     /// The maximum size of a request in bytes.
     max_request_size: i32,
     /// The total memory size for the buffer pool.
@@ -817,6 +823,7 @@ impl<K, V> KafkaProducer<K, V> {
             client_id: config.client_id.clone(),
             key_serializer,
             value_serializer,
+            serializers_closed: AtomicBool::new(false),
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
@@ -1450,6 +1457,7 @@ impl<K, V> KafkaProducer<K, V> {
             client_id: config.client_id.clone(),
             key_serializer,
             value_serializer,
+            serializers_closed: AtomicBool::new(false),
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
@@ -3018,20 +3026,56 @@ where
 
         // Java `close`'s `Utils.closeQuietly(...)` chain, in order:
         // `producerMetrics` → `metrics` → `keySerializer` → `valueSerializer` →
-        // `partitioner` (`KafkaProducer.java:1528-1533`). This crate does not model
-        // closeable serializers, so the partitioner is closed right after `metrics`,
-        // which is its faithful position among the closeables that exist. (The Phase 2
-        // spec cited `:1449-1450` for the position, but 4.3.1 closes the partitioner at
-        // `:1446`, after metrics rather than before — behaviourally irrelevant for the
-        // built-in partitioners, whose `close` is a no-op.)
+        // `partitioner` (`KafkaProducer.java:1528-1533`).
         self.producer_metrics.close();
         self.metrics.close();
+        let first_error = self.close_serializers().await;
         if let Some(partitioner) = &self.partitioner {
             partitioner.close();
         }
 
+        // `KafkaProducer.java:1536-1541`: the first failure `closeQuietly`
+        // recorded is raised once everything is closed.
+        if let Some(error) = first_error {
+            return Err(Error::kafka_message_source("Failed to close kafka producer", error));
+        }
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
+    }
+}
+
+impl<K, V> KafkaProducer<K, V> {
+    /// `Utils.closeQuietly(keySerializerPlugin, "producer keySerializer", firstException)`
+    /// then the same for the value serializer (`KafkaProducer.java:1531-1532`):
+    /// both are closed, each panic is logged as `closeQuietly` logs a failure
+    /// (`Utils.java:1131`), and the first one is returned. Only the first call
+    /// closes them.
+    async fn close_serializers(&self) -> Option<Error> {
+        if self.serializers_closed.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let mut first_error = None;
+        if let Err(payload) = AssertUnwindSafe(DynSerializer::close(&*self.key_serializer))
+            .catch_unwind()
+            .await
+        {
+            first_error.get_or_insert(self.serializer_close_failure("key serializer", &*payload));
+        }
+        if let Err(payload) = AssertUnwindSafe(DynSerializer::close(&*self.value_serializer))
+            .catch_unwind()
+            .await
+        {
+            first_error.get_or_insert(self.serializer_close_failure("value serializer", &*payload));
+        }
+        first_error
+    }
+
+    /// The error `closeQuietly` records for a serializer whose `close`
+    /// panicked, logged as it logs one.
+    fn serializer_close_failure(&self, name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
+        let message = panic_payload_message(payload);
+        kafka_error!(self.log_context, "Failed to close {}: {}", name, message);
+        Error::kafka_message(message.to_string())
     }
 }
 
@@ -4465,6 +4509,108 @@ mod tests {
 
         // Cleanup since we use mutable process-global statics in MockPartitioner.
         MockPartitioner::reset_counters();
+    }
+
+    /// Java's `MockSerializer` (`clients/src/test/java/org/apache/kafka/test/MockSerializer.java`):
+    /// counts its constructions and closes. Java keeps the counters in statics;
+    /// here each test shares its own, so parallel tests cannot disturb them.
+    use std::sync::atomic::AtomicUsize;
+
+    struct MockSerializer {
+        close_count: Arc<AtomicUsize>,
+        panic_on_close: Option<&'static str>,
+    }
+
+    impl MockSerializer {
+        fn new(init_count: &AtomicUsize, close_count: &Arc<AtomicUsize>) -> Self {
+            init_count.fetch_add(1, Ordering::SeqCst);
+            Self { close_count: Arc::clone(close_count), panic_on_close: None }
+        }
+    }
+
+    impl Serializer<String> for MockSerializer {
+        async fn serialize<'a>(
+            &'a self,
+            _topic: &'a str,
+            data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+            Ok(data.map(|data| Cow::Borrowed(data.as_bytes())))
+        }
+
+        async fn close(&self) {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(message) = self.panic_on_close {
+                panic!("{message}");
+            }
+        }
+    }
+
+    fn create_producer_with_serializers(
+        key_serializer: Box<dyn DynSerializer<String>>,
+        value_serializer: Box<dyn DynSerializer<String>>,
+    ) -> KafkaProducer<String, String> {
+        KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&ProducerConfig::defaults())
+                .set_key_serializer(key_serializer)
+                .set_value_serializer(value_serializer)
+                .set_metadata(create_metadata_with_topic(TOPIC, 1))
+                .set_accumulator(create_accumulator())
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        )
+    }
+
+    /// Translated from `KafkaProducerTest.testSerializerClose` (`:603-619`):
+    /// `close` closes both serializers (`KafkaProducer.java:1531-1532`). The
+    /// second `close` (Java's try-with-resources closes once) shows the
+    /// serializers are closed only once.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSerializerClose")]
+    async fn test_serializer_close() {
+        let init_count = AtomicUsize::new(0);
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let producer = create_producer_with_serializers(
+            Box::new(MockSerializer::new(&init_count, &close_count)),
+            Box::new(MockSerializer::new(&init_count, &close_count)),
+        );
+        assert_eq!(2, init_count.load(Ordering::SeqCst));
+        assert_eq!(0, close_count.load(Ordering::SeqCst));
+
+        producer.close().await.expect("close");
+
+        assert_eq!(2, init_count.load(Ordering::SeqCst));
+        assert_eq!(2, close_count.load(Ordering::SeqCst));
+
+        producer.close().await.expect("a second close");
+        assert_eq!(2, close_count.load(Ordering::SeqCst));
+    }
+
+    /// `Utils.closeQuietly` keeps closing after a failure and `close` raises
+    /// the first one as the cause of `KafkaException("Failed to close kafka
+    /// producer", ..)` (`KafkaProducer.java:1531-1541`): the value serializer
+    /// is closed although the key serializer's `close` panicked.
+    #[tokio::test]
+    async fn test_serializer_close_failure_closes_both_and_reports_the_first() {
+        let init_count = AtomicUsize::new(0);
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let mut key = MockSerializer::new(&init_count, &close_count);
+        key.panic_on_close = Some("key close failed");
+        let mut value = MockSerializer::new(&init_count, &close_count);
+        value.panic_on_close = Some("value close failed");
+        let producer = create_producer_with_serializers(Box::new(key), Box::new(value));
+
+        let error = producer.close().await.expect_err("both closes panicked");
+        assert!(error.is_kafka_error());
+        assert_eq!("Failed to close kafka producer", error.message());
+        let source = std::error::Error::source(&error).expect("the first failure is the source");
+        assert_eq!("key close failed", source.to_string());
+        assert_eq!(2, close_count.load(Ordering::SeqCst));
+
+        producer.close().await.expect("the serializers are not closed again");
+        assert_eq!(2, close_count.load(Ordering::SeqCst));
     }
 
     /// Translated from `KafkaProducerTest.negativePartitionShouldThrow` (`:2410-2427`).

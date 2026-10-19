@@ -30,6 +30,7 @@
 //! (`check-dyn-forwarding`) fails until all three forward it.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -100,6 +101,12 @@ pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
         headers: &'a RecordHeaders,
         data: Option<&'a T>,
     ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>>;
+
+    /// See [`Serializer::configure`].
+    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>;
+
+    /// See [`Serializer::close`].
+    fn close(&self) -> InlineFuture<'_, ()>;
 }
 
 impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
@@ -118,6 +125,14 @@ impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
         data: Option<&'a T>,
     ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>> {
         InlineFuture::new(Serializer::serialize_with_headers(self, topic, headers, data))
+    }
+
+    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()> {
+        InlineFuture::new(Serializer::configure(self, configs, is_key))
+    }
+
+    fn close(&self) -> InlineFuture<'_, ()> {
+        InlineFuture::new(Serializer::close(self))
     }
 }
 
@@ -141,6 +156,18 @@ impl<T: ?Sized> Serializer<T> for dyn DynSerializer<T> + '_ {
         data: Option<&'a T>,
     ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
         DynSerializer::serialize_with_headers(self, topic, headers, data)
+    }
+
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        DynSerializer::configure(self, configs, is_key)
+    }
+
+    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+        DynSerializer::close(self)
     }
 }
 
@@ -213,6 +240,47 @@ mod tests {
             crate::AllocTrackingGuard::count()
         };
         assert_eq!(0, count, "a dyn serializer call must not allocate");
+    }
+
+    #[tokio::test]
+    async fn test_configure_and_close_forward_through_dyn() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(Arc<AtomicUsize>, Arc<AtomicUsize>);
+        impl Serializer<str> for Counting {
+            async fn serialize<'a>(
+                &'a self,
+                _topic: &'a str,
+                _data: Option<&'a str>,
+            ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+                Ok(None)
+            }
+            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+                assert!(is_key);
+                self.0.fetch_add(configs.len(), Ordering::SeqCst);
+            }
+            async fn close(&self) {
+                self.1.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (configured, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut boxed: Box<dyn DynSerializer<str>> = Box::new(Counting(configured.clone(), closed.clone()));
+        let configs = HashMap::from([("a".to_string(), "b".to_string())]);
+        DynSerializer::configure(&mut *boxed, &configs, true).await;
+        DynSerializer::close(&*boxed).await;
+        // And through the `Serializer` impl on the trait object.
+        Serializer::close(&*boxed).await;
+        assert_eq!(1, configured.load(Ordering::SeqCst));
+        assert_eq!(2, closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_configure_and_close_default_to_no_ops() {
+        let mut boxed: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        DynSerializer::configure(&mut *boxed, &HashMap::new(), false).await;
+        DynSerializer::close(&*boxed).await;
+        assert_eq!(b"v".to_vec(), through_generic(&*boxed, "v").await);
     }
 
     #[test]

@@ -40,7 +40,7 @@
 
 #![expect(non_camel_case_types)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
@@ -59,16 +59,14 @@ use crate::ffi::common::serialization::byte_array_deserializer::GenericByteArray
 use crate::ffi::common::serialization::bytes_deserializer::GenericBytesDeserializer;
 use crate::ffi::common::serialization::string_deserializer::GenericStringDeserializer;
 use crate::ffi::common::serialization::{
-    Call, CallArgs, Data, Dispatch, Results, block_on_thread, dispatch, lock_blocking, ready, send_ptr,
+    Call, CallArgs, Data, Dispatch, OpaqueCb, Results, block_on_thread, build_configs, dispatch, lock_blocking,
+    log_failure, opaque_sink, read_configs, ready, send_ptr,
 };
 use crate::ffi::common::{
     box_error, deliver_panic_opaque, deliver_panic_value, deliver_value, kafka_common_Error_t, run_inline, take_error,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    GenericValue, box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Bytes_t,
-    kafka_Map_destroy, kafka_Map_t, map_entries, owned_c_string,
-};
+use crate::ffi::util::{GenericValue, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, owned_c_string};
 
 /// Opaque handle to a [`Deserializer`] implementation over the `void *`
 /// representation.
@@ -692,23 +690,6 @@ impl CDeserializer {
     }
 }
 
-/// The owned map a C `configure` reads: sorted by key, since Java's map is
-/// unordered and index addressing through the C map is not.
-fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map_t {
-    let sorted: BTreeMap<&str, &str> = configs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    box_string_keyed_map(
-        sorted.into_iter().map(|(k, v)| (k, into_c_string(v) as *mut c_void)),
-        Some(destroy_string_element),
-    )
-}
-
-/// Logs the failure of a `void` method, which has nowhere to report it.
-fn log_failure(what: &str, result: Result<(), Error>) {
-    if let Err(error) = result {
-        log::warn!("Failed to {what} the deserializer: {error}");
-    }
-}
-
 // Each method returns the `Call` future itself rather than awaiting it in an
 // `async fn`, so the consumer's wrapper stays within `InlineFuture`'s buffer.
 impl Deserializer<GenericValue> for CDeserializer {
@@ -746,13 +727,13 @@ impl Deserializer<GenericValue> for CDeserializer {
 
     async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
         if let Some(call) = self.start_configure(Dispatch::Blocking, configs, is_key) {
-            log_failure("configure", call.await);
+            log_failure("configure", "deserializer", call.await);
         }
     }
 
     async fn close(&mut self) {
         if let Some(call) = self.start_close(Dispatch::Blocking) {
-            log_failure("close", call.await);
+            log_failure("close", "deserializer", call.await);
         }
     }
 }
@@ -1213,26 +1194,6 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     }
 }
 
-/// The configs a C caller passed, copied.
-///
-/// # Safety
-///
-/// `configs` must be null or a valid map of NUL-terminated strings.
-unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `map_entries`
-    // requires (null reads as empty); the borrow of its entries ends when they are collected.
-    unsafe { map_entries(configs) }
-        .iter()
-        .map(|&(k, v)| {
-            // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid
-            // NUL-terminated string, as `c_str_to_string` requires; both are copied.
-            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
-                c_str_to_string(v as *const c_char)
-            })
-        })
-        .collect()
-}
-
 /// Runs a `void` method (`configure` or `close`) through an invoker: the
 /// call `start` makes, `None` for the Java default, on the calling thread,
 /// or a built-in's future.
@@ -1253,10 +1214,10 @@ unsafe fn invoke_void(
     match &mut *deserializer {
         FfiDeserializer::C(c) => {
             if let Some(call) = start(c) {
-                log_failure(what, block_on_thread(call));
+                log_failure(what, "deserializer", block_on_thread(call));
             }
         },
-        other => log_failure(what, ready(builtin(other))),
+        other => log_failure(what, "deserializer", ready(builtin(other))),
     }
 }
 
@@ -1322,7 +1283,9 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure_cb(
         invoke_void_cb(
             self_,
             "configure",
-            |c| c.start_configure_with_sink(&configs, is_key != 0, opaque_sink("configure", cb, opaque)),
+            |c| {
+                c.start_configure_with_sink(&configs, is_key != 0, opaque_sink("configure", "deserializer", cb, opaque))
+            },
             |c| c.start_configure(Dispatch::Inline, &configs, is_key != 0),
             async |d| d.configure(&configs, is_key != 0).await,
             cb,
@@ -1372,27 +1335,13 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close_cb(
         invoke_void_cb(
             self_,
             "close",
-            |c| c.start_close_with_sink(opaque_sink("close", cb, opaque)),
+            |c| c.start_close_with_sink(opaque_sink("close", "deserializer", cb, opaque)),
             |c| c.start_close(Dispatch::Inline),
             async |d| d.close().await,
             cb,
             opaque,
         )
     }
-}
-
-/// Completion of the `void` `_cb` twins.
-type OpaqueCb = unsafe extern "C" fn(opaque: *mut c_void);
-
-/// Fires a `void` completion, logging a failure.
-fn opaque_sink(what: &'static str, cb: OpaqueCb, opaque: *mut c_void) -> ResultSink {
-    let opaque = SendPtr(opaque);
-    Box::new(move |result| {
-        log_failure(what, result.map(|_| ()));
-        // SAFETY: `cb` and `opaque` are the pair the C caller passed to the `_cb` twin, a valid
-        // completion until it fires; this `FnOnce` fires it once.
-        unsafe { cb(opaque.get()) }
-    })
 }
 
 /// The `_cb` form of a `void` method: an asynchronous implementation is
@@ -1423,10 +1372,10 @@ unsafe fn invoke_void_cb(
         },
         FfiDeserializer::C(c) => {
             if let Some(call) = start(c) {
-                log_failure(what, block_on_thread(call));
+                log_failure(what, "deserializer", block_on_thread(call));
             }
         },
-        other => log_failure(what, ready(builtin(other))),
+        other => log_failure(what, "deserializer", ready(builtin(other))),
     }
     drop(deserializer);
     // SAFETY: Per this function's `# Safety`, `cb` is a valid completion, not yet fired: no sink
@@ -1505,7 +1454,8 @@ mod tests {
         kafka_common_Error_destroy, kafka_common_Error_message, kafka_common_Error_serialization,
     };
     use crate::ffi::util::{
-        kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value, kafka_string_destroy,
+        into_c_string, kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value,
+        kafka_string_destroy,
     };
 
     // A C deserializer producing an owned `char *` with the bytes

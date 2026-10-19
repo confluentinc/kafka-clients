@@ -422,6 +422,9 @@ typedef struct {
     const char *data;
     int serialize_calls;
     int with_headers_calls;
+    int configured_entries;
+    int8_t configured_is_key;
+    int close_calls;
 } async_upper_serializer_t;
 
 static void async_serializer_report(async_upper_serializer_t *imp, int64_t id, const char *topic, const char *data) {
@@ -469,6 +472,22 @@ static void async_upper_serialize_with_headers(void *self, const char *topic,
     async_upper_serialize(self, topic, data, callback_id);
 }
 
+static void async_upper_serializer_configure(void *self, const kafka_Map_t *configs, int8_t is_key,
+                                             int64_t callback_id) {
+    async_upper_serializer_t *imp = self;
+    imp->configured_entries = kafka_Map_size(configs);
+    imp->configured_is_key = is_key;
+    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+}
+
+static void async_upper_serializer_close(void *self, int64_t callback_id) {
+    async_upper_serializer_t *imp = self;
+    imp->close_calls++;
+    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+}
+
+static void on_serializer_done(void *opaque) { record_completion_thread(opaque); }
+
 // Waits for the pending call and reports it from this thread.
 static void *async_serializer_reporter(void *arg) {
     async_upper_serializer_t *imp = arg;
@@ -497,7 +516,8 @@ static void on_serialized(kafka_Bytes_t value, kafka_common_Error_t *error, void
 static void test_async_c_serializer_reporting_inside_the_call(void) {
     async_upper_serializer_t imp = {0};
     kafka_common_serialization_Serializer_t *serializer = kafka_common_serialization_Serializer_new_async(
-        &imp, async_upper_serialize, async_upper_serialize_with_headers);
+        &imp, async_upper_serialize, async_upper_serialize_with_headers, async_upper_serializer_configure,
+        async_upper_serializer_close);
     imp.handle = serializer;
     imp.inline_report = 1;
     TEST_ASSERT_EQUAL_INT8(1, kafka_common_serialization_Serializer__is_async(serializer));
@@ -541,6 +561,24 @@ static void test_async_c_serializer_reporting_inside_the_call(void) {
     TEST_ASSERT_EQUAL_INT(6, imp.serialize_calls);
     TEST_ASSERT_EQUAL_INT(2, imp.with_headers_calls);
 
+    // `configure` and `close`, blocking and `_cb`.
+    kafka_Map_t *configs = kafka_Map_new();
+    char key_a[] = "alpha", value_a[] = "1";
+    kafka_Map_put(configs, key_a, value_a);
+    kafka_common_serialization_Serializer_configure(serializer, configs, 1);
+    TEST_ASSERT_EQUAL_INT(1, imp.configured_entries);
+    TEST_ASSERT_EQUAL_INT8(1, imp.configured_is_key);
+    completion_t configured = {0};
+    kafka_common_serialization_Serializer_configure_cb(serializer, configs, 0, on_serializer_done, &configured);
+    TEST_ASSERT_TRUE(completion_fired(&configured));
+    TEST_ASSERT_EQUAL_INT8(0, imp.configured_is_key);
+    kafka_Map_destroy(configs);
+    kafka_common_serialization_Serializer_close(serializer);
+    completion_t closed = {0};
+    kafka_common_serialization_Serializer_close_cb(serializer, on_serializer_done, &closed);
+    TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_EQUAL_INT(2, imp.close_calls);
+
     // A report for an id that is not pending (here, already reported) is
     // ignored and its error freed.
     kafka_common_serialization_Serializer__set_callback_result(serializer, 0, NULL,
@@ -553,8 +591,20 @@ static void test_async_c_serializer_reporting_inside_the_call(void) {
 static void test_async_c_serializer_reporting_later_from_another_thread(void) {
     async_upper_serializer_t imp = {0};
     kafka_common_serialization_Serializer_t *serializer =
-        kafka_common_serialization_Serializer_new_async(&imp, async_upper_serialize, NULL);
+        kafka_common_serialization_Serializer_new_async(&imp, async_upper_serialize, NULL, NULL, NULL);
     imp.handle = serializer;
+
+    // `configure` and `close` left NULL are the Java defaults: nothing is
+    // called, and each `_cb` completion fires before it returns.
+    kafka_common_serialization_Serializer_configure(serializer, NULL, 1);
+    completion_t configured = {0};
+    kafka_common_serialization_Serializer_configure_cb(serializer, NULL, 1, on_serializer_done, &configured);
+    TEST_ASSERT_TRUE(completion_fired(&configured));
+    kafka_common_serialization_Serializer_close(serializer);
+    completion_t closed = {0};
+    kafka_common_serialization_Serializer_close_cb(serializer, on_serializer_done, &closed);
+    TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_EQUAL_INT(0, imp.serialize_calls);
 
     // The blocking invoker parks the calling thread until the report.
     pthread_t reporter;

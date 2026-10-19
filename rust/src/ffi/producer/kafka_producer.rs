@@ -32,6 +32,7 @@
 #![expect(non_camel_case_types)]
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -137,6 +138,16 @@ impl Serializer<GenericValue> for ArcSerializer {
         data: Option<&'a GenericValue>,
     ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         Serializer::serialize_with_headers(self.0.get(), topic, headers, data).await
+    }
+
+    /// The handle is shared, so `configure` goes through the shared form,
+    /// which reaches a C implementation as `&mut` would.
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        self.0.get().configure_shared(configs, is_key).await;
+    }
+
+    async fn close(&self) {
+        Serializer::close(self.0.get()).await;
     }
 }
 
@@ -616,6 +627,8 @@ mod tests {
                     std::ptr::null_mut(),
                     async_fn,
                     None,
+                    None,
+                    None,
                 ))),
             )
         };
@@ -714,7 +727,7 @@ mod tests {
             assert!(err.is_null());
             kafka_Map_destroy(props);
             let string = kafka_common_serialization_StringSerializer_new();
-            let built_in = kafka_common_serialization_StringSerializer__as_Serializer(string).cast_mut();
+            let built_in = kafka_common_serialization_StringSerializer__as_Serializer(string);
             let cases = [
                 ("NULL", std::ptr::null_mut(), std::ptr::null_mut(), true),
                 ("built-in", built_in, built_in, true),
@@ -727,7 +740,7 @@ mod tests {
                 (
                     "async C value",
                     built_in,
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None),
+                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
                     false,
                 ),
             ];

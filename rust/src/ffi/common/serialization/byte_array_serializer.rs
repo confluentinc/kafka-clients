@@ -23,6 +23,7 @@
 //! out before it returns.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -92,6 +93,13 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
         let data: Option<&'a [u8]> = unsafe { bytes(data) };
         Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, data).await
     }
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        Serializer::<[u8]>::configure(&mut self.0, configs, is_key).await;
+    }
+
+    async fn close(&self) {
+        Serializer::<[u8]>::close(&self.0).await;
+    }
 }
 
 /// The handle behind a pointer.
@@ -127,13 +135,13 @@ pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Serializer(
-    self_: *const kafka_common_serialization_ByteArraySerializer_t,
-) -> *const kafka_common_serialization_Serializer_t {
+    self_: *mut kafka_common_serialization_ByteArraySerializer_t,
+) -> *mut kafka_common_serialization_Serializer_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle, as
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_serializer()
+    unsafe { handle(self_) }.as_serializer().cast_mut()
 }
 
 /// Frees an owned handle; null is a no-op.

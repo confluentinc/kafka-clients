@@ -255,8 +255,8 @@ void test_create_with_string_serializers(void) {
     kafka_common_Error_t *err = NULL;
     producer = kafka_producer_KafkaProducer_new(
         config,
-        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(key_ser),
-        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(value_ser), &err);
+        kafka_common_serialization_StringSerializer__as_Serializer(key_ser),
+        kafka_common_serialization_StringSerializer__as_Serializer(value_ser), &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
     kafka_producer_ProducerConfig_destroy(config);

@@ -23,7 +23,7 @@ use futures_util::FutureExt;
 
 use crate::common::Error;
 use crate::common::serialization::DynDeserializer;
-use crate::consumer::internals::consumer_interceptors::panic_payload_message;
+use crate::consumer::internals::panic_payload_message;
 
 /// A container that holds the key + value deserializers as
 /// [`DynDeserializer`] trait objects.
