@@ -35,8 +35,10 @@
 //! `FindCoordinator` names this broker (node 0) the coordinator of every key,
 //! and `OffsetFetch` returns the committed offset the test sets with
 //! [`FakeBroker::set_committed_offset`] (`-1`, no committed offset, until then)
-//! for every partition asked for. Every other request is read and left
-//! unanswered.
+//! for every partition asked for. Started with
+//! [`FakeBroker::start_acknowledging_produce`], it also answers every
+//! `Produce` request that expects a response, so a test can see records
+//! delivered. Every other request is read and left unanswered.
 //!
 //! A test can also kill the broker ([`FakeBroker::kill`]), or have SASL/PLAIN
 //! authentication succeed on the first connections and fail
@@ -79,6 +81,8 @@ use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
 use crate::OffsetFetchRequestData;
 use crate::OffsetFetchResponseData;
+use crate::ProduceRequestData;
+use crate::ProduceResponseData;
 use crate::SaslAuthenticateResponseData;
 use crate::SaslHandshakeResponseData;
 use crate::api_message_type::ListenerType;
@@ -92,6 +96,7 @@ use crate::consumer_group_heartbeat_response_data::Assignment;
 use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as FetchPartitionData};
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
+use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
 /// The node id the fake advertises for itself in its Metadata responses.
 pub(crate) const FAKE_BROKER_NODE_ID: i32 = 0;
@@ -149,6 +154,9 @@ struct Shared {
     fetch_answer: Mutex<Option<FetchAnswer>>,
     /// Whether the fake acts as the group coordinator.
     group_coordinator: bool,
+    /// Whether `Produce` requests are acknowledged
+    /// ([`FakeBroker::start_acknowledging_produce`]).
+    acknowledge_produce: bool,
     /// The member epoch of every `ConsumerGroupHeartbeat` received, in arrival
     /// order (only recorded when acting as the group coordinator).
     heartbeat_epochs: Mutex<Vec<i32>>,
@@ -195,16 +203,22 @@ impl FakeBroker {
     /// Binds `127.0.0.1:0` and serves every accepted connection. Metadata
     /// responses carry `cluster_id` and a single-partition `topic`.
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
-        Self::start_inner(cluster_id, topic, false).await
+        Self::start_inner(cluster_id, topic, false, false).await
+    }
+
+    /// As [`Self::start`], and also acknowledges every `Produce` request that
+    /// expects a response: each partition it carries succeeds, at base offset 0.
+    pub(crate) async fn start_acknowledging_produce(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, false, true).await
     }
 
     /// Like [`Self::start`], and also acts as the group coordinator (see the
     /// module docs): joins are answered, leave heartbeats are not.
     pub(crate) async fn start_with_group_coordinator(cluster_id: &str, topic: &str) -> Self {
-        Self::start_inner(cluster_id, topic, true).await
+        Self::start_inner(cluster_id, topic, true, false).await
     }
 
-    async fn start_inner(cluster_id: &str, topic: &str, group_coordinator: bool) -> Self {
+    async fn start_inner(cluster_id: &str, topic: &str, group_coordinator: bool, acknowledge_produce: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
         let shared = Arc::new(Shared {
@@ -214,6 +228,7 @@ impl FakeBroker {
             fetch_requests: AtomicUsize::new(0),
             fetch_answer: Mutex::new(None),
             group_coordinator,
+            acknowledge_produce,
             heartbeat_epochs: Mutex::new(Vec::new()),
             sasl_handshakes: AtomicUsize::new(0),
             sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
@@ -485,6 +500,19 @@ async fn read_requests(
             let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
             seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
             Pending::Fetch { response_header, version, request }
+        } else if *header.api_key() == ApiKeys::PRODUCE && seen.acknowledge_produce {
+            let request = ProduceRequestData::read(&mut accessor, version).expect("fake broker: Produce body");
+            // With `acks=0` the client expects no response.
+            if request.acks == 0 {
+                continue;
+            }
+            let mut body = produce_response(&request);
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else if *header.api_key() == ApiKeys::CONSUMER_GROUP_HEARTBEAT && seen.group_coordinator {
             let request = ConsumerGroupHeartbeatRequestData::read(&mut accessor, version)
                 .expect("fake broker: ConsumerGroupHeartbeat body");
@@ -551,6 +579,37 @@ async fn respond(seen: &Shared, pending: Pending) -> Option<Vec<u8>> {
 /// The bytes of a serialized response.
 fn serialize<E: std::fmt::Debug>(response: Result<ByteBufferAccessor, E>) -> Vec<u8> {
     response.expect("fake broker: serialize response").into_buffer()
+}
+
+/// A response in which every partition `request` carries succeeds, at base
+/// offset 0.
+fn produce_response(request: &ProduceRequestData) -> ProduceResponseData {
+    let topics = request
+        .topic_data
+        .iter()
+        .map(|topic_data| {
+            let partitions = topic_data
+                .partition_data
+                .iter()
+                .map(|partition_data| {
+                    let mut partition = PartitionProduceResponse::new();
+                    partition.set_index(partition_data.index);
+                    partition.set_error_code(Errors::None.code());
+                    partition.set_base_offset(0);
+                    partition.set_log_start_offset(0);
+                    partition
+                })
+                .collect();
+            let mut topic = TopicProduceResponse::new();
+            topic.set_name(topic_data.name.clone());
+            topic.set_topic_id(topic_data.topic_id);
+            topic.set_partition_responses(partitions);
+            topic
+        })
+        .collect();
+    let mut data = ProduceResponseData::new();
+    data.set_responses(topics);
+    data
 }
 
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {
