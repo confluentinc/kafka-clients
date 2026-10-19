@@ -23,9 +23,11 @@
 //!
 //! Used by the §27 per-record allocation-budget regression test
 //! (`consumer-threading.md` §27, "Tests required") to assert that the
-//! receive path stays zero-copy, and by the decode-hardening tests to assert
+//! receive path stays zero-copy, by the decode-hardening tests to assert
 //! that a length read off the wire does not size an allocation
-//! ([`AllocTrackingGuard::max_allocation`]).
+//! ([`AllocTrackingGuard::max_allocation`]), and by the compressed-batch tests
+//! to assert what a batch's records keep allocated once they are handed out
+//! ([`AllocTrackingGuard::net_bytes`]).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -40,6 +42,10 @@ thread_local! {
     /// Per-thread size in bytes of the largest single allocation (or
     /// reallocation target) requested while [`TRACK_ENABLED`] is `true`.
     static MAX_ALLOC_SIZE: Cell<usize> = const { Cell::new(0) };
+    /// Per-thread bytes allocated minus bytes freed while [`TRACK_ENABLED`] is
+    /// `true`. Signed: a block allocated before tracking began may be freed
+    /// while it is on.
+    static NET_BYTES: Cell<isize> = const { Cell::new(0) };
 }
 
 /// Counts one allocation of `size` bytes, if tracking is enabled on this thread.
@@ -47,6 +53,14 @@ fn record(size: usize) {
     if TRACK_ENABLED.with(|t| t.get()) {
         ALLOC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
         MAX_ALLOC_SIZE.with(|m| m.set(m.get().max(size)));
+        NET_BYTES.with(|n| n.set(n.get().saturating_add_unsigned(size)));
+    }
+}
+
+/// Counts one deallocation of `size` bytes, if tracking is enabled on this thread.
+fn release(size: usize) {
+    if TRACK_ENABLED.with(|t| t.get()) {
+        NET_BYTES.with(|n| n.set(n.get().saturating_sub_unsigned(size)));
     }
 }
 
@@ -57,9 +71,9 @@ pub(crate) struct TrackingAllocator;
 // SAFETY: every method forwards the caller's arguments unchanged to `System`, so the
 // `GlobalAlloc` contract holds exactly as it does for `System` (`alloc` returns a block
 // of the requested layout or null; `dealloc` / `realloc` receive a pointer this
-// allocator returned together with its layout). The only extra work is `record`, which
-// updates `const`-initialised `Cell` thread-locals (the count and the largest size) and
-// performs no allocation of its own.
+// allocator returned together with its layout). The only extra work is `record` and
+// `release`, which update `const`-initialised `Cell` thread-locals (the count, the
+// largest size and the net bytes) and perform no allocation of their own.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
@@ -67,6 +81,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        release(layout.size());
         // SAFETY: ptr / layout provided by the caller per GlobalAlloc contract.
         unsafe { System.dealloc(ptr, layout) }
     }
@@ -76,6 +91,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        release(layout.size());
         record(new_size);
         // SAFETY: ptr / layout / new_size provided by the caller per GlobalAlloc contract.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -99,10 +115,10 @@ static GLOBAL: TrackingAllocator = TrackingAllocator;
 pub(crate) struct AllocTrackingGuard(());
 
 impl AllocTrackingGuard {
-    /// Enables tracking, resetting the counter and the largest allocation to 0.
+    /// Enables tracking, resetting the counter, the largest allocation and the
+    /// net bytes to 0.
     pub(crate) fn new() -> Self {
-        ALLOC_COUNT.with(|c| c.set(0));
-        MAX_ALLOC_SIZE.with(|m| m.set(0));
+        Self::reset();
         TRACK_ENABLED.with(|t| t.set(true));
         Self(())
     }
@@ -118,11 +134,20 @@ impl AllocTrackingGuard {
         MAX_ALLOC_SIZE.with(|m| m.get())
     }
 
-    /// Resets the per-thread counter and largest allocation to zero without
-    /// disabling tracking.
+    /// Returns the bytes this thread allocated minus the bytes it freed while
+    /// tracking was enabled: what the code under measurement still holds.
+    /// Negative when more was freed than allocated, which blocks allocated
+    /// before tracking began and freed under it can make it.
+    pub(crate) fn net_bytes() -> isize {
+        NET_BYTES.with(|n| n.get())
+    }
+
+    /// Resets the per-thread counter, largest allocation and net bytes to zero
+    /// without changing whether tracking is enabled.
     pub(crate) fn reset() {
         ALLOC_COUNT.with(|c| c.set(0));
         MAX_ALLOC_SIZE.with(|m| m.set(0));
+        NET_BYTES.with(|n| n.set(0));
     }
 }
 
@@ -169,6 +194,34 @@ mod tests {
         let mut grown: Vec<u8> = Vec::with_capacity(16);
         grown.reserve_exact(8192);
         assert_eq!(8192, AllocTrackingGuard::max_allocation(), "a realloc counts its new size");
+    }
+
+    #[test]
+    fn test_net_bytes_follow_allocations_and_frees() {
+        let before: Vec<u8> = Vec::with_capacity(1024);
+        let _guard = AllocTrackingGuard::new();
+        assert_eq!(0, AllocTrackingGuard::net_bytes());
+        let held: Vec<u8> = Vec::with_capacity(4096);
+        let freed: Vec<u8> = Vec::with_capacity(512);
+        drop(freed);
+        assert_eq!(4096, AllocTrackingGuard::net_bytes(), "a freed block no longer counts");
+        let mut grown: Vec<u8> = Vec::with_capacity(16);
+        grown.reserve_exact(8192);
+        assert_eq!(
+            4096 + 8192,
+            AllocTrackingGuard::net_bytes(),
+            "a realloc counts its new size only"
+        );
+        drop(before);
+        assert_eq!(
+            4096 + 8192 - 1024,
+            AllocTrackingGuard::net_bytes(),
+            "freeing a block allocated before tracking began counts against it"
+        );
+        drop((held, grown));
+        assert_eq!(-1024, AllocTrackingGuard::net_bytes());
+        AllocTrackingGuard::reset();
+        assert_eq!(0, AllocTrackingGuard::net_bytes());
     }
 
     #[test]

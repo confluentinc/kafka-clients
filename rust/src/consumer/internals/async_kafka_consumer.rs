@@ -149,7 +149,7 @@ enum BgJoin {
 ///      (`PlaintextConsumerCallbackTest.java`).
 ///
 /// In Rust the consumer is owned via `&mut self` for the duration of a
-/// blocking call, and `Box<dyn Consumer>` is not `Clone`, so neither
+/// blocking call, and a consumer is not `Clone`, so neither
 /// pattern is expressible with a bare reference. This handle captures
 /// only the already-`Arc`-shared, internally-synchronized consumer state,
 /// so both patterns are expressible **without `unsafe`**. The user
@@ -1432,8 +1432,8 @@ impl NetworkThreadCloseHandle {
 }
 
 /// `AsyncKafkaConsumer<K, V>` — the production consumer for the KIP-848
-/// group protocol. Implements [`crate::consumer::Consumer`] via
-/// [`async_trait`].
+/// group protocol. Implements [`crate::consumer::Consumer`], and is the
+/// delegate held by [`crate::consumer::KafkaConsumer`].
 ///
 /// The struct shape mirrors the Phase 11 PLAN.md layout:
 ///   - **Shared with the bg task**: `subscriptions`, `metadata`,
@@ -6780,13 +6780,12 @@ where
 //
 // Delegates each trait method to the inherent impl. The split is
 // deliberate: the inherent impl carries the (untyped) ctor, the
-// internal helpers, and the `pub`-visible API for users that hold an
+// internal helpers, and the API used by crate code that holds an
 // `AsyncKafkaConsumer<K, V>` directly. The trait impl exposes the same
-// surface through `Box<dyn Consumer<K, V>>` for callers that want
-// type-erased dispatch (the factory `KafkaConsumer::new::<K, V>` returns this
-// boxed form per DoD §11).
+// surface through `KafkaConsumer`, which forwards every `Consumer` method
+// here, and through `DynConsumer` for callers that want type-erased
+// dispatch.
 
-#[async_trait::async_trait]
 impl<K, V> crate::consumer::Consumer<K, V> for AsyncKafkaConsumer<K, V>
 where
     K: Send + Sync + 'static,
@@ -7676,7 +7675,7 @@ mod tests {
 
         use crate::ClientUtils;
         use crate::common::serialization::StringDeserializer;
-        use crate::consumer::{CloseOptions, KafkaConsumer};
+        use crate::consumer::{CloseOptions, Consumer, KafkaConsumer};
 
         let servers: Vec<String> = (0..3)
             .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
@@ -7690,7 +7689,7 @@ mod tests {
             (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
             (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
         ]);
-        let mut consumer = KafkaConsumer::new::<String, String>(
+        let mut consumer = KafkaConsumer::<String, String>::new(
             ConsumerConfig::new(&props).unwrap(),
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),

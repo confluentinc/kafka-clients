@@ -70,7 +70,7 @@ const CONSUME_RECORDS_TIMEOUT: Duration = Duration::from_millis(60_000);
 
 /// Which close overload `calculateConsumerCloseDelay` drives — Java passes a
 /// `java.util.function.Consumer<Consumer<byte[], byte[]>>` lambda; an async
-/// closure over `&mut Box<dyn Consumer>` is awkward in Rust, so the two
+/// closure over `&mut Box<dyn DynConsumer>` is awkward in Rust, so the two
 /// lambdas the Java tests use are enumerated instead.
 enum CloseOperation {
     /// `Consumer::close`.
@@ -164,12 +164,14 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
         ("group.id".to_string(), group_id),
         ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
     ]);
-    let mut consumer: BytesConsumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer: BytesConsumer = Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::default()),
+            Box::new(ByteArrayDeserializer::default()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
+    );
 
     consumer
         .subscribe_with_topics(vec![topic_name])

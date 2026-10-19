@@ -16,15 +16,14 @@
 //!
 //! # Handles
 //!
-//! `kafka_consumer_Consumer_t` is the interface handle, Rust's
-//! `Box<dyn Consumer>`. `kafka_consumer_KafkaConsumer_new` returns one owned
-//! by the caller (`KafkaConsumer::new` returns the delegate it chose, not a
-//! `KafkaConsumer`), freed with [`kafka_consumer_Consumer_destroy`];
-//! `kafka_consumer_MockConsumer__as_Consumer` returns a borrowed view of a
-//! `kafka_consumer_MockConsumer_t`, valid until that class handle is
-//! destroyed and never passed to `Consumer_destroy`. Both point at the same
-//! thing: a [`ConsumerClassHandle`] whose first field is the shared
-//! [`Client`].
+//! `kafka_consumer_Consumer_t` is the interface handle, every operation of
+//! the `Consumer` trait takes it. It is never owned: the class handles
+//! `kafka_consumer_KafkaConsumer_t` and `kafka_consumer_MockConsumer_t` are,
+//! freed with `kafka_consumer_KafkaConsumer_destroy` /
+//! `kafka_consumer_MockConsumer_destroy`, and their `__as_Consumer` returns a
+//! borrowed view valid until the class handle is destroyed. All three point
+//! at the same thing: a [`ConsumerClassHandle`] whose first field is the
+//! shared [`Client`].
 //!
 //! # Threading
 //!
@@ -56,7 +55,7 @@
 //! [`kafka_consumer_Consumer__set_callback_result`], from inside the
 //! function or later from any thread; the operation waits for that report
 //! (a C implementation that never reports hangs it, as a Java listener that
-//! never returns would). [`kafka_consumer_Consumer_destroy`] wakes the
+//! never returns would). Destroying the class handle wakes the
 //! operation still waiting (it fails with `kafka_common_Error_is_wakeup_error`)
 //! and runs the callbacks still pending so each fires exactly once.
 //!
@@ -96,7 +95,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use crate::common::{Error, TopicPartition};
-use crate::consumer::{Consumer, ConsumerHandle, MockConsumer};
+use crate::consumer::{ConsumerHandle, KafkaConsumer, MockConsumer};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS};
 use crate::ffi::common::metrics::box_metrics_map;
@@ -140,17 +139,17 @@ pub struct kafka_consumer_Consumer_t {
 }
 
 /// The consumer behind the boundary: keys and values are the C caller's
-/// `void *`s.
-pub(crate) type DynConsumer = dyn Consumer<GenericValue, GenericValue>;
+/// `void *`s. The dyn-compatible [`crate::consumer::DynConsumer`], since
+/// `Consumer` returns unboxed futures and is not dyn-compatible.
+pub(crate) type DynConsumer = dyn crate::consumer::DynConsumer<GenericValue, GenericValue>;
 
 /// A pinned, sendable operation future borrowing the consumer.
 pub(crate) type OpFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
-/// What a handle wraps: the delegate `KafkaConsumer::new` chose, or the
-/// mock, kept concrete so `kafka_consumer_MockConsumer_*` can reach its
-/// inherent methods.
+/// What a handle wraps: the `KafkaConsumer`, or the mock, kept concrete so
+/// `kafka_consumer_MockConsumer_*` can reach its inherent methods.
 pub(crate) enum ConsumerKind {
-    Async(Box<DynConsumer>),
+    Async(Box<KafkaConsumer<GenericValue, GenericValue>>),
     Mock(Box<MockConsumer<GenericValue, GenericValue>>),
 }
 
@@ -392,10 +391,10 @@ impl Drop for BlockingGuard<'_> {
     }
 }
 
-/// The class handle behind `kafka_consumer_Consumer_t` (from
-/// `KafkaConsumer_new`) and `kafka_consumer_MockConsumer_t`: the shared
-/// client and the runtime that drives it. `#[repr(C)]` with the client
-/// first, so the `Consumer_t` pointer is the handle pointer and
+/// The class handle behind `kafka_consumer_KafkaConsumer_t`,
+/// `kafka_consumer_MockConsumer_t` and their `kafka_consumer_Consumer_t`
+/// views: the shared client and the runtime that drives it. `#[repr(C)]`
+/// with the client first, so the `Consumer_t` pointer is the handle pointer and
 /// [`client_ref`] reads the `Arc` straight from it.
 #[repr(C)]
 pub(crate) struct ConsumerClassHandle {
@@ -554,7 +553,7 @@ impl ConsumerClassHandle {
 /// # Safety
 ///
 /// `consumer` must point at a live [`ConsumerClassHandle`], kept alive for
-/// `'a`: a handle from `KafkaConsumer_new`, an `__as_Consumer` view, or a
+/// `'a`: an `__as_Consumer` view, or a `kafka_consumer_KafkaConsumer_t` /
 /// `kafka_consumer_MockConsumer_t` cast to `kafka_consumer_Consumer_t` (the
 /// same pointer, see [`ConsumerClassHandle::as_consumer`]).
 pub(crate) unsafe fn client_ref<'a>(consumer: *const kafka_consumer_Consumer_t) -> &'a Arc<Client> {
@@ -619,7 +618,7 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 /// not read, so it may be any consumer or `NULL`.
 ///
 /// Callable from inside the method or later, from any thread, including
-/// while `kafka_consumer_Consumer_destroy` or `kafka_consumer_MockConsumer_destroy`
+/// while `kafka_consumer_KafkaConsumer_destroy` or `kafka_consumer_MockConsumer_destroy`
 /// runs the consumer's pending callbacks, but never once it returned. A
 /// second report for the same id, or one for an id the consumer did not
 /// issue, is ignored: its error is freed and its `result` is not taken.
@@ -4079,39 +4078,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
     // `CallbackQueue::notify_if` relies on when it fires the hook after releasing the
     // registration's lock.
     unsafe { client_ref(self_) }.delivery.queue.set_notify(Some(notify), opaque);
-}
-
-/// Frees a handle returned by `kafka_consumer_KafkaConsumer_new`: awaits the
-/// `_cb` operations in flight, runs every pending callback (so each fires
-/// exactly once), drops the consumer (which closes it if `close` was never
-/// called, as Java's finalizer-less contract expects the caller to do) and
-/// shuts its runtime down. Never called on an `__as_Consumer` view; a null
-/// pointer is a no-op. It first wakes the operation still waiting, which
-/// fails with `kafka_common_Error_is_wakeup_error`, so a long `poll_cb` does
-/// not hold it up. Called inside a tokio runtime (on a worker thread, or
-/// inside a `block_on`), where it cannot wait, it returns at once and all of
-/// this happens on a new thread, the pending callbacks included; if that
-/// thread cannot be started, the handle is leaked and an error logged.
-///
-/// # Safety
-///
-/// `self_` must be null or an owned handle from
-/// `kafka_consumer_KafkaConsumer_new` not yet destroyed, that no other call
-/// uses at the same time; the callbacks this call runs may use it only to
-/// report through `kafka_consumer_Consumer__set_callback_result`, and
-/// nothing else uses it once this call returned.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(self_: *mut kafka_consumer_Consumer_t) {
-    if !self_.is_null() {
-        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
-        // handle not yet destroyed, i.e. the `Box::into_raw` of the `Box<ConsumerClassHandle>`
-        // `kafka_consumer_KafkaConsumer_new` delivered, that no other call uses at the same time
-        // except the reports of the callbacks this call runs, as `ConsumerClassHandle::destroy`
-        // requires; it frees the handle exactly once, after awaiting the tasks still holding the
-        // client.
-        unsafe { ConsumerClassHandle::destroy(self_ as *mut ConsumerClassHandle) };
-    }
 }
 
 #[cfg(test)]

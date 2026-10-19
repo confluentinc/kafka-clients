@@ -443,17 +443,23 @@ enter it.*
 
 ### Consumer (`src/consumer/`)
 
-`Consumer<K, V>` is a single `#[async_trait]` trait (`src/consumer/mod.rs:133`)
-with 47 methods. The 38 async ones are the ones that block in Java. The nine
-sync ones are `assignment`, `subscription`, `paused`, `group_metadata`,
-`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`.
+`Consumer<K, V>` (`src/consumer/mod.rs`) is a trait with 47 methods. The 38
+async ones are the ones that block in Java; they return `impl Future + Send`,
+as `Producer`'s do, so static dispatch involves no boxed future. The nine sync
+ones are `assignment`, `subscription`, `paused`, `group_metadata`,
+`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`. Returning
+`impl Future` makes the trait not dyn-compatible, so the sealed
+`DynConsumer<K, V>` (`dyn_consumer.rs`) is blanket-implemented for every
+`Consumer` and boxes each future, for code that holds several implementations
+behind one type; `dyn DynConsumer<K, V>` implements `Consumer` in turn.
 
-`KafkaConsumer::new(config, key_deserializer, value_deserializer)`
-(`kafka_consumer.rs`) is the factory, and it returns
-`Box<dyn Consumer<K, V>>`. There is no free `new_consumer` function. The
+`KafkaConsumer<K, V>` (`kafka_consumer.rs`) is the public consumer type, built
+with `KafkaConsumer::new(config, key_deserializer, value_deserializer)`. As in
+Java, it holds a delegate and forwards every `Consumer` method to it. The
 implementations are:
-- `AsyncKafkaConsumer<K, V>`, which is crate-private (`mod.rs:44`) and
-  reachable only through that box.
+- `KafkaConsumer<K, V>`, whose delegate is `AsyncKafkaConsumer<K, V>`; that
+  type is crate-private (`mod.rs`) and reachable only through
+  `KafkaConsumer`.
 - `MockConsumer<K, V>`.
 
 A compile-time guard on this shape lives at
@@ -572,14 +578,21 @@ only after the listener has returned.*
 ![Consumer receive path](img/consumer-receive-path.svg)
 
 *Takeaway: one buffer owns the fetch payload, and everything downstream
-borrows slices from it. The only per-record deep copy is the one the user's
-`Deserializer` chooses to make.*
+borrows slices from it, or, for a compressed batch, from each record's own
+buffer. The only per-record deep copy is the one the user's `Deserializer`
+chooses to make.*
 
 Receive-path zero-copy holds:
 - `CompletedFetch` owns the fetched bytes once.
 - The buffer is *moved*, never cloned, into a lazy `BatchCursor`
   (`completed_fetch.rs:250`).
-- Compressed batches are decompressed once per batch.
+- Compressed batches are decompressed a record at a time, each record into
+  a buffer of its own, as Java's `DefaultRecord.readFrom(InputStream, ...)`
+  reads it (`RecordStream` in `completed_fetch.rs`); the whole batch is
+  never decompressed at once. That buffer is one allocation per record
+  beyond the deserializer's output, which `consumer-threading.md` §27 does
+  not budget for (the comment on `RecordStream` says why it is taken), and
+  a record handed out zero-copy pins only its own bytes.
 - The topic name is one `Arc<str>` per fetch (`topic_arc`, `:180`), cloned
   per record.
 - `Deserializer<T>` is a sync trait taking `&[u8]`
@@ -1022,7 +1035,7 @@ The module is gated on the `ffi` feature, which also turns on the `cbindgen`
 build-dependency that emits `rust/target/include/confluent_kafka.h` (33.9K
 lines). Only crate types that are public have bindings (CLAUDE.md §4). The
 layout mirrors the crate: one file per Java class under `src/ffi/common/`,
-`producer/`, `consumer/` and `admin/` (269 files, 2353 exported symbols),
+`producer/`, `consumer/` and `admin/` (269 files, 2354 exported symbols),
 plus the package-less helpers:
 
 | File / directory | Exported symbols | What it holds |
@@ -1033,7 +1046,7 @@ plus the package-less helpers:
 | `kafka_future.rs` | 12 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
 | `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
 | `producer/` (9 files) | 132 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
-| `consumer/` (16 files) | 305 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
+| `consumer/` (16 files) | 306 | `kafka_consumer_Consumer_t` interface, `KafkaConsumer_t` / `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
 | `admin/` (132 files; `options/` 46, `rpc.rs` 96 invokers) | 857 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
 
 The conventions, each enforced by `cargo xtask lint-custom check-ffi-translation`
@@ -1111,7 +1124,7 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Generics are `void *`**: K/V, `KafkaFuture<T>` values, list and map
   elements. With a NULL serializer/deserializer the `void *` is a
   `kafka_Bytes_t *`, written straight into the batch (CLAUDE.md §14) or
-  borrowed from the fetch buffer.
+  borrowed from the fetch buffer, or a compressed record's own buffer.
 - **Collections** are the package-less `kafka_List_t` / `kafka_Map_t` of
   `void *`: inputs hold borrowed elements; outputs are owned, except the
   borrowed view lists, and are sorted deterministically.
