@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
+    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
 };
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
@@ -58,7 +58,7 @@ use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer, OffsetAndMetadata};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{AdminBackend, GroupOffsets, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::test_context::TestContext;
@@ -71,7 +71,7 @@ const NUM_PARTITIONS: i32 = 2;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }

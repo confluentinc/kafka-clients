@@ -31,15 +31,16 @@
 
 #![expect(non_camel_case_types)]
 
+use std::borrow::Cow;
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
-use crate::common::serialization::Serializer;
+use crate::common::serialization::{DynSerializer, Serializer};
 use crate::ffi::common::fail_with;
 use crate::ffi::common::serialization::serializer::{
-    DynSerializer, kafka_common_serialization_Serializer_t, take_serializer,
+    SerializerInner, kafka_common_serialization_Serializer_t, take_serializer,
 };
 use crate::ffi::common::{deliver_panic, deliver_panic_value, kafka_common_Error_t};
 use crate::ffi::consumer::kafka_consumer_ConsumerGroupMetadata_t;
@@ -94,49 +95,54 @@ pub type kafka_producer_KafkaProducer_send_cb_t =
     unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The serializer behind a `NULL` handle: the `void *` is a `kafka_Bytes_t *`
-/// and its bytes are the serialized form (`data == NULL` is Java's `null`).
+/// and its bytes are the serialized form (`data == NULL` is Java's `null`),
+/// borrowed rather than copied: the producer copies them once, into the batch.
 pub(crate) struct BytesPassthrough;
 
 impl Serializer<GenericValue> for BytesPassthrough {
-    fn serialize(&self, _topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
+    async fn serialize<'a>(
+        &'a self,
+        _topic: &'a str,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
         Ok(data.filter(|v| !v.is_null()).and_then(|v| {
-            // SAFETY: by contract a `void *` key or value of a producer built
-            // without a serializer points at a live `kafka_Bytes_t`.
-            unsafe { (*(v.as_ptr() as *const kafka_Bytes_t)).as_slice() }.map(<[u8]>::to_vec)
+            // SAFETY: by contract a `void *` key or value of a producer built without a serializer
+            // points at a live `kafka_Bytes_t` whose bytes stay unchanged while the record is
+            // borrowed (`kafka_producer_Producer_send_cb`: during the call, or until `cb` fires),
+            // which covers `'a`, the borrow of the value itself.
+            unsafe { (*(v.as_ptr() as *const kafka_Bytes_t)).as_slice() }.map(Cow::Borrowed)
         }))
     }
 }
 
 /// A C serializer shared with its registration: the producer's
-/// `Box<dyn Serializer>` forwarding to the `Arc` the handle hands out.
-pub(crate) struct ArcSerializer(pub(crate) Arc<DynSerializer>);
+/// `Box<dyn DynSerializer>` forwarding to the `Arc` the handle hands out,
+/// which also keeps the handle pointer valid for an asynchronous
+/// implementation's reports.
+pub(crate) struct ArcSerializer(pub(crate) Arc<SerializerInner>);
 
 impl Serializer<GenericValue> for ArcSerializer {
-    fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
-        self.0.serialize(topic, data)
+    async fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+        Serializer::serialize(self.0.get(), topic, data).await
     }
 
-    fn serialize_with_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        data: Option<&GenericValue>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        self.0.serialize_with_headers(topic, headers, data)
-    }
-
-    fn serialize_owned_with_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        data: Option<GenericValue>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        self.0.serialize_owned_with_headers(topic, headers, data)
+    async fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a GenericValue>,
+    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+        Serializer::serialize_with_headers(self.0.get(), topic, headers, data).await
     }
 }
 
 /// The Rust serializer a `*mut kafka_common_serialization_Serializer_t`
-/// parameter stands for (see the module docs).
+/// parameter stands for (see the module docs), and whether it is a C
+/// implementation ([`SerializerInner::is_c`]).
 ///
 /// # Safety
 ///
@@ -144,14 +150,16 @@ impl Serializer<GenericValue> for ArcSerializer {
 /// again by the caller.
 pub(crate) unsafe fn serializer_from(
     serializer: *mut kafka_common_serialization_Serializer_t,
-) -> Box<dyn Serializer<GenericValue> + Send + Sync> {
+) -> (Box<dyn DynSerializer<GenericValue>>, bool) {
     if serializer.is_null() {
-        Box::new(BytesPassthrough)
+        (Box::new(BytesPassthrough), false)
     } else {
         // SAFETY: Per this function's `# Safety`, `serializer` is a live handle (non-null, checked
         // above), as `take_serializer` requires; an owned one is not used again by the caller, as
         // the `# Safety` states.
-        Box::new(ArcSerializer(unsafe { take_serializer(serializer) }))
+        let serializer = unsafe { take_serializer(serializer) };
+        let is_c = serializer.is_c();
+        (Box::new(ArcSerializer(serializer)), is_c)
     }
 }
 
@@ -201,10 +209,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     // drops (and so frees) the owned ones the caller handed over.
     // SAFETY: Per this function's `# Safety`, `key_serializer` is null or a live handle, not used
     // again by the caller when owned, as `serializer_from` requires.
-    let key_serializer = unsafe { serializer_from(key_serializer) };
+    let (key_serializer, key_is_c) = unsafe { serializer_from(key_serializer) };
     // SAFETY: Per this function's `# Safety`, `value_serializer` is null or a live handle, not used
     // again by the caller when owned, as `serializer_from` requires.
-    let value_serializer = unsafe { serializer_from(value_serializer) };
+    let (value_serializer, value_is_c) = unsafe { serializer_from(value_serializer) };
     // SAFETY: Per this function's `# Safety`, `config` is a live handle; no
     // `kafka_producer_ProducerConfig_set_partitioner` call can run on it meanwhile, since that
     // function's `# Safety` excludes any other call using the handle at the same time, so
@@ -214,7 +222,12 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
     };
-    match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer), true) {
+    let tries_send_inline = !(key_is_c || value_is_c);
+    match ProducerHandle::new(
+        || KafkaProducer::new(config, key_serializer, value_serializer),
+        true,
+        tries_send_inline,
+    ) {
         Ok(handle) => Box::into_raw(handle) as *mut kafka_producer_KafkaProducer_t,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -484,14 +497,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live handle,
-/// `out_err` a valid slot pointing at null.
+/// `self_` and `record` must be live handles, `callback` null or a live handle
+/// (consumed), `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     self_: *const kafka_producer_KafkaProducer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
@@ -501,15 +514,16 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     unsafe { kafka_producer_Producer_send_with_callback(producer(self_), record, callback, out_err) }
 }
 
-/// `KafkaProducer.send(ProducerRecord, Callback)`, completed through `cb`,
-/// inside the call for a record the producer takes or refuses at once and
-/// later for one it would have to wait for: see
+/// `KafkaProducer.send(ProducerRecord, Callback)`, completed through `cb`:
+/// when both serializers are built-in, inside the call for a record the
+/// producer takes or refuses at once and later for one it would have to wait
+/// for; with a C serializer, later for every record. See
 /// [`kafka_producer_Producer_send_with_callback_cb`].
 ///
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
-/// handle.
+/// handle (consumed).
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
     // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
@@ -523,7 +537,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     self_: *const kafka_producer_KafkaProducer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     cb: kafka_producer_KafkaProducer_send_cb_t,
     opaque: *mut c_void,
 ) {
@@ -559,6 +573,68 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// A C serializer's calls go through `ArcSerializer`, whose futures must
+    /// fit `InlineFuture`'s buffer, or every record would box one: for a
+    /// built-in, a synchronous C implementation (a blocking-pool task) and an
+    /// asynchronous one (a pending report).
+    #[test]
+    fn arc_serializer_futures_are_stored_inline() {
+        use std::ffi::c_void;
+
+        use crate::common::serialization::InlineFuture;
+        use crate::ffi::common::kafka_common_Error_t;
+        use crate::ffi::common::serialization::serializer::{
+            FfiSerializer, kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
+        };
+        use crate::ffi::common::serialization::string_serializer::GenericStringSerializer;
+
+        // Never called: the futures are only built.
+        unsafe extern "C" fn sync_fn(
+            _: *mut c_void,
+            _: *const std::ffi::c_char,
+            _: *const c_void,
+            _: *mut *mut kafka_common_Error_t,
+        ) -> kafka_Bytes_t {
+            kafka_Bytes_t::NULL
+        }
+        unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
+
+        let built_in = ArcSerializer(SerializerInner::view(Arc::new(FfiSerializer::String(
+            GenericStringSerializer::default(),
+        ))));
+        // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
+        // producer's `Arc` frees it.
+        let (sync, asynchronous) = unsafe {
+            (
+                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new(
+                    std::ptr::null_mut(),
+                    sync_fn,
+                    None,
+                ))),
+                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
+                    std::ptr::null_mut(),
+                    async_fn,
+                    None,
+                ))),
+            )
+        };
+        let headers = RecordHeaders::new();
+        for (kind, serializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
+            let future = Serializer::serialize(serializer, "t", None);
+            assert!(
+                InlineFuture::<()>::is_inline_for(&future),
+                "{kind} serialize: {} bytes",
+                size_of_val(&future)
+            );
+            let future = Serializer::serialize_with_headers(serializer, "t", &headers, None);
+            assert!(
+                InlineFuture::<()>::is_inline_for(&future),
+                "{kind} with_headers: {} bytes",
+                size_of_val(&future)
+            );
+        }
+    }
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::kafka_common_KafkaFuture_destroy;
     use crate::ffi::producer::producer_config::{
@@ -579,7 +655,9 @@ mod tests {
     /// leaking it.
     #[test]
     fn a_configuration_error_frees_the_owned_serializers() {
-        let imp: Arc<DynSerializer> = Arc::new(BytesPassthrough);
+        let imp = Arc::new(crate::ffi::common::serialization::serializer::FfiSerializer::ByteArray(
+            Default::default(),
+        ));
         let props = [("bootstrap.servers".to_string(), String::new())].into_iter().collect();
         let config = crate::ffi::producer::producer_config::ProducerConfigInner::unvalidated_for_test(props);
         // SAFETY: Test code: `config` and the two owned serializers are live handles, the
@@ -597,6 +675,72 @@ mod tests {
             kafka_producer_ProducerConfig_destroy(config);
         }
         assert_eq!(Arc::strong_count(&imp), 1, "both owned serializers were freed");
+    }
+
+    /// `send_cb` tries the producer on the calling thread only when neither
+    /// serializer is a C implementation (COMMENTS.1 Issue 1): a `NULL` handle
+    /// and a built-in class keep the fast path, a C implementation, sync or
+    /// async, sends every record through the submission task.
+    #[test]
+    fn send_cb_tries_inline_only_without_a_c_serializer() {
+        use crate::ffi::common::serialization::serializer::{
+            kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
+        };
+        use crate::ffi::common::serialization::string_serializer::{
+            kafka_common_serialization_StringSerializer__as_Serializer,
+            kafka_common_serialization_StringSerializer_destroy, kafka_common_serialization_StringSerializer_new,
+        };
+
+        // Never called: no record is sent.
+        unsafe extern "C" fn sync_fn(
+            _: *mut c_void,
+            _: *const std::ffi::c_char,
+            _: *const c_void,
+            _: *mut *mut kafka_common_Error_t,
+        ) -> kafka_Bytes_t {
+            kafka_Bytes_t::NULL
+        }
+        unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
+
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1")]);
+        // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
+        // `props`, `config`, the string serializer and each producer are live from their
+        // constructor to their single destroy below, each owned C serializer is handed over to
+        // one constructor and not used again, and each view is read only before its producer is
+        // destroyed.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let string = kafka_common_serialization_StringSerializer_new();
+            let built_in = kafka_common_serialization_StringSerializer__as_Serializer(string).cast_mut();
+            let cases = [
+                ("NULL", std::ptr::null_mut(), std::ptr::null_mut(), true),
+                ("built-in", built_in, built_in, true),
+                (
+                    "sync C key",
+                    kafka_common_serialization_Serializer_new(std::ptr::null_mut(), sync_fn, None),
+                    std::ptr::null_mut(),
+                    false,
+                ),
+                (
+                    "async C value",
+                    built_in,
+                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None),
+                    false,
+                ),
+            ];
+            for (kind, key, value, inline) in cases {
+                let producer = kafka_producer_KafkaProducer_new(config, key, value, &raw mut err);
+                assert!(err.is_null());
+                let view = kafka_producer_KafkaProducer__as_Producer(producer);
+                assert_eq!(client_ref(view).tries_send_inline, inline, "{kind}");
+                kafka_producer_KafkaProducer_destroy(producer);
+            }
+            kafka_common_serialization_StringSerializer_destroy(string);
+            kafka_producer_ProducerConfig_destroy(config);
+        }
     }
 
     /// A `KafkaProducer` that can never fetch metadata, so a send waits out
@@ -1049,21 +1193,38 @@ mod tests {
             assert!(value.is_null());
             kafka_common_Error_destroy(err);
             kafka_common_KafkaFuture_destroy(future);
-            crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_ProducerRecord_destroy(record);
         }
     }
 
     #[test]
-    fn passthrough_reads_bytes_and_null_means_null() {
+    fn passthrough_borrows_bytes_and_null_means_null() {
+        use crate::ffi::common::serialization::ready;
         let bytes = kafka_Bytes_t::from_slice(b"abc");
         let value = GenericValue::new(&bytes as *const kafka_Bytes_t as *mut c_void);
-        assert_eq!(BytesPassthrough.serialize("t", Some(&value)).unwrap(), Some(b"abc".to_vec()));
+        match ready(Serializer::serialize(&BytesPassthrough, "t", Some(&value)))
+            .unwrap()
+            .unwrap()
+        {
+            Some(Cow::Borrowed(out)) => {
+                assert_eq!(out, b"abc");
+                assert_eq!(out.as_ptr(), bytes.data, "the caller's bytes, not a copy");
+            },
+            other => panic!("expected borrowed bytes, got {other:?}"),
+        }
         let null = kafka_Bytes_t::NULL;
         let value = GenericValue::new(&null as *const kafka_Bytes_t as *mut c_void);
-        assert_eq!(BytesPassthrough.serialize("t", Some(&value)).unwrap(), None);
-        assert_eq!(BytesPassthrough.serialize("t", None).unwrap(), None);
+        assert_eq!(
+            ready(Serializer::serialize(&BytesPassthrough, "t", Some(&value)))
+                .unwrap()
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            ready(Serializer::serialize(&BytesPassthrough, "t", None)).unwrap().unwrap(),
+            None
+        );
     }
 
     /// Stores the message of the error a `void` completion was given.
@@ -1103,7 +1264,7 @@ mod tests {
             // the error slot and the future handle.
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            let future = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null(), &raw mut err);
+            let future = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null_mut(), &raw mut err);
             if err.is_null() {
                 assert!(!future.is_null());
                 kafka_common_KafkaFuture_destroy(future);

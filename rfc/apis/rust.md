@@ -273,7 +273,7 @@ pub trait Producer<K, V>: Send + Sync {
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
     fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
     fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
@@ -300,7 +300,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     pub async fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error>;
 }
 ```
@@ -642,6 +642,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::StringSerializer;
+use confluent_kafka::producer::callback;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -689,11 +690,11 @@ async fn produce_records(
     }
     Ok(())
 }
-fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Callback {
+fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Box<dyn Callback> {
     // Per the `Callback` contract, on failure `metadata` is still `Some` but holds a
     // sentinel `-1` offset (and `-1` partition if none could be resolved), so `error`
     // must be checked first to tell success from failure.
-    Box::new(move |metadata, error| match error {
+    Box::new(callback::new(move |metadata, error| match error {
         Some(error) => {
             eprintln!("Failed to deliver record {index}: {error}");
             first_delivery_error.lock().unwrap().get_or_insert_with(|| error.clone());
@@ -707,7 +708,7 @@ fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>
             ),
             None => eprintln!("Record {index} completed with neither metadata nor error"),
         },
-    })
+    }))
 }
 fn bootstrap_servers() -> String {
     std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".to_string())

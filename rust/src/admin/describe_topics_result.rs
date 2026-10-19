@@ -17,80 +17,108 @@
 //! Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use crate::admin::TopicDescription;
 use crate::common::{KafkaFuture, Uuid};
 
 /// The result of `Admin::describe_topics_with_topics`.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`. As
-/// with `DeleteTopicsResult`, the "keyed by id XOR name" invariant is a closed
-/// enum instead of Java's two nullable maps.
+/// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
+/// Exactly one of the two maps is present, the one matching the kind of
+/// `TopicCollection` the request used.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
-pub enum DescribeTopicsResult {
-    /// Result keyed by topic id (the request used a `TopicIdCollection`).
-    ByTopicId(HashMap<Uuid, KafkaFuture<TopicDescription>>),
-    /// Result keyed by topic name (the request used a `TopicNameCollection`).
-    ByTopicName(HashMap<String, KafkaFuture<TopicDescription>>),
+pub struct DescribeTopicsResult {
+    topic_id_futures: Option<HashMap<Uuid, KafkaFuture<TopicDescription>>>,
+    name_futures: Option<HashMap<String, KafkaFuture<TopicDescription>>>,
 }
 
 impl DescribeTopicsResult {
+    /// Creates a result keyed by topic id or by topic name.
+    ///
+    /// # Panics
+    ///
+    /// If both maps or neither are given, as Java throws
+    /// `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#DescribeTopicsResult")]
+    pub(crate) fn with_topic_id_futures_name_futures(
+        topic_id_futures: Option<HashMap<Uuid, KafkaFuture<TopicDescription>>>,
+        name_futures: Option<HashMap<String, KafkaFuture<TopicDescription>>>,
+    ) -> Self {
+        assert!(
+            topic_id_futures.is_none() || name_futures.is_none(),
+            "topicIdFutures and nameFutures cannot both be specified."
+        );
+        assert!(
+            topic_id_futures.is_some() || name_futures.is_some(),
+            "topicIdFutures and nameFutures cannot both be null."
+        );
+        DescribeTopicsResult { topic_id_futures, name_futures }
+    }
+
     /// Creates a result keyed by topic id.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#ofTopicIds")]
     pub(crate) fn of_topic_ids(topic_id_futures: HashMap<Uuid, KafkaFuture<TopicDescription>>) -> Self {
-        DescribeTopicsResult::ByTopicId(topic_id_futures)
+        Self::with_topic_id_futures_name_futures(Some(topic_id_futures), None)
     }
 
     /// Creates a result keyed by topic name.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#ofTopicNames")]
     pub(crate) fn of_topic_names(name_futures: HashMap<String, KafkaFuture<TopicDescription>>) -> Self {
-        DescribeTopicsResult::ByTopicName(name_futures)
+        Self::with_topic_id_futures_name_futures(None, Some(name_futures))
     }
 
-    /// A map from topic IDs to futures if the request used topic IDs, otherwise
+    /// Use when `Admin::describe_topics_with_topics_options` used a
+    /// `TopicCollection` of ids.
+    ///
+    /// Returns a map from topic IDs to futures which can be used to check the
+    /// status of individual topics if the request used topic IDs, otherwise
     /// `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues")]
     pub fn topic_id_values(&self) -> Option<&HashMap<Uuid, KafkaFuture<TopicDescription>>> {
-        match self {
-            DescribeTopicsResult::ByTopicId(futures) => Some(futures),
-            DescribeTopicsResult::ByTopicName(_) => None,
-        }
+        self.topic_id_futures.as_ref()
     }
 
-    /// A map from topic names to futures if the request used topic names,
+    /// Use when `Admin::describe_topics_with_topics_options` used a
+    /// `TopicCollection` of names.
+    ///
+    /// Returns a map from topic names to futures which can be used to check
+    /// the status of individual topics if the request used topic names,
     /// otherwise `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicNameValues")]
     pub fn topic_name_values(&self) -> Option<&HashMap<String, KafkaFuture<TopicDescription>>> {
-        match self {
-            DescribeTopicsResult::ByTopicName(futures) => Some(futures),
-            DescribeTopicsResult::ByTopicId(_) => None,
-        }
+        self.name_futures.as_ref()
     }
 
-    /// A future map from topic names to descriptions if the request used topic
-    /// names, otherwise `None`. Succeeds only if all descriptions succeed.
+    /// A future map from topic names to descriptions which can be used to
+    /// check the status of individual description if the describe topic
+    /// request used topic names, otherwise `None`. This request succeeds only
+    /// if all the topic descriptions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicNames")]
     pub fn all_topic_names(&self) -> Option<KafkaFuture<HashMap<String, TopicDescription>>> {
-        match self {
-            DescribeTopicsResult::ByTopicName(futures) => Some(KafkaFuture::join_map(
-                futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            )),
-            DescribeTopicsResult::ByTopicId(_) => None,
-        }
+        Self::all(self.name_futures.as_ref())
     }
 
-    /// A future map from topic ids to descriptions if the request used topic
-    /// ids, otherwise `None`. Succeeds only if all descriptions succeed.
+    /// A future map from topic ids to descriptions which can be used to check
+    /// the status of individual description if the describe topic request used
+    /// topic ids, otherwise `None`. This request succeeds only if all the topic
+    /// descriptions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicIds")]
     pub fn all_topic_ids(&self) -> Option<KafkaFuture<HashMap<Uuid, TopicDescription>>> {
-        match self {
-            DescribeTopicsResult::ByTopicId(futures) => {
-                Some(KafkaFuture::join_map(futures.iter().map(|(k, v)| (*k, v.clone())).collect()))
-            },
-            DescribeTopicsResult::ByTopicName(_) => None,
-        }
+        Self::all(self.topic_id_futures.as_ref())
+    }
+
+    /// Return a future which succeeds only if all the topic descriptions
+    /// succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#all")]
+    fn all<T: Clone + Eq + Hash + Send + Sync + 'static>(
+        futures: Option<&HashMap<T, KafkaFuture<TopicDescription>>>,
+    ) -> Option<KafkaFuture<HashMap<T, TopicDescription>>> {
+        let futures = futures?;
+        Some(KafkaFuture::join_map(
+            futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        ))
     }
 }
 
@@ -131,5 +159,47 @@ mod tests {
         assert!(result.all_topic_names().is_none());
         h1.complete_with_error(Error::local_illegal_state("x".to_string()));
         assert!(result.all_topic_ids().unwrap().get().await.is_err());
+    }
+
+    /// `DescribeTopicsResultTest.testNullAllTopicNames`.
+    #[test]
+    fn test_null_all_topic_names() {
+        let result = DescribeTopicsResult::of_topic_ids(HashMap::from([(
+            Uuid::random_uuid(),
+            KafkaFuture::completed_future(Ok(description("foo"))),
+        )]));
+        assert!(result.all_topic_names().is_none());
+    }
+
+    /// `DescribeTopicsResultTest.testNullAllTopicIds`.
+    #[test]
+    fn test_null_all_topic_ids() {
+        let result = DescribeTopicsResult::of_topic_names(HashMap::from([(
+            "foo".to_string(),
+            KafkaFuture::completed_future(Ok(description("foo"))),
+        )]));
+        assert!(result.all_topic_ids().is_none());
+    }
+
+    /// The constructor checks Java's invariant as `DeleteTopicsResult`'s does
+    /// (`DeleteTopicsResultTest.testInvalidConfigurations`).
+    #[test]
+    fn test_invalid_configurations() {
+        let both_null = std::panic::catch_unwind(|| {
+            DescribeTopicsResult::with_topic_id_futures_name_futures(None, None);
+        })
+        .expect_err("expected a panic");
+        assert_eq!(
+            both_null.downcast_ref::<&str>(),
+            Some(&"topicIdFutures and nameFutures cannot both be null.")
+        );
+        let both_set = std::panic::catch_unwind(|| {
+            DescribeTopicsResult::with_topic_id_futures_name_futures(Some(HashMap::new()), Some(HashMap::new()));
+        })
+        .expect_err("expected a panic");
+        assert_eq!(
+            both_set.downcast_ref::<&str>(),
+            Some(&"topicIdFutures and nameFutures cannot both be specified.")
+        );
     }
 }

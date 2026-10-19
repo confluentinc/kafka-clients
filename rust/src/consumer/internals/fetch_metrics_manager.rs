@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
 use crate::common::metrics::stats::WindowedCount;
-use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, Sensor};
+use crate::common::metrics::{Metrics, Sensor, gauge};
 use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::FetchMetricsRegistry;
 use crate::consumer::internals::SubscriptionState;
@@ -434,14 +434,14 @@ impl FetchMetricsManager {
                 self.inner.metrics().add_metric_if_absent(
                     metric_name,
                     None,
-                    MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
+                    Box::new(gauge::new(move |_config, _now| {
                         let value = subscription
                             .lock()
                             .expect("SubscriptionState mutex poisoned")
                             .preferred_read_replica(&tp_owned, 0)
                             .unwrap_or(-1);
                         MetricValue::Int(value)
-                    }))),
+                    })),
                 );
             }
         }

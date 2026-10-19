@@ -45,7 +45,7 @@ impl ConsumerCommitFailedError {
     /// Default message used by Java's `CommitFailedException` no-arg constructor.
     ///
     /// Kept as a constant so tests can assert exact equality.
-    pub const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
+    pub(crate) const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
 
     /// Create the error with the given message.
     #[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException#CommitFailedException")]

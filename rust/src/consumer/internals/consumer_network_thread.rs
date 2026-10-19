@@ -446,10 +446,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //     `CommitRequestManager.poll(currentTimeMs)`
             //     (`CommitRequestManager.java:181-209`). Drains
             //     `unsent_offset_commits` and `unsent_offset_fetches`
-            //     into `UnsentRequest`s, fires the auto-commit timer
-            //     via `maybe_auto_commit_async`, and handles
+            //     into `UnsentRequest`s and handles
             //     `closing && coordinator unknown` by failing pending
-            //     commits with `CommitFailedException`. Without this
+            //     commits with `CommitFailedException`. It does NOT fire
+            //     the auto-commit timer: since KAFKA-18641 that happens
+            //     only from the application's poll, through the
+            //     `AsyncPoll` / `AssignmentChange` events'
+            //     `update_timer_and_maybe_commit`. Without this
             //     call `commit_sync()`/`committed()` hang forever
             //     (Phase-12 Critic Issue 1).
             //   * `membership.reconcile(now, false)` — driven in
@@ -2690,6 +2693,133 @@ mod tests {
             "expected the commit to land on the delegate (unsent={} inflight={})",
             unsent_count,
             inflight_count
+        );
+    }
+
+    /// KAFKA-18641 (COMMENTS.1.md Issue 5): with auto-commit enabled and the
+    /// interval elapsed, the background loop alone sends no OffsetCommit,
+    /// however many iterations it runs: Java's `CommitRequestManager.poll`
+    /// does not auto-commit. The auto-commit goes out only once the
+    /// application's `poll()` hands the background task an `AsyncPoll`
+    /// event, whose `update_timer_and_maybe_commit` enqueues it, so it covers
+    /// only records the application has had the chance to process.
+    #[tokio::test]
+    async fn run_once_auto_commits_only_on_an_async_poll_event() {
+        use crate::common::Node;
+        use crate::common::TopicPartition;
+        use crate::common::protocol::ApiKeys;
+        use crate::consumer::internals::CommitRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 100;
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g".to_string()));
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g".to_string(),
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        // A consumed position, so an auto-commit has offsets to send.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 42).expect("seek");
+        }
+
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(coordinator.clone()),
+            None,
+            Some(commit.clone()),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // OffsetCommit requests the background task has handed to the
+        // network: still unsent in the delegate, or already sent.
+        async fn offset_commits(delegate: &AsyncMutex<NetworkClientDelegate<MockClient>>) -> usize {
+            let guard = delegate.lock().await;
+            let unsent = guard
+                .unsent_requests()
+                .iter()
+                .filter(|r| r.request_builder().is_some_and(|b| *b.api_key() == ApiKeys::OFFSET_COMMIT))
+                .count();
+            let sent = guard
+                .client_for_test_ref()
+                .requests()
+                .iter()
+                .filter(|r| *r.api_key() == ApiKeys::OFFSET_COMMIT)
+                .count();
+            unsent + sent
+        }
+
+        // The interval elapses several times over, with only the background
+        // loop running.
+        for _ in 0..5 {
+            time.sleep(100);
+            thread.run_once().await;
+            assert_eq!(
+                0,
+                offset_commits(&delegate).await,
+                "the background loop must not auto-commit on its own timer"
+            );
+        }
+
+        // The application polls: the AsyncPoll event fires the auto-commit.
+        let now = time.milliseconds();
+        let event = ApplicationEvent::AsyncPoll {
+            deadline_ms: now + 60_000,
+            poll_time_ms: now,
+            state: Arc::new(AsyncPollState::new()),
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now }).expect("send ok");
+        thread.run_once().await;
+        // The event's continuation runs on a spawned task (Java runs it
+        // inline): let it enqueue the commit, then the next iteration's
+        // `poll_with_coordinator` sends it.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        thread.run_once().await;
+        assert_eq!(
+            1,
+            offset_commits(&delegate).await,
+            "the AsyncPoll event's update_timer_and_maybe_commit must send the auto-commit"
         );
     }
 

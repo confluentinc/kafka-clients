@@ -487,8 +487,8 @@ fn send_offset_callback(
     topic: String,
     partition: i32,
     check_serialized_sizes: bool,
-) -> Callback {
-    Box::new(move |metadata, error| {
+) -> Box<dyn Callback> {
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         let mut st = state.lock().unwrap();
         st.invocations += 1;
         // Java: `if (exception == null) ... else fail(...)`.
@@ -1812,10 +1812,10 @@ async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
         timestamp_diff: 1,
         failures: Vec::new(),
     }));
-    let callback = || -> Option<Callback> {
+    let callback = || -> Option<Box<dyn Callback>> {
         let state = state.clone();
         let topic = topic.clone();
-        Some(Box::new(move |metadata, error| {
+        Some(Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             let mut st = state.lock().unwrap();
             // Java: `if (exception == null) ... else fail(...)`.
             if let Some(e) = error {
@@ -2932,11 +2932,11 @@ struct FailingSerializer;
 
 #[cfg(feature = "integration-tests")]
 impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSerializer {
-    fn serialize(
-        &self,
-        _topic: &str,
-        _data: Option<&Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, confluent_kafka::common::Error> {
+    async fn serialize<'a>(
+        &'a self,
+        _topic: &'a str,
+        _data: Option<&'a Vec<u8>>,
+    ) -> Result<Option<std::borrow::Cow<'a, [u8]>>, confluent_kafka::common::Error> {
         Err(confluent_kafka::common::Error::serialization("FailingSerializer always fails"))
     }
 }
@@ -3248,9 +3248,10 @@ where
         let mut responses = Vec::with_capacity(NUM_RECORDS);
         for i in 0..NUM_RECORDS {
             let tx = tx.clone();
-            let callback: Callback = Box::new(move |_metadata, _error| {
-                let _ = tx.send(i == 0);
-            });
+            let callback: Box<dyn Callback> =
+                Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                    let _ = tx.send(i == 0);
+                });
             responses.push(
                 Producer::send_with_callback(producer.as_ref(), record(), Some(callback))
                     .await

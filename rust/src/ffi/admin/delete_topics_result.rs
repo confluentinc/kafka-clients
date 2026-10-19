@@ -14,38 +14,27 @@
 
 //! C bindings for `org.apache.kafka.clients.admin.DeleteTopicsResult`.
 //!
-//! The Rust result is an enum (keyed by topic id or by topic name, never
-//! both), so besides the Java methods it has the `_e` enumerator type,
-//! `__enum`, and one factory per variant (CLAUDE.md §4, "Enums").
+//! A result is keyed by topic id or by topic name, never both: the accessor
+//! for the other key returns `NULL`, as Java's returns `null`. Java's
+//! constructor is protected and its `ofTopicIds` / `ofTopicNames` factories
+//! package-private, so C gets no constructor.
 
-use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::ptr;
 
 use crate::admin::DeleteTopicsResult;
-use crate::common::{Error, KafkaFuture, Uuid};
+use crate::common::{KafkaFuture, Uuid};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
-use crate::ffi::common::take_error;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::kafka_future::{
-    kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
-};
-use crate::ffi::util::{c_str_to_string, kafka_Map_t, map_entries};
+use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
+use crate::ffi::util::kafka_Map_t;
 
 /// Opaque handle to a [`DeleteTopicsResult`], owned by the caller and freed
 /// with [`kafka_admin_DeleteTopicsResult_destroy`].
 #[repr(C)]
 pub struct kafka_admin_DeleteTopicsResult_t {
     _private: [u8; 0],
-}
-
-/// The variants of [`DeleteTopicsResult`], for a C `switch`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum kafka_admin_DeleteTopicsResult_e {
-    kafka_admin_DeleteTopicsResult_BY_TOPIC_ID,
-    kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME,
 }
 
 /// Hands `result` to C, binding the futures it exposes to `ctx`.
@@ -89,131 +78,6 @@ unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     // SAFETY: Per this function's `# Safety`, `a` and `b` are valid uuid handles, alive for this
     // call, as `uuid_of` requires.
     unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
-}
-
-/// The Rust `KafkaFuture<Void>` standing for a C future that is already
-/// complete (see [`kafka_admin_DeleteTopicsResult_by_topic_id`]): its
-/// outcome is copied; a future that is not yet complete yields one failed
-/// with the translation of `IllegalArgumentException`.
-///
-/// # Safety
-///
-/// `future` must be a valid future handle.
-unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> KafkaFuture<()> {
-    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, as
-    // `kafka_common_KafkaFuture_is_done` requires; the borrow lasts for this call.
-    if unsafe { kafka_common_KafkaFuture_is_done(future) } == 0 {
-        return KafkaFuture::completed_future(Err(Error::local_illegal_argument(
-            "The futures passed to DeleteTopicsResult must already be complete",
-        )));
-    }
-    let mut error = ptr::null_mut();
-    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut error`
-    // points at a local, so it is a valid pointer, as `kafka_common_KafkaFuture_get` requires.
-    let _value = unsafe { kafka_common_KafkaFuture_get(future, &mut error) };
-    // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
-    // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
-    KafkaFuture::completed_future(unsafe { take_error(error) }.map_or(Ok(()), Err))
-}
-
-/// `DeleteTopicsResult.ofTopicIds(Map<Uuid, KafkaFuture<Void>> topicIdFutures)`:
-/// `value` is a borrowed map of `const kafka_common_Uuid_t *` to
-/// `const kafka_common_KafkaFuture_t *`, copied during the call; the caller
-/// keeps ownership of the map, its keys and its futures. Only futures that
-/// are already complete (`kafka_common_KafkaFuture_is_done`) can be copied
-/// across the boundary: the outcome of each is taken as it stands, and a
-/// future still pending stands as one failed with the translation of
-/// `IllegalArgumentException`. Owned, freed with
-/// [`kafka_admin_DeleteTopicsResult_destroy`].
-///
-/// # Safety
-///
-/// `value` must be null or a valid map whose keys are valid uuid handles
-/// and whose values are valid future handles.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_id(
-    value: *const kafka_Map_t,
-) -> *mut kafka_admin_DeleteTopicsResult_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
-    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
-    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
-    // same time. That is what `map_entries` requires.
-    let futures: HashMap<Uuid, KafkaFuture<()>> = unsafe { map_entries(value) }
-        .iter()
-        .map(|&(k, v)| {
-            // SAFETY: Per this function's `# Safety`, the key `k` is a valid uuid handle, as
-            // `uuid_of` requires, and the value `v` a valid future handle, as
-            // `resolved_void_future` requires; the caller keeps both alive for this call.
-            (unsafe { uuid_of(k as *const kafka_common_Uuid_t) }, unsafe {
-                resolved_void_future(v as *const kafka_common_KafkaFuture_t)
-            })
-        })
-        .collect();
-    box_delete_topics_result(DeleteTopicsResult::of_topic_ids(futures), &FutureCtx::detached())
-}
-
-/// `DeleteTopicsResult.ofTopicNames(Map<String, KafkaFuture<Void>> nameFutures)`:
-/// `value` is a borrowed map of `const char *` to
-/// `const kafka_common_KafkaFuture_t *`, copied during the call; the caller
-/// keeps ownership of the map, its keys and its futures. Only futures that
-/// are already complete (`kafka_common_KafkaFuture_is_done`) can be copied
-/// across the boundary: the outcome of each is taken as it stands, and a
-/// future still pending stands as one failed with the translation of
-/// `IllegalArgumentException`. Owned, freed with
-/// [`kafka_admin_DeleteTopicsResult_destroy`].
-///
-/// # Safety
-///
-/// `value` must be null or a valid map whose keys are valid NUL-terminated
-/// strings and whose values are valid future handles.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_name(
-    value: *const kafka_Map_t,
-) -> *mut kafka_admin_DeleteTopicsResult_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
-    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
-    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
-    // same time. That is what `map_entries` requires.
-    let futures: HashMap<String, KafkaFuture<()>> = unsafe { map_entries(value) }
-        .iter()
-        .map(|&(k, v)| {
-            // SAFETY: Per this function's `# Safety`, the key `k` is a valid NUL-terminated string,
-            // as `c_str_to_string` requires, and the value `v` a valid future handle, as
-            // `resolved_void_future` requires; the caller keeps both alive for this call.
-            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
-                resolved_void_future(v as *const kafka_common_KafkaFuture_t)
-            })
-        })
-        .collect();
-    box_delete_topics_result(DeleteTopicsResult::of_topic_names(futures), &FutureCtx::detached())
-}
-
-/// The variant of a result, for a `switch`.
-///
-/// A caught Rust panic returns `kafka_admin_DeleteTopicsResult_BY_TOPIC_ID`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
-/// # Safety
-///
-/// `self_` must be a live result handle.
-#[ffi_guard(fallback = kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_ID)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult__enum(
-    self_: *const kafka_admin_DeleteTopicsResult_t,
-) -> kafka_admin_DeleteTopicsResult_e {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
-    // call, as `handle` requires.
-    match unsafe { handle(self_) }.result {
-        DeleteTopicsResult::ByTopicId(_) => {
-            kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_ID
-        },
-        DeleteTopicsResult::ByTopicName(_) => {
-            kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME
-        },
-    }
 }
 
 /// `DeleteTopicsResult.topicIdValues()`: an owned map, sorted by topic id,

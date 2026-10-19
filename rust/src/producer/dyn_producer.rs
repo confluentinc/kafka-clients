@@ -23,6 +23,10 @@
 //! `DynProducer` restores the Java capability (CLAUDE.md §3, "traits must be
 //! dyn-compatible") by boxing each future, and only callers that go through
 //! `dyn` pay for it.
+//!
+//! A method added to [`Producer`] goes in three places here: the trait, the
+//! blanket impl and the impl on `dyn DynProducer`. `cargo xtask lint-custom`
+//! (`check-dyn-forwarding`) fails until all three forward it.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -154,7 +158,7 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -256,7 +260,7 @@ impl<K, V, P: Producer<K, V>> DynProducer<K, V> for P {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -343,7 +347,7 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send {
         DynProducer::send_with_callback(self, record, callback)
     }
@@ -394,7 +398,7 @@ pub(crate) trait DynTrySend<K, V>: DynProducer<K, V> {
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,
@@ -410,7 +414,7 @@ where
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,
@@ -431,7 +435,7 @@ where
     fn try_send<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
     where
         K: 'a,

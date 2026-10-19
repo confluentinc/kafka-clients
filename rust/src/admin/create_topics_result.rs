@@ -137,7 +137,7 @@ impl CreateTopicsResult {
     /// Panics if `topic` was not part of the original request.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#config")]
     pub fn config(&self, topic: &str) -> KafkaFuture<Config> {
-        self.future_for(topic).then_apply(|tmac| tmac.config())
+        self.future_for(topic).then_apply(|tmac: TopicMetadataAndConfig| tmac.config())
     }
 
     /// Returns a future that provides the topic id for the topic.
@@ -147,7 +147,8 @@ impl CreateTopicsResult {
     /// Panics if `topic` was not part of the original request.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#topicId")]
     pub fn topic_id(&self, topic: &str) -> KafkaFuture<Uuid> {
-        self.future_for(topic).then_apply(|tmac| tmac.topic_id())
+        self.future_for(topic)
+            .then_apply(|tmac: TopicMetadataAndConfig| tmac.topic_id())
     }
 
     /// Returns a future that provides the number of partitions for the topic.
@@ -157,7 +158,8 @@ impl CreateTopicsResult {
     /// Panics if `topic` was not part of the original request.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#numPartitions")]
     pub fn num_partitions(&self, topic: &str) -> KafkaFuture<i32> {
-        self.future_for(topic).then_apply(|tmac| tmac.num_partitions())
+        self.future_for(topic)
+            .then_apply(|tmac: TopicMetadataAndConfig| tmac.num_partitions())
     }
 
     /// Returns a future that provides the replication factor for the topic.
@@ -167,7 +169,8 @@ impl CreateTopicsResult {
     /// Panics if `topic` was not part of the original request.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#replicationFactor")]
     pub fn replication_factor(&self, topic: &str) -> KafkaFuture<i32> {
-        self.future_for(topic).then_apply(|tmac| tmac.replication_factor())
+        self.future_for(topic)
+            .then_apply(|tmac: TopicMetadataAndConfig| tmac.replication_factor())
     }
 
     fn future_for(&self, topic: &str) -> &KafkaFuture<TopicMetadataAndConfig> {

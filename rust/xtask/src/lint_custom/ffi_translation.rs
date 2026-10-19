@@ -51,7 +51,16 @@
 //!
 //!   - a public struct, or an enum whose variants all carry data (`Error`,
 //!     `TopicCollection`): the opaque handle `<prefix>_t` when some method
-//!     takes `self` or some static returns the type, else no handle;
+//!     takes `self` or some static returns the type, else no handle. A
+//!     struct a public enum's data variant wraps
+//!     (`TopicCollection::TopicIds(TopicIdCollection)`) gets the handle
+//!     only when C can come to hold one — a static of its own builds it or
+//!     a public signature anywhere names it, a type inside a parameter or
+//!     return (`KafkaFuture<T>`) included; otherwise its constructor is
+//!     private as Java's is and C cannot downcast the enum handle, so, as
+//!     for an interface nothing hands out, neither its handle nor its
+//!     getters are expected (`Error`'s payloads are not wrapped in this
+//!     sense: the `kafka_common_Error_<class>` views reach them);
 //!     `<prefix>_destroy` for every handle;
 //!   - every `pub fn` of its inherent impls: `<prefix>_<name>`, `self` first
 //!     as `*const <prefix>_t` for `&self` and `*mut` for `&mut self` or
@@ -77,7 +86,11 @@
 //!     variant and one `<prefix>_<variant>(<fields>..)` returning an owned
 //!     handle per data variant (`MetricValue::Double(f64)`); the Java static
 //!     factory, when there is one (`OffsetSpec::for_timestamp`), is an
-//!     ordinary method beside it. `Error` is the exception: its constructors
+//!     ordinary method beside it. A data variant whose field is a type C
+//!     cannot hold (above: `OffsetSpec::Timestamp(TimestampSpec)`,
+//!     `TopicCollection::TopicIds(TopicIdCollection)`) has no constructor,
+//!     and the Java static factory is its only builder, as §4 says for a
+//!     value carrying data. `Error` is the exception: its constructors
 //!     are the `kafka_common_Error_<class>` factories and C classifies it
 //!     with the predicates, never by variant;
 //!   - a public trait some public method accepts or returns, or a public
@@ -96,12 +109,16 @@
 //!     the default), a bare `unsafe extern "C" fn(..)` otherwise, and the
 //!     `_new` parameter is always the bare typedef name (cbindgen does not
 //!     see through `Option<alias>` in a signature); an async method's
-//!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
+//!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`,
+//!     except on a dual-mode interface ([`DUAL_MODE_INTERFACES`]), whose
+//!     `_fn_t`s keep the synchronous form and which adds `_new_async` with
+//!     one reported-form `_async_fn_t` per method, `__is_async` and its own
+//!     `__set_callback_result`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
 //!     `__set_callback_result(self, callback_id, result, error)` when it
-//!     accepts an interface with an async method or runs a reported C-only
-//!     closure interface ([`C_ONLY_CLOSURE_INTERFACES`]) (the double
+//!     accepts an interface with an async method or runs a reported
+//!     interface ([`REPORTED_INTERFACES`]) (the double
 //!     underscore on all three: derived by convention, no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
@@ -133,15 +150,12 @@
 //! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
 //! associated consts expect nothing (cbindgen exports no constants); a
-//! struct generic over a closure (`ClosureGauge<F>`, a Java lambda's
+//! struct generic over a closure (`ClosureMeasurable<F>`, a Java lambda's
 //! stand-in) expects nothing, since C implements the trait's interface
-//! instead; a Java functional interface the Rust API takes as a closure
-//! ([`C_ONLY_CLOSURE_INTERFACES`]) has no Rust item, so its §4 rule 3
-//! interface — `_t`, `_new`, `_destroy`, one invoker and one `_fn_t` per
-//! method — is accepted as C-only, while the closure-taking Rust method stays
-//! `unmapped`; a reported one (Java's `Callback`) adds the client's
-//! `__set_callback_result` to the expected surface and admits its invoker's
-//! `_cb` twin and `_cb_t`.
+//! instead; a reported interface ([`REPORTED_INTERFACES`], Java's
+//! `Callback`) has each `_fn_t` take a trailing `callback_id` instead of
+//! returning, adds the client's `__set_callback_result` to the expected
+//! surface and gives each invoker a `_cb` twin and `_cb_t`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -166,50 +180,60 @@ const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
 
 /// Public Rust types that deliberately have no C counterpart: `KafkaError`
 /// is the embedded `KafkaException` base, which never crosses the boundary on
-/// its own (CLAUDE.md §4).
-const NO_C_TYPE: &[&str] = &["KafkaError"];
+/// its own (CLAUDE.md §4); `InlineFuture` is the future a `DynSerializer` /
+/// `DynDeserializer` call returns, which C never holds: a C caller of a
+/// waiting function gets its result through the `_cb` twin (§4 rule 5).
+const NO_C_TYPE: &[&str] = &["KafkaError", "InlineFuture"];
 
 /// Package-less free helpers the FFI may export besides the `kafka_<Type>_t`
 /// containers: the deallocator of an owned string (CLAUDE.md §4 rule 6).
 const C_ONLY_FREE_FUNCTIONS: &[&str] = &["kafka_string_destroy"];
 
-/// Java functional interfaces that the Rust API takes as closures, with their
-/// methods. C has no closures, so each is translated as a CLAUDE.md §4 rule 3
-/// interface (`<prefix>_t`, `_new`, `_destroy`, `<prefix>_<method>` and
-/// `<prefix>_<method>_fn_t`) that no Rust item stands behind: the closure
-/// parameter of the Rust method is `unmapped` by design, and these are the C
-/// items it takes instead.
-///
-/// A closure the client runs on the caller's queue and waits for (Java's
-/// `Callback`, which `flush` and `close` wait for on the I/O thread) is
-/// *reported*: its `_fn_t` takes a trailing `callback_id`, its
-/// implementation reports through the client's
-/// `__set_callback_result(self, callback_id, result, error)` — expected with
-/// that shape, as for a client accepting an async interface — and its
+/// Interfaces the client runs on the caller's queue and waits for (Java's
+/// `Callback`, which `flush` and `close` wait for on the I/O thread), each
+/// with the client trait ([`CLIENT_TRAITS`]) whose `__set_callback_result`
+/// the implementation reports through. Such an interface is *reported*: each
+/// method's `_fn_t` returns nothing and takes a trailing `callback_id`, as an
+/// async method's does, the client expects
+/// `__set_callback_result(self, callback_id, result, error)`, and each
 /// invoker has the CLAUDE.md §4 `_cb` twin with its `_cb_t`, since it waits
 /// for that report.
-const C_ONLY_CLOSURE_INTERFACES: &[ClosureInterface] = &[
-    ClosureInterface {
-        prefix: "kafka_common_KafkaFuture_BaseFunction",
-        methods: &["apply"],
-        reported_by: None,
-    },
-    ClosureInterface {
-        prefix: "kafka_producer_Callback",
-        methods: &["on_completion"],
-        reported_by: Some("Producer"),
-    },
-];
+const REPORTED_INTERFACES: &[ReportedInterface] =
+    &[ReportedInterface { prefix: "kafka_producer_Callback", reported_by: "Producer" }];
 
-/// One entry of [`C_ONLY_CLOSURE_INTERFACES`].
-struct ClosureInterface {
+/// One entry of [`REPORTED_INTERFACES`].
+struct ReportedInterface {
     /// The C prefix of the interface.
     prefix: &'static str,
-    /// Its methods, snake_cased.
-    methods: &'static [&'static str],
-    /// The client trait ([`CLIENT_TRAITS`]) whose `__set_callback_result`
-    /// the implementation reports through, when it is reported.
-    reported_by: Option<&'static str>,
+    /// The client trait whose `__set_callback_result` the implementation
+    /// reports through.
+    reported_by: &'static str,
+}
+
+/// Whether the interface with C prefix `prefix` is reported.
+fn is_reported(prefix: &str) -> bool {
+    REPORTED_INTERFACES.iter().any(|r| r.prefix == prefix)
+}
+
+/// Interfaces a C implementation registers in one of two modes, fixed at
+/// construction: `<prefix>_new` takes the synchronous `_fn_t`s (the value
+/// returned, the error stored in `out_err`), whose functions Rust runs on a
+/// blocking task; `<prefix>_new_async` takes the `_async_fn_t`s in the
+/// reported form of an async method (`void`, a trailing `callback_id`),
+/// whose implementation reports through the interface's own
+/// `<prefix>__set_callback_result(self, callback_id, result, error)`, and
+/// `<prefix>__is_async(self)` tells the two apart. These are the serdes,
+/// called once per key and per value: a C serde that blocks must not stall
+/// the client's runtime, and one that waits on its own I/O must not hold a
+/// thread, so C chooses (CLAUDE.md §4 "Traits", §11).
+const DUAL_MODE_INTERFACES: &[&str] = &[
+    "kafka_common_serialization_Serializer",
+    "kafka_common_serialization_Deserializer",
+];
+
+/// Whether the interface with C prefix `prefix` is dual-mode.
+fn is_dual_mode(prefix: &str) -> bool {
+    DUAL_MODE_INTERFACES.contains(&prefix)
 }
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
@@ -662,6 +686,13 @@ impl Mapper<'_> {
                 },
                 _ => {},
             }
+            // `DynSerializer` is `Serializer`'s dyn-compatible companion
+            // (check-dyn-compatible), left out of the surface: C sees one
+            // `Serializer_t`, so `Box<dyn DynSerializer<K>>` maps onto it.
+            let name = match name.strip_prefix("Dyn") {
+                Some(base) if !self.by_name.contains_key(&name) => base.to_string(),
+                _ => name,
+            };
             if let Some([(prefix, TypeClass::Trait)]) = self.by_name.get(&name).map(Vec::as_slice) {
                 return Ok(CType::Handle { prefix: prefix.clone(), mutable: owned || mut_ref });
             }
@@ -916,10 +947,10 @@ impl RustType {
         match &self.kind {
             Kind::Trait { .. } => true,
             Kind::Enum { unit, .. } if !unit.is_empty() => true,
-            _ => self.methods.iter().any(|m| {
-                m.sig.receiver().is_some()
-                    || matches!(&m.sig.output, syn::ReturnType::Type(_, ty) if mentions(ty, "Self") || mentions(ty, &self.name))
-            }),
+            _ => self
+                .methods
+                .iter()
+                .any(|m| m.sig.receiver().is_some() || returns_type(&m.sig, &self.name)),
         }
     }
 }
@@ -1204,7 +1235,7 @@ impl FfiTranslation {
             let file = m.file.display().to_string();
             let (attrs, kind, generics, methods) = match item {
                 syn::Item::Struct(s) => {
-                    // A struct generic over a closure (`ClosureGauge<F>`)
+                    // A struct generic over a closure (`ClosureMeasurable<F>`)
                     // stands in for a Java lambda: C implements the trait's
                     // interface instead, so the struct has no C type.
                     if has_closure_bound(&s.generics) {
@@ -1482,17 +1513,53 @@ impl FfiTranslation {
             }
         }
 
+        // A struct a public enum's data variant wraps
+        // (`TopicCollection::TopicIds(TopicIdCollection)`) has a handle only
+        // when C can come to hold one: a static of its own builds it, or a
+        // public signature anywhere names it — as a parameter, a return, or a
+        // type inside one such as `KafkaFuture<T>`. Otherwise its constructor
+        // is private as Java's is and C cannot downcast the enum handle, so, as
+        // for an interface nothing hands out, neither its handle nor its
+        // getters are expected. `Error`'s payloads are not wrapped in this
+        // sense: C reaches them through the `kafka_common_Error_<class>` views.
+        let wrapped: BTreeSet<String> = surface
+            .types
+            .iter()
+            .filter(|t| error_prefix.as_deref() != Some(t.prefix.as_str()))
+            .filter_map(|t| match &t.kind {
+                Kind::Enum { data, .. } => Some(data),
+                _ => None,
+            })
+            .flat_map(|data| data.iter().flat_map(|v| &v.fields))
+            .filter_map(|(_, fty)| type_ident(fty))
+            .collect();
+        let named: BTreeSet<String> = surface
+            .types
+            .iter()
+            .flat_map(|t| &t.methods)
+            .filter(|m| !mentions_any(&m.sig, NO_C_TYPE))
+            .flat_map(|m| signature_types(&m.sig))
+            .flat_map(|ty| idents(&ty))
+            .collect();
+        let obtainable = |t: &RustType| {
+            !wrapped.contains(&t.name)
+                || named.contains(&t.name)
+                || t.methods
+                    .iter()
+                    .any(|m| receiver(&m.sig) == Receiver::Static && returns_type(&m.sig, &t.name))
+        };
+        let struct_handle = |t: &RustType| (t.needs_handle() && obtainable(t)) || referenced.contains(&t.prefix);
+
         // The traits some public struct with a handle implements: its
         // `__as_<Trait>` view builds an instance.
         let implemented: BTreeSet<&str> = surface
             .impls
             .iter()
             .filter(|(s, _)| {
-                surface.types.iter().any(|t| {
-                    &t.name == s
-                        && !matches!(t.kind, Kind::Trait { .. })
-                        && (t.needs_handle() || referenced.contains(&t.prefix))
-                })
+                surface
+                    .types
+                    .iter()
+                    .any(|t| &t.name == s && !matches!(t.kind, Kind::Trait { .. }) && struct_handle(t))
             })
             .map(|(_, t)| t.as_str())
             .collect();
@@ -1510,7 +1577,7 @@ impl FfiTranslation {
                         || referenced.contains(&t.prefix)
                         || implemented.contains(t.name.as_str())
                 },
-                _ => t.needs_handle() || referenced.contains(&t.prefix),
+                _ => struct_handle(t),
             })
             .map(|t| t.prefix.as_str())
             .collect();
@@ -1599,6 +1666,23 @@ impl FfiTranslation {
                 // an ordinary method beside it.
                 if has_handle && !is_error {
                     for v in data {
+                        // A field of a type C cannot hold (no handle, above:
+                        // `TopicCollection::TopicIds(TopicIdCollection)`,
+                        // `OffsetSpec::Timestamp(TimestampSpec)`) leaves the
+                        // variant without a constructor; the enum's Java
+                        // static factory (`of_topic_ids`, `for_timestamp`) is
+                        // its only builder, as §4 says for a value carrying
+                        // data.
+                        let unholdable = v.fields.iter().any(|(_, fty)| {
+                            type_ident(fty).and_then(|n| by_name.get(&n)).is_some_and(|types| {
+                                types
+                                    .iter()
+                                    .any(|(p, class)| *class != TypeClass::Trait && !handles.contains(p.as_str()))
+                            })
+                        });
+                        if unholdable {
+                            continue;
+                        }
                         let mapper = Mapper {
                             by_name: &by_name,
                             aliases: &surface.aliases,
@@ -1640,8 +1724,14 @@ impl FfiTranslation {
                 if mentions_any(&m.sig, NO_C_TYPE) {
                     continue;
                 }
-                let mapper = mapper_for(&m.sig);
                 let recv = receiver(&m.sig);
+                // No handle, no instance to call a method on: a wrapped
+                // struct's getters (`TopicIdCollection::topic_ids`) stay on
+                // the Rust side; its statics, if any, are still expected.
+                if !has_handle && recv != Receiver::Static {
+                    continue;
+                }
+                let mapper = mapper_for(&m.sig);
                 let self_param = (recv != Receiver::Static).then(|| {
                     Param::new(
                         "self",
@@ -1692,10 +1782,8 @@ impl FfiTranslation {
                         .flatten()
                         .filter_map(|t| traits.get(t.as_str()))
                         .any(|t| t.methods.iter().any(|m| async_output(&m.sig).is_some()));
-                    let reported_closure = C_ONLY_CLOSURE_INTERFACES
-                        .iter()
-                        .any(|c| c.reported_by == Some(ty.name.as_str()));
-                    if async_interface || reported_closure {
+                    let reports = REPORTED_INTERFACES.iter().any(|r| r.reported_by == ty.name);
+                    if async_interface || reports {
                         out.add(
                             format!("{prefix}__set_callback_result"),
                             Shape::Fn(Sig {
@@ -1914,6 +2002,11 @@ fn is_hidden(attrs: &[syn::Attribute]) -> bool {
 
 /// Whether `sig` names any of `names` in a parameter or the return type.
 fn mentions_any(sig: &syn::Signature, names: &[&str]) -> bool {
+    signature_types(sig).any(|t| names.iter().any(|n| mentions(&t, n)))
+}
+
+/// The parameter types and the return type of `sig`, the receiver aside.
+fn signature_types(sig: &syn::Signature) -> impl Iterator<Item = syn::Type> + '_ {
     let types = sig.inputs.iter().filter_map(|a| match a {
         syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
         syn::FnArg::Receiver(_) => None,
@@ -1922,7 +2015,23 @@ fn mentions_any(sig: &syn::Signature, names: &[&str]) -> bool {
         syn::ReturnType::Type(_, t) => Some((**t).clone()),
         syn::ReturnType::Default => None,
     };
-    types.chain(ret).any(|t| names.iter().any(|n| mentions(&t, n)))
+    types.chain(ret)
+}
+
+/// Every identifier in `ty`'s tokens: what [`mentions`] tests one name against.
+fn idents(ty: &syn::Type) -> Vec<String> {
+    ty.to_token_stream()
+        .to_string()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `sig` returns `name` or `Self`, possibly inside another type
+/// (`Result<Self, Error>`).
+fn returns_type(sig: &syn::Signature, name: &str) -> bool {
+    matches!(&sig.output, syn::ReturnType::Type(_, ty) if mentions(ty, "Self") || mentions(ty, name))
 }
 
 /// The `pub fn`s of the inherent impls of `name` among `items`, test and
@@ -1954,7 +2063,13 @@ fn param_traits(sig: &syn::Signature, traits: &BTreeMap<&str, &RustType>) -> BTr
     let mut visit = |ty: &syn::Type| {
         let mut names = BTreeSet::new();
         collect_bound_traits(ty, &generics, &mut names);
-        out.extend(names.into_iter().filter(|n| traits.contains_key(n.as_str())));
+        // `dyn DynSerializer<K>` accepts a `Serializer`: the companion is left
+        // out of the surface and C implements the base trait's interface.
+        let names = names.into_iter().map(|n| match n.strip_prefix("Dyn") {
+            Some(base) if !traits.contains_key(n.as_str()) => base.to_string(),
+            _ => n,
+        });
+        out.extend(names.filter(|n| traits.contains_key(n.as_str())));
     };
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
@@ -2032,6 +2147,9 @@ fn expect_method(
 ) {
     let name = format!("{prefix}_{}", m.name);
     let (is_async, output) = method_output(&m.sig, mapper);
+    // A reported interface's invoker waits for the report, as an async
+    // method waits for its result.
+    let is_async = is_async || is_reported(prefix);
 
     let mut params: Vec<Param> = self_param.into_iter().collect();
     let mut unmapped: Vec<String> = Vec::new();
@@ -2116,7 +2234,10 @@ fn expect_method(
 }
 
 /// Adds the C interface of an accepted trait: `_new` and one `_fn_t` per
-/// method (CLAUDE.md §4 rule 3).
+/// method (CLAUDE.md §4 rule 3). A dual-mode interface
+/// ([`DUAL_MODE_INTERFACES`]) also has `_new_async` taking one `_async_fn_t`
+/// per method, `__is_async` and `__set_callback_result`, and its `_fn_t`s
+/// keep the synchronous form whether the Rust method is async or not.
 fn expect_interface<'a>(
     out: &mut Expectations,
     mapper_for: &dyn Fn(&syn::Signature) -> Mapper<'a>,
@@ -2124,22 +2245,29 @@ fn expect_interface<'a>(
     methods: &[RustMethod],
     file: &str,
 ) {
+    let dual = is_dual_mode(prefix);
     let mut new_params = vec![Param::new("self", "*mut c_void".to_string())];
+    let mut new_async_params = new_params.clone();
     for m in methods {
         let fn_t = format!("{prefix}_{}_fn_t", m.name);
+        let async_fn_t = format!("{prefix}_{}_async_fn_t", m.name);
         new_params.push(Param::new(
             &m.name,
             CType::FnPtr { name: fn_t.clone(), nullable: m.has_default }.render(),
         ));
+        new_async_params.push(Param::new(
+            &m.name,
+            CType::FnPtr { name: async_fn_t.clone(), nullable: m.has_default }.render(),
+        ));
 
         let mapper = mapper_for(&m.sig);
         let (is_async, output) = method_output(&m.sig, &mapper);
-        let mut sig = Sig { params: vec![Param::new("self", "*mut c_void".to_string())], ret: None };
+        let mut params = vec![Param::new("self", "*mut c_void".to_string())];
         let mut failed = false;
         for arg in &m.sig.inputs {
             let syn::FnArg::Typed(pt) = arg else { continue };
             match map_param(&mapper, &param_name(pt), &pt.ty) {
-                Ok(c) => sig.params.extend(c),
+                Ok(c) => params.extend(c),
                 Err(_) => failed = true,
             }
         }
@@ -2160,28 +2288,65 @@ fn expect_interface<'a>(
         if failed {
             // Reported once, on the invoker, by `expect_method`.
             out.add(fn_t, Shape::Unknown, file);
+            if dual {
+                out.add(async_fn_t, Shape::Unknown, file);
+            }
             continue;
         }
-        if is_async {
-            // The result is reported through `__set_callback_result`.
-            sig.params.push(Param::new("callback_id", "i64".to_string()));
-        } else {
-            match (&output, &value) {
-                (Ok(Output::Fallible(_)), v) => {
-                    sig.params.push(Param::out_err());
-                    sig.ret = v.as_ref().map(CType::render);
-                },
-                (Ok(Output::Value(_)), Some(v)) => sig.ret = Some(v.render()),
-                _ => {},
-            }
+        // The synchronous form: the value returned, the error stored in `out_err`.
+        let mut sync_sig = Sig { params: params.clone(), ret: None };
+        match (&output, &value) {
+            (Ok(Output::Fallible(_)), v) => {
+                sync_sig.params.push(Param::out_err());
+                sync_sig.ret = v.as_ref().map(CType::render);
+            },
+            (Ok(Output::Value(_)), Some(v)) => sync_sig.ret = Some(v.render()),
+            _ => {},
         }
-        out.add(fn_t, Shape::FnPtr { sig, nullable: m.has_default }, file);
+        // The reported form: the result reported through `__set_callback_result`.
+        let mut reported_sig = Sig { params, ret: None };
+        reported_sig.params.push(Param::new("callback_id", "i64".to_string()));
+        if dual {
+            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+            out.add(async_fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+        } else if is_async || is_reported(prefix) {
+            out.add(fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+        } else {
+            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+        }
     }
+    let handle = format!("*mut {prefix}_t");
     out.add(
         format!("{prefix}_new"),
-        Shape::Fn(Sig { params: new_params, ret: Some(format!("*mut {prefix}_t")) }),
+        Shape::Fn(Sig { params: new_params, ret: Some(handle.clone()) }),
         file,
     );
+    if dual {
+        out.add(
+            format!("{prefix}_new_async"),
+            Shape::Fn(Sig { params: new_async_params, ret: Some(handle) }),
+            file,
+        );
+        let self_param = || Param::new("self", format!("*const {prefix}_t"));
+        out.add(
+            format!("{prefix}__is_async"),
+            Shape::Fn(Sig { params: vec![self_param()], ret: Some("i8".to_string()) }),
+            file,
+        );
+        out.add(
+            format!("{prefix}__set_callback_result"),
+            Shape::Fn(Sig {
+                params: vec![
+                    self_param(),
+                    Param::new("callback_id", "i64".to_string()),
+                    Param::new("result", "*mut c_void".to_string()),
+                    Param::new("error", "*mut kafka_common_Error_t".to_string()),
+                ],
+                ret: None,
+            }),
+            file,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2365,32 +2530,11 @@ fn render_fn_ptr_decl(name: &str, sig: &Sig, nullable: bool) -> String {
 /// Compares the expected surface with the declared one.
 fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &mut Vec<Finding>) {
     let c_only = actual.c_only_prefixes();
-    let closure_interfaces: BTreeSet<String> = C_ONLY_CLOSURE_INTERFACES
-        .iter()
-        .flat_map(|c| {
-            let prefix = c.prefix;
-            let mut items = vec![
-                format!("{prefix}_t"),
-                format!("{prefix}_new"),
-                format!("{prefix}_destroy"),
-            ];
-            for m in c.methods.iter() {
-                items.push(format!("{prefix}_{m}"));
-                items.push(format!("{prefix}_{m}_fn_t"));
-                if c.reported_by.is_some() {
-                    items.push(format!("{prefix}_{m}_cb"));
-                    items.push(format!("{prefix}_{m}_cb_t"));
-                }
-            }
-            items
-        })
-        .collect();
     let is_c_only = |name: &str| {
         c_only.iter().any(|p| name == p.as_str() || name.starts_with(&format!("{p}_")))
             || C_ONLY_FREE_FUNCTIONS.contains(&name)
             || C_ONLY_ERROR_CODE.contains(&name)
             || C_ONLY_DRAINING_CB_TWINS.contains(&name)
-            || closure_interfaces.contains(name)
     };
 
     for (name, exp) in expected {
@@ -2778,6 +2922,11 @@ mod tests {
             field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: crate::java::JavaKind::Class,
+            visibility: crate::java::Visibility::Public,
+            is_abstract: false,
+            functional_interface: false,
+            supertypes: Vec::new(),
         }
     }
 
@@ -2792,10 +2941,16 @@ mod tests {
                 class("clients.consumer", &["KafkaConsumer"]),
                 class("clients.consumer.internals", &["Fetcher"]),
                 class("clients.admin", &["OffsetSpec"]),
+                class("clients.admin", &["OffsetSpec", "TimestampSpec"]),
+                class("common", &["TopicCollection"]),
+                class("common", &["TopicCollection", "TopicIdCollection"]),
+                class("common", &["TopicCollection", "TopicNameCollection"]),
                 class("clients.admin", &["CreateTopicsResult"]),
                 class("clients.admin", &["CreateTopicsResult", "TopicMetadataAndConfig"]),
                 class("common", &["TopicPartition"]),
                 class("common", &["Cluster"]),
+                class("common", &["KafkaFuture"]),
+                class("common", &["KafkaFuture", "BaseFunction"]),
                 class("common.record", &["TimestampType"]),
                 class("common.errors", &["TopicAuthorizationException"]),
                 class("common.errors", &["ResourceNotFoundException"]),
@@ -3173,6 +3328,135 @@ mod tests {
         );
     }
 
+    /// Java's `TopicCollection`: an abstract class whose subclasses have private
+    /// constructors, so only the static factories build one. The Rust variants
+    /// wrap the subclasses, and C can hold neither of them: no subclass handle
+    /// or getter and no per-variant constructor, the factories being the only
+    /// builders (§4, "Enums").
+    const TOPIC_COLLECTION_RUST: &str = r#"
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.TopicCollection")]
+            pub enum TopicCollection { TopicIds(TopicIdCollection), TopicNames(TopicNameCollection) }
+            impl TopicCollection {
+                pub fn of_topic_ids(topics: Vec<i64>) -> TopicCollection { TopicCollection::TopicIds(TopicIdCollection) }
+                pub fn of_topic_names(topics: Vec<String>) -> TopicCollection { TopicCollection::TopicNames(TopicNameCollection) }
+            }
+            #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicIdCollection")]
+            pub struct TopicIdCollection;
+            impl TopicIdCollection { pub fn topic_ids(&self) -> &[i64] { &[] } }
+            #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicNameCollection")]
+            pub struct TopicNameCollection;
+            impl TopicNameCollection { pub fn topic_names(&self) -> &[String] { &[] } }
+        }
+    "#;
+
+    const TOPIC_COLLECTION_FFI: &str = r#"
+        #[repr(C)] pub struct kafka_common_TopicCollection_t { _p: [u8; 0] }
+        #[repr(C)] pub enum kafka_common_TopicCollection_e { kafka_common_TopicCollection_TOPIC_IDS, kafka_common_TopicCollection_TOPIC_NAMES }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection__enum(this: *const kafka_common_TopicCollection_t) -> kafka_common_TopicCollection_e { kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(topics: *const kafka_List_t) -> *mut kafka_common_TopicCollection_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(topics: *const kafka_List_t) -> *mut kafka_common_TopicCollection_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_destroy(this: *mut kafka_common_TopicCollection_t) {}
+    "#;
+
+    #[test]
+    fn test_variant_wrapping_a_struct_c_cannot_hold_has_no_constructor_and_the_struct_no_handle() {
+        let findings = run("unholdable-payload", TOPIC_COLLECTION_RUST, TOPIC_COLLECTION_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // The shape the rule rules out: a subclass handle nothing in C can
+        // obtain, its getter, and a variant constructor taking it.
+        let ffi = format!(
+            "{TOPIC_COLLECTION_FFI}
+            #[repr(C)] pub struct kafka_common_TopicCollection_TopicIdCollection_t {{ _p: [u8; 0] }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_TopicIdCollection_topic_ids(this: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_List_t {{ std::ptr::null_mut() }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_TopicIdCollection_destroy(this: *mut kafka_common_TopicCollection_TopicIdCollection_t) {{}}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_topic_ids(value: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_common_TopicCollection_t {{ std::ptr::null_mut() }}"
+        );
+        let findings = run("unholdable-payload-dead", TOPIC_COLLECTION_RUST, &ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_destroy",
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_t",
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_topic_ids",
+                "unexpected kafka_common_TopicCollection_topic_ids",
+            ]
+        );
+    }
+
+    /// The same enum when the subclass has a public constructor
+    /// (`UserScramCredentialAlteration::Upsertion(UserScramCredentialUpsertion)`):
+    /// C can build the subclass, so it has its handle and the variant has its
+    /// constructor taking that handle.
+    #[test]
+    fn test_variant_wrapping_a_struct_c_can_build_keeps_its_constructor() {
+        let rust = TOPIC_COLLECTION_RUST.replace(
+            "impl TopicIdCollection { pub fn topic_ids(&self) -> &[i64] { &[] } }",
+            "impl TopicIdCollection {
+                pub fn new(topic_ids: Vec<i64>) -> Self { TopicIdCollection }
+                pub fn topic_ids(&self) -> &[i64] { &[] }
+            }",
+        );
+        let findings = run("holdable-payload", &rust, TOPIC_COLLECTION_FFI);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_common_TopicCollection_TopicIdCollection_destroy",
+                "missing kafka_common_TopicCollection_TopicIdCollection_new",
+                "missing kafka_common_TopicCollection_TopicIdCollection_t",
+                "missing kafka_common_TopicCollection_TopicIdCollection_topic_ids",
+                "missing kafka_common_TopicCollection_topic_ids",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_TopicCollection_topic_ids"),
+            "expected `fn(value: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_common_TopicCollection_t`"
+        );
+    }
+
+    /// Java's `OffsetSpec.TimestampSpec`: a nested subclass whose constructor
+    /// and getter are package-private, so the Rust struct has no public method
+    /// at all. Beside the singletons, `forTimestamp` is the only way to a
+    /// timestamp spec; there is no `_timestamp` constructor taking a handle no
+    /// C code could obtain.
+    #[test]
+    fn test_data_variant_with_a_package_private_payload_is_built_by_its_factory_only() {
+        let rust = ENUM_RUST.replace(
+            "pub enum OffsetSpec { Earliest, Latest, MaxTimestamp }",
+            "pub enum OffsetSpec { Earliest, Latest, MaxTimestamp, Timestamp(TimestampSpec) }
+            impl OffsetSpec {
+                pub fn for_timestamp(timestamp: i64) -> Self { OffsetSpec::Timestamp(TimestampSpec { timestamp }) }
+            }
+            #[doc(alias = \"org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec\")]
+            pub struct TimestampSpec { timestamp: i64 }
+            impl TimestampSpec {
+                pub(crate) fn new(timestamp: i64) -> Self { TimestampSpec { timestamp } }
+                pub(crate) fn timestamp(&self) -> i64 { self.timestamp }
+            }",
+        );
+        let ffi = ENUM_FFI
+            .replace(
+                "kafka_admin_OffsetSpec_MAX_TIMESTAMP }",
+                "kafka_admin_OffsetSpec_MAX_TIMESTAMP, kafka_admin_OffsetSpec_TIMESTAMP }",
+            )
+            .replace(
+                "#[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_earliest()",
+                "#[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut kafka_admin_OffsetSpec_t { std::ptr::null_mut() }
+                #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_destroy(this: *mut kafka_admin_OffsetSpec_t) {}
+                #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_earliest()",
+            );
+        let findings = run("factory-only-payload", &rust, &ffi);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let ffi = format!(
+            "{ffi}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_admin_OffsetSpec_t {{ std::ptr::null_mut() }}"
+        );
+        let findings = run("factory-only-payload-dead", &rust, &ffi);
+        assert_eq!(keys(&findings), ["unexpected kafka_admin_OffsetSpec_timestamp"]);
+    }
+
     #[test]
     fn test_c_enum_lists_every_variant() {
         let ffi = ENUM_FFI.replace(", kafka_admin_OffsetSpec_MAX_TIMESTAMP }", " }");
@@ -3235,6 +3519,24 @@ mod tests {
     #[test]
     fn test_accepted_trait_interface_passes() {
         let findings = run("trait-ok", TRAIT_RUST, TRAIT_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A parameter taking the dyn-compatible companion
+    /// (`Box<dyn DynSerializer<K>>`) maps onto the base trait's handle and
+    /// accepts the base trait's interface, as `Box<dyn Serializer<K>>` did.
+    #[test]
+    fn test_dyn_companion_parameter_maps_onto_the_base_trait() {
+        let rust = TRAIT_RUST
+            .replace(
+                "            #[doc(alias = \"org.apache.kafka.clients.producer.KafkaProducer\")]",
+                "            #[doc(alias = \"rust-only\")]\n            \
+                 pub trait DynPartitioner<K, V>: Send + Sync {}\n            \
+                 #[doc(alias = \"org.apache.kafka.clients.producer.KafkaProducer\")]",
+            )
+            .replace("Box<dyn Partitioner<K, V>>", "Box<dyn DynPartitioner<K, V>>");
+        assert!(rust.contains("Box<dyn DynPartitioner<K, V>>") && rust.contains("pub trait DynPartitioner"));
+        let findings = run("trait-dyn-companion", &rust, TRAIT_FFI);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -3393,6 +3695,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dual_mode_interface_expects_both_constructors() {
+        let rust = r#"
+            pub mod common {
+                pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+                pub use error::Error;
+                pub mod serialization {
+                    #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
+                    pub trait Deserializer: Send + Sync {
+                        async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, crate::common::Error>;
+                        async fn close(&mut self) {}
+                    }
+                    #[doc(alias = "rust-only")]
+                    pub struct Holder;
+                    impl Holder { pub fn new(deserializer: Box<dyn Deserializer>) -> Self { Holder } }
+                }
+            }
+        "#;
+        let findings = run("dual-mode", rust, "");
+        let prefix = "kafka_common_serialization_Deserializer";
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_deserialize_fn_t")),
+            format!(
+                "expected `type {prefix}_deserialize_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: *const \
+                 c_char, data: kafka_Bytes_t, out_err: *mut *mut kafka_common_Error_t) -> *mut c_char`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_deserialize_async_fn_t")),
+            format!(
+                "expected `type {prefix}_deserialize_async_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: \
+                 *const c_char, data: kafka_Bytes_t, callback_id: i64)`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_close_async_fn_t")),
+            format!("expected `type {prefix}_close_async_fn_t = Option<unsafe extern \"C\" fn(self: *mut c_void, callback_id: i64)>`")
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}_new_async")),
+            format!(
+                "expected `fn(self: *mut c_void, deserialize: {prefix}_deserialize_async_fn_t, close: \
+                 {prefix}_close_async_fn_t) -> *mut {prefix}_t`"
+            )
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}__is_async")),
+            format!("expected `fn(self: *const {prefix}_t) -> i8`")
+        );
+        assert_eq!(
+            detail(&findings, &format!("missing {prefix}__set_callback_result")),
+            format!(
+                "expected `fn(self: *const {prefix}_t, callback_id: i64, result: *mut c_void, error: *mut \
+                 kafka_common_Error_t)`"
+            )
+        );
+        assert!(keys(&findings).contains(&"missing kafka_common_serialization_Deserializer_deserialize_cb_t"));
+    }
+
     const AS_RUST: &str = r#"
         pub mod common {
             pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3406,10 +3767,10 @@ mod tests {
                 pub struct StringSerializer;
                 impl StringSerializer { pub fn new() -> Self { StringSerializer } }
                 impl Serializer<str> for StringSerializer {
-                    fn serialize(&self, topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
+                    async fn serialize(&self, topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
                 }
                 impl Serializer<String> for StringSerializer {
-                    fn serialize(&self, topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
+                    async fn serialize(&self, topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, crate::common::Error> { Ok(None) }
                 }
             }
         }
@@ -3554,31 +3915,43 @@ mod tests {
     }
 
     #[test]
-    fn test_closure_interface_is_accepted_as_c_only() {
-        // `then_apply` takes a closure (Java's `KafkaFuture.BaseFunction`): the
-        // method is `unmapped`, and the rule 3 interface C gets instead has no
-        // Rust item, so it is admitted — but only its rule 3 items.
+    fn test_functional_interface_trait_takes_its_handle_owned() {
+        // `then_apply` takes Java's `KafkaFuture.BaseFunction` as a trait bound:
+        // the function crosses as a consumed `*mut` handle, the generic argument
+        // as a borrowed `void *`, the result as an owned one; an item the trait
+        // does not stand behind is unexpected.
         let rust = r#"
             pub mod common {
+                pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+                pub use error::Error;
                 #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
                 pub struct KafkaFuture<T>(T);
                 impl<T> KafkaFuture<T> {
-                    pub fn then_apply<R, F: Fn(T) -> Result<R, Error>>(&self, function: F) -> KafkaFuture<R> { unimplemented!() }
+                    pub fn then_apply<R, F: BaseFunction<T, R>>(&self, function: F) -> KafkaFuture<R> { unimplemented!() }
                 }
+                pub mod kafka_future {
+                    use crate::common::Error;
+                    #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
+                    pub trait BaseFunction<A, B> {
+                        #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction#apply")]
+                        fn apply(&self, a: A) -> Result<B, Error>;
+                    }
+                }
+                pub use kafka_future::BaseFunction;
             }
         "#;
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
-            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
             #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
             #[unsafe(no_mangle)] pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(self_: *mut c_void, apply: kafka_common_KafkaFuture_BaseFunction_apply_fn_t) -> *mut kafka_common_KafkaFuture_BaseFunction_t { std::ptr::null_mut() }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_stray(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(self_: *const kafka_common_KafkaFuture_t, function: *const kafka_common_KafkaFuture_BaseFunction_t) -> *mut kafka_common_KafkaFuture_t { std::ptr::null_mut() }
         "#;
-        let findings = run("closure-interface", rust, ffi);
+        let findings = run("functional-interface", rust, ffi);
         let keys: Vec<&str> = keys(&findings)
             .into_iter()
             .filter(|k| k.contains("BaseFunction") || k.contains("then_apply"))
@@ -3586,34 +3959,45 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "shape kafka_common_KafkaFuture_then_apply",
                 "unexpected kafka_common_KafkaFuture_BaseFunction_stray",
-                "unmapped kafka_common_KafkaFuture_then_apply"
             ]
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_common_KafkaFuture_then_apply"),
+            "expected `fn(self: *const kafka_common_KafkaFuture_t, function: *mut kafka_common_KafkaFuture_BaseFunction_t) \
+             -> *mut kafka_common_KafkaFuture_t`, found `fn(self_: *const kafka_common_KafkaFuture_t, function: *const \
+             kafka_common_KafkaFuture_BaseFunction_t) -> *mut kafka_common_KafkaFuture_t`"
         );
     }
 
     #[test]
-    fn test_producer_callback_interface_is_accepted_as_c_only() {
-        // `Producer::send_with_callback` takes Java's `Callback` as a closure:
-        // the method is `unmapped`, and `kafka_producer_Callback` is the C-only
-        // interface standing in for it — admitted with its rule 3 items, and,
-        // being reported, the invoker's `_cb` twin, only.
+    fn test_reported_interface_matches_its_c_surface() {
+        // `Producer::send_with_callback` takes Java's `Callback`, a reported
+        // interface: its `_fn_t` takes a trailing `callback_id`, its invoker has
+        // a `_cb` twin, and nothing else is admitted.
         let findings = run("callback-interface", PRODUCER_CALLBACK_RUST, PRODUCER_CALLBACK_FFI);
         let keys: Vec<&str> = keys(&findings)
             .into_iter()
             .filter(|k| k.contains("Callback") || k.contains("send_with_callback") || k.contains("callback_result"))
             .collect();
+        assert_eq!(keys, ["unexpected kafka_producer_Callback_stray"]);
+    }
+
+    #[test]
+    fn test_reported_interface_fn_t_takes_callback_id() {
+        let ffi = PRODUCER_CALLBACK_FFI.replace(", callback_id: i64);", ");");
+        let findings = run("callback-fn-t", PRODUCER_CALLBACK_RUST, &ffi);
         assert_eq!(
-            keys,
-            [
-                "unexpected kafka_producer_Callback_stray",
-                "unmapped kafka_producer_Producer_send_with_callback"
-            ]
+            detail(&findings, "shape kafka_producer_Callback_on_completion_fn_t"),
+            "expected `type kafka_producer_Callback_on_completion_fn_t = unsafe extern \"C\" fn(self: *mut c_void, \
+             offset: i64, error: *const kafka_common_Error_t, callback_id: i64)`, found `fn(self_: *mut c_void, \
+             offset: i64, error: *const kafka_common_Error_t)`"
         );
     }
 
     #[test]
-    fn test_reported_closure_interface_expects_the_client_set_callback_result() {
+    fn test_reported_interface_expects_the_client_set_callback_result() {
         // The `Callback` implementation reports through the producer's
         // `__set_callback_result`, so the client trait expects it although no
         // interface it accepts has an async method.
@@ -3632,7 +4016,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reported_closure_interface_checks_the_set_callback_result_shape() {
+    fn test_reported_interface_checks_the_set_callback_result_shape() {
         // The three-parameter form of before the report carried its error is
         // the wrong shape.
         let ffi = PRODUCER_CALLBACK_FFI.replace(
@@ -3644,23 +4028,34 @@ mod tests {
     }
 
     #[test]
-    fn test_only_a_reported_closure_interface_admits_an_invoker_cb_twin() {
+    fn test_only_a_reported_interface_admits_an_invoker_cb_twin() {
         // `KafkaFuture.BaseFunction` is not reported: its invoker waits for
         // nothing, so a `_cb` twin of it is unexpected.
         let rust = r#"
             pub mod common {
                 #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
                 pub struct KafkaFuture<T>(T);
+                pub mod kafka_future {
+                    #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
+                    pub trait BaseFunction<A, B> {
+                        #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction#apply")]
+                        fn apply(&self, a: A) -> B;
+                    }
+                }
             }
         "#;
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
-            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
             pub type kafka_common_KafkaFuture_BaseFunction_apply_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply_cb(self_: *const c_void, cb: kafka_common_KafkaFuture_BaseFunction_apply_cb_t, opaque: *mut c_void) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void) -> *mut c_void { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply_cb(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void, cb: kafka_common_KafkaFuture_BaseFunction_apply_cb_t, opaque: *mut c_void) {}
         "#;
         let findings = run("closure-cb-twin", rust, ffi);
-        let keys: Vec<&str> = keys(&findings).into_iter().filter(|k| k.contains("BaseFunction")).collect();
+        let keys: Vec<&str> = keys(&findings)
+            .into_iter()
+            .filter(|k| k.contains("BaseFunction_apply_cb"))
+            .collect();
         assert_eq!(
             keys,
             [
@@ -3670,12 +4065,22 @@ mod tests {
         );
     }
 
-    /// A `Producer` client trait taking Java's `Callback` as a closure.
+    /// A `Producer` client trait taking Java's `Callback`.
     const PRODUCER_CALLBACK_RUST: &str = r#"
+        pub mod common {
+            pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+            pub use error::Error;
+        }
         pub mod producer {
+            use crate::common::Error;
+            #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
+            pub trait Callback: Send + Sync {
+                #[doc(alias = "org.apache.kafka.clients.producer.Callback#onCompletion")]
+                fn on_completion(self: Box<Self>, offset: i64, error: Option<&Error>);
+            }
             #[doc(alias = "org.apache.kafka.clients.producer.Producer")]
             pub trait Producer<K, V> {
-                fn send_with_callback(&self, record: K, callback: Option<Box<dyn FnOnce(Option<&V>) + Send + Sync>>) -> i32;
+                fn send_with_callback(&self, record: K, callback: Option<Box<dyn Callback>>) -> i32;
             }
         }
     "#;
@@ -3685,15 +4090,16 @@ mod tests {
         #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
         #[repr(C)] pub struct kafka_producer_Callback_t { _p: [u8; 0] }
         #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
-        pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, metadata: *const c_void, error: *const kafka_common_Error_t, callback_id: i64);
+        pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, offset: i64, error: *const kafka_common_Error_t, callback_id: i64);
         pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
         #[unsafe(no_mangle)] pub extern "C" fn kafka_producer_Callback_new(self_: *mut c_void, on_completion: kafka_producer_Callback_on_completion_fn_t) -> *mut kafka_producer_Callback_t { std::ptr::null_mut() }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t) {}
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t, cb: kafka_producer_Callback_on_completion_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *mut kafka_producer_Callback_t, offset: i64, error: *const kafka_common_Error_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(self_: *mut kafka_producer_Callback_t, offset: i64, error: *const kafka_common_Error_t, cb: kafka_producer_Callback_on_completion_cb_t, opaque: *mut c_void) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_stray(self_: *mut kafka_producer_Callback_t) {}
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t) -> i32 { 0 }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *mut kafka_producer_Callback_t) -> i32 { 0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(self_: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(self_: *const kafka_producer_Producer_t) -> i32 { 0 }
     "#;
 
     #[test]

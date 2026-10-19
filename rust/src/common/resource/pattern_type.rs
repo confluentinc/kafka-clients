@@ -44,15 +44,19 @@ pub enum PatternType {
 }
 
 impl PatternType {
-    /// All pattern types, in declaration (code) order. Mirrors Java's
-    /// `PatternType.values()`.
-    pub const VALUES: [PatternType; 5] = [
-        PatternType::Unknown,
-        PatternType::Any,
-        PatternType::Match,
-        PatternType::Literal,
-        PatternType::Prefixed,
-    ];
+    /// All pattern types, in declaration (code) order.
+    ///
+    /// Mirrors `PatternType.values()`.
+    #[doc(alias = "org.apache.kafka.common.resource.PatternType#values")]
+    pub fn values() -> &'static [Self] {
+        &[
+            PatternType::Unknown,
+            PatternType::Any,
+            PatternType::Match,
+            PatternType::Literal,
+            PatternType::Prefixed,
+        ]
+    }
 
     /// Return the code of this resource pattern type.
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#code")]
@@ -130,7 +134,7 @@ mod tests {
 
     #[test]
     fn code_round_trips_for_all_variants() {
-        for pt in PatternType::VALUES {
+        for &pt in PatternType::values() {
             assert_eq!(PatternType::from_code(pt.code()), pt);
         }
     }

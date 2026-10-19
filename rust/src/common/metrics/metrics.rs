@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::{
-    ClosureGauge, KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, RecordingLevel, Sensor,
+    KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, RecordingLevel, Sensor, gauge,
 };
 use crate::common::utils::{SystemTime, Time};
 use crate::common::{Error, Metric, MetricName, MetricNameTemplate, MetricValue};
@@ -302,7 +302,7 @@ impl Metrics {
         };
         // Java registers a "count" gauge in kafka-metrics-count group.
         let shared = Arc::clone(&metrics.shared);
-        let count_gauge = ClosureGauge::new(move |_config, _now| {
+        let count_gauge = gauge::new(move |_config, _now| {
             let n = shared.metrics.lock().expect("metrics mutex poisoned").len();
             MetricValue::Double(n as f64)
         });
@@ -315,7 +315,7 @@ impl Metrics {
                     BTreeMap::new(),
                 ),
                 None,
-                MetricValueProvider::Gauge(Box::new(count_gauge)),
+                Box::new(count_gauge),
             )
             .expect("count metric registration should not fail on a fresh registry");
         metrics
@@ -636,11 +636,7 @@ impl Metrics {
         metric_name: MetricName,
         measurable: Box<dyn Measurable>,
     ) -> Result<(), Error> {
-        self.add_metric_with_config_metric_value_provider(
-            metric_name,
-            None,
-            MetricValueProvider::Measurable(measurable),
-        )
+        self.add_metric_with_config_metric_value_provider(metric_name, None, Box::new(measurable))
     }
 
     /// Add a metric to monitor an object that implements `MetricValueProvider`.
@@ -651,7 +647,7 @@ impl Metrics {
     pub fn add_metric_with_metric_value_provider(
         &self,
         metric_name: MetricName,
-        metric_value_provider: MetricValueProvider,
+        metric_value_provider: Box<dyn MetricValueProvider>,
     ) -> Result<(), Error> {
         self.add_metric_with_config_metric_value_provider(metric_name, None, metric_value_provider)
     }
@@ -667,7 +663,7 @@ impl Metrics {
         &self,
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
-        provider: MetricValueProvider,
+        provider: Box<dyn MetricValueProvider>,
     ) -> Result<(), Error> {
         let metric_config = config.unwrap_or_else(|| Arc::clone(&self.config));
         let metric = Arc::new(KafkaMetric::new(
@@ -695,7 +691,7 @@ impl Metrics {
         &self,
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
-        provider: MetricValueProvider,
+        provider: Box<dyn MetricValueProvider>,
     ) -> Arc<KafkaMetric> {
         let metric_config = config.unwrap_or_else(|| Arc::clone(&self.config));
         let metric = Arc::new(KafkaMetric::new(metric_name, provider, metric_config, Arc::clone(&self.time)));

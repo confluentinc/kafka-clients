@@ -31,6 +31,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::{Error, TopicPartition};
@@ -59,6 +60,35 @@ struct OffsetCommitCallbackTask {
     /// Optional error captured at enqueue time. `None` for the interceptor
     /// invocation (Java passes `null`).
     error: Option<Error>,
+}
+
+/// Marks a user callback the consumer is running on the caller's task: a
+/// `ConsumerRebalanceListener` method or an [`OffsetCommitCallback`]. The
+/// consumer's callback counter is incremented while the marker lives and
+/// decremented when it drops, on every exit path, so a callback that
+/// returns an error leaves the counter balanced.
+///
+/// Rust-only type (no Java class). It stands in for the thread-identity
+/// check in Java's `KafkaConsumer.acquire()`: Java admits a call from
+/// inside a callback because it comes from the thread already holding the
+/// consumer, and rejects every other thread. A `ConsumerHandle` operation
+/// is admitted only while the consumer runs a callback, which this marker
+/// records; see `ConsumerHandle`'s rustdoc for the contract.
+#[must_use = "the callback scope ends when the marker drops"]
+pub(crate) struct CallbackInProgress(Arc<AtomicUsize>);
+
+impl CallbackInProgress {
+    /// Enters a callback scope on `counter`.
+    pub(crate) fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for CallbackInProgress {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Utility that helps the application thread (Rust: caller task) invoke
@@ -98,6 +128,12 @@ pub(crate) struct OffsetCommitCallbackInvoker<K: 'static, V: 'static> {
     /// expected to change for the lifetime of the invoker (matches Java —
     /// the interceptor list is final).
     interceptors_empty: bool,
+    /// How many user callbacks the consumer is running right now, on the
+    /// caller's task: the commit callbacks this invoker drains and the
+    /// rebalance-listener methods the consumer invokes. Shared with the
+    /// consumer's `ConsumerHandle`, which admits an operation only while
+    /// it is non-zero (see [`CallbackInProgress`]). Rust-only field.
+    callbacks_in_progress: Arc<AtomicUsize>,
 }
 
 /// Type-erased hook for enqueueing an interceptor `on_commit` invocation on
@@ -211,7 +247,21 @@ where
             interceptors: Mutex::new(interceptors),
             pending: Mutex::new(VecDeque::new()),
             interceptors_empty,
+            callbacks_in_progress: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The consumer's callback counter (see [`CallbackInProgress`]), shared
+    /// with its `ConsumerHandle`.
+    pub(crate) fn callbacks_in_progress(&self) -> &Arc<AtomicUsize> {
+        &self.callbacks_in_progress
+    }
+
+    /// Enters a callback scope: the consumer calls this around each
+    /// rebalance-listener invocation, and [`Self::invoke_pending_callbacks`]
+    /// around each commit callback.
+    pub(crate) fn enter_callback(&self) -> CallbackInProgress {
+        CallbackInProgress::enter(&self.callbacks_in_progress)
     }
 
     /// Enqueues an `on_commit` invocation on the interceptor chain if any
@@ -294,6 +344,10 @@ where
                     drop(guard);
                 },
                 CallbackKind::User { callback } => {
+                    // The callback may call back into the consumer through
+                    // its `ConsumerHandle` (Java: the same thread re-enters
+                    // `acquire()`); the marker admits it.
+                    let _in_callback = self.enter_callback();
                     callback.on_complete(&task.offsets, task.error.as_ref()).await?;
                 },
             }
@@ -581,5 +635,68 @@ mod tests {
         fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
             <RecordingInterceptor as ConsumerInterceptor<K, V>>::on_commit(&self.0, offsets);
         }
+    }
+
+    /// A callback that records the invoker's callback counter as seen from
+    /// inside `on_complete`, then returns `outcome`.
+    struct CounterReadingCallback {
+        counter: Arc<AtomicUsize>,
+        seen: AtomicUsize,
+        outcome: Result<(), &'static str>,
+    }
+
+    #[async_trait]
+    impl OffsetCommitCallback for CounterReadingCallback {
+        async fn on_complete(
+            &self,
+            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            self.seen.store(self.counter.load(Ordering::SeqCst), Ordering::SeqCst);
+            self.outcome.map_err(Error::local_illegal_state)
+        }
+    }
+
+    /// Rust-only: the callback counter a `ConsumerHandle` consults is
+    /// non-zero exactly while a user callback runs, and is balanced again
+    /// after the callback returns — whether it succeeds or fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn callback_counter_is_set_only_while_a_user_callback_runs() {
+        let tp = TopicPartition::new("t0".to_string(), 0);
+        let interceptors: ConsumerInterceptors<String, String> = ConsumerInterceptors::new(Vec::new());
+        let invoker = OffsetCommitCallbackInvoker::new(interceptors);
+        let counter = Arc::clone(invoker.callbacks_in_progress());
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        let ok = Arc::new(CounterReadingCallback {
+            counter: Arc::clone(&counter),
+            seen: AtomicUsize::new(usize::MAX),
+            outcome: Ok(()),
+        });
+        invoker.enqueue_user_callback_invocation(ok.clone(), singleton_offset(tp.clone(), 1), None);
+        invoker.invoke_pending_callbacks().await.unwrap();
+        assert_eq!(ok.seen.load(Ordering::SeqCst), 1, "inside the callback the counter is 1");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "balanced after the callback returns");
+
+        let failing = Arc::new(CounterReadingCallback {
+            counter: Arc::clone(&counter),
+            seen: AtomicUsize::new(usize::MAX),
+            outcome: Err("boom"),
+        });
+        invoker.enqueue_user_callback_invocation(failing.clone(), singleton_offset(tp, 2), None);
+        let err = invoker.invoke_pending_callbacks().await.unwrap_err();
+        assert_eq!(err.message(), "boom");
+        assert_eq!(failing.seen.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "balanced after a failing callback too");
+
+        // Nested scopes (a listener whose commit drains the queue) count up
+        // and back down.
+        let outer = invoker.enter_callback();
+        let inner = invoker.enter_callback();
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        drop(inner);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        drop(outer);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }

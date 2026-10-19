@@ -44,7 +44,7 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions, ConfigEntry, DescribeClusterOptions,
     DescribeTopicsOptions, ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
-    NewPartitionReassignment, OffsetSpec, OpType,
+    NewPartitionReassignment, OpType,
 };
 use confluent_kafka::common::Error;
 use confluent_kafka::common::config::{ConfigResource, config_resource};
@@ -52,7 +52,7 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{AdminBackend, OffsetSpecArg, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -118,7 +118,7 @@ async fn produce_records(ctx: &TestContext, topic: &str, partition: i32, num: us
 async fn offset_of<B: AdminBackend>(
     admin: &B,
     tp: &TopicPartition,
-    spec: OffsetSpec,
+    spec: OffsetSpecArg,
     options: ListOffsetsOptions,
 ) -> Result<confluent_kafka::admin::ListOffsetsResultInfo, confluent_kafka::common::Error> {
     let outcomes = admin
@@ -135,7 +135,7 @@ async fn offset_of<B: AdminBackend>(
 async fn offset_ok<B: AdminBackend>(
     admin: &B,
     tp: &TopicPartition,
-    spec: OffsetSpec,
+    spec: OffsetSpecArg,
 ) -> confluent_kafka::admin::ListOffsetsResultInfo {
     offset_of(admin, tp, spec, ListOffsetsOptions::new())
         .await
@@ -296,7 +296,7 @@ async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx:
 
     // Earliest: offset 0. The broker sends no timestamp for a sentinel lookup, so
     // Java reports -1 — asserted because it is the contract, not incidental.
-    let earliest = offset_ok(&admin, &tp, OffsetSpec::earliest()).await;
+    let earliest = offset_ok(&admin, &tp, OffsetSpecArg::Earliest).await;
     assert_eq!(earliest.offset(), 0, "{backend} backend: earliest offset should be 0");
     assert_eq!(
         earliest.timestamp(),
@@ -309,7 +309,7 @@ async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx:
     );
 
     // Latest: log end offset == number of produced records.
-    let latest = offset_ok(&admin, &tp, OffsetSpec::latest()).await;
+    let latest = offset_ok(&admin, &tp, OffsetSpecArg::Latest).await;
     assert_eq!(
         latest.offset(),
         NUM_RECORDS as i64,
@@ -322,7 +322,7 @@ async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx:
     // so the exact offset is timing-dependent — assert only that a valid offset
     // in range and a real timestamp are returned (this still drives the v7+
     // MAX_TIMESTAMP spec path end to end).
-    let max_ts = offset_ok(&admin, &tp, OffsetSpec::max_timestamp()).await;
+    let max_ts = offset_ok(&admin, &tp, OffsetSpecArg::MaxTimestamp).await;
     assert!(
         max_ts.offset() >= 0 && max_ts.offset() < NUM_RECORDS as i64,
         "{backend} backend: max-timestamp offset should be a valid offset in [0, {NUM_RECORDS})"
@@ -370,7 +370,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // earliestLocal is the local log start offset. With no remote storage
     // configured that is the log start offset, i.e. the same answer as earliest —
     // but a *different* wire sentinel (-4 rather than -2).
-    let earliest_local = offset_ok(&admin, &tp, OffsetSpec::earliest_local()).await;
+    let earliest_local = offset_ok(&admin, &tp, OffsetSpecArg::EarliestLocal).await;
     assert_eq!(
         earliest_local.offset(),
         0,
@@ -379,7 +379,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
 
     // latestTiered: nothing has been uploaded, so the broker answers with the
     // unknown-offset sentinel and omits the leader epoch.
-    let latest_tiered = offset_ok(&admin, &tp, OffsetSpec::latest_tiered()).await;
+    let latest_tiered = offset_ok(&admin, &tp, OffsetSpecArg::LatestTiered).await;
     assert_eq!(
         latest_tiered.offset(),
         -1,
@@ -420,7 +420,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // the version this spec needs — that theory was empirically wrong for the
     // broker version this suite actually runs against, so the assertion below
     // was wrong too; fixed to match the real, verified broker behavior.)
-    let pending = offset_ok(&admin, &tp, OffsetSpec::earliest_pending_upload()).await;
+    let pending = offset_ok(&admin, &tp, OffsetSpecArg::EarliestPendingUpload).await;
     assert_eq!(
         pending.offset(),
         -1,
@@ -472,7 +472,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
 
     // forTimestamp(0): the first record at or after the epoch, i.e. offset 0 —
     // but unlike earliest() the broker reports that record's real timestamp.
-    let for_epoch = offset_ok(&admin, &tp, OffsetSpec::for_timestamp(0)).await;
+    let for_epoch = offset_ok(&admin, &tp, OffsetSpecArg::ForTimestamp(0)).await;
     assert_eq!(for_epoch.offset(), 0, "{backend} backend: forTimestamp(0) is the first record");
     assert!(
         for_epoch.timestamp() > 0,
@@ -483,7 +483,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
 
     // forTimestamp far in the future matches nothing: the unknown-offset
     // sentinel, again with no leader epoch.
-    let for_future = offset_ok(&admin, &tp, OffsetSpec::for_timestamp(4_000_000_000_000)).await;
+    let for_future = offset_ok(&admin, &tp, OffsetSpecArg::ForTimestamp(4_000_000_000_000)).await;
     assert_eq!(
         for_future.offset(),
         -1,
@@ -536,7 +536,7 @@ async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory
         "{backend} backend: the options object should carry the isolation level it was built with"
     );
 
-    let latest = offset_of(&admin, &tp, OffsetSpec::latest(), options)
+    let latest = offset_of(&admin, &tp, OffsetSpecArg::Latest, options)
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: read-committed latest offset: {e}"));
     assert_eq!(

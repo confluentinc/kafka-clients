@@ -62,6 +62,8 @@ pub mod producer;
 mod test_alloc_tracker;
 #[cfg(test)]
 mod test_fake_broker;
+#[cfg(test)]
+mod test_thread_safety;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
