@@ -387,7 +387,7 @@ def test_topic_authorization_constructors() -> None:
     assert e.unauthorized_topics() == {"t"}
     # (String message) passes Collections.emptySet(): the Java-given default.
     assert TopicAuthorizationError(message="x").unauthorized_topics() == set()
-    # UNSET: an explicit empty set is given, so (unauthorizedTopics) is used.
+    # MISSING: an explicit empty set is given, so (unauthorizedTopics) is used.
     assert str(TopicAuthorizationError(unauthorized_topics=())) == (
         "Not authorized to access topics: []")
     with pytest.raises(IllegalArgumentError) as exc:

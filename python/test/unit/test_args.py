@@ -578,3 +578,13 @@ def test_mypy_reports_the_deprecated_stub_of_a_former_name(tmp_path: Any) -> Non
     lines = [line for line in out.splitlines() if ": error:" in line]
     assert len(lines) == 1, out
     assert "aliased.py:15:" in lines[0] and "deprecated" in lines[0], out
+
+
+def test_a_signature_default_other_than_missing_is_refused() -> None:
+    # What Java's shorter overload passes is a Form default, never a signature
+    # default (CLAUDE.md, Signatures): the check fails at class definition.
+    with pytest.raises(TypeError, match=r"\['timeout'\] must default to MISSING"):
+        class Broken:
+            @java_forms(Form(), Form("timeout"))
+            def close(self, *, timeout: float | None = None) -> None:
+                pass

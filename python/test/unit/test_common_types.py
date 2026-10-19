@@ -37,7 +37,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NoSuchElementError
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.common import (
     Cluster,
@@ -203,7 +203,7 @@ _TOPIC_PARTITION0 = TopicPartition(topic=_TOPIC_NAME0, partition=_PARTITION1)
 _TIDP0 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_TOPIC_PARTITION0)
 _TIDP1 = TopicIdPartition(topic_id=_TOPIC_ID0, partition=_PARTITION1, topic=_TOPIC_NAME0)
 # Java's `new TopicIdPartition(topicId0, partition1, null)`: `topic` defaults to
-# UNSET, so `topic=None` is given and selects that constructor (CLAUDE.md,
+# MISSING, so `topic=None` is given and selects that constructor (CLAUDE.md,
 # Python Binding Conventions, Signatures).
 _NULL_TOPIC = TopicPartition(topic=None, partition=_PARTITION1)  # type: ignore[arg-type]
 _TIDP_NULL0 = TopicIdPartition(topic_id=_TOPIC_ID0, partition=_PARTITION1, topic=None)
@@ -286,10 +286,10 @@ def test_partition_info_short_form_and_equality() -> None:
                                  in_sync_replicas=(), offline_replicas=())
     assert hash(info) == hash(PartitionInfo(topic="t", partition=1, leader=None,
                                             replicas=(leader,), in_sync_replicas=()))
-    # offline_replicas defaults to UNSET (the five-argument constructor passes
+    # offline_replicas defaults to MISSING (the five-argument constructor passes
     # new Node[0]); both sets are Java constructors, so there is no check, and
     # the constructor fills the omitted one.
-    assert inspect.signature(PartitionInfo).parameters["offline_replicas"].default is UNSET
+    assert inspect.signature(PartitionInfo).parameters["offline_replicas"].default is MISSING
     assert PartitionInfo(topic="t", partition=1, leader=None, replicas=(leader,),
                          in_sync_replicas=(), offline_replicas=(leader,)).offline_replicas() == (
         leader,)
@@ -313,13 +313,13 @@ def test_node_constructors_and_accessors() -> None:
     assert str(exc.value) == (
         "Node() takes one of (id, host, port), (id, host, port, rack), "
         "(id, host, port, rack, is_fenced); got (id, host, port, is_fenced)")
-    # is_fenced defaults to UNSET ((id, host, port, rack) passes false): a false
+    # is_fenced defaults to MISSING ((id, host, port, rack) passes false): a false
     # one is given too, so it is refused without the rack.
     with pytest.raises(IllegalArgumentError) as exc:
         Node(id=5, host="h", port=9092, is_fenced=False)  # type: ignore[call-overload]
     assert str(exc.value).endswith("; got (id, host, port, is_fenced)")
     assert not Node(id=5, host="h", port=9092, rack=None, is_fenced=False).is_fenced()
-    # rack defaults to UNSET, so rack=None is given: the five-argument
+    # rack defaults to MISSING, so rack=None is given: the five-argument
     # constructor with a null rack.
     fenced = Node(id=5, host="h", port=9092, rack=None, is_fenced=True)
     assert fenced.is_fenced() and fenced.rack() is None and not fenced.has_rack()

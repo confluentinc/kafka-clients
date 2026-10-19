@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["AlterClientQuotasOptions"]
@@ -40,23 +40,25 @@ class AlterClientQuotasOptions(AbstractOptions):
 
     __slots__ = ("_validate_only",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, validate_only: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, validate_only: bool = MISSING) -> None:
         super().__init__()
         self._validate_only = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if validate_only is not UNSET:
+        if validate_only is not MISSING:
             self.validate_only(validate_only=validate_only)
 
-    def validate_only(self, *, validate_only: bool | None = None) -> Any:
+    def validate_only(self, *, validate_only: bool = MISSING) -> Any:
         """With ``validate_only``: sets whether the request should be validated without
         altering the configs, and return this object.
 
         Without: returns whether the request should be validated without altering the
         configs.
         """
-        if validate_only is None:
+        if validate_only is MISSING:
             return self._validate_only
+        if validate_only is None:  # a boolean: Java cannot pass null
+            raise TypeError("validate_only must not be None")
         self._validate_only = validate_only
         self._record("validate_only", self._validate_only)
         return self

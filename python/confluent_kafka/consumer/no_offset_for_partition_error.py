@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.consumer.invalid_offset_error import InvalidOffsetError
 
@@ -53,8 +53,8 @@ class NoOffsetForPartitionError(InvalidOffsetError):
     def __init__(
         self,
         *,
-        partition: TopicPartition | None = None,
-        partitions: Iterable[TopicPartition] | None = None,
+        partition: TopicPartition = MISSING,
+        partitions: Iterable[TopicPartition] = MISSING,
         _java_form: int = -1,
     ) -> None:
         partitions = _throwable.materialize(partitions)

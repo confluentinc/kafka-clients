@@ -87,14 +87,14 @@ def test_offset_and_metadata_forms() -> None:
     assert (OffsetAndMetadata(offset=5).metadata(), OffsetAndMetadata(offset=5).leader_epoch()) == (
         "", None)
     assert OffsetAndMetadata(offset=5, metadata="m").leader_epoch() is None
-    # metadata is UNSET: an explicit "" is given, so (offset, leaderEpoch, metadata).
+    # metadata is MISSING: an explicit "" is given, so (offset, leaderEpoch, metadata).
     assert OffsetAndMetadata(offset=5, leader_epoch=3, metadata="").leader_epoch() == 3
     with pytest.raises(IllegalArgumentError) as exc:
         OffsetAndMetadata(offset=5, leader_epoch=3)
     assert str(exc.value) == (
         "OffsetAndMetadata() takes one of (offset, leader_epoch, metadata), "
         "(offset, metadata), (offset); got (offset, leader_epoch)")
-    # leader_epoch is UNSET too ((offset, metadata) passes Optional.empty()): a
+    # leader_epoch is MISSING too ((offset, metadata) passes Optional.empty()): a
     # None leader epoch is given, so it selects the three-argument constructor,
     # and without metadata it is refused, as Java has no (offset, leaderEpoch).
     assert OffsetAndMetadata(offset=5, leader_epoch=None, metadata="m").metadata() == "m"
@@ -121,7 +121,7 @@ def test_offset_and_timestamp() -> None:
     assert o == OffsetAndTimestamp(offset=1, timestamp=2)
     assert hash(o) == hash(OffsetAndTimestamp(offset=1, timestamp=2))
     assert o != OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=4)
-    # leader_epoch is UNSET ((offset, timestamp) passes Optional.empty()); both
+    # leader_epoch is MISSING ((offset, timestamp) passes Optional.empty()); both
     # sets are Java constructors, so a None one is the three-argument form.
     assert o == OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None)
     assert OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None).leader_epoch() is None
@@ -329,7 +329,7 @@ def test_consumer_record_null_checks_and_forms() -> None:
         ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None,  # type: ignore[call-overload]
                        delivery_count=2)
     assert str(exc.value).endswith("got (topic, partition, offset, key, value, delivery_count)")
-    # delivery_count is UNSET (the 11-argument form passes Optional.empty()): a
+    # delivery_count is MISSING (the 11-argument form passes Optional.empty()): a
     # None one is given, so it is refused with the short form too, selects the
     # full form with the long one, and the short form is filled with no count.
     with pytest.raises(IllegalArgumentError) as exc:
@@ -342,7 +342,7 @@ def test_consumer_record_null_checks_and_forms() -> None:
                           leader_epoch=None, delivery_count=None).delivery_count() is None
     assert ConsumerRecord(topic="t", partition=0, offset=0, key=None,
                           value=None).delivery_count() is None
-    # UNSET: Java's default values given explicitly still select the full form.
+    # MISSING: Java's default values given explicitly still select the full form.
     full = ConsumerRecord(topic="t", partition=0, offset=0, timestamp=-1,
                           timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, serialized_key_size=-1,
                           serialized_value_size=-1, key=None, value=None, headers=(),

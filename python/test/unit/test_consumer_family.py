@@ -264,7 +264,7 @@ def test_commit_nowait_rejects_offsets_without_a_callback() -> None:
 
 
 def test_commit_nowait_takes_offsets_with_a_null_callback() -> None:
-    # callback defaults to UNSET, so callback=None is given: Java's
+    # callback defaults to MISSING, so callback=None is given: Java's
     # commitAsync(offsets, null) (CLAUDE.md, Python Binding Conventions,
     # Signatures).
     c = mock()

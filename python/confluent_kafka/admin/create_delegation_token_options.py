@@ -21,11 +21,11 @@ field (CLAUDE.md, Python Binding Conventions, Signatures). Two Java setters writ
 ``maxlifeTimeMs(long)``; the keyword ``max_lifetime_ms`` calls the one named like the
 field, and the deprecated pair (setter and getter) is not generated (Class family).
 ``owner()`` returns ``Optional.ofNullable(owner)``, so the field can hold ``null``:
-the setter's argument is nullable, and, as it shares its name with the getter,
-defaults to ``_args.UNSET`` so that ``owner(owner=None)`` sets ``null``.
+the setter's argument is nullable, so ``owner(owner=None)`` sets ``null``.
 ``renewers`` is not nullable (it starts as ``new LinkedList<>()``, Java has no null branch
 or Javadoc for it, and the admin client iterates it), so ``renewers()`` with no argument
-reads and ``None`` is "not given" (Signatures, Nullability).
+reads and ``renewers(renewers=None)`` raises ``TypeError`` *(at the setter, where Java
+fails in the admin client)* (Signatures, Nullability).
 
 Not generated (deprecated): ``maxlifeTimeMs(long)``, ``maxlifeTimeMs()``.
 """
@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 if TYPE_CHECKING:
@@ -52,45 +52,49 @@ class CreateDelegationTokenOptions(AbstractOptions):
 
     __slots__ = ("_max_lifetime_ms", "_renewers", "_owner")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, max_lifetime_ms: int = UNSET,
-                 renewers: Sequence[KafkaPrincipal] = UNSET,
-                 owner: KafkaPrincipal | None = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, max_lifetime_ms: int = MISSING,
+                 renewers: Sequence[KafkaPrincipal] = MISSING,
+                 owner: KafkaPrincipal | None = MISSING) -> None:
         super().__init__()
         self._max_lifetime_ms = -1
         self._renewers: list[KafkaPrincipal] = []
         self._owner: KafkaPrincipal | None = None
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if max_lifetime_ms is not UNSET:
+        if max_lifetime_ms is not MISSING:
             self.max_lifetime_ms(max_lifetime_ms=max_lifetime_ms)
-        if renewers is not UNSET:
+        if renewers is not MISSING:
             self.renewers(renewers=renewers)
-        if owner is not UNSET:
+        if owner is not MISSING:
             self.owner(owner=owner)
 
-    def renewers(self, *, renewers: Sequence[KafkaPrincipal] | None = None) -> Any:
+    def renewers(self, *, renewers: Sequence[KafkaPrincipal] = MISSING) -> Any:
         """With ``renewers``: set the renewers and return this object. Without: the
         renewers."""
-        if renewers is None:
+        if renewers is MISSING:
             return self._renewers
+        if renewers is None:  # the admin client iterates it
+            raise TypeError("renewers must not be None")
         self._renewers = list(renewers)
         self._record("renewers", self._renewers)
         return self
 
-    def owner(self, *, owner: KafkaPrincipal | None = UNSET) -> Any:
+    def owner(self, *, owner: KafkaPrincipal | None = MISSING) -> Any:
         """With ``owner``: set the owner (``None`` for none) and return this object.
         Without: the owner, or ``None``."""
-        if owner is UNSET:
+        if owner is MISSING:
             return self._owner  # Optional.ofNullable(owner)
         self._owner = owner
         self._record("owner", self._owner)
         return self
 
-    def max_lifetime_ms(self, *, max_lifetime_ms: int | None = None) -> Any:
+    def max_lifetime_ms(self, *, max_lifetime_ms: int = MISSING) -> Any:
         """With ``max_lifetime_ms``: set the maximum lifetime in milliseconds and return
         this object. Without: the maximum lifetime in milliseconds."""
-        if max_lifetime_ms is None:
+        if max_lifetime_ms is MISSING:
             return self._max_lifetime_ms
+        if max_lifetime_ms is None:  # a long: Java cannot pass null
+            raise TypeError("max_lifetime_ms must not be None")
         self._max_lifetime_ms = max_lifetime_ms
         self._record("max_lifetime_ms", self._max_lifetime_ms)
         return self

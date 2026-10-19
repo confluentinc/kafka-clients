@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka.common.errors.api_error import ApiError
 
 __all__ = ["InvalidTxnTimeoutError"]
@@ -45,7 +46,7 @@ class InvalidTxnTimeoutError(ApiError):
         self,
         *,
         message: str,
-        cause: BaseException | None = None,
+        cause: BaseException | None = MISSING,
     ) -> None:
-        _throwable.init(self, message, cause)
+        _throwable.init(self, message, (None if cause is MISSING else cause))
         self._java_kwargs = _throwable.kwargs(message=message, cause=cause)
