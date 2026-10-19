@@ -3371,6 +3371,13 @@ where
             commit.as_ref().map(Arc::clone),
             Arc::clone(&positions_validator),
         ));
+        // Wake the bg task when a LIST_OFFSETS / OFFSETS_FOR_LEADER_EPOCH
+        // forwarder queues its response, so `end_offsets` & co. complete as
+        // soon as the response is read (as Java's do inside `client.poll`)
+        // rather than after the network poll's own timeout.
+        if let Some(offsets_mgr) = offsets.as_ref() {
+            offsets_mgr.set_completion_notify(Arc::clone(&event_notify));
+        }
 
         // TopicMetadataRequestManager — always built.
         let topic_metadata = Some(TopicMetadataRequestManager::new(&config));

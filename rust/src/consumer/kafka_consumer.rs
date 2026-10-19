@@ -712,6 +712,36 @@ mod tests {
         close_and_assert_current_lag_fails(consumer).await;
     }
 
+    /// An offsets query completes as soon as its response is read, as Java's
+    /// does inside `client.poll` (`NetworkClientDelegate.java:454-464` →
+    /// `OffsetsRequestManager.java:686`, `:208`). The LIST_OFFSETS forwarder
+    /// must wake the background task; without that wake the completion waits
+    /// for the network poll's own timeout (`MAX_POLL_TIMEOUT_MS`, 5 s) and a
+    /// shorter timeout fails every time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_offsets_query_completes_without_waiting_for_poll_timeout() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let mut consumer = new_consumer(&broker);
+        consumer.assign(vec![tp0()]).await.expect("assign");
+
+        broker.answer_list_offsets(Some(ListOffsetsAnswer { error: Errors::None, offset: 90 }));
+        assert_eq!(
+            HashMap::from([(tp0(), 90)]),
+            consumer
+                .end_offsets_with_timeout(&[tp0()], Duration::from_secs(1))
+                .await
+                .expect("end offsets")
+        );
+        assert_eq!(
+            HashMap::from([(tp0(), 90)]),
+            consumer
+                .beginning_offsets_with_timeout(&[tp0()], Duration::from_secs(1))
+                .await
+                .expect("beginning offsets")
+        );
+        consumer.close().await.expect("close");
+    }
+
     /// `KafkaConsumer` can move to another task but not be shared between
     /// tasks, as Java's `KafkaConsumer` is single-threaded and enforces it at
     /// run time with `acquire()` (`consumer-threading.md` §2). The compiler
