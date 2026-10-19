@@ -24,6 +24,8 @@ mod deserializer;
 mod dyn_deserializer;
 mod dyn_serializer;
 mod inline_future;
+#[cfg(test)]
+mod serialization_test;
 mod string_deserializer;
 mod string_serializer;
 

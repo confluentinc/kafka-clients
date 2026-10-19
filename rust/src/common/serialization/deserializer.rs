@@ -137,8 +137,9 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// The default implementation delegates to
     /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
     /// `&data[..]`, which, unlike Java's default (`Utils.toNullableArray`),
-    /// copies nothing. [`BytesDeserializer`] overrides it to return `data`
-    /// itself.
+    /// copies nothing. [`StringDeserializer`] overrides it, as Java's does, to
+    /// decode `data` in place; [`BytesDeserializer`] overrides it to return
+    /// `data` itself.
     ///
     /// Java's `byte[]` and `ByteBuffer` overloads share the parameter name
     /// `data`, so the Rust type name `bytes` tells this one apart (CLAUDE.md
@@ -149,6 +150,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// As [`deserialize`](Deserializer::deserialize).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
+    /// [`StringDeserializer`]: crate::common::serialization::StringDeserializer
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
