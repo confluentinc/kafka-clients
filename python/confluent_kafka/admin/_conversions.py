@@ -283,7 +283,12 @@ __all__ = [
     "update_features_result",
     "wrap",
     "wrap_map",
+    "all_partitions_valid",
+    "check_keys",
+    "present",
     "ambiguous_none",
+    "any_topic_id",
+    "any_topic_name",
     "element",
     "non_null",
     "options_or_new",
@@ -317,19 +322,69 @@ def element(value: _T | None, name: str) -> _T:
     return value
 
 
+def check_keys(mapping: Mapping[Any, Any], name: str) -> None:
+    """Java's dereference of each key of ``mapping`` in the method's own loop,
+    before it reads ``options`` (``nodeFor(resource)``, ``replica.brokerId()``,
+    ``Collectors.toUnmodifiableMap``'s null-key check): ``element`` on each key.
+    The values Java reads only on the admin thread are checked after ``options``,
+    in the ``*_args`` conversion."""
+    for key in mapping:
+        element(key, name)
+
+
+def present(values: Iterable[Any], name: str) -> list[Any]:
+    """``values`` as a list, a ``None`` element raising
+    ``TypeError("<name> must not contain None")``. For a ``None`` the FFI cannot
+    carry while Java reads it only on a later path (``CoordinatorStrategy``'s group
+    or transactional id, ``createRequest``), so Java fails that key's future instead
+    (CLAUDE.md, Implementation over the FFI, exception 4, the later-path clause)."""
+    out = list(values)
+    for value in out:
+        element(value, name)
+    return out
+
+
 _O = TypeVar("_O")
 
 
-def options_or_new(options: _O | None, factory: Callable[[], _O]) -> _O:
+def options_or_new(options: _O | None, factory: Callable[[], _O], *, read: bool = True) -> _O:
     """An RPC's ``options``: left out (``MISSING``), Java's short form, which passes
     ``new XxxOptions()``; an explicit ``None`` is Java's ``null``, which
     ``KafkaAdminClient`` dereferences (``options.timeoutMs()``):
-    ``TypeError("options must not be None")``."""
+    ``TypeError("options must not be None")``. The caller runs it where Java reads
+    ``options``, after Java's own loop over the arguments; ``read`` is ``False`` when
+    Java's body returns before reading it (an empty input, every input failed
+    early): then a ``None`` is accepted and a new options object, which the core does
+    not read either, goes to the FFI."""
     if options is MISSING:
         return factory()
     if options is None:
+        if not read:
+            return factory()
         raise TypeError("options must not be None")
     return options
+
+
+def any_topic_name(names: Iterable[Any]) -> bool:
+    """Whether Java reads ``options`` for these topic names: some name is not
+    unrepresentable (``KafkaAdminClient.topicNameIsUnrepresentable``: ``null`` or
+    empty), so ``if (!topics.isEmpty())`` holds (KafkaAdminClient:1905, 2042, 2453)."""
+    return any(name for name in names)
+
+
+def any_topic_id(ids: Iterable[Any]) -> bool:
+    """Whether Java's ``handleDeleteTopicsUsingIds`` reads ``options``: some id is not
+    ``Uuid.ZERO_UUID`` (KafkaAdminClient:2058, 2067)."""
+    from confluent_kafka.common.uuid import Uuid
+
+    return any(topic_id != Uuid.ZERO_UUID for topic_id in ids)
+
+
+def all_partitions_valid(rows: Iterable[tuple[Any, int]] | None) -> bool:
+    """Whether Java's ``listPartitionReassignments`` reads ``options``: it returns
+    early on the first unrepresentable topic or negative partition
+    (KafkaAdminClient:4194-4205)."""
+    return rows is None or all(topic and partition >= 0 for topic, partition in rows)
 
 
 def ambiguous_none(method: str, name: str, forms: tuple[str, ...]) -> Exception:
@@ -437,6 +492,10 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
     spec = []
     for topic in new_topics:
         element(topic, "new_topics")  # newTopic.name()
+        if topic.name() is None:
+            # Java's unrepresentable name (KafkaAdminClient:1895): that topic's future
+            # fails. The FFI cannot carry it: TypeError up front.
+            raise TypeError("new_topics must not contain a NewTopic with a None name")
         configs = topic.configs()
         assignments = topic.replicas_assignments()
         spec.append((
@@ -508,13 +567,17 @@ def topic_collection_target(topics: Any, rpc: str) -> tuple[bool, list[Any]]:
         raise IllegalArgumentError(
             message="The TopicCollection: None provided did not match any supported "
             "classes for " + rpc + ".")
+    # A None name is Java's unrepresentable name (KafkaAdminClient:1847), whose
+    # future fails; a None id, Java's NPE (deleteTopics, 2057) or unrepresentable id
+    # (describeTopics, 1851). The FFI carries neither: TypeError up front, before the
+    # options, as Java's loop precedes its options read.
     if not isinstance(topics, TopicCollection):
         reject_str("topics", topics)
-        return False, list(topics)
+        return False, present(topics, "topics")
     if isinstance(topics, TopicCollection.TopicIdCollection):
-        return True, topics.topic_ids()
+        return True, present(topics.topic_ids(), "topics")
     if isinstance(topics, TopicCollection.TopicNameCollection):
-        return False, topics.topic_names()
+        return False, present(topics.topic_names(), "topics")
     raise IllegalArgumentError(
         message="The TopicCollection: " + java_str(topics)
         + " provided did not match any supported classes for " + rpc + ".")
@@ -617,21 +680,21 @@ def describe_topic_names(topic_names: Iterable[str]) -> list[str]:
     """``describeTopics(Collection<String> topicNames)``'s names as a list; a ``str``
     is refused (``reject_str``)."""
     reject_str("topic_names", topic_names)
-    return list(topic_names)
+    return present(topic_names, "topic_names")  # see topic_collection_target
 
 
 def group_ids_list(group_ids: Iterable[str]) -> list[str]:
     """A ``Collection<String> groupIds`` as a list; a ``str`` is refused
     (``reject_str``)."""
     reject_str("group_ids", group_ids)
-    return list(group_ids)
+    return present(group_ids, "group_ids")
 
 
 def transactional_ids_list(transactional_ids: Iterable[str]) -> list[str]:
     """A ``Collection<String> transactionalIds`` as a list; a ``str`` is refused
     (``reject_str``)."""
     reject_str("transactional_ids", transactional_ids)
-    return list(transactional_ids)
+    return present(transactional_ids, "transactional_ids")
 
 
 def describe_topics_args(form: int, keys: list[Any]) -> tuple[Any, ...]:
@@ -1083,9 +1146,15 @@ def create_delegation_token_options(options: CreateDelegationTokenOptions
                                     ) -> list[tuple[str, Any]]:
     """The ``(setter, value)`` pairs of a ``CreateDelegationTokenOptions``: the
     renewers as ``(principal_type, name)`` pairs and the owner as one (``None`` for
-    none), read back from the options' own getters."""
+    none), read back from the options' own getters. A ``None`` renewers, which the
+    setter stores as Java's does, raises where Java iterates it
+    (``KafkaAdminClient.createDelegationToken``: ``for (KafkaPrincipal principal :
+    options.renewers())``)."""
+    renewers = options.renewers()
+    if renewers is None:
+        raise TypeError("CreateDelegationTokenOptions.renewers must not be None")
     stored: dict[str, Callable[[], Any]] = {
-        "renewers": lambda: [_principal_args(p) for p in options.renewers()],
+        "renewers": lambda: [_principal_args(p) for p in renewers],
         "owner": lambda: _optional_principal_args(options.owner())}
     return [(setter, stored[setter]() if setter in stored else value)
             for setter, value in options._setters_ran()]
@@ -1239,6 +1308,8 @@ def list_consumer_group_offsets_args(
     assert group_specs is not None  # the caller's non_null
     rows = []
     for spec_group_id, spec in group_specs.items():
+        if spec_group_id is None:  # a later-path null: CoordinatorStrategy's group id
+            raise TypeError("group_specs must not contain None")
         if spec is None:  # the handler's groupSpecs.get(groupId).topicPartitions()
             raise TypeError("group_specs must not contain None")
         partitions = spec.topic_partitions()
@@ -1590,16 +1661,17 @@ def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
     return False, -1  # ListOffsetsRequest.LATEST_TIMESTAMP
 
 
-def list_offsets_args(topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                      options: Any) -> tuple[Any, ...]:
-    """``Admin_list_offsets(h, rows, isolation_level, options)``'s arguments: each
-    entry as ``(topic, partition, is_timestamp, value)``; the options'
-    ``isolationLevel().id()``, which Java's ``ListOffsetsOptions`` takes in its
-    constructor."""
+def list_offsets_args(topic_partition_offsets: Mapping[TopicPartition, OffsetSpec]
+                      ) -> tuple[Any, ...]:
+    """``Admin_list_offsets(h, rows, isolation_level, options)``'s first argument:
+    each entry as ``(topic, partition, is_timestamp, value)``. The caller adds the
+    options' ``isolationLevel().id()`` once it has read ``options``, after these
+    rows, as Java builds its offset queries before ``new ListOffsetsHandler(…,
+    options, …)``."""
     spec = [(element(partition, "topic_partition_offsets").topic(), partition.partition(),
              *offset_spec_value(offset_spec))
             for partition, offset_spec in topic_partition_offsets.items()]
-    return (spec, options.isolation_level().id())
+    return (spec,)
 
 
 def _listed_offset(info: tuple[int, int, int | None]) -> Any:
@@ -1699,7 +1771,9 @@ def describe_user_scram_credentials_args(users: Iterable[str] | None) -> tuple[A
     (``reject_str``)."""
     if users is not None:
         reject_str("users", users)
-    return (None if users is None else list(users),)
+    # Java's createRequest skips a null user (``if (user != null)``,
+    # KafkaAdminClient:4473): it is not described.
+    return (None if users is None else [user for user in users if user is not None],)
 
 
 def _scram_description(user: str, infos: Iterable[tuple[int, int]]

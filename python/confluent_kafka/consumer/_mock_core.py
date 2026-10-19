@@ -59,7 +59,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka._java import java_str
@@ -176,7 +176,7 @@ class MockConsumerCore(Generic[K, V]):
         """Java's private ``MockConsumer(AutoOffsetResetStrategy)``."""
         self._lock = _Monitor()
         self._subscriptions = SubscriptionState(offset_reset_strategy)
-        self._partitions: dict[str, list[PartitionInfo]] = {}
+        self._partitions: dict[str, list[PartitionInfo] | None] = {}
         self._records: dict[TopicPartition, list[ConsumerRecord[K, V]]] = {}
         self._paused_partitions: set[TopicPartition] = set()
         self._mock_closed = False
@@ -507,12 +507,15 @@ class MockConsumerCore(Generic[K, V]):
                           ) -> list[PartitionInfo]:
         with self._lock:
             self._ensure_not_closed()
-            return list(self._partitions.get(topic, []))
+            found = self._partitions.get(topic, [])
+            return cast("list[PartitionInfo]", None if found is None else list(found))
 
     def _c_list_topics(self, timeout: Duration = MISSING) -> dict[str, list[PartitionInfo]]:
         with self._lock:
             self._ensure_not_closed()
-            return {topic: list(partitions) for topic, partitions in self._partitions.items()}
+            return {topic: cast("list[PartitionInfo]", None if partitions is None
+                                else list(partitions))
+                    for topic, partitions in self._partitions.items()}
 
     def _c_paused(self) -> set[TopicPartition]:
         with self._lock:
@@ -736,7 +739,9 @@ class MockConsumerCore(Generic[K, V]):
     def update_partitions(self, *, topic: str, partitions: Sequence[PartitionInfo]) -> None:
         with self._lock:
             self._ensure_not_closed()
-            self._partitions[topic] = list(partitions)
+            # Java stores the list as given, a null one included, which
+            # partitions_for() / list_topics() then hand out.
+            self._partitions[topic] = None if partitions is None else list(partitions)
 
     def closed(self) -> bool:
         with self._lock:

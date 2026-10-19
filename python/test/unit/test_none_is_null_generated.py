@@ -145,9 +145,8 @@ def test_setters_reject_a_null_they_dereference() -> None:
     # new HashSet<>(null)
     with pytest.raises(TypeError, match=r"^states must not be None$"):
         ListTransactionsOptions().filter_states(states=None)  # type: ignore[arg-type]
-    # a collection the admin client iterates (checked at the setter)
-    with pytest.raises(TypeError, match=r"^renewers must not be None$"):
-        CreateDelegationTokenOptions().renewers(renewers=None)  # type: ignore[call-overload]
+    # a collection the admin client iterates later: stored, as Java's setter does
+    assert CreateDelegationTokenOptions().renewers(renewers=None).renewers() is None  # type: ignore[call-overload]
 
 
 def test_set_copy_of_rejects_a_null_element() -> None:

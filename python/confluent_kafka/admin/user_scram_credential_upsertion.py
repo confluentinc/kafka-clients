@@ -20,8 +20,13 @@ Java's three constructors ``(user, credentialInfo, String password)``,
 password, byte[] salt)`` are one keyword-only constructor (CLAUDE.md, Python
 Binding Conventions, Signatures): ``password`` is ``str | bytes``, dispatched by
 ``isinstance``, and ``salt``, which the shorter forms fill with a random salt
-(a computed value), defaults to ``None``. A ``str`` password with a ``salt`` is
-no Java constructor and raises ``TypeError``. The random salt is Java's
+(a computed value), defaults to ``MISSING``: left out, the random salt; a
+``None`` is Java's ``null`` and raises ``TypeError("salt must not be None")``
+(``Objects.requireNonNull(salt)``), as a ``None`` user, credential info or
+password does, in Java's order. A ``str`` password with a ``salt`` is no Java
+constructor and raises ``TypeError``; a ``None`` password without a salt matches
+both the ``String`` and the ``byte[]`` constructor and raises
+``IllegalArgumentError``. The random salt is Java's
 ``ScramFormatter.secureRandomBytes``: the UTF-8 bytes of a random 130-bit
 integer written in base 36. Java declares no ``equals`` / ``hashCode`` /
 ``toString``.

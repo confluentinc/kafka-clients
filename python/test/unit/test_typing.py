@@ -1134,7 +1134,17 @@ def _one_stub_per_java_overload(c: object = None) -> None:
                 "ConsumerRecord[bytes, bytes]")
 
 
+def _error_message_takes_null() -> None:
+    """A message takes Java's null in every signature, single-constructor errors
+    included (``ProducerFencedException(String)``)."""
+    from confluent_kafka.common.errors import ApiError, ProducerFencedError
+
+    assert_type(ProducerFencedError(message=None), ProducerFencedError)
+    assert_type(ApiError(message=None), ApiError)
+
+
 def test_one_stub_per_java_overload_typing_imports() -> None:
+    _error_message_takes_null()
     _one_stub_per_java_overload()
 
 

@@ -41,7 +41,7 @@ class GroupAuthorizationError(AuthorizationError):
     def __init__(
         self,
         *,
-        message: str,
+        message: str | None,
         group_id: str | None = MISSING,
     ) -> None:
         if group_id is MISSING:

@@ -163,7 +163,12 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
     constructor argument is given: the argument wins and the key is not
     parsed, as Java's ``ProducerConfig.appendSerializerToConfig`` /
     ``ConsumerConfig.appendDeserializerToConfig`` replace it with the
-    argument's class before ``ConfigDef`` parses the configs."""
+    argument's class before ``ConfigDef`` parses the configs. A ``None`` is
+    Java's null map, which ``new HashMap<>(configs)`` dereferences
+    (``ProducerConfig.java:717``, ``ConsumerConfig.java:794``,
+    ``Utils.castToStringObjectMap``): ``TypeError("configs must not be None")``."""
+    if configs is None:
+        raise TypeError("configs must not be None")
     if not isinstance(configs, Mapping):
         raise TypeError(f"configs must be a dict, not {type(configs).__name__}")
     for key, value in configs.items():

@@ -24,7 +24,8 @@ Conventions, Signatures), and the constructor fills it. Java's ``Node[]`` is ``t
 
 from __future__ import annotations
 
-from typing import overload
+from collections.abc import Iterable
+from typing import cast, overload
 
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
@@ -58,9 +59,13 @@ class PartitionInfo:
         self._topic = topic
         self._partition = partition
         self._leader = leader
-        self._replicas = tuple(replicas)
-        self._in_sync_replicas = tuple(in_sync_replicas)
-        self._offline_replicas = tuple(offline_replicas)
+        # Java stores the arrays as given, a null one included (its toString
+        # formats a null array as "[]"); the stubs keep them non-nullable.
+        self._replicas: tuple[Node, ...] = cast("tuple[Node, ...]", _copied(replicas))
+        self._in_sync_replicas: tuple[Node, ...] = cast("tuple[Node, ...]",
+                                                        _copied(in_sync_replicas))
+        self._offline_replicas: tuple[Node, ...] = cast("tuple[Node, ...]",
+                                                        _copied(offline_replicas))
 
     def topic(self) -> str:
         """The topic name."""
@@ -114,6 +119,11 @@ class PartitionInfo:
                 f"leader = {leader}, replicas = {_format_node_ids(self._replicas)}, "
                 f"isr = {_format_node_ids(self._in_sync_replicas)}, "
                 f"offlineReplicas = {_format_node_ids(self._offline_replicas)})")
+
+
+def _copied(nodes: Iterable[Node] | None) -> tuple[Node, ...] | None:
+    """Java's ``Node[]`` as given: a copy, or ``None`` for Java's null."""
+    return None if nodes is None else tuple(nodes)
 
 
 def _format_node_ids(nodes: tuple[Node, ...] | None) -> str:

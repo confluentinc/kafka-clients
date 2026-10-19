@@ -465,8 +465,10 @@ def test_records_constructor_null_maps() -> None:
     with pytest.raises(TypeError) as exc:
         ConsumerRecords(records=None, next_offsets=None)  # type: ignore[arg-type]
     assert str(exc.value) == "next_offsets must not be None"
+    # A null records map is stored, as Java's, and fails at its first use.
+    stored = ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
     with pytest.raises(TypeError) as exc:
-        ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
+        stored.is_empty()
     assert str(exc.value) == "records must not be None"
 
 
