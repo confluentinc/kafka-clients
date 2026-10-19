@@ -62,7 +62,7 @@ import logging
 import math
 import threading
 import weakref
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sized
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
@@ -403,6 +403,17 @@ def abandoned_call_wait_s(close_timeout_ms: int) -> float:
     if close_timeout_ms < 0:
         return ABANDONED_CALL_END_S
     return min(ABANDONED_CALL_END_S, close_timeout_ms / 1000.0)
+
+
+def empty_input_timeout(collection: object, timeout: Any) -> Any:
+    """The ``timeout`` of ``committed`` / ``beginning_offsets`` / ``end_offsets``
+    / ``offsets_for_times`` for an empty input: Java returns the empty map
+    before it reads the ``Duration`` (``AsyncKafkaConsumer.java:1270-1272``,
+    ``1419``, ``1476``), so a ``None`` there is never dereferenced and the call
+    takes the overload without it, whose answer is the same empty map."""
+    if timeout is None and isinstance(collection, Sized) and len(collection) == 0:
+        return MISSING
+    return timeout
 
 
 def close_args(option: CloseOptions) -> tuple[int, int]:
@@ -1643,8 +1654,13 @@ class _ConsumerState:
         assignment (``IllegalStateError("No current assignment for partition
         None")``), after the negative-offset check; with a leader epoch,
         ``metadata.updateLastSeenEpochIfNewer(null, …)`` throws its
-        ``requireNonNull`` first (``TypeError``). The FFI takes the partition's
-        topic and number, so a ``None`` cannot cross it (exception 4)."""
+        ``requireNonNull`` there first, which ``ConsumerUtils.getResult`` hands
+        the caller wrapped by ``maybeWrapAsKafkaException`` (only an
+        ``IllegalStateException`` passes unwrapped): Java's
+        ``new KafkaException(npe)``, a ``KafkaError`` caused by
+        ``TypeError("partition must not be None")``. The FFI takes the
+        partition's topic and number, so a ``None`` cannot cross it (exception
+        4)."""
         if offset is None:
             raise TypeError("offset must not be None")
         if offset_and_metadata is not MISSING:
@@ -1658,7 +1674,7 @@ class _ConsumerState:
             with self._use():
                 if (offset_and_metadata is not MISSING
                         and offset_and_metadata.leader_epoch() is not None):
-                    raise TypeError("partition must not be None")
+                    raise KafkaError(cause=TypeError("partition must not be None"))
                 raise IllegalStateError(message="No current assignment for partition None")
         return (None if offset is MISSING else offset,
                 None if offset_and_metadata is MISSING else offset_and_metadata)
@@ -1674,8 +1690,9 @@ class _ConsumerState:
 
     def _check_committed_timeout(self, partitions: object, timeout: object) -> None:
         """``committed(partitions, null)``: after ``acquireAndEnsureOpen()``,
-        Java checks the group, dereferences ``partitions``, then the null
-        ``Duration`` (``calculateDeadlineMs``)."""
+        Java checks the group, dereferences ``partitions`` (an empty one returns
+        ``{}`` there, before the timeout is read: ``empty_input_timeout``), then
+        the null ``Duration`` (``calculateDeadlineMs``)."""
         if timeout is None:
             self._check_open()
             with self._use():

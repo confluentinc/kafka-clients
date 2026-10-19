@@ -125,9 +125,11 @@ field, and the deprecated pair (setter and getter) is not generated (Class famil
 ``owner()`` returns ``Optional.ofNullable(owner)``, so the field can hold ``null``:
 the setter's argument is nullable, so ``owner(owner=None)`` sets ``null``.
 ``renewers`` is not nullable (it starts as ``new LinkedList<>()``, Java has no null branch
-or Javadoc for it, and the admin client iterates it), so ``renewers()`` with no argument
-reads and ``renewers(renewers=None)`` raises ``TypeError`` *(at the setter, where Java
-fails in the admin client)* (Signatures, Nullability).
+or Javadoc for it), so ``renewers()`` with no argument reads. Java's setter stores its
+argument as given, so ``renewers(renewers=None)`` stores ``None``, as Java stores ``null``;
+``create_delegation_token`` raises ``TypeError("CreateDelegationTokenOptions.renewers must
+not be None")`` where Java iterates it (``KafkaAdminClient.createDelegationToken``,
+``MockAdminClient.createDelegationToken``) (Signatures, Nullability).
 
 Not generated (deprecated): ``maxlifeTimeMs(long)``, ``maxlifeTimeMs()``.
 """

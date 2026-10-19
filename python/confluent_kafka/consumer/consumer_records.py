@@ -55,15 +55,13 @@ class ConsumerRecords(Generic[K, V]):
                  next_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None:
         """The records by partition, and the next offsets and metadata of the
         partitions whose position the poll advanced. A ``None`` ``next_offsets``
-        raises ``TypeError``, as Java's ``Map.copyOf(nextOffsets)``; so does a
-        ``None`` ``records``, which Java stores and dereferences at its first
-        use *(Python copies it here)*."""
+        raises ``TypeError``, as Java's ``Map.copyOf(nextOffsets)``; a ``None``
+        ``records`` is stored, as Java stores it, and the methods that read it
+        raise ``TypeError`` where Java's dereference throws."""
         if next_offsets is None:
             raise TypeError("next_offsets must not be None")
-        if records is None:
-            raise TypeError("records must not be None")
-        self._records: dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]] = {
-            tp: tuple(recs) for tp, recs in records.items()}
+        self._records: dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]] | None = (
+            None if records is None else {tp: tuple(recs) for tp, recs in records.items()})
         self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = dict(next_offsets)
 
     @overload
@@ -72,19 +70,19 @@ class ConsumerRecords(Generic[K, V]):
     def records(self, *, topic: str) -> list[ConsumerRecord[K, V]]: ...
 
     @java_forms(Form("partition"), Form("topic"))
-    def records(self, *, partition: TopicPartition | None = MISSING,
+    def records(self, *, partition: TopicPartition = MISSING,
                 topic: str = MISSING) -> list[ConsumerRecord[K, V]]:
         """Get just the records for the given partition (none for a ``None``
         one, as Java's map lookup), or for the given topic (``None`` raises
         Java's ``IllegalArgumentError``)."""
         if partition is not MISSING:
-            return list(self._records.get(partition, ()))  # type: ignore[arg-type]
+            return list(self._by_partition().get(partition, ()))
         if topic is None:
             from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
             raise IllegalArgumentError(message="Topic must be non-None.")
         result: list[ConsumerRecord[K, V]] = []
-        for tp, recs in self._records.items():
+        for tp, recs in self._by_partition().items():
             if tp.topic() == topic:
                 result.extend(recs)
         return result
@@ -107,18 +105,24 @@ class ConsumerRecords(Generic[K, V]):
         """Get the partitions which have records contained in this record set:
         the set of partitions with data (may be empty if no data was
         returned)."""
-        return set(self._records)
+        return set(self._by_partition())
 
     def __iter__(self) -> Iterator[ConsumerRecord[K, V]]:
-        for recs in self._records.values():
-            yield from recs
+        # Not a generator: a null records map throws here, as Java's iterator().
+        return (r for recs in self._by_partition().values() for r in recs)
 
     def __len__(self) -> int:
         """The number of records for all topics (Java's ``count()``)."""
-        return sum(len(recs) for recs in self._records.values())
+        return sum(len(recs) for recs in self._by_partition().values())
 
     def is_empty(self) -> bool:
-        return not self._records
+        return not self._by_partition()
+
+    def _by_partition(self) -> dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]]:
+        """The records map; a null one throws where Java dereferences it."""
+        if self._records is None:
+            raise TypeError("records must not be None")
+        return self._records
 
     @staticmethod
     def empty() -> ConsumerRecords[Any, Any]:

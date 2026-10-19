@@ -41,15 +41,15 @@ through the error registry (`_errors.from_ffi_error` / `class_for_ffi_id`), `Non
 | `AbstractOptions` | Java `abstract`: `__init__` raises `TypeError("AbstractOptions is an abstract class; use one of its subclasses")` when the class is itself, else sets Java's field initializers; no keyword constructor. `timeoutMs()` / `timeoutMs(Integer)`: one method, two stubs, `-> Self`; the argument defaults to `MISSING` (left out, it reads) and is nullable, so `timeout_ms=None` sets null. |
 | `DeleteRecordsOptions` | Only the inherited `timeoutMs`: keyword constructor `(*, timeout_ms)`, nothing else. |
 | `CreateTopicsOptions` | Re-declared `timeoutMs` (repeated with the class's own return type). Setter and getter with different names (`validate_only` / `should_validate_only`, `retry_on_quota_violation` / `should_retry_on_quota_violation`): the setter has a required keyword. |
-| `DescribeTopicsOptions` | One-name setter + getter pairs with a non-nullable argument (`include_authorized_operations`, `partition_size_limit_per_response`): runtime default `None` = read; stubs `(self) -> T` and `(self, *, x: T) -> Class`. Starting values `False` and `2000`. Re-declared `timeoutMs`. |
+| `DescribeTopicsOptions` | One-name setter + getter pairs with a non-nullable argument (`include_authorized_operations`, `partition_size_limit_per_response`): runtime default `MISSING` = read (left out), a `None` raises `TypeError` (a primitive: Java cannot pass null); stubs `(self) -> T` and `(self, *, x: T) -> Class`. Starting values `False` and `2000`. Re-declared `timeoutMs`. |
 | `DescribeFeaturesOptions` | A starting value with no value of the setter's type (`OptionalInt.empty()`, setter `int`): stub `node_id: int = ...`. The setter's `OptionalInt.of(x)` is `x`. |
-| `ListGroupsOptions` | Setters storing a changed value (`null`/empty -> `Set.of()`, else a `Set.copyOf` copy; a `None` element is not checked, as item 8 says). Keywords named after fields, not setters (`group_states` -> `in_group_states`, `types` -> `with_types`, `protocol_types` -> `with_protocol_types`). Static factories -> `@staticmethod`. Java's internal `ConsumerProtocol.PROTOCOL_TYPE` -> a private module constant. Stubs show `= ()` for `Set.of()`. Translates `ListGroupsOptionsTest`. |
+| `ListGroupsOptions` | Setters storing a changed value (`null`/empty -> `Set.of()`, else a `Set.copyOf` copy; a `None` element raises `TypeError("<argument> must not contain None")`, as item 8 says). Keywords named after fields, not setters (`group_states` -> `in_group_states`, `types` -> `with_types`, `protocol_types` -> `with_protocol_types`). Static factories -> `@staticmethod`. Java's internal `ConsumerProtocol.PROTOCOL_TYPE` -> a private module constant. Stubs show `= ()` for `Set.of()`. Translates `ListGroupsOptionsTest`. |
 | `ListTopicsOptions` | `equals` / `hashCode` / `toString` -> `__eq__` (`type(other) is not type(self)` -> `NotImplemented`) / `__hash__` (tuple of Java's `Objects.hash` fields) / `__str__` (Java's text, values through `java_str`). Re-declared `timeoutMs`. |
 | `CreateDelegationTokenOptions` | Several setters for one field: `maxLifetimeMs` and the deprecated `maxlifeTimeMs`; the keyword calls the one named like the field and the deprecated pair is not generated (listed in the module docstring). `owner`: a nullable argument of a one-name pair (`Optional.ofNullable` getter): `owner=None` sets null. Starting values `-1`, `()` (`new LinkedList<>()`), `None`. Getter returns the stored `list` (Java returns its mutable field). |
 | `RemoveMembersFromConsumerGroupOptions` | Not built with setters (a constructor takes arguments): Java's constructors only, `(*, members=MISSING)`, left out = the `()` form, `None` raises `TypeError` (Java's `members.isEmpty()`), two stubs; Java's `IllegalArgumentException` message. Setter returning `void` -> returns `None`; nullable one-name pair: `reason=None` sets null. Translates `RemoveMembersFromConsumerGroupOptionsTest`. |
-| `ListTransactionsOptions` | Set fields that Java's `hashCode` hashes: stored as `frozenset` (hashable), getters return a new `set`; `__hash__` hashes the frozensets. Keyword named after the field while the setter and its parameter have other names (`filtered_states` -> `filter_states(*, states)`). A nullable setter argument with its own name (`filter_on_transactional_id_pattern(*, pattern: str \| None)`, required). `toString` prints `timeoutMs`, `equals` / `hashCode` leave it out. `new HashSet<>(null)` is not checked. |
+| `ListTransactionsOptions` | Set fields that Java's `hashCode` hashes: stored as `frozenset` (hashable), getters return a new `set`; `__hash__` hashes the frozensets. Keyword named after the field while the setter and its parameter have other names (`filtered_states` -> `filter_states(*, states)`). A nullable setter argument with its own name (`filter_on_transactional_id_pattern(*, pattern: str \| None)`, required). `toString` prints `timeoutMs`, `equals` / `hashCode` leave it out. A `None` to a `new HashSet<>(x)` setter raises `TypeError("<argument> must not be None")` (item 8). |
 | `DescribeProducersOptions` | `OptionalInt` in `toString` (`OptionalInt[5]` / `OptionalInt.empty`); `equals` / `hashCode` over a field and `timeoutMs`; `broker_id: int = ...`. |
-| `ListOffsetsOptions` | Constructor-only class with a Java-given enum default (`()` calls `this(IsolationLevel.READ_UNCOMMITTED)`): `isolation_level: IsolationLevel = IsolationLevel.READ_UNCOMMITTED`; a `final` field, so no setter. |
+| `ListOffsetsOptions` | Constructor-only class with a Java-given enum default (`()` calls `this(IsolationLevel.READ_UNCOMMITTED)`): `isolation_level: IsolationLevel = MISSING`, left out it is `READ_UNCOMMITTED`; two stubs, `()` and `(*, isolation_level: IsolationLevel)`; a `final` field, so no setter. |
 
 Keyword constructor (every setter-built class): parent fields first (`timeout_ms`), then the class's
 own in Java's field order; runtime default `MISSING`; body = `super().__init__()`, Java's field
@@ -111,8 +111,10 @@ map of futures) have one `@overload` per kind (`self: X[Sync]` -> `KafkaFuture[.
    `TypeError("<param> must not be None")` for a `NullPointerException`, Java's error and message
    (`null` read `None`) for an explicit check. A `null` element `Set.copyOf` rejects is
    `TypeError("<param> must not contain None")` (`ListGroupsOptions.in_group_states([None])`). A
-   collection a setter stores as given and Java's admin client iterates later
-   (`CreateDelegationTokenOptions.renewers`) is refused at the setter *(Python checks it there)*.
+   reference a setter stores as given (`CreateDelegationTokenOptions.renewers`) is stored,
+   `None` included, as Java stores `null`; the RPC that iterates it raises
+   `TypeError("CreateDelegationTokenOptions.renewers must not be None")` there, as Java's admin
+   client and mock do.
    Where Java gives `null` a meaning (`owner`, `timeoutMs`, `reason`), `None` keeps it. A `null`
    the class itself produces and then dereferences is `IllegalStateError` naming the state a mock
    lacks, or `IllegalArgumentError` with the core's text for a Result's unknown key
@@ -120,7 +122,9 @@ map of futures) have one `@overload` per kind (`self: X[Sync]` -> `KafkaFuture[.
 9. `CreateDelegationTokenOptions.renewers` is not nullable, following the Signatures nullability
    text (starting value `new LinkedList<>()`, no null branch, no Javadoc; `KafkaAdminClient`
    iterates it): its runtime default is `MISSING` (left out, it reads), the stub's argument is
-   `Sequence[KafkaPrincipal]`, and `renewers(renewers=None)` raises `TypeError` (item 8).
+   `Sequence[KafkaPrincipal]`, and `renewers(renewers=None)` stores `None`, which
+   `create_delegation_token` refuses where Java iterates it (item 8); the field and the
+   getter are `list[KafkaPrincipal] | None`.
 10. `ListTransactionsResult.all_by_broker_id()` stays pending for an empty broker map, as Java's
     does.
 

@@ -46,7 +46,7 @@ class DuplicateResourceError(ApiError):
         self,
         *,
         resource: str | None = MISSING,
-        message: str,
+        message: str | None,
         cause: BaseException | None = MISSING,
     ) -> None:
         if resource is MISSING:

@@ -632,3 +632,250 @@ def test_mock_add_topic_uses_topic_id_left_out() -> None:
     ids = {n: listing.topic_id()
            for n, listing in mock.list_topics().names_to_listings().get().items()}
     assert ids["a"] != Uuid.ZERO_UUID and ids["b"] == Uuid.ZERO_UUID
+
+
+# ---- options=None where Java's body returns before reading options (Critic 99, item 1) ----
+
+
+def _empty_input_rows() -> list[tuple[str, dict[str, Any], str | None]]:
+    """``(rpc, arguments with options=None, expected TypeError text or None for a
+    result)``: the empty input and the null element of each RPC whose Java body reads
+    ``options`` only after its loop over the arguments, and only for a non-empty
+    input; the element's NPE comes first."""
+    from confluent_kafka.common import (
+        AccessControlEntryFilter,
+        ResourcePatternFilter,
+        TopicCollection,
+        Uuid,
+    )
+
+    unknown = AclBindingFilter(
+        pattern_filter=ResourcePatternFilter(resource_type=ResourceType.UNKNOWN, name=None,
+                                             pattern_type=PatternType.LITERAL),
+        entry_filter=AccessControlEntryFilter.ANY)
+    no_ids = TopicCollection.of_topic_ids(topics=[])
+    return [
+        ("create_topics", {"new_topics": []}, None),
+        ("create_topics", {"new_topics": [None]}, "new_topics must not contain None"),
+        ("create_topics", {"new_topics": [NewTopic(name="", num_partitions=1,
+                                                   replication_factor=1)]}, None),
+        ("delete_topics", {"topics": []}, None),
+        ("delete_topics", {"topics": [""]}, None),
+        ("delete_topics", {"topics": no_ids}, None),
+        ("delete_topics", {"topics": TopicCollection.of_topic_ids(topics=[Uuid.ZERO_UUID])}, None),
+        ("describe_topics", {"topic_names": []}, None),
+        # By ids Java reads options unconditionally (KafkaAdminClient:2495).
+        ("describe_topics", {"topics": no_ids}, "options must not be None"),
+        ("describe_configs", {"resources": []}, None),
+        ("describe_configs", {"resources": [None]}, "resources must not contain None"),
+        ("incremental_alter_configs", {"configs": {}}, None),
+        ("incremental_alter_configs", {"configs": {None: [OP]}}, "configs must not contain None"),
+        ("alter_replica_log_dirs", {"replica_assignment": {}}, None),
+        ("alter_replica_log_dirs", {"replica_assignment": {None: "/d"}},
+         "replica_assignment must not contain None"),
+        ("describe_log_dirs", {"brokers": []}, None),
+        # options is read before the broker id is unboxed (KafkaAdminClient:3128-3129).
+        ("describe_log_dirs", {"brokers": [None]}, "options must not be None"),
+        ("describe_replica_log_dirs", {"replicas": []}, None),
+        ("describe_replica_log_dirs", {"replicas": [None]}, "replicas must not contain None"),
+        ("create_partitions", {"new_partitions": {}}, None),
+        ("create_partitions", {"new_partitions": {"t": None}}, "new_partitions must not contain None"),
+        ("create_acls", {"acls": [None]}, "acls must not contain None"),
+        ("create_acls", {"acls": []}, "options must not be None"),
+        ("delete_acls", {"filters": [None]}, "filters must not contain None"),
+        ("alter_client_quotas", {"entries": [None]}, "entries must not contain None"),
+        ("alter_user_scram_credentials", {"alterations": [None]},
+         "alterations must not contain None"),
+        ("list_offsets", {"topic_partition_offsets": {None: OffsetSpec.latest()}},
+         "topic_partition_offsets must not contain None"),
+        ("alter_partition_reassignments", {"reassignments": {None: None}},
+         "reassignments must not contain a None key"),
+        # An invalid partition: Java returns before reading options (4204).
+        ("list_partition_reassignments",
+         {"partitions": [TopicPartition(topic="t", partition=-1)]}, None),
+        ("list_partition_reassignments", {"partitions": [TP]}, "options must not be None"),
+        # An UNKNOWN filter: Java returns a failed future before reading options (2679).
+        ("describe_acls", {"filter": unknown}, None),
+        ("describe_acls", {"filter": AclBindingFilter.ANY}, "options must not be None"),
+    ]
+
+
+def _check_empty_input(client: Any) -> None:
+    for rpc, kwargs, expected in _empty_input_rows():
+        call = getattr(client, rpc)
+        if expected is None:
+            assert call(**kwargs, options=None) is not None, (rpc, kwargs)
+        else:
+            with pytest.raises(TypeError) as info:
+                call(**kwargs, options=None)
+            assert str(info.value) == expected, (rpc, kwargs)
+
+
+def test_options_none_where_java_returns_before_reading_it(admin: Admin) -> None:
+    _check_empty_input(admin)
+
+
+async def test_async_options_none_where_java_returns_before_reading_it() -> None:
+    client = AsyncAdmin.create(configs=UNREACHABLE)
+    try:
+        _check_empty_input(client)
+    finally:
+        await client.close(timeout=0)
+
+
+# ---- Critic 99, items 5 and 6: Java stores the null; the read that dereferences it raises ----
+
+
+def test_create_delegation_token_renewers_none(admin: Admin) -> None:
+    """``CreateDelegationTokenOptions.renewers(null)`` stores the null
+    (CreateDelegationTokenOptions:36-38); ``createDelegationToken`` iterates it
+    (KafkaAdminClient:3402, MockAdminClient:646)."""
+    from confluent_kafka.admin import CreateDelegationTokenOptions
+
+    options = CreateDelegationTokenOptions().renewers(renewers=None)
+    assert options.renewers() is None
+    assert CreateDelegationTokenOptions(renewers=None).renewers() is None
+    message = "CreateDelegationTokenOptions.renewers must not be None"
+    for client in (admin, MockAdminClient()):
+        with pytest.raises(TypeError) as info:
+            client.create_delegation_token(options=options)
+        assert str(info.value) == message
+
+
+async def test_async_create_delegation_token_renewers_none() -> None:
+    from confluent_kafka.admin import CreateDelegationTokenOptions
+
+    options = CreateDelegationTokenOptions(renewers=None)
+    client = AsyncAdmin.create(configs=UNREACHABLE)
+    try:
+        for c in (client, AsyncMockAdminClient()):
+            with pytest.raises(TypeError) as info:
+                c.create_delegation_token(options=options)
+            assert str(info.value) == "CreateDelegationTokenOptions.renewers must not be None"
+    finally:
+        await client.close(timeout=0)
+
+
+def test_log_dir_description_stores_none_replica_infos() -> None:
+    """Java stores ``replicaInfos`` (LogDirDescription:50); ``replicaInfos()`` is
+    ``unmodifiableMap(null)``; ``toString`` prints ``null``."""
+    from confluent_kafka.admin import LogDirDescription
+
+    description = LogDirDescription(error=None, replica_infos=None)  # type: ignore[arg-type]
+    assert str(description).startswith("LogDirDescription(replicaInfos=None, ")
+    with pytest.raises(TypeError) as info:
+        description.replica_infos()
+    assert str(info.value) == "replica_infos must not be None"
+
+
+def test_topic_description_stores_none_partitions() -> None:
+    """Java stores ``partitions`` (TopicDescription:98): ``partitions()`` returns the
+    null, ``equals`` / ``hashCode`` take it, ``toString`` dereferences it (:139)."""
+    from confluent_kafka.admin import TopicDescription
+
+    description = TopicDescription(name="t", internal=False,
+                                   partitions=None)  # type: ignore[call-overload]
+    assert description.partitions() is None
+    assert description == TopicDescription(name="t", internal=False,
+                                           partitions=None)  # type: ignore[call-overload]
+    assert hash(description) == hash(TopicDescription(name="t", internal=False,
+                                                      partitions=None))  # type: ignore[call-overload]
+    with pytest.raises(TypeError) as info:
+        str(description)
+    assert str(info.value) == "partitions must not be None"
+
+
+# ---- Critic 99, round 2, items 9 and 11 -------------------------------------------------
+
+
+def _round_two_rows() -> list[tuple[str, dict[str, Any], type[Exception] | None, str | None]]:
+    """``(rpc, arguments, expected error class or None for a result, message)``: the
+    element checks on Java's side of the options check (item 9), and a ``None``
+    element that the FFI cannot carry (item 11)."""
+    from confluent_kafka.admin import (
+        DescribeProducersOptions,
+        UpdateFeaturesOptions,
+    )
+    from confluent_kafka.common import TopicCollection
+
+    spec = ListConsumerGroupOffsetsSpec()
+    upgrade = FeatureUpdate(max_version_level=1, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)
+    records = RecordsToDelete.before_offset(offset=1)
+    return [
+        # Item 9: Java reads options before the value (3006, 3070).
+        ("incremental_alter_configs", {"configs": {RES: None}, "options": None},
+         TypeError, "options must not be None"),
+        ("incremental_alter_configs", {"configs": {RES: [None]}, "options": None},
+         TypeError, "options must not be None"),
+        ("incremental_alter_configs", {"configs": {RES: [None]}},
+         TypeError, "configs must not contain None"),
+        ("alter_replica_log_dirs", {"replica_assignment": {REPLICA: None}, "options": None},
+         TypeError, "options must not be None"),
+        ("describe_log_dirs", {"brokers": [None]}, TypeError, "brokers must not contain None"),
+        # Item 9: Java checks the key before options (3385, 4997, 4726).
+        ("delete_records", {"records_to_delete": {None: records}, "options": None},
+         TypeError, "records_to_delete must not contain None"),
+        ("describe_producers", {"partitions": [None], "options": None},
+         TypeError, "partitions must not contain None"),
+        ("describe_producers", {"partitions": [None], "options": DescribeProducersOptions()},
+         TypeError, "partitions must not contain None"),
+        ("update_features", {"feature_updates": {None: upgrade}, "options": None},
+         IllegalArgumentError, "Provided feature can not be empty."),
+        ("update_features", {"feature_updates": {None: upgrade},
+                             "options": UpdateFeaturesOptions()},
+         IllegalArgumentError, "Provided feature can not be empty."),
+        # Item 11: names and ids Java cannot represent (1847, 1851, 2057), before options.
+        ("delete_topics", {"topics": [None], "options": None},
+         TypeError, "topics must not contain None"),
+        ("delete_topics", {"topics": TopicCollection.of_topic_ids(topics=[None])},
+         TypeError, "topics must not contain None"),
+        ("describe_topics", {"topic_names": [None], "options": None},
+         TypeError, "topic_names must not contain None"),
+        ("describe_topics", {"topics": TopicCollection.of_topic_ids(topics=[None])},
+         TypeError, "topics must not contain None"),
+        ("describe_topics", {"topics": TopicCollection.of_topic_names(topics=[None])},
+         TypeError, "topics must not contain None"),
+        ("create_topics", {"new_topics": [NewTopic(name=None, num_partitions=1,  # type: ignore[arg-type]
+                                                   replication_factor=1)]},
+         TypeError, "new_topics must not contain a NewTopic with a None name"),
+        # Item 11: later-path ids (CoordinatorStrategy:97-99), after options.
+        ("describe_consumer_groups", {"group_ids": [None]},
+         TypeError, "group_ids must not contain None"),
+        ("describe_consumer_groups", {"group_ids": [None], "options": None},
+         TypeError, "options must not be None"),
+        ("delete_consumer_groups", {"group_ids": [None]},
+         TypeError, "group_ids must not contain None"),
+        ("describe_classic_groups", {"group_ids": [None]},
+         TypeError, "group_ids must not contain None"),
+        ("describe_transactions", {"transactional_ids": [None]},
+         TypeError, "transactional_ids must not contain None"),
+        ("fence_producers", {"transactional_ids": [None]},
+         TypeError, "transactional_ids must not contain None"),
+        ("list_consumer_group_offsets", {"group_specs": {None: spec}},
+         TypeError, "group_specs must not contain None"),
+        # Item 11: Java's createRequest skips a null user (4473).
+        ("describe_user_scram_credentials", {"users": [None, "u"]}, None, None),
+    ]
+
+
+def _check_round_two(client: Any) -> None:
+    for rpc, kwargs, error, message in _round_two_rows():
+        call = getattr(client, rpc)
+        if error is None:
+            assert call(**kwargs) is not None, (rpc, kwargs)
+            continue
+        with pytest.raises(error) as info:
+            call(**kwargs)
+        assert str(info.value) == message, (rpc, kwargs)
+
+
+def test_round_two_element_checks(admin: Admin) -> None:
+    _check_round_two(admin)
+
+
+async def test_async_round_two_element_checks() -> None:
+    client = AsyncAdmin.create(configs=UNREACHABLE)
+    try:
+        _check_round_two(client)
+    finally:
+        await client.close(timeout=0)

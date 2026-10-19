@@ -143,6 +143,7 @@ from confluent_kafka.admin.renew_delegation_token_options import RenewDelegation
 from confluent_kafka.admin.terminate_transaction_options import TerminateTransactionOptions
 from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 
 if TYPE_CHECKING:
@@ -555,10 +556,10 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(new_topics, "new_topics")
-        options = _conversions.options_or_new(options, CreateTopicsOptions)
-        native = self._call(_lib.Admin_create_topics,
-                            *_conversions.create_topics_args(new_topics),
-                            options._setters_ran())
+        args = _conversions.create_topics_args(new_topics)
+        reads = _conversions.any_topic_name(row[0] for row in args[0])
+        options = _conversions.options_or_new(options, CreateTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_create_topics, *args, options._setters_ran())
         return _conversions.create_topics_result(native, Sync, None)
 
     @overload
@@ -603,9 +604,11 @@ class Admin(_AdminState):
         reject_str("topics", topics)
         self._check_not_closed()
         by_ids, keys = _conversions.topic_collection_target(topics, "deleteTopics")
-        options = _conversions.options_or_new(options, DeleteTopicsOptions)
-        native = self._call(_lib.Admin_delete_topics, *_conversions.delete_topics_args(by_ids, keys),
-                            options._setters_ran())
+        args = _conversions.delete_topics_args(by_ids, keys)
+        reads = (_conversions.any_topic_id(keys) if by_ids
+                 else _conversions.any_topic_name(keys))
+        options = _conversions.options_or_new(options, DeleteTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_delete_topics, *args, options._setters_ran())
         return _conversions.delete_topics_result(native, by_ids, Sync, None)
 
     @overload
@@ -667,9 +670,11 @@ class Admin(_AdminState):
             by_ids, keys = _conversions.topic_collection_target(topics, "describeTopics")
             form = (_conversions.DESCRIBE_TOPIC_ID_COLLECTION if by_ids
                     else _conversions.DESCRIBE_TOPIC_NAME_COLLECTION)
-        options = _conversions.options_or_new(options, DescribeTopicsOptions)
-        native = self._call(_lib.Admin_describe_topics, *_conversions.describe_topics_args(form, keys),
-                            options._setters_ran())
+        args = _conversions.describe_topics_args(form, keys)
+        reads = (form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION
+                 or _conversions.any_topic_name(keys))
+        options = _conversions.options_or_new(options, DescribeTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_topics, *args, options._setters_ran())
         return _conversions.describe_topics_result(
             native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Sync, None)
 
@@ -717,9 +722,10 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(filter, "filter")
-        options = _conversions.options_or_new(options, DescribeAclsOptions)
-        native = self._call(_lib.Admin_describe_acls, *_conversions.describe_acls_args(filter),
-                            options._setters_ran())
+        args = _conversions.describe_acls_args(filter)
+        reads = not filter.is_unknown()
+        options = _conversions.options_or_new(options, DescribeAclsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_acls, *args, options._setters_ran())
         return _conversions.describe_acls_result(native, Sync, None)
 
     @overload
@@ -746,9 +752,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(acls, "acls")
+        args = _conversions.create_acls_args(acls)
         options = _conversions.options_or_new(options, CreateAclsOptions)
-        native = self._call(_lib.Admin_create_acls, *_conversions.create_acls_args(acls),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_create_acls, *args, options._setters_ran())
         return _conversions.create_acls_result(native, Sync, None)
 
     @overload
@@ -772,9 +778,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(filters, "filters")
+        args = _conversions.delete_acls_args(filters)
         options = _conversions.options_or_new(options, DeleteAclsOptions)
-        native = self._call(_lib.Admin_delete_acls, *_conversions.delete_acls_args(filters),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_delete_acls, *args, options._setters_ran())
         return _conversions.delete_acls_result(native, Sync, None)
 
     @overload
@@ -819,10 +825,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(resources, "resources")
-        options = _conversions.options_or_new(options, DescribeConfigsOptions)
-        native = self._call(_lib.Admin_describe_configs,
-                            *_conversions.describe_configs_args(list(resources)),
-                            options._setters_ran())
+        args = _conversions.describe_configs_args(list(resources))
+        options = _conversions.options_or_new(options, DescribeConfigsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_describe_configs, *args, options._setters_ran())
         return _conversions.describe_configs_result(native, Sync, None)
 
     @overload
@@ -863,10 +868,11 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(configs, "configs")
-        options = _conversions.options_or_new(options, AlterConfigsOptions)
-        native = self._call(_lib.Admin_incremental_alter_configs,
-                            *_conversions.incremental_alter_configs_args(configs),
-                            options._setters_ran())
+        _conversions.check_keys(configs, "configs")  # nodeFor(resource), before options
+        # Java reads options per node (3006), the ops only in createRequest.
+        options = _conversions.options_or_new(options, AlterConfigsOptions, read=bool(configs))
+        args = _conversions.incremental_alter_configs_args(configs)
+        native = self._call(_lib.Admin_incremental_alter_configs, *args, options._setters_ran())
         return _conversions.incremental_alter_configs_result(native, Sync, None)
 
     @overload
@@ -906,10 +912,12 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(replica_assignment, "replica_assignment")
-        options = _conversions.options_or_new(options, AlterReplicaLogDirsOptions)
-        native = self._call(_lib.Admin_alter_replica_log_dirs,
-                            *_conversions.alter_replica_log_dirs_args(replica_assignment),
-                            options._setters_ran())
+        # replica.brokerId() (3048) before options (3070); the log dir is not read.
+        _conversions.check_keys(replica_assignment, "replica_assignment")
+        reads = bool(replica_assignment)
+        options = _conversions.options_or_new(options, AlterReplicaLogDirsOptions, read=reads)
+        args = _conversions.alter_replica_log_dirs_args(replica_assignment)
+        native = self._call(_lib.Admin_alter_replica_log_dirs, *args, options._setters_ran())
         return _conversions.alter_replica_log_dirs_result(native, Sync, None)
 
     @overload
@@ -931,10 +939,13 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(brokers, "brokers")
-        options = _conversions.options_or_new(options, DescribeLogDirsOptions)
-        native = self._call(_lib.Admin_describe_log_dirs,
-                            *_conversions.describe_log_dirs_args(list(brokers)),
-                            options._setters_ran())
+        broker_ids = list(brokers)
+        # new Call(…, calcDeadlineMs(now, options.timeoutMs()), new ConstantNodeIdProvider(
+        # brokerId)) reads options before it unboxes the broker id (3128-3129).
+        options = _conversions.options_or_new(options, DescribeLogDirsOptions,
+                                              read=bool(broker_ids))
+        args = _conversions.describe_log_dirs_args(broker_ids)
+        native = self._call(_lib.Admin_describe_log_dirs, *args, options._setters_ran())
         return _conversions.describe_log_dirs_result(native, Sync, None)
 
     @overload
@@ -964,10 +975,10 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(replicas, "replicas")
-        options = _conversions.options_or_new(options, DescribeReplicaLogDirsOptions)
-        native = self._call(_lib.Admin_describe_replica_log_dirs,
-                            *_conversions.describe_replica_log_dirs_args(list(replicas)),
-                            options._setters_ran())
+        args = _conversions.describe_replica_log_dirs_args(list(replicas))
+        reads = bool(args[0])
+        options = _conversions.options_or_new(options, DescribeReplicaLogDirsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_replica_log_dirs, *args, options._setters_ran())
         return _conversions.describe_replica_log_dirs_result(native, Sync, None)
 
     @overload
@@ -1024,10 +1035,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(new_partitions, "new_partitions")
-        options = _conversions.options_or_new(options, CreatePartitionsOptions)
-        native = self._call(_lib.Admin_create_partitions,
-                            *_conversions.create_partitions_args(new_partitions),
-                            options._setters_ran())
+        args = _conversions.create_partitions_args(new_partitions)
+        options = _conversions.options_or_new(options, CreatePartitionsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_create_partitions, *args, options._setters_ran())
         return _conversions.create_partitions_result(native, Sync, None)
 
     @overload
@@ -1054,6 +1064,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(records_to_delete, "records_to_delete")
+        # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (3385) before
+        # options (3388); the values are read by the handler.
+        _conversions.check_keys(records_to_delete, "records_to_delete")
         options = _conversions.options_or_new(options, DeleteRecordsOptions)
         native = self._call(_lib.Admin_delete_records,
                             *_conversions.delete_records_args(records_to_delete),
@@ -1490,10 +1503,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(reassignments, "reassignments")
+        args = _conversions.alter_partition_reassignments_args(reassignments)
         options = _conversions.options_or_new(options, AlterPartitionReassignmentsOptions)
-        native = self._call(_lib.Admin_alter_partition_reassignments,
-                            *_conversions.alter_partition_reassignments_args(reassignments),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_alter_partition_reassignments, *args, options._setters_ran())
         return _conversions.alter_partition_reassignments_result(native, Sync, None)
 
     @overload
@@ -1545,10 +1557,10 @@ class Admin(_AdminState):
         if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
             _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
             targets = partitions
-        options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions)
-        native = self._call(_lib.Admin_list_partition_reassignments,
-                            *_conversions.list_partition_reassignments_args(targets),
-                            options._setters_ran())
+        args = _conversions.list_partition_reassignments_args(targets)
+        reads = _conversions.all_partitions_valid(args[0])
+        options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions, read=reads)
+        native = self._call(_lib.Admin_list_partition_reassignments, *args, options._setters_ran())
         return _conversions.list_partition_reassignments_result(native, Sync, None)
 
     def remove_members_from_consumer_group(
@@ -1633,11 +1645,10 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(topic_partition_offsets, "topic_partition_offsets")
+        args = _conversions.list_offsets_args(topic_partition_offsets)
         options = _conversions.options_or_new(options, ListOffsetsOptions)
         partitions = list(topic_partition_offsets)
-        native = self._call(_lib.Admin_list_offsets,
-                            *_conversions.list_offsets_args(topic_partition_offsets, options),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_list_offsets, *args, options.isolation_level().id(), options._setters_ran())
         return _conversions.list_offsets_result(native, partitions, Sync, None)
 
     @overload
@@ -1719,10 +1730,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(entries, "entries")
+        args = _conversions.alter_client_quotas_args(entries)
         options = _conversions.options_or_new(options, AlterClientQuotasOptions)
-        native = self._call(_lib.Admin_alter_client_quotas,
-                            *_conversions.alter_client_quotas_args(entries),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_alter_client_quotas, *args, options._setters_ran())
         return _conversions.alter_client_quotas_result(native, Sync, None)
 
     @overload
@@ -1818,10 +1828,9 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(alterations, "alterations")
+        args = _conversions.alter_user_scram_credentials_args(alterations)
         options = _conversions.options_or_new(options, AlterUserScramCredentialsOptions)
-        native = self._call(_lib.Admin_alter_user_scram_credentials,
-                            *_conversions.alter_user_scram_credentials_args(alterations),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_alter_user_scram_credentials, *args, options._setters_ran())
         return _conversions.alter_user_scram_credentials_result(native, Sync, None)
 
     @overload
@@ -1915,6 +1924,11 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(feature_updates, "feature_updates")
+        if None in feature_updates:
+            # Utils.isBlank(null) (4726-4727), before options (4733); the FFI cannot
+            # carry the null, so Python raises Java's error (a blank key gets the
+            # same error from the core).
+            raise IllegalArgumentError(message="Provided feature can not be empty.")
         options = _conversions.options_or_new(options, UpdateFeaturesOptions)
         native = self._call(_lib.Admin_update_features,
                             *_conversions.update_features_args(feature_updates),
@@ -1983,10 +1997,12 @@ class Admin(_AdminState):
         """
         self._check_not_closed()
         _conversions.non_null(partitions, "partitions")
-        options = _conversions.options_or_new(options, DescribeProducersOptions)
         targets = list(partitions)
-        native = self._call(_lib.Admin_describe_producers,
-                            *_conversions.describe_producers_args(targets), options._setters_ran())
+        # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (4997) before
+        # options (4998).
+        args = _conversions.describe_producers_args(targets)
+        options = _conversions.options_or_new(options, DescribeProducersOptions)
+        native = self._call(_lib.Admin_describe_producers, *args, options._setters_ran())
         return _conversions.describe_producers_result(native, Sync, None, targets)
 
     @overload

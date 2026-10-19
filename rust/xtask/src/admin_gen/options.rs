@@ -932,20 +932,25 @@ impl Renderer<'_> {
     }
 
     fn storage(&mut self, f: &Field) -> Result<Storage, Stop> {
-        let setters: Vec<Store> = self
+        let field_setters: Vec<Setter> = self
             .o
             .setters
             .iter()
             .chain(self.parent.setters.iter())
             .filter(|s| s.field == f.java)
-            .map(|s| s.store)
+            .cloned()
             .collect();
+        let setters: Vec<Store> = field_setters.iter().map(|s| s.store).collect();
+        // A setter that stores a non-nullable reference as given stores Java's null
+        // too (`renewers(null)`): the field can then hold `None`.
+        let stores_null = field_setters.iter().any(|s| self.stores_null_as_given(s));
         let init = f.init.as_deref();
         let ty = f.ty.as_str();
         let reference = !is_primitive(ty);
         // A `final` field without initializer is set by every constructor.
-        let nullable =
-            (reference && (init == Some("null") || (init.is_none() && !f.is_final))) || ty.starts_with("Optional");
+        let nullable = (reference && (init == Some("null") || (init.is_none() && !f.is_final)))
+            || ty.starts_with("Optional")
+            || stores_null;
         let st = |s: &Self, r: String| s.st(r);
         let (value, comment) = match init {
             None | Some("null") if reference => ("None".to_string(), None),
@@ -980,6 +985,15 @@ impl Renderer<'_> {
             pty.push_str(" | None");
         }
         Ok(Storage { ty: pty, init: value, comment, frozen, nullable })
+    }
+
+    /// Whether the setter stores a non-nullable reference argument as given, as
+    /// Java's `this.renewers = renewers` does: a `None` is then stored, as Java
+    /// stores `null`, and the read that dereferences it raises (CLAUDE.md, Python
+    /// Binding Conventions, Implementation over the FFI, exception 4: "a mock whose
+    /// Java NPE comes later raises it there").
+    fn stores_null_as_given(&self, s: &Setter) -> bool {
+        s.store == Store::AsGiven && !is_primitive(&s.param.ty) && !self.param_nullable(s)
     }
 
     /// CLAUDE.md, Signatures, Nullability: a Javadoc "Non-null" wins; else the
@@ -1039,10 +1053,10 @@ impl Renderer<'_> {
     /// The setter's check of a `None` its Java body dereferences (CLAUDE.md,
     /// Python Binding Conventions, Implementation over the FFI, exception 4;
     /// Types: Python's `TypeError` naming the parameter): a primitive (Java
-    /// cannot pass null to it), `new HashSet<>(x)`, `OptionalInt.of(x)`, and a
-    /// collection the setter stores as given, which Java's admin client then
-    /// iterates (`renewers`) *(Python checks it at the setter)*. A nullable
-    /// argument keeps `None` as Java's meaning.
+    /// cannot pass null to it), `new HashSet<>(x)` and `OptionalInt.of(x)`. A
+    /// nullable argument keeps `None` as Java's meaning, and a reference the setter
+    /// stores as given (`renewers`) is stored, `None` included, as Java stores
+    /// `null`: the read that dereferences it raises (`stores_null_as_given`).
     fn null_guard(&self, s: &Setter, nullable: bool) -> Vec<String> {
         if nullable {
             return Vec::new();
@@ -1054,7 +1068,8 @@ impl Renderer<'_> {
             match s.store {
                 Store::NewHashSet => format!("new HashSet<>({}) on a null", s.param.name),
                 Store::OptionalOf => format!("OptionalInt.of({}) on a null", s.param.name),
-                _ => "the admin client iterates it".to_string(),
+                // Stored as given, `None` included; `Set.copyOf` setters are nullable.
+                Store::AsGiven | Store::CopyOf => return Vec::new(),
             }
         };
         vec![
@@ -1068,7 +1083,7 @@ impl Renderer<'_> {
         let p = snake(&s.param.name);
         let f = self.field(&s.field).clone();
         let storage = self.storage(&f)?;
-        let nullable = self.param_nullable(s);
+        let nullable = self.param_nullable(s) || self.stores_null_as_given(s);
         let wrap = |conv: &str| {
             if nullable {
                 format!("None if {p} is None else {conv}({p})")

@@ -2093,8 +2093,9 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
     let ty = py_type(&p.java_ty, true, info, used)?;
     Ok(match &p.default {
         // A required cause is given as None for a null cause (CLAUDE.md,
-        // Errors).
+        // Errors); a required message takes Java's null as the stubs do.
         Dflt::Required if p.name == "cause" || p.evidenced => format!("{}: {ty} | None", p.name),
+        Dflt::Required if takes_null(p) && ty != "Any" => format!("{}: {ty} | None", p.name),
         Dflt::Required => format!("{}: {ty}", p.name),
         Dflt::Missing if takes_null(p) && ty != "Any" => format!("{}: {ty} | None = MISSING", p.name),
         Dflt::Missing => format!("{}: {ty} = MISSING", p.name),
@@ -3418,6 +3419,21 @@ mod tests {
         }
         assert!(!m.decorated);
         assert!(m.stubs.is_empty());
+    }
+
+    #[test]
+    fn a_required_message_takes_null_in_the_signature_too() {
+        // One constructor (String message): no stubs, and the signature, like
+        // every stub elsewhere, types the message `str | None`.
+        let classes = build_graph(&repo_root()).unwrap();
+        let m = model_of(&classes, "org.apache.kafka.common.errors.ProducerFencedException");
+        assert!(m.stubs.is_empty());
+        let info = &classes["org.apache.kafka.common.errors.ProducerFencedException"];
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            param_decl(param(&m, "message"), info, &mut used).unwrap(),
+            "message: str | None"
+        );
     }
 
     #[test]

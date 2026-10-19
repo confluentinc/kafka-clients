@@ -123,7 +123,7 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def __init__(self: MockProducer[bytes, bytes]) -> None: ...
 
     @java_forms(*_FORMS)
-    def __init__(self, *, cluster: Cluster | None = MISSING, auto_complete: bool = MISSING,
+    def __init__(self, *, cluster: Cluster = MISSING, auto_complete: bool = MISSING,
                  partitioner: Partitioner | None = MISSING,
                  key_serializer: Serializer[Any] | None = MISSING,
                  value_serializer: Serializer[Any] | None = MISSING) -> None:

@@ -45,7 +45,7 @@ class ThrottlingQuotaExceededError(RetriableError):
         self,
         *,
         throttle_time_ms: int = MISSING,
-        message: str,
+        message: str | None,
     ) -> None:
         if throttle_time_ms is not MISSING:
             _throwable.init(self, message, None)

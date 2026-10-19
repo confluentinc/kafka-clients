@@ -1283,7 +1283,9 @@ class MockAdminClientCore:
 
         with self._lock:
             future: KafkaFuture[DelegationToken] | AsyncKafkaFuture[DelegationToken] = self._future()
-            renewers: list[KafkaPrincipal] = options.renewers()
+            renewers: list[KafkaPrincipal] | None = options.renewers()
+            if renewers is None:  # for (KafkaPrincipal renewer : options.renewers())
+                raise TypeError("CreateDelegationTokenOptions.renewers must not be None")
             for renewer in renewers:
                 if renewer.principal_type() != KafkaPrincipal.USER_TYPE:
                     _complete_with_error(future, InvalidPrincipalTypeError(message=""))

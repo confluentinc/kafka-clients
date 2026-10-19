@@ -261,10 +261,13 @@ def test_seek_null_partition_checks_the_offset_first(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         await raises(IllegalArgumentError, "seek offset must not be a negative number",
                lambda: call("seek", partition=None, offset=-1))
-        # With a leader epoch: Metadata.updateLastSeenEpochIfNewer's requireNonNull.
-        await raises(TypeError, "partition must not be None",
-               lambda: call("seek", partition=None, offset_and_metadata=OffsetAndMetadata(
-                   offset=5, leader_epoch=1, metadata="")))
+        # With a leader epoch: Metadata.updateLastSeenEpochIfNewer's requireNonNull,
+        # wrapped by ConsumerUtils.getResult (test_seek_null_partition_with_an_epoch_…).
+        from confluent_kafka.common import KafkaError
+
+        await raises(KafkaError, "builtins.TypeError: partition must not be None",
+                     lambda: call("seek", partition=None, offset_and_metadata=OffsetAndMetadata(
+                         offset=5, leader_epoch=1, metadata="")))
     run(kind, body)
 
 
@@ -494,3 +497,50 @@ def test_signatures_show_missing(cls: type) -> None:
     assert [params[n].default for n in ("topics", "pattern", "callback")] == [MISSING] * 3
     assert "= MISSING" in pydoc.render_doc(cls.close, renderer=pydoc.plaintext)
     assert CloseOptions is not None
+
+
+# ---- Critic 99: Java's empty-input return and the background NPE --------------------
+@pytest.mark.parametrize("kind", ["kafka", "async_kafka"])
+def test_an_empty_input_returns_before_the_null_timeout(kind: str) -> None:
+    # committed / beginningOffsets / endOffsets / offsetsForTimes return the empty
+    # map before they read the Duration (AsyncKafkaConsumer.java:1270-1272, 1419,
+    # 1476), so a None timeout is never dereferenced there.
+    async def body(c: Any, call: Callable[..., Any]) -> None:
+        assert await call("committed", partitions=[], timeout=None) == {}
+        assert await call("beginning_offsets", partitions=[], timeout=None) == {}
+        assert await call("end_offsets", partitions=[], timeout=None) == {}
+        assert await call("offsets_for_times", timestamps_to_search={}, timeout=None) == {}
+        # A one-shot iterable is read once, so an empty one is an empty input.
+        assert await call("committed", partitions=iter([]), timeout=None) == {}
+        assert await call("committed", partitions=(tp for tp in []), timeout=None) == {}
+        assert await call("beginning_offsets", partitions=iter([]), timeout=None) == {}
+        await raises(TypeError, "timeout must not be None",
+                     lambda: call("committed", partitions=[TP], timeout=None))
+    run(kind, body)
+
+
+@pytest.mark.parametrize("kind", ["kafka", "async_kafka"])
+def test_seek_null_partition_with_an_epoch_is_a_wrapped_npe(kind: str) -> None:
+    # Metadata.updateLastSeenEpochIfNewer's requireNonNull throws on the
+    # background thread; ConsumerUtils.getResult wraps it: KafkaException(npe).
+    from confluent_kafka.common import KafkaError
+
+    async def body(c: Any, call: Callable[..., Any]) -> None:
+        with pytest.raises(KafkaError) as exc:
+            await call("seek", partition=None, offset_and_metadata=OffsetAndMetadata(
+                offset=5, leader_epoch=3, metadata=""))
+        assert type(exc.value) is KafkaError
+        assert type(exc.value.__cause__) is TypeError
+        assert str(exc.value.__cause__) == "partition must not be None"
+        assert str(exc.value) == "builtins.TypeError: partition must not be None"
+    run(kind, body)
+
+
+@pytest.mark.parametrize("kind", ["mock", "async_mock"])
+def test_mock_update_partitions_stores_a_null_list(kind: str) -> None:
+    # MockConsumer.updatePartitions stores the list as given (MockConsumer.java:590).
+    async def body(c: Any, call: Callable[..., Any]) -> None:
+        c.update_partitions(topic="t", partitions=None)
+        assert await call("partitions_for", topic="t") is None
+        assert await call("list_topics") == {"t": None}
+    run(kind, body)

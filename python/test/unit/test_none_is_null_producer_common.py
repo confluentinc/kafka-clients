@@ -286,3 +286,76 @@ def test_offset_and_metadata_null_metadata_and_epoch() -> None:
 
 def test_topic_partition_is_untouched() -> None:
     assert TopicPartition(topic="t", partition=0).partition() == 0
+
+
+# ---- Critic 99: Java stores the null, or fails with its own NPE ---------------------
+def test_consumer_records_stores_a_null_records_map() -> None:
+    from confluent_kafka.consumer import ConsumerRecords
+
+    # Java stores records as given (ConsumerRecords.java:77) and dereferences
+    # it at first use; next_offsets() does not read it.
+    r: Any = ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
+    assert r.next_offsets() == {}
+    for use in (lambda: r.records(partition=TopicPartition(topic="t", partition=0)),
+                lambda: r.records(topic="t"), lambda: len(r), lambda: r.partitions(),
+                lambda: iter(r), lambda: r.is_empty()):
+        with _raises(TypeError, "records must not be None"):
+            use()
+    with _raises(IllegalArgumentError, "Topic must be non-None."):
+        r.records(topic=None)
+
+
+def test_partition_info_stores_null_arrays() -> None:
+    from confluent_kafka.common import PartitionInfo
+
+    p: Any = PartitionInfo(topic="t", partition=0, leader=None, replicas=None,  # type: ignore[arg-type]
+                           in_sync_replicas=None, offline_replicas=None)  # type: ignore[arg-type]
+    assert p.replicas() is None and p.in_sync_replicas() is None and p.offline_replicas() is None
+    # Java's formatNodeIds prints a null array as "[]".
+    assert str(p) == ("Partition(topic = t, partition = 0, leader = none, replicas = [], "
+                      "isr = [], offlineReplicas = [])")
+    assert p == PartitionInfo(topic="t", partition=0, leader=None, replicas=None,  # type: ignore[arg-type]
+                              in_sync_replicas=None, offline_replicas=None)  # type: ignore[arg-type]
+
+
+def test_token_information_stores_null_renewers() -> None:
+    owner = KafkaPrincipal(principal_type="User", name="o")
+    other = KafkaPrincipal(principal_type="User", name="x")
+    t: Any = TokenInformation(token_id="i", owner=owner, renewers=None,  # type: ignore[arg-type]
+                              issue_timestamp=0, max_timestamp=0, expiry_timestamp=0)
+    assert t.renewers() is None
+    assert "renewers=None" in str(t)
+    assert t.owner_or_renewer(principal=owner) is True  # short-circuits before the renewers
+    with _raises(TypeError, "renewers must not be None"):
+        t.owner_or_renewer(principal=other)
+    with _raises(TypeError, "renewers must not be None"):
+        t.renewers_as_string()
+
+
+def test_kafka_future_all_of_null_futures() -> None:
+    # Arrays.stream(null) and a null element's toCompletionStage() (KafkaFuture.java:76, 80).
+    with _raises(TypeError, "futures must not be None"):
+        KafkaFuture.all_of(futures=None)  # type: ignore[arg-type]
+    with _raises(TypeError, "futures must not contain None"):
+        KafkaFuture.all_of(futures=(KafkaFuture.completed_future(value=1), None))  # type: ignore[arg-type]
+
+
+async def test_async_kafka_future_all_of_null_futures() -> None:
+    from confluent_kafka.common import AsyncKafkaFuture
+
+    with _raises(TypeError, "futures must not be None"):
+        AsyncKafkaFuture.all_of(futures=None)  # type: ignore[arg-type]
+    with _raises(TypeError, "futures must not contain None"):
+        AsyncKafkaFuture.all_of(futures=(None,))  # type: ignore[arg-type]
+
+
+def test_clients_null_configs() -> None:
+    # Java's new HashMap<>(configs) (ProducerConfig.java:717, ConsumerConfig.java:794,
+    # Utils.castToStringObjectMap).
+    from confluent_kafka.admin import Admin
+    from confluent_kafka.consumer import KafkaConsumer
+
+    for build in (lambda: KafkaProducer(configs=None), lambda: KafkaConsumer(configs=None),
+                  lambda: Admin.create(configs=None)):
+        with _raises(TypeError, "configs must not be None"):
+            build()  # type: ignore[arg-type]

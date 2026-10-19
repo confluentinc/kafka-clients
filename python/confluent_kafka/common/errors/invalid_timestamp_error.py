@@ -43,7 +43,7 @@ class InvalidTimestampError(ApiError):
     def __init__(
         self,
         *,
-        message: str,
+        message: str | None,
         cause: BaseException | None = MISSING,
     ) -> None:
         _throwable.init(self, message, (None if cause is MISSING else cause))

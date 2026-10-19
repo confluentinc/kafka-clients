@@ -56,14 +56,16 @@ Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import MISSING, Form, java_forms, reject_str
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
-from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
+from ._base import (
+    _ConsumerState, blank_null_topics, close_args, empty_input_timeout, poll_timeout_ms,
+)
 from ._conversions import tp_to_spec
 from .close_options import CloseOptions
 
@@ -624,6 +626,11 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_committed(self, partitions: Iterable[TopicPartition],
                      timeout: Duration = MISSING
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+        # Read a one-shot iterable once, so its emptiness is seen (Java's empty
+        # Set returns {} before the timeout is read).
+        partitions = cast("Iterable[TopicPartition]",
+                          None if partitions is None else list(partitions))
+        timeout = empty_input_timeout(partitions, timeout)
         self._check_committed_timeout(partitions, timeout)
         timeout_ms = self._timeout_ms(timeout, group=True)
         self._check_committed_partitions(partitions)
@@ -661,7 +668,7 @@ class Consumer(Generic[K, V], _ConsumerState):
                              timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         self._check_not_null("offsets_for_times", timestamps_to_search)
-        timeout_ms = self._timeout_ms(timeout)
+        timeout_ms = self._timeout_ms(empty_input_timeout(timestamps_to_search, timeout))
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
@@ -672,8 +679,8 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
                       timeout: Duration) -> dict[TopicPartition, int]:
         self._check_not_null(op, partitions)
-        timeout_ms = self._timeout_ms(timeout)
         partition_list = list(partitions)
+        timeout_ms = self._timeout_ms(empty_input_timeout(partition_list, timeout))
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
             return offsets

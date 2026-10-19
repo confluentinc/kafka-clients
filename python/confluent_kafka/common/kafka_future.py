@@ -566,6 +566,19 @@ class _KafkaFutureBase(Generic[T]):
         return _to_string(impl._state, impl._outcome)
 
 
+
+
+def _checked_futures(futures: Any) -> list[Any]:
+    """``allOf(KafkaFuture<?>... futures)``'s argument: Java's
+    ``Arrays.stream(futures)`` dereferences a null array, and each null element
+    is dereferenced in turn (``KafkaFuture.java:76, 80``)."""
+    if futures is None:
+        raise TypeError("futures must not be None")
+    sources = list(futures)
+    if any(f is None for f in sources):
+        raise TypeError("futures must not contain None")
+    return sources
+
 class KafkaFuture(_KafkaFutureBase[T]):
     """A flexible future which supports call chaining and other asynchronous
     programming patterns.
@@ -619,8 +632,11 @@ class KafkaFuture(_KafkaFutureBase[T]):
     def all_of(*, futures: tuple[KafkaFuture[Any], ...]) -> KafkaFuture[None]:
         """Returns a new KafkaFuture that is completed when all the given futures
         have completed. If any future fails, the returned future fails with it.
-        If multiple futures fail, the first failure is returned."""
-        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of([f._python_state() for f in futures]))
+        If multiple futures fail, the first failure is returned. A ``None``
+        ``futures``, or a ``None`` among them, raises ``TypeError``, as Java's
+        ``Arrays.stream(null)`` and ``kafkaFuture.toCompletionStage()`` do."""
+        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of(
+            [f._python_state() for f in _checked_futures(futures)]))
 
     def to_completion_stage(self) -> concurrent.futures.Future[T]:
         """Gets the inner ``concurrent.futures.Future`` this future waits on,
@@ -811,8 +827,11 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
     def all_of(*, futures: tuple[AsyncKafkaFuture[Any], ...]) -> AsyncKafkaFuture[None]:
         """Returns a new AsyncKafkaFuture that is completed when all the given
         futures have completed. If any future fails, the returned future fails
-        with it. If multiple futures fail, the first failure is returned."""
-        sources = list(futures)
+        with it. If multiple futures fail, the first failure is returned. A
+        ``None`` ``futures``, or a ``None`` among them, raises ``TypeError``, as
+        Java's ``Arrays.stream(null)`` and ``kafkaFuture.toCompletionStage()``
+        do."""
+        sources = _checked_futures(futures)
         loop = next((f._loop for f in sources if f._loop is not None), None)
         return AsyncKafkaFuture._of_impl(
             _KafkaFutureImpl.all_of([f._python_state() for f in sources]), loop)
