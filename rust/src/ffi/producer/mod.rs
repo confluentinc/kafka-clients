@@ -89,11 +89,14 @@
 //!
 //! # Ordering between `send_cb` and the control operations
 //!
-//! `send_cb` first tries the producer on the calling thread, without
-//! waiting: a record the producer takes, or refuses, at once is done there,
-//! and `cb` fires inside the call (see below). Only a record the producer
-//! would have to wait for, on metadata or on buffer memory, is *queued*: a
-//! per-producer submission task takes the queued records in FIFO order and
+//! When both of the producer's serializers are built-in, `send_cb` first
+//! tries the producer on the calling thread, without waiting: a record the
+//! producer takes, or refuses, at once is done there, and `cb` fires inside
+//! the call (see below). Only a record the producer would have to wait for,
+//! on metadata or on buffer memory, is *queued*. When either serializer is a
+//! C implementation, every record is queued and `cb` fires later, through the
+//! callback vector; only a closed producer still completes inside the call.
+//! A per-producer submission task takes the queued records in FIFO order and
 //! tries each again on the producer without waiting. One it still has to
 //! wait for moves to a task of its own, which runs Java's blocking `send` for
 //! it, so the records behind it are not held back: Java's `send` blocking on
@@ -167,14 +170,14 @@
 //! serializers on the runtime, and `cb` fires later, through the callback
 //! vector. The choice is made once, when the producer is built.
 //!
-//! The producer is tried first whatever the queue holds, so a record taken at
-//! once can reach the producer before one queued earlier, by this caller or
-//! by another. That is Java's order: records are ordered by when they reach
-//! the accumulator, and a `send` blocking on metadata or on buffer memory
-//! holds back its own caller's next record, nothing else. A caller that wants
-//! its records in sending order therefore waits for a queued record's `cb`
-//! before its next send, as Java's `send` would have made it wait; the queue
-//! then holds at most one record per such caller.
+//! When it is tried first, the producer is tried whatever the queue holds, so
+//! a record taken at once can reach the producer before one queued earlier,
+//! by this caller or by another. That is Java's order: records are ordered
+//! by when they reach the accumulator, and a `send` blocking on metadata or
+//! on buffer memory holds back its own caller's next record, nothing else. A
+//! caller that wants its records in sending order therefore waits for a
+//! queued record's `cb` before its next send, as Java's `send` would have
+//! made it wait; the queue then holds at most one record per such caller.
 //!
 //! # Destroy
 //!
