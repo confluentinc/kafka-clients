@@ -203,7 +203,7 @@ async fn produce_and_consume(
         Box::new(StringDeserializer::new()),
         Box::new(StringDeserializer::new()),
     )?;
-    let consumed = consume_all(consumer.as_mut(), topic, expected.len()).await;
+    let consumed = consume_all(&mut consumer, topic, expected.len()).await;
     let close = consumer.close().await;
     let consumed = consumed?;
     close?;
@@ -220,7 +220,7 @@ async fn produce_and_consume(
 }
 
 async fn consume_all(
-    consumer: &mut dyn Consumer<String, String>,
+    consumer: &mut impl Consumer<String, String>,
     topic: &str,
     count: usize,
 ) -> Result<BTreeSet<(String, String)>, Error> {
