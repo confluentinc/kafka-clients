@@ -236,7 +236,7 @@ enum BgJoin {
 /// background task like any other; the handle does not identify its caller.
 ///
 /// [`wakeup`](Self::wakeup) and the sync reads (`assignment`, `paused`,
-/// `group_metadata`, `current_lag`) are not gated: Java's
+/// `group_metadata`) are not gated: Java's
 /// `wakeup()` is callable from any thread by contract, and the reads take
 /// the same short locks the owning consumer's `&self` getters do.
 ///
@@ -281,6 +281,9 @@ pub(crate) struct AsyncConsumerHandleState {
     time: Arc<dyn Time>,
     /// Cached `default.api.timeout.ms`.
     default_api_timeout_ms: i64,
+    /// The consumer's `isolation.level`, carried by the handle's `CurrentLag`
+    /// event as the consumer's own.
+    isolation_level: IsolationLevel,
     /// The consumer's metrics registry, read by [`ConsumerHandle::metrics`].
     metrics: Arc<Metrics>,
     /// The consumer's commit bookkeeping, so the handle's commits run the
@@ -386,18 +389,32 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::current_lag`](crate::consumer::Consumer::current_lag): the
-    /// same sync cached read as `AsyncKafkaConsumer::current_lag`; on a
-    /// `MockConsumer` handle, Java's `MockConsumer.currentLag` over the mock's
-    /// shared end offsets and positions.
-    pub fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        match &self.inner {
-            // See `AsyncKafkaConsumer::current_lag`: the sync accessor reads
-            // cached state only, and there is no lag cache yet.
-            ConsumerHandleInner::Async(_) => None,
-            ConsumerHandleInner::Mock { subscriptions, end_offsets, .. } => {
-                crate::consumer::mock_consumer::mock_current_lag(subscriptions, end_offsets, topic_partition)
-            },
+    /// [`Consumer::current_lag`](crate::consumer::Consumer::current_lag):
+    /// submits the consumer's `CurrentLag` event and waits for the background
+    /// task's answer, as the consumer's own does. Like the other async
+    /// operations it is admitted only inside a callback (see `Threads`).
+    ///
+    /// On a `MockConsumer` handle, Java's `MockConsumer.currentLag` over the
+    /// mock's shared end offsets and positions, answered without waiting. The
+    /// handle cannot seed a missing position as the mock's own `position()`
+    /// does (it holds no reset offsets), so a partition without a position
+    /// answers `Ok(None)`, the lag being unknown.
+    pub fn current_lag(
+        &self,
+        topic_partition: &TopicPartition,
+    ) -> impl Future<Output = Result<Option<i64>, Error>> + Send {
+        async move {
+            match &self.inner {
+                ConsumerHandleInner::Async(_) => self.async_state()?.current_lag(topic_partition).await,
+                ConsumerHandleInner::Mock { closed, subscriptions, end_offsets, .. } => {
+                    crate::consumer::mock_consumer::mock_current_lag(
+                        closed,
+                        subscriptions,
+                        end_offsets,
+                        topic_partition,
+                    )
+                },
+            }
         }
     }
 
@@ -1072,6 +1089,25 @@ impl AsyncConsumerHandleState {
             receiver,
             deadline_ms,
             "Timeout expired while waiting for ResumePartitions",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::current_lag`].
+    async fn current_lag(&self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<Option<i64>>(deadline_ms);
+        // Java's `currentLag` does not call `setActiveTask`, so no wakeup.
+        self.submit_and_await::<Option<i64>>(
+            ApplicationEvent::CurrentLag {
+                handle,
+                partition: topic_partition.clone(),
+                isolation_level: self.isolation_level,
+            },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for CurrentLag",
             false,
         )
         .await
@@ -1988,6 +2024,10 @@ type OffsetsReadyReceiver = tokio::sync::oneshot::Receiver<Result<(), Error>>;
 /// shared by the owning consumer and its [`ConsumerHandle`].
 const OFFSETS_READY_TIMEOUT_MSG: &str = "Timed out waiting for offsetsReady on commit event";
 
+/// The message of the `IllegalStateException` Java's
+/// `AsyncKafkaConsumer.acquireAndEnsureOpen()` throws on a closed consumer.
+const CONSUMER_CLOSED_MSG: &str = "This consumer has already been closed.";
+
 /// Timeout message of the wait for the last pending async commit in Java's
 /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`.
 const PENDING_ASYNC_COMMIT_TIMEOUT_MSG: &str = "Timed out waiting for last pending async commit to complete";
@@ -1995,12 +2035,13 @@ const PENDING_ASYNC_COMMIT_TIMEOUT_MSG: &str = "Timed out waiting for last pendi
 /// Translates Java's `throwIfGroupIdNotDefined()`
 /// (`AsyncKafkaConsumer.java:1192-1197`) over a borrowed `group.id`, so the
 /// owning consumer and its [`ConsumerHandle`] run the same check.
+/// Java's `InvalidGroupIdException` message from `throwIfGroupIdNotDefined`.
+const GROUP_ID_NOT_DEFINED_MSG: &str = "To use the group management or offset commit APIs, you must provide a \
+                                        valid group.id in the consumer configuration.";
+
 fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Error> {
     if group_id.map(str::is_empty).unwrap_or(true) {
-        return Err(Error::invalid_group_id(
-            "To use the group management or offset commit APIs, you must provide a valid \
-             group.id in the consumer configuration.",
-        ));
+        return Err(Error::invalid_group_id(GROUP_ID_NOT_DEFINED_MSG));
     }
     Ok(())
 }
@@ -3830,30 +3871,30 @@ where
     // holds the guard across `.await`. Since these methods are `fn`
     // (not `async`), there is no `.await` boundary at all.
     //
-    // # Closed-consumer behavior (deliberate Java divergence)
+    // # Closed-consumer behavior
     //
     // Java's accessors call `acquireAndEnsureOpen()` which throws
     // `IllegalStateException("This consumer has already been closed.")`
-    // when the consumer is closed. Each Rust accessor below returns the
-    // cached / empty value silently instead — there is no error channel
-    // on these `fn` signatures and panicking on a pure accessor would
-    // diverge sharply from idiomatic Rust. The strict closed-consumer
-    // check is surfaced on every `async fn` (poll / commit / position /
-    // committed / unsubscribe / close / etc.) via `ensure_open()`.
-    //
-    // Tests that exercise the Java accessor-throws-after-close behavior
-    // (`testListPartitionsAfterClose` style) are listed in the commit-8
-    // test-skip rationale.
+    // when the consumer is closed. Calling one after `close()` is a
+    // programming error, so each Rust accessor below panics with Java's
+    // message instead (`panic_if_closed`), as a Java argument-precondition
+    // throw stays a Rust panic. The signatures keep their plain return types;
+    // `Consumer`'s rustdoc documents the panic under `# Panics`.
+    // `groupMetadata()` panics the same way when `group.id` is unset
+    // (Java's `throwIfGroupIdNotDefined()`). Every `async fn` (poll / commit /
+    // position / committed / current_lag / unsubscribe / close / etc.) returns
+    // the closed-consumer error through `ensure_open()`.
     //
     // # Bootstrap-failure behavior (deliberate Java divergence, KIP-909)
     //
     // Java 4.4's `acquireAndEnsureOpen()` also throws the permanent
     // `BootstrapResolutionException` (`AsyncKafkaConsumer.java:2205`), so
-    // `assignment()`, `subscription()`, `paused()`, `groupMetadata()` and
-    // `currentLag()` throw it once asynchronous bootstrap resolution has
-    // failed. For the reason above, the Rust accessors cannot: they keep
-    // returning their current / stub value. Every `Result`-returning API
-    // returns `Error::BootstrapResolution` through `ensure_open()`.
+    // `assignment()`, `subscription()`, `paused()` and `groupMetadata()`
+    // throw it once asynchronous bootstrap resolution has failed. The Rust
+    // accessors have no error channel, and a bootstrap failure is not a
+    // programming error that would justify a panic, so they keep returning
+    // their current value. Every `Result`-returning API, `current_lag`
+    // included, returns `Error::BootstrapResolution` through `ensure_open()`.
     //
     // # Mutable Set semantics (deliberate Java divergence)
     //
@@ -3867,15 +3908,15 @@ where
     /// Java: `Set<TopicPartition> assignment()`.
     ///
     /// **Returns an owned mutable `HashSet`** (Java returns
-    /// `Collections.unmodifiableSet(...)`). **Returns the empty set
-    /// silently when the consumer is closed** (Java throws
-    /// `IllegalStateException`). See the module-level "Sync state-read
-    /// methods" comment for rationale.
+    /// `Collections.unmodifiableSet(...)`). **Panics when the consumer is
+    /// closed** (Java throws `IllegalStateException`). See the module-level
+    /// "Sync state-read methods" comment for rationale.
     ///
     /// **Returns the current value after a permanent bootstrap failure**
     /// (Java throws `BootstrapResolutionException`, KIP-909); see the
     /// module-level "Sync state-read methods" comment.
     pub fn assignment(&self) -> std::collections::HashSet<TopicPartition> {
+        self.panic_if_closed();
         let subs = self.subscriptions.lock().unwrap();
         subs.assigned_partitions()
     }
@@ -3883,14 +3924,14 @@ where
     /// Java: `Set<String> subscription()`.
     ///
     /// **Returns an owned mutable `HashSet`** (Java returns
-    /// `Collections.unmodifiableSet(...)`). **Returns the empty set
-    /// silently when the consumer is closed** (Java throws
-    /// `IllegalStateException`).
+    /// `Collections.unmodifiableSet(...)`). **Panics when the consumer is
+    /// closed** (Java throws `IllegalStateException`).
     ///
     /// **Returns the current value after a permanent bootstrap failure**
     /// (Java throws `BootstrapResolutionException`, KIP-909); see the
     /// module-level "Sync state-read methods" comment.
     pub fn subscription(&self) -> std::collections::HashSet<String> {
+        self.panic_if_closed();
         let subs = self.subscriptions.lock().unwrap();
         subs.subscription()
     }
@@ -3898,14 +3939,14 @@ where
     /// Java: `Set<TopicPartition> paused()`.
     ///
     /// **Returns an owned mutable `HashSet`** (Java returns
-    /// `Collections.unmodifiableSet(...)`). **Returns the empty set
-    /// silently when the consumer is closed** (Java throws
-    /// `IllegalStateException`).
+    /// `Collections.unmodifiableSet(...)`). **Panics when the consumer is
+    /// closed** (Java throws `IllegalStateException`).
     ///
     /// **Returns the current value after a permanent bootstrap failure**
     /// (Java throws `BootstrapResolutionException`, KIP-909); see the
     /// module-level "Sync state-read methods" comment.
     pub fn paused(&self) -> std::collections::HashSet<TopicPartition> {
+        self.panic_if_closed();
         let subs = self.subscriptions.lock().unwrap();
         subs.paused_partitions()
     }
@@ -3946,73 +3987,29 @@ where
     /// Java: `ConsumerGroupMetadata groupMetadata()`
     /// (`AsyncKafkaConsumer.java:1529-1537`).
     ///
-    /// # Java divergence
-    ///
-    /// Java's `groupMetadata()` calls `throwIfGroupIdNotDefined()` (`:1532`)
-    /// and throws `InvalidGroupIdException` when `group.id` is unset. The
-    /// Rust translation returns a stub metadata with an empty group id
-    /// and unknown generation / member ids for groupless consumers,
-    /// because:
-    ///   (a) the [`Consumer`] trait surface returns
-    ///       `Arc<dyn ConsumerGroupMetadata>` with no error channel (Phase 2
-    ///       decision), and panicking on a pure accessor diverges
-    ///       sharply from idiomatic Rust;
-    ///   (b) the strict-Java behavior IS surfaced via `commit_*` /
-    ///       `subscribe` etc., which call `return_error_if_group_id_not_defined()`
-    ///       on the error-bearing path.
-    ///
-    /// The Java test
-    /// `AsyncKafkaConsumerTest.testGroupMetadataAfterCreationWithGroupIdIsNull`
-    /// asserts that throw, so it is skipped with this rationale (commit (8/N)
-    /// test-skip section).
-    ///
-    /// **Returns a stub value silently when the consumer is closed**
-    /// (Java throws `IllegalStateException`).
+    /// **Panics when the consumer is closed** (Java's `acquireAndEnsureOpen()`
+    /// throws `IllegalStateException`) and **when `group.id` is unset** (Java's
+    /// `throwIfGroupIdNotDefined()` throws `InvalidGroupIdException`), with
+    /// Java's messages: both are programming errors. See the module-level
+    /// "Sync state-read methods" comment.
     ///
     /// The returned value shares the cached `Arc`, as Java returns the cached
-    /// object. For a consumer **with** a `group.id` the slot is seeded at
-    /// construction (`initialize_group_metadata`, mirroring Java `:533`),
-    /// carrying `UNKNOWN_GENERATION_ID` (-1) and `UNKNOWN_MEMBER_ID` ("") until
+    /// object. The slot is seeded at construction (`initialize_group_metadata`,
+    /// mirroring Java `:533`), carrying `UNKNOWN_GENERATION_ID` (-1) and
+    /// `UNKNOWN_MEMBER_ID` ("") until
     /// [`ConsumerStateNotifier::on_member_epoch_updated`] — the
     /// [`MemberStateListener`] registered on the `ConsumerMembershipManager` —
     /// overwrites them with the first heartbeat response's epoch / member id.
-    /// So the `Some(..)` arm is the normal path; only a groupless
-    /// (assignment-only) consumer leaves the slot `None`, where the stub is
-    /// returned.
     ///
     /// **Returns the current value after a permanent bootstrap failure**
     /// (Java throws `BootstrapResolutionException`, KIP-909); see the
     /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+        self.panic_if_closed();
+        if let Err(error) = self.return_error_if_group_id_not_defined() {
+            panic!("{}", error.message());
+        }
         group_metadata_from(&self.group_metadata, self.group_id.as_deref())
-    }
-
-    /// Java: `OptionalLong currentLag(TopicPartition)`.
-    ///
-    /// Returns the cached lag (highWaterMark - position) if both values
-    /// are known locally, otherwise `None` (matching `OptionalLong.empty()`).
-    ///
-    /// **Sync variant — does NOT enqueue a `CurrentLag` event.** Java's
-    /// implementation dispatches through a `CurrentLagEvent` to the bg
-    /// task when the lag cache is empty; the trait surface (Phase 2) is
-    /// sync, so the async dispatch lives on
-    /// [`Self::current_lag_async`]. The sync accessor only reads
-    /// cached state.
-    ///
-    /// **Returns `None` silently when the consumer is closed** (Java
-    /// throws `IllegalStateException`).
-    ///
-    /// **Returns the current value after a permanent bootstrap failure**
-    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
-    /// module-level "Sync state-read methods" comment.
-    pub fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
-        // The bg-task `current_lag_async` path is the one that drives the
-        // event; this accessor only reads cached state and currently has
-        // no cache (the lag-cache lives on the membership manager in Java
-        // and is populated by fetch responses — not yet wired through to
-        // the consumer struct). Returning `None` matches Java's behavior
-        // for "lag unknown".
-        None
     }
 
     /// Returns the [`ConsumerStateNotifier`] this consumer expects to
@@ -4060,6 +4057,7 @@ where
             group_metadata: Arc::clone(&self.group_metadata),
             time: Arc::clone(&self.time),
             default_api_timeout_ms: self.default_api_timeout_ms,
+            isolation_level: self.isolation_level,
             metrics: Arc::clone(&self.metrics),
             commit_state: Arc::clone(&self.commit_state),
             group_id: self.group_id.clone(),
@@ -4088,6 +4086,16 @@ where
     /// `true` iff [`Self::close`] has already returned.
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// The closed half of Java's `acquireAndEnsureOpen()` for the sync
+    /// accessors: panics with Java's `IllegalStateException` message, since
+    /// they have no error channel and calling them after `close()` is a
+    /// programming error (see the "Sync state-read methods" comment).
+    fn panic_if_closed(&self) {
+        if self.is_closed() {
+            panic!("{CONSUMER_CLOSED_MSG}");
+        }
     }
 
     // ── Subscribe / unsubscribe / assign ───────────────────────────────
@@ -4141,11 +4149,12 @@ where
     /// API that acquires the consumer returns the
     /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
     /// The sync accessors (`assignment`, `subscription`, `paused`,
-    /// `group_metadata`, `current_lag`) have no error channel and keep
-    /// returning their value — see the "Sync state-read methods" comment.
+    /// `group_metadata`) have no error channel: they panic on a closed
+    /// consumer and keep returning their value after a bootstrap failure —
+    /// see the "Sync state-read methods" comment.
     fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
-            return Err(Error::local_illegal_state("This consumer has already been closed."));
+            return Err(Error::local_illegal_state(CONSUMER_CLOSED_MSG));
         }
         self.metadata.maybe_return_bootstrap_fatal_error()
     }
@@ -6283,9 +6292,13 @@ where
     /// Java: `OptionalLong currentLag(TopicPartition)`
     /// (`AsyncKafkaConsumer.java:1514-1526`).
     ///
-    /// Phase 11 commit (6/N) wires the `CurrentLag` event. The previous
-    /// stub (commit (2/N)) returned `None` for every input.
-    pub async fn current_lag_async(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+    /// Submits a `CurrentLag` event and waits for the background task's
+    /// answer, as Java's `applicationEventHandler.addAndGet(new
+    /// CurrentLagEvent(..))`. The background task reads the lag from the
+    /// `SubscriptionState`, or issues a one-shot `ListOffsets(LATEST)` request
+    /// when the log-end offset is unknown so the lag is known on a later call
+    /// (`OffsetsRequestManager::current_lag`, KAFKA-20187).
+    pub async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
         self.ensure_open()?;
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<Option<i64>>(deadline_ms);
@@ -7131,24 +7144,24 @@ where
 {
     // ── Sync state-read methods ────────────────────────────────────────
 
-    fn assignment(&self) -> std::collections::HashSet<TopicPartition> {
+    fn assignment(&mut self) -> std::collections::HashSet<TopicPartition> {
         AsyncKafkaConsumer::assignment(self)
     }
 
-    fn subscription(&self) -> std::collections::HashSet<String> {
+    fn subscription(&mut self) -> std::collections::HashSet<String> {
         AsyncKafkaConsumer::subscription(self)
     }
 
-    fn paused(&self) -> std::collections::HashSet<TopicPartition> {
+    fn paused(&mut self) -> std::collections::HashSet<TopicPartition> {
         AsyncKafkaConsumer::paused(self)
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         AsyncKafkaConsumer::group_metadata(self)
     }
 
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        AsyncKafkaConsumer::current_lag(self, topic_partition)
+    async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        AsyncKafkaConsumer::current_lag(self, topic_partition).await
     }
 
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
@@ -7778,15 +7791,6 @@ mod tests {
         assert!(snap.contains(&tp1));
     }
 
-    #[tokio::test]
-    async fn current_lag_returns_none_in_commit_2() {
-        // Phase-11 commit (2/N) stub — verified to return None until
-        // commit (6/N) wires CurrentLagEvent.
-        let consumer = make_test_consumer();
-        let tp = TopicPartition::new("t".to_string(), 0);
-        assert_eq!(consumer.current_lag(&tp), None);
-    }
-
     /// Phase-12 Issue 2 regression: when the consumer's `state_notifier`
     /// Arc is registered on a `ConsumerMembershipManager` listener list
     /// (the production wiring) and a heartbeat-response-style member-epoch
@@ -7970,6 +7974,7 @@ mod tests {
         assert_rejected_outside_callback("resume", handle.resume(tps).await, rx);
         assert_rejected_outside_callback("position", handle.position(&tp).await, rx);
         assert_rejected_outside_callback("position_with_timeout", handle.position_with_timeout(&tp, timeout).await, rx);
+        assert_rejected_outside_callback("current_lag", handle.current_lag(&tp).await, rx);
         assert_rejected_outside_callback("committed", handle.committed(tps).await, rx);
         assert_rejected_outside_callback(
             "committed_with_timeout",
@@ -8058,7 +8063,6 @@ mod tests {
         assert_eq!(handle.assignment(), HashSet::from([tp.clone()]));
         assert!(handle.paused().is_empty());
         assert_eq!(handle.group_metadata().group_id(), consumer.group_metadata().group_id());
-        assert_eq!(handle.current_lag(&tp), None);
 
         let token = consumer.wakeup_trigger.current_token();
         handle.wakeup();
@@ -8120,6 +8124,83 @@ mod tests {
 
         // The listener has returned: the consumer runs no callback.
         let err = handle.pause(std::slice::from_ref(&tp)).await.expect_err("outside the listener");
+        assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
+        completer.abort();
+    }
+
+    /// `ConsumerHandle::current_lag` inside `on_partitions_revoked` submits a
+    /// `CurrentLag` event carrying the consumer's isolation level and returns
+    /// what the bg task answers, as the owning consumer's `current_lag` does;
+    /// after the listener returns it is rejected like every async handle op.
+    #[tokio::test]
+    async fn handle_current_lag_works_inside_a_rebalance_listener() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct LagListener {
+            handle: ConsumerHandle,
+            lags: std::sync::Mutex<Vec<Result<Option<i64>, Error>>>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for LagListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                for partition in partitions {
+                    let lag = self.handle.current_lag(partition).await;
+                    self.lags.lock().unwrap().push(lag);
+                }
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let isolation_level = consumer.isolation_level;
+        let handle = consumer.handle();
+        let listener = Arc::new(LagListener { handle: handle.clone(), lags: std::sync::Mutex::new(Vec::new()) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+        let known = TopicPartition::new("t".to_string(), 0);
+        let unknown = TopicPartition::new("t".to_string(), 1);
+        let completer = {
+            let known = known.clone();
+            tokio::spawn(async move {
+                while let Some(env) = app_event_rx.recv().await {
+                    match env.event {
+                        ApplicationEvent::CurrentLag { handle, partition, isolation_level: level } => {
+                            assert_eq!(isolation_level, level, "the handle carries the consumer's isolation level");
+                            handle.complete((partition == known).then_some(7));
+                        },
+                        other => panic!("unexpected event {}", other.type_name()),
+                    }
+                }
+            })
+        };
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![known.clone(), unknown],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+        consumer.process_background_events().await.expect("listener ran");
+        ack_rx.await.expect("ack").expect("listener returned Ok");
+        let lags: Vec<Option<i64>> = std::mem::take(&mut *listener.lags.lock().unwrap())
+            .into_iter()
+            .map(|lag| lag.expect("current_lag inside the listener"))
+            .collect();
+        assert_eq!(vec![Some(7), None], lags, "the known lag, then an unknown one");
+
+        // The listener has returned: the consumer runs no callback.
+        let err = handle.current_lag(&known).await.expect_err("outside the listener");
         assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
         completer.abort();
     }
@@ -9560,12 +9641,81 @@ mod tests {
             consumer.group_metadata.lock().unwrap().is_none(),
             "epoch update must not initialize the slot for a groupless consumer"
         );
-        // ... and the getter still returns the groupless `""` stub.
-        let meta = consumer.group_metadata();
-        assert_eq!(meta.group_id(), "");
-        assert_eq!(meta.generation_id(), -1);
-        assert_eq!(meta.member_id(), "");
-        assert_eq!(meta.group_instance_id(), None);
+        // ... and the getter still refuses a groupless consumer, as Java's
+        // `groupMetadata()` throws `InvalidGroupIdException`
+        // (`AsyncKafkaConsumer.java` `throwIfGroupIdNotDefined`).
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consumer.group_metadata()))
+            .expect_err("group_metadata without group.id must panic");
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some(GROUP_ID_NOT_DEFINED_MSG)
+        );
+    }
+
+    /// Builds a consumer and closes it, answering the close-path events.
+    async fn closed_test_consumer() -> AsyncKafkaConsumer<Vec<u8>, Vec<u8>> {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. }
+                    | ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        crate::consumer::Consumer::close(&mut consumer).await.expect("close");
+        consumer
+    }
+
+    /// Java's `assignment()` runs `acquireAndEnsureOpen()`, which throws
+    /// `IllegalStateException` on a closed consumer.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn assignment_panics_after_close() {
+        let mut consumer = closed_test_consumer().await;
+        let _ = crate::consumer::Consumer::assignment(&mut consumer);
+    }
+
+    /// Java's `subscription()` runs `acquireAndEnsureOpen()`.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn subscription_panics_after_close() {
+        let mut consumer = closed_test_consumer().await;
+        let _ = crate::consumer::Consumer::subscription(&mut consumer);
+    }
+
+    /// Java's `paused()` runs `acquireAndEnsureOpen()`.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn paused_panics_after_close() {
+        let mut consumer = closed_test_consumer().await;
+        let _ = crate::consumer::Consumer::paused(&mut consumer);
+    }
+
+    /// Java's `groupMetadata()` runs `acquireAndEnsureOpen()`.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn group_metadata_panics_after_close() {
+        let mut consumer = closed_test_consumer().await;
+        let _ = crate::consumer::Consumer::group_metadata(&mut consumer);
+    }
+
+    /// Java's `groupMetadata()` throws `InvalidGroupIdException` without a
+    /// `group.id` (`throwIfGroupIdNotDefined`).
+    #[tokio::test]
+    #[should_panic(
+        expected = "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer configuration."
+    )]
+    async fn group_metadata_panics_without_group_id() {
+        let (mut consumer, _handles) = make_test_consumer_without_group_id();
+        let _ = crate::consumer::Consumer::group_metadata(&mut consumer);
     }
 
     /// Java: `testSubscribeGeneratesEvent` (Java line 1191-1200) —
@@ -13431,7 +13581,7 @@ mod tests {
             "committed_with_timeout",
             consumer.committed_with_timeout(tp_slice, Duration::from_millis(0)).await
         );
-        assert_closed!("current_lag_async", consumer.current_lag_async(&tp).await);
+        assert_closed!("current_lag", consumer.current_lag(&tp).await);
 
         // ── beginning / end / offsetsForTimes ───────────────────────
         assert_closed!("beginning_offsets", consumer.beginning_offsets(tp_slice).await);

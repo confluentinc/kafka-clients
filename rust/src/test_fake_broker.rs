@@ -25,8 +25,11 @@
 //!
 //! It speaks just enough protocol for the client to learn the cluster:
 //! `ApiVersions` gets the default broker response and `Metadata` gets one
-//! broker (node 0, this listener) leading partition 0 of one topic. Every
-//! other request is read and left unanswered.
+//! broker (node 0, this listener) leading partition 0 of one topic.
+//! `ListOffsets` requests are recorded and held until the test sets an answer
+//! with [`FakeBroker::answer_list_offsets`], which lets a consumer test step
+//! through the moments Java's `MockClient` tests stop at (request sent, no
+//! response yet). Every other request is read and left unanswered.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,14 +37,18 @@ use std::sync::Mutex;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
+use crate::ListOffsetsRequestData;
+use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::{ApiVersionsResponse, RequestHeader, RequestUtils};
+use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
 /// The node id the fake advertises for itself in its Metadata responses.
@@ -58,10 +65,28 @@ pub(crate) struct ReceivedApiVersions {
     pub(crate) node_id: i32,
 }
 
-/// The fake broker: a listener plus the ApiVersions requests it has seen.
+/// How the fake answers every partition of a held `ListOffsets` request.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ListOffsetsAnswer {
+    /// The partition error.
+    pub(crate) error: Errors,
+    /// The offset returned with [`Errors::None`].
+    pub(crate) offset: i64,
+}
+
+/// What the serving tasks share with the test.
+struct Shared {
+    api_versions: Mutex<Vec<ReceivedApiVersions>>,
+    /// The `Timestamp` of every partition of every `ListOffsets` received.
+    list_offsets_timestamps: Mutex<Vec<i64>>,
+    /// `None` holds `ListOffsets` requests; `Some` answers them.
+    list_offsets_answer: watch::Sender<Option<ListOffsetsAnswer>>,
+}
+
+/// The fake broker: a listener plus the requests it has seen.
 pub(crate) struct FakeBroker {
     addr: SocketAddr,
-    api_versions: Arc<Mutex<Vec<ReceivedApiVersions>>>,
+    shared: Arc<Shared>,
     accept_task: JoinHandle<()>,
 }
 
@@ -71,8 +96,12 @@ impl FakeBroker {
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
-        let api_versions = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&api_versions);
+        let shared = Arc::new(Shared {
+            api_versions: Mutex::new(Vec::new()),
+            list_offsets_timestamps: Mutex::new(Vec::new()),
+            list_offsets_answer: watch::Sender::new(None),
+        });
+        let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
         let topic = topic.to_string();
         let topic_id = Uuid::random_uuid();
@@ -88,7 +117,7 @@ impl FakeBroker {
                 ));
             }
         });
-        Self { addr, api_versions, accept_task }
+        Self { addr, shared, accept_task }
     }
 
     /// `host:port` for `bootstrap.servers`.
@@ -98,7 +127,24 @@ impl FakeBroker {
 
     /// The ApiVersions requests received so far, in arrival order.
     pub(crate) fn api_versions_requests(&self) -> Vec<ReceivedApiVersions> {
-        self.api_versions.lock().expect("fake broker mutex poisoned").clone()
+        self.shared.api_versions.lock().expect("fake broker mutex poisoned").clone()
+    }
+
+    /// The `Timestamp` of each partition of the `ListOffsets` requests
+    /// received so far, in arrival order: `-1` (`LATEST_TIMESTAMP`) asks for
+    /// the log-end offset.
+    pub(crate) fn list_offsets_timestamps(&self) -> Vec<i64> {
+        self.shared
+            .list_offsets_timestamps
+            .lock()
+            .expect("fake broker mutex poisoned")
+            .clone()
+    }
+
+    /// Answers the held `ListOffsets` requests, and every later one, with
+    /// `answer`; `None` holds them again.
+    pub(crate) fn answer_list_offsets(&self, answer: Option<ListOffsetsAnswer>) {
+        self.shared.list_offsets_answer.send_replace(answer);
     }
 
     /// Waits (up to `timeout`) until at least `count` ApiVersions requests have
@@ -128,7 +174,7 @@ impl Drop for FakeBroker {
 async fn serve(
     mut stream: TcpStream,
     addr: SocketAddr,
-    seen: Arc<Mutex<Vec<ReceivedApiVersions>>>,
+    seen: Arc<Shared>,
     cluster_id: String,
     topic: String,
     topic_id: Uuid,
@@ -148,11 +194,10 @@ async fn serve(
         let response_header = header.to_response_header();
         let response = if *header.api_key() == ApiKeys::API_VERSIONS {
             let data = ApiVersionsRequestData::read(&mut accessor, version).expect("fake broker: ApiVersions body");
-            seen.lock().expect("fake broker mutex poisoned").push(ReceivedApiVersions {
-                version,
-                cluster_id: data.cluster_id.clone(),
-                node_id: data.node_id,
-            });
+            seen.api_versions
+                .lock()
+                .expect("fake broker mutex poisoned")
+                .push(ReceivedApiVersions { version, cluster_id: data.cluster_id.clone(), node_id: data.node_id });
             let mut body = ApiVersionsResponse::default_api_versions_response(ListenerType::Broker);
             RequestUtils::serialize(
                 response_header.data(),
@@ -162,6 +207,24 @@ async fn serve(
             )
         } else if *header.api_key() == ApiKeys::METADATA {
             let mut body = metadata_response(addr, &cluster_id, &topic, topic_id);
+            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+        } else if *header.api_key() == ApiKeys::LIST_OFFSETS {
+            let request = ListOffsetsRequestData::read(&mut accessor, version).expect("fake broker: ListOffsets body");
+            seen.list_offsets_timestamps.lock().expect("fake broker mutex poisoned").extend(
+                request
+                    .topics()
+                    .iter()
+                    .flat_map(|topic| topic.partitions().iter().map(|partition| partition.timestamp())),
+            );
+            let mut answers = seen.list_offsets_answer.subscribe();
+            let Ok(answer) = answers
+                .wait_for(Option::is_some)
+                .await
+                .map(|answer| answer.expect("checked by wait_for"))
+            else {
+                return;
+            };
+            let mut body = list_offsets_response(&request, answer);
             RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
         } else {
             continue;
@@ -203,5 +266,39 @@ fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: 
     data.set_controller_id(FAKE_BROKER_NODE_ID);
     data.set_brokers(vec![broker]);
     data.set_topics(vec![topic_metadata]);
+    data
+}
+
+/// Answers every partition of `request` with `answer`.
+fn list_offsets_response(request: &ListOffsetsRequestData, answer: ListOffsetsAnswer) -> ListOffsetsResponseData {
+    let topics = request
+        .topics()
+        .iter()
+        .map(|topic| {
+            let partitions = topic
+                .partitions()
+                .iter()
+                .map(|partition| {
+                    let mut response = ListOffsetsPartitionResponse::new();
+                    response.set_partition_index(partition.partition_index());
+                    response.set_error_code(answer.error.code());
+                    response.set_timestamp(-1);
+                    response.set_offset(if answer.error == Errors::None {
+                        answer.offset
+                    } else {
+                        -1
+                    });
+                    response.set_leader_epoch(0);
+                    response
+                })
+                .collect();
+            let mut response = ListOffsetsTopicResponse::new();
+            response.set_name(topic.name().clone());
+            response.set_partitions(partitions);
+            response
+        })
+        .collect();
+    let mut data = ListOffsetsResponseData::new();
+    data.set_topics(topics);
     data
 }

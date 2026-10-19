@@ -395,7 +395,7 @@ enum TpListOp {
 
 impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     // ── non-blocking state reads (sync in the trait) ──
-    fn assignment(&self) -> HashSet<TopicPartition> {
+    fn assignment(&mut self) -> HashSet<TopicPartition> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -415,7 +415,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn subscription(&self) -> HashSet<String> {
+    fn subscription(&mut self) -> HashSet<String> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -433,7 +433,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn paused(&self) -> HashSet<TopicPartition> {
+    fn paused(&mut self) -> HashSet<TopicPartition> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -453,7 +453,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -473,8 +473,8 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         MultilanguageGroupMetadata::register(response, self.client.clone(), backend)
     }
 
-    fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
-        unimplemented!("current_lag is not supported on the gRPC multilanguage backend")
+    async fn current_lag(&mut self, _topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        Err(self.unsupported("current_lag"))
     }
 
     fn wakeup(&self) {

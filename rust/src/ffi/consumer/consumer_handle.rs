@@ -28,9 +28,10 @@
 //! `OffsetCommitCallback`), and otherwise stores the
 //! `LOCAL_CONCURRENT_MODIFICATION` error Java's `acquire()` throws, before
 //! anything is submitted. That is the Java rule: the thread inside the
-//! consumer may call back in, no other thread may. `wakeup` and the sync
-//! reads (`assignment`, `paused`, `group_metadata`, `current_lag`,
-//! `metrics`) are callable from any thread at any time. A `MockConsumer`
+//! consumer may call back in, no other thread may; `current_lag`, which waits
+//! for the consumer's background task as Java's `CurrentLagEvent` does, is one
+//! of these operations. `wakeup` and the sync reads (`assignment`, `paused`,
+//! `group_metadata`, `metrics`) are callable from any thread at any time. A `MockConsumer`
 //! handle is not gated, as Java's `MockConsumer` has no `acquire()`.
 //!
 //! # Threads
@@ -2556,21 +2557,81 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_group_metadata(
 /// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` where Java
 /// returns an empty `OptionalLong`, as `kafka_consumer_Consumer_current_lag`.
 ///
+/// Blocking; callable from inside a listener. On failure the error is stored in
+/// `*out_err` and -1 returned; since -1 is also the empty lag, the caller tells
+/// the two apart by `*out_err`.
+///
 /// # Safety
 ///
-/// `self_` must be a live handle and `topic_partition` a valid handle.
+/// `self_` must be a live handle, `topic_partition` a valid handle and
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
     self_: *const kafka_consumer_ConsumerHandle_t,
     topic_partition: *const kafka_common_TopicPartition_t,
+    out_err: *mut *mut kafka_common_Error_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
-    // alive for this call, as `topic_partition_ref` requires.
-    let tp = unsafe { topic_partition_ref(topic_partition) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
-    // the only use of the reference, as `inner` requires.
-    unsafe { inner(self_) }.handle.current_lag(tp).unwrap_or(-1)
+    // alive for this expression, as `topic_partition_ref` requires; the value is cloned.
+    let partition = unsafe { topic_partition_ref(topic_partition) }.clone();
+    let h = inner.handle.clone();
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_current_lag", async move {
+        h.current_lag(&partition).await
+    });
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
+    // to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |lag| lag.unwrap_or(-1)) }
+}
+
+/// The completion of the `_cb` twin: the lag, `-1` for `OptionalLong.empty()`,
+/// beside a null `error` on success; `-1` beside an owned `error` otherwise.
+pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
+    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The non-blocking twin: `cb` is queued for
+/// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Safety
+///
+/// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_i64` requires.
+    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
+    self_: *const kafka_consumer_ConsumerHandle_t,
+    topic_partition: *const kafka_common_TopicPartition_t,
+    cb: kafka_consumer_ConsumerHandle_current_lag_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
+    // alive for this expression, as `topic_partition_ref` requires; the value is cloned.
+    let partition = unsafe { topic_partition_ref(topic_partition) }.clone();
+    let h = inner.handle.clone();
+    let opaque = SendPtr(opaque);
+    inner.run_cb(
+        "kafka_consumer_ConsumerHandle_current_lag_cb",
+        async move { h.current_lag(&partition).await.map(|lag| lag.unwrap_or(-1)) },
+        move |client, result| deliver_i64(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
+        |error| unsafe { cb(-1, box_error(error), opaque.get()) },
+    )
 }
 
 /// `wakeup()`: as `kafka_consumer_Consumer_wakeup`, from any thread.

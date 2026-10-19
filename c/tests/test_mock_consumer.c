@@ -1321,24 +1321,51 @@ static void test_mock_consumer_destroy_runs_pending_completion_once(void) {
 }
 
 // ---------------------------------------------------------------------------
-// current_lag is -1 when unknown; metrics is a map
+// current_lag follows MockConsumer.currentLag; metrics is a map
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_current_lag_and_metrics(void) {
     fixture_t f;
     make_assigned_mock(&f, "test", 0);
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
-    /* The Rust MockConsumer's documented model: an assigned partition with
-     * no end offset known is "caught up" (0); with one it is end - position;
-     * an unassigned partition has no lag (-1 for Java's empty OptionalLong). */
+    /* Java's MockConsumer.currentLag (MockConsumer.java:764-771): with no end
+     * offset set the test models being caught up (0); with one it is
+     * end - position(tp). */
     TEST_ASSERT_EQUAL_INT64(0, consumer_current_lag(f.consumer, tp));
     update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 0, 55);
     kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 10); /* positions test-0 at 0 */
     kafka_consumer_ConsumerRecords_destroy(records);
     TEST_ASSERT_EQUAL_INT64(55, consumer_current_lag(f.consumer, tp));
+
+    /* The `_cb` twin delivers the same lag through the consumer's queue. */
+    lag_completion_t done;
+    lag_completion_init(&done);
+    kafka_consumer_Consumer_current_lag_cb(f.consumer, tp, on_lag, &done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
+    TEST_ASSERT_NULL(done.error);
+    TEST_ASSERT_EQUAL_INT64(55, done.value);
     kafka_common_TopicPartition_destroy(tp);
+
+    /* An unassigned partition: caught up while no end offset is set; with one,
+     * Java's position(tp) throws IllegalArgumentException, so the blocking
+     * form returns -1 beside the error and the twin delivers it. */
     kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("test", 9);
-    TEST_ASSERT_EQUAL_INT64(-1, consumer_current_lag(f.consumer, other));
+    TEST_ASSERT_EQUAL_INT64(0, consumer_current_lag(f.consumer, other));
+    update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 9, 5);
+    kafka_common_Error_t *err = NULL;
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_Consumer_current_lag(f.consumer, other, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    lag_completion_init(&done);
+    kafka_consumer_Consumer_current_lag_cb(f.consumer, other, on_lag, &done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
+    TEST_ASSERT_EQUAL_INT64(-1, done.value);
+    TEST_ASSERT_NOT_NULL(done.error);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(done.error));
+    kafka_common_Error_destroy(done.error);
     kafka_common_TopicPartition_destroy(other);
 
     kafka_Map_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);

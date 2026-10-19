@@ -580,20 +580,24 @@ where
 {
     // ── Sync accessors ─────────────────────────────────────────────────
 
-    fn assignment(&self) -> HashSet<TopicPartition> {
+    // Java's `assignment()`, `subscription()`, `paused()` and
+    // `groupMetadata()` do not call `ensureNotClosed()`, so these answer on a
+    // closed mock too.
+
+    fn assignment(&mut self) -> HashSet<TopicPartition> {
         self.subs().assigned_partitions()
     }
 
-    fn subscription(&self) -> HashSet<String> {
+    fn subscription(&mut self) -> HashSet<String> {
         self.subs().subscription()
     }
 
-    fn paused(&self) -> HashSet<TopicPartition> {
+    fn paused(&mut self) -> HashSet<TopicPartition> {
         // Java line 613-615: returns a copy of `paused`.
         self.paused.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         mock_group_metadata()
     }
 
@@ -603,38 +607,35 @@ where
     ///
     /// Java: `ensureNotClosed(); return Collections.emptyMap();`. The mock
     /// has no metrics registry, so the Rust port returns an empty map,
-    /// matching Java. (The Rust mock's sync accessors do not panic on a
-    /// closed consumer — see the other accessors — so the `ensureNotClosed`
-    /// guard is not replicated here; the result is the same empty map either
-    /// way.)
+    /// matching Java.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` on a closed
+    /// mock, where Java's `ensureNotClosed()` throws `IllegalStateException`:
+    /// calling it after `close()` is a programming error.
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        if let Err(error) = self.ensure_not_closed() {
+            panic!("{}", error.message());
+        }
         HashMap::new()
     }
 
     /// Translates Java's
     /// `OptionalLong currentLag(TopicPartition)`
-    /// (`MockConsumer.java:764-771`).
-    ///
-    /// Behavior summary:
-    /// - Returns `None` if the partition is **not assigned** to this
-    ///   consumer. (Java throws `IllegalArgumentException` from the inner
-    ///   `position(tp)` call in that case; Rust's `&self` API can't throw,
-    ///   so `None` is the closest analog and lets the caller distinguish
-    ///   "unassigned" from a real lag of `0`.)
-    /// - Returns `Some(0)` if assigned but no end offset is known (Java's
-    ///   "caught up" model — `endOffsets` has no entry for the partition).
-    /// - Returns `Some(0)` if assigned with end offset known but no
-    ///   position has been set yet. Java's `position(tp)` would call
-    ///   `updateFetchPosition` to seed a position; the Rust `&self` API
-    ///   cannot mutate, so `Some(0)` is the least-surprising fallback for
-    ///   the caught-up model.
-    /// - Returns `Some(end - position)` otherwise.
-    ///
-    /// Divergence from Java: Java throws on unassigned partitions; Rust
-    /// returns `None`. Callers needing the strict Java behavior must
-    /// pre-check `assignment().contains(tp)` themselves.
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        mock_current_lag(&self.subscriptions, &self.end_offsets, topic_partition)
+    /// (`MockConsumer.java:764-771`): `endOffsets.get(tp) - position(tp)` when
+    /// the test set an end offset, else `0`, the test modelling being caught
+    /// up. `position(tp)` is the mock's own, so it returns its errors (a closed
+    /// mock, an unassigned partition) and seeds a missing position as Java's
+    /// `updateFetchPosition` does.
+    async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        let end = self.end_offsets_lock().get(topic_partition).copied();
+        match end {
+            Some(end) => Ok(Some(end - Consumer::position(self, topic_partition).await?)),
+            // If the test doesn't bother to set an end offset, we assume it
+            // wants to model being caught up.
+            None => Ok(Some(0)),
+        }
     }
 
     // ── Subscription / assignment ──────────────────────────────────────
@@ -945,9 +946,7 @@ where
         // Java line 420-430.
         self.ensure_not_closed()?;
         if !self.subs().is_assigned(partition) {
-            return Err(Error::local_illegal_argument(
-                "You can only check the position for partitions assigned to this consumer.",
-            ));
+            return Err(Error::local_illegal_argument(POSITION_NOT_ASSIGNED_MSG));
         }
         // First read; if absent, refresh via update_fetch_position and re-read.
         let pos = self.subs().position_or_null(partition).map(|p| p.offset);
@@ -1189,6 +1188,10 @@ impl<K, V> MockConsumer<K, V> {
     }
 }
 
+/// The message of the `IllegalArgumentException` Java's
+/// `MockConsumer.position(TopicPartition)` throws for an unassigned partition.
+const POSITION_NOT_ASSIGNED_MSG: &str = "You can only check the position for partitions assigned to this consumer.";
+
 /// Java's `ensureNotClosed()` (`MockConsumer.java:700-703`) over the mock's
 /// shared `closed` flag, so a [`ConsumerHandle`] obtained from the mock
 /// checks it too.
@@ -1212,47 +1215,35 @@ pub(crate) fn mock_group_metadata() -> Arc<dyn ConsumerGroupMetadata> {
     ))
 }
 
-/// Java's `currentLag(TopicPartition)` (`MockConsumer.java:645-660`) over the
-/// mock's shared state: the lag of the mock and of every [`ConsumerHandle`]
-/// obtained from it.
-///
-/// - Returns `None` for an unassigned partition — a divergence from Java,
-///   which throws; callers needing the strict Java behavior pre-check
-///   `assignment().contains(tp)` themselves.
-/// - Returns `Some(0)` when no end offset is known or the partition has no
-///   valid position yet (Java's "caught up" model).
-/// - Returns `Some(end - position)` otherwise.
-///
-/// Each lock is taken for a read and released; none is held across an
-/// `.await` (`consumer-threading.md` §16).
+/// Java's `currentLag(TopicPartition)` (`MockConsumer.java:764-771`) over
+/// the mock's shared state, for a [`ConsumerHandle`] obtained from the mock:
+/// `endOffsets.get(tp) - position(tp)` when an end offset is set, else `0`
+/// ("caught up"). Java's `position(tp)` checks that the mock is open and that
+/// the partition is assigned, with its messages; a partition without a
+/// position answers `None`, since the handle cannot seed one as
+/// `updateFetchPosition` does.
 pub(crate) fn mock_current_lag(
+    closed: &AtomicBool,
     subscriptions: &Mutex<SubscriptionState>,
     end_offsets: &Mutex<HashMap<TopicPartition, i64>>,
     topic_partition: &TopicPartition,
-) -> Option<i64> {
-    let subs = subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
-    // Unassigned → None (diverges from Java, which throws). See rustdoc.
-    if !subs.is_assigned(topic_partition) {
-        return None;
-    }
+) -> Result<Option<i64>, Error> {
     let end = end_offsets
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(topic_partition)
         .copied();
-    match end {
-        // No end offset known: Java's "caught up" model.
-        None => Some(0),
-        Some(end) => {
-            // Read the position WITHOUT triggering `update_fetch_position`
-            // (which needs `&mut self`). If the partition has no valid
-            // position yet, fall back to the caught-up model.
-            match subs.position_or_null(topic_partition).map(|p| p.offset) {
-                Some(p) => Some(end - p),
-                None => Some(0),
-            }
-        },
+    let Some(end) = end else {
+        // If the test doesn't bother to set an end offset, we assume it wants
+        // to model being caught up.
+        return Ok(Some(0));
+    };
+    ensure_mock_not_closed(closed)?;
+    let subs = subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+    if !subs.is_assigned(topic_partition) {
+        return Err(Error::local_illegal_argument(POSITION_NOT_ASSIGNED_MSG));
     }
+    Ok(subs.position_or_null(topic_partition).map(|position| end - position.offset))
 }
 
 /// Java's `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:399-404`)
@@ -1309,6 +1300,26 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    /// `MockConsumer` has the same thread shape as `KafkaConsumer`: it can
+    /// move to another task but not be shared (`consumer-threading.md` §2).
+    #[test]
+    fn mock_consumer_is_send_and_not_sync() {
+        use crate::test_thread_safety::{is_send, is_sync};
+        assert!(is_send!(MockConsumer<String, String>));
+        assert!(!is_sync!(MockConsumer<String, String>));
+    }
+
+    /// Java's `MockConsumer.metrics()` calls `ensureNotClosed()`
+    /// (`MockConsumer.java:566`), which throws `IllegalStateException`.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn test_metrics_panics_after_close() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        Consumer::close(&mut c).await.expect("close");
+        let _ = Consumer::metrics(&c);
+    }
 
     #[test]
     fn test_new_initial_state() {
@@ -1630,8 +1641,16 @@ mod tests {
         let handle = c.handle();
         c.subscribe_with_topics(vec!["test".to_string()]).await.expect("subscribe");
         let tp = tp_of("test");
-        // Unassigned: `None` from the handle as from the mock.
-        assert_eq!(handle.current_lag(&tp), None);
+        // No end offset: caught up, assigned or not, as Java's mock.
+        assert_eq!(handle.current_lag(&tp).await.expect("lag"), Some(0));
+        c.update_end_offsets(HashMap::from([(tp.clone(), 10)]));
+        // Unassigned with an end offset: Java's `position(tp)` throws.
+        let error = handle.current_lag(&tp).await.expect_err("unassigned");
+        assert!(error.is_local_illegal_argument_error(), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "You can only check the position for partitions assigned to this consumer."
+        );
         c.rebalance(std::slice::from_ref(&tp)).await.expect("rebalance");
         assert_eq!(handle.assignment(), HashSet::from([tp.clone()]));
         c.pause(std::slice::from_ref(&tp)).await.expect("pause");
@@ -1639,16 +1658,20 @@ mod tests {
         c.resume(std::slice::from_ref(&tp)).await.expect("resume");
         assert!(handle.paused().is_empty());
 
-        // Assigned, no end offset: caught up.
-        assert_eq!(handle.current_lag(&tp), Some(0));
-        c.update_end_offsets(HashMap::from([(tp.clone(), 10)]));
+        // Assigned with an end offset but no position yet: Java's mock would
+        // reset the position through `position(tp)`; the handle cannot seed
+        // one, so the lag is unknown.
+        assert_eq!(handle.current_lag(&tp).await.expect("lag"), None);
         c.seek_with_offset(tp.clone(), 4).await.expect("seek");
         assert_eq!(
-            handle.current_lag(&tp),
+            handle.current_lag(&tp).await.expect("lag"),
             Some(6),
             "handle lag reads the mock's end offsets and position"
         );
-        assert_eq!(handle.current_lag(&tp), c.current_lag(&tp));
+        assert_eq!(
+            handle.current_lag(&tp).await.expect("lag"),
+            c.current_lag(&tp).await.expect("lag")
+        );
 
         // Java's `MockConsumer.groupMetadata()` sentinel values.
         let meta = handle.group_metadata();

@@ -75,7 +75,7 @@ fn make_smoke_config() -> ConsumerConfig {
 /// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let consumer = KafkaConsumer::<String, String>::new(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_smoke_config(),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),

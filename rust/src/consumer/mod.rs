@@ -156,8 +156,15 @@ where
     ///
     /// Translates Java's `Set<TopicPartition> assignment()` (javadoc from
     /// `KafkaConsumer`, KAFKA-20341).
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` when the
+    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
+    /// `IllegalStateException`: calling it after `close()` is a programming
+    /// error.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assignment")]
-    fn assignment(&self) -> HashSet<TopicPartition>;
+    fn assignment(&mut self) -> HashSet<TopicPartition>;
 
     /// Get the current subscription. Will return the same topics used in the
     /// most recent call to [`Self::subscribe_with_topics`] or
@@ -170,26 +177,71 @@ where
     ///
     /// Translates Java's `Set<String> subscription()` (javadoc from
     /// `KafkaConsumer`, KAFKA-20341).
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` when the
+    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
+    /// `IllegalStateException`: calling it after `close()` is a programming
+    /// error.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscription")]
-    fn subscription(&self) -> HashSet<String>;
+    fn subscription(&mut self) -> HashSet<String>;
 
     /// Translates Java's `Set<TopicPartition> paused()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` when the
+    /// consumer is closed, where Java's `acquireAndEnsureOpen()` throws
+    /// `IllegalStateException`: calling it after `close()` is a programming
+    /// error.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#paused")]
-    fn paused(&self) -> HashSet<TopicPartition>;
+    fn paused(&mut self) -> HashSet<TopicPartition>;
 
     /// Translates Java's `ConsumerGroupMetadata groupMetadata()`.
     ///
     /// `ConsumerGroupMetadata` is a trait (see its docs), so the consumer
     /// returns its own implementation behind an `Arc`, which is cheap to clone
     /// and to hand to `Producer::send_offsets_to_transaction`.
+    ///
+    /// # Panics
+    ///
+    /// Where Java throws, because calling it there is a programming error:
+    ///
+    /// - with `"This consumer has already been closed."` when the consumer is
+    ///   closed (Java's `IllegalStateException` from `acquireAndEnsureOpen()`);
+    /// - with `InvalidGroupIdException`'s message, `"To use the group
+    ///   management or offset commit APIs, you must provide a valid group.id in
+    ///   the consumer configuration."`, when the consumer has no `group.id`
+    ///   (Java's `throwIfGroupIdNotDefined()`).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
     ///
-    /// Returns `Option<i64>` — the natural Rust analog.
+    /// Get the consumer's current lag on the partition. Returns `None` if the
+    /// lag is not known, for example if there is no position yet, or if the
+    /// end offset is not known yet.
+    ///
+    /// This method uses locally cached metadata. If the log end offset is not
+    /// known yet, it triggers a request to fetch the log end offset, but
+    /// returns immediately (javadoc from `KafkaConsumer`).
+    ///
+    /// Asynchronous: Java's `currentLag` waits for a `CurrentLagEvent` on the
+    /// consumer's background thread (`addAndGet`), so it blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalState`] when the partition is not assigned
+    /// to this consumer (Java's `IllegalStateException`) or with `"This
+    /// consumer has already been closed."` when the consumer is closed, and a
+    /// timeout error when the background task does not answer within
+    /// `default.api.timeout.ms`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#currentLag")]
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
+    fn current_lag(
+        &mut self,
+        topic_partition: &TopicPartition,
+    ) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
 
     /// Translates Java's `Map<MetricName, ? extends Metric> metrics()`.
     ///
@@ -642,6 +694,12 @@ where
 
     /// Translates Java's `void wakeup()`. Sync — callable from any task,
     /// including signal handlers.
+    ///
+    /// The consumer is not `Sync`, so a call made while another task or thread
+    /// is inside one of its methods cannot go through a reference to the
+    /// consumer. Take a [`ConsumerHandle`] beforehand
+    /// (`let handle = consumer.handle();`) and call
+    /// [`handle.wakeup()`](ConsumerHandle::wakeup) from there instead.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#wakeup")]
     fn wakeup(&self);
 

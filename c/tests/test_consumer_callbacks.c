@@ -685,12 +685,14 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(gm));
     kafka_consumer_ConsumerGroupMetadata_destroy(gm);
 
-    /* currentLag(): no end offset yet -> Java's OptionalLong.of(0); then
-     * end 10 - position 4 = 6 (MockConsumer.java:664-674); an unassigned
-     * partition -> empty, -1 here. */
+    /* currentLag() (MockConsumer.java:764-771): no end offset yet -> 0, the
+     * test modelling being caught up; then end 10 - position 4 = 6. A mock
+     * handle is not gated (Java's MockConsumer has no acquire()), so the
+     * blocking form answers outside a listener. */
     const kafka_common_TopicPartition_t *assigned = (const kafka_common_TopicPartition_t *)kafka_List_get(list, 0);
     update_beginning_offset(f.mock, "test", 0);
-    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_ConsumerHandle_current_lag(h, assigned));
+    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &err));
+    assert_ok(err, "ConsumerHandle_current_lag");
     int64_t ten = 10;
     kafka_Map_t *ends = kafka_Map_new();
     kafka_Map_put(ends, (void *)assigned, &ten);
@@ -698,9 +700,31 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     kafka_Map_destroy(ends);
     kafka_consumer_Consumer_seek_with_offset(f.consumer, assigned, 4, &err);
     assert_ok(err, "Consumer_seek_with_offset");
-    TEST_ASSERT_EQUAL_INT64(6, kafka_consumer_ConsumerHandle_current_lag(h, assigned));
+    TEST_ASSERT_EQUAL_INT64(6, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &err));
+    assert_ok(err, "ConsumerHandle_current_lag");
+
+    /* The `_cb` twin delivers the same lag through the consumer's queue. */
+    lag_completion_t lag_done;
+    lag_completion_init(&lag_done);
+    kafka_consumer_ConsumerHandle_current_lag_cb(h, assigned, on_lag, &lag_done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &lag_done.fired, 1));
+    TEST_ASSERT_NULL(lag_done.error);
+    TEST_ASSERT_EQUAL_INT64(6, lag_done.value);
+
+    /* An unassigned partition with an end offset reaches Java's position(tp),
+     * which throws IllegalArgumentException: -1 beside the error. */
     kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("other", 0);
-    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_ConsumerHandle_current_lag(h, other));
+    ends = kafka_Map_new();
+    kafka_Map_put(ends, other, &ten);
+    kafka_consumer_MockConsumer_update_end_offsets(f.mock, ends);
+    kafka_Map_destroy(ends);
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_ConsumerHandle_current_lag(h, other, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = NULL;
     kafka_common_TopicPartition_destroy(other);
     tp_list_destroy(list);
 
@@ -1031,6 +1055,12 @@ static void test_consumer_handle_outside_a_callback_is_concurrent_modification(v
     assert_handle_outside_callback(err);
     err = NULL;
     TEST_ASSERT_NULL(committed);
+    /* current_lag waits for the background task (Java's CurrentLagEvent), so
+     * it is gated like the other async operations. */
+    int64_t lag = kafka_consumer_ConsumerHandle_current_lag(h, tp, &err);
+    assert_handle_outside_callback(err);
+    err = NULL;
+    TEST_ASSERT_EQUAL_INT64(-1, lag); /* the failure value */
 
     /* Not gated: the state reads and the cross-thread wakeup. */
     kafka_List_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
@@ -1048,6 +1078,12 @@ static void test_consumer_handle_outside_a_callback_is_concurrent_modification(v
     TEST_ASSERT_TRUE(callback_pump_until(&pump, &completion.fired, 1));
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), completion.thread));
     assert_handle_outside_callback(completion.error);
+    lag_completion_t lag_done;
+    lag_completion_init(&lag_done);
+    kafka_consumer_ConsumerHandle_current_lag_cb(h, tp, on_lag, &lag_done);
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &lag_done.fired, 1));
+    TEST_ASSERT_EQUAL_INT64(-1, lag_done.value);
+    assert_handle_outside_callback(lag_done.error);
 
     tp_list_destroy(list);
     kafka_consumer_ConsumerHandle_destroy(h);
