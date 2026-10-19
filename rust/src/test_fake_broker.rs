@@ -25,8 +25,10 @@
 //!
 //! It speaks just enough protocol for the client to learn the cluster:
 //! `ApiVersions` gets the default broker response and `Metadata` gets one
-//! broker (node 0, this listener) leading partition 0 of one topic. Every
-//! other request is read and left unanswered.
+//! broker (node 0, this listener) leading partition 0 of one topic. Started
+//! with [`FakeBroker::start_acknowledging_produce`], it also answers every
+//! `Produce` request that expects a response, so a test can see records
+//! delivered. Every other request is read and left unanswered.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,11 +40,14 @@ use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
 use crate::MetadataResponseData;
+use crate::ProduceRequestData;
+use crate::ProduceResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::{ApiVersionsResponse, RequestHeader, RequestUtils};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
+use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
 /// The node id the fake advertises for itself in its Metadata responses.
 pub(crate) const FAKE_BROKER_NODE_ID: i32 = 0;
@@ -69,6 +74,16 @@ impl FakeBroker {
     /// Binds `127.0.0.1:0` and serves every accepted connection. Metadata
     /// responses carry `cluster_id` and a single-partition `topic`.
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
+        Self::start_with(cluster_id, topic, false).await
+    }
+
+    /// As [`Self::start`], and also acknowledges every `Produce` request that
+    /// expects a response: each partition it carries succeeds, at base offset 0.
+    pub(crate) async fn start_acknowledging_produce(cluster_id: &str, topic: &str) -> Self {
+        Self::start_with(cluster_id, topic, true).await
+    }
+
+    async fn start_with(cluster_id: &str, topic: &str, acknowledge_produce: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
         let api_versions = Arc::new(Mutex::new(Vec::new()));
@@ -85,6 +100,7 @@ impl FakeBroker {
                     cluster_id.clone(),
                     topic.clone(),
                     topic_id,
+                    acknowledge_produce,
                 ));
             }
         });
@@ -132,6 +148,7 @@ async fn serve(
     cluster_id: String,
     topic: String,
     topic_id: Uuid,
+    acknowledge_produce: bool,
 ) {
     loop {
         let mut size = [0u8; 4];
@@ -163,6 +180,14 @@ async fn serve(
         } else if *header.api_key() == ApiKeys::METADATA {
             let mut body = metadata_response(addr, &cluster_id, &topic, topic_id);
             RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
+        } else if *header.api_key() == ApiKeys::PRODUCE && acknowledge_produce {
+            let request = ProduceRequestData::read(&mut accessor, version).expect("fake broker: Produce body");
+            // With `acks=0` the client expects no response.
+            if request.acks == 0 {
+                continue;
+            }
+            let mut body = produce_response(&request);
+            RequestUtils::serialize(response_header.data(), response_header.header_version(), &mut body, version)
         } else {
             continue;
         };
@@ -174,6 +199,37 @@ async fn serve(
             return;
         }
     }
+}
+
+/// A response in which every partition `request` carries succeeds, at base
+/// offset 0.
+fn produce_response(request: &ProduceRequestData) -> ProduceResponseData {
+    let topics = request
+        .topic_data
+        .iter()
+        .map(|topic_data| {
+            let partitions = topic_data
+                .partition_data
+                .iter()
+                .map(|partition_data| {
+                    let mut partition = PartitionProduceResponse::new();
+                    partition.set_index(partition_data.index);
+                    partition.set_error_code(Errors::None.code());
+                    partition.set_base_offset(0);
+                    partition.set_log_start_offset(0);
+                    partition
+                })
+                .collect();
+            let mut topic = TopicProduceResponse::new();
+            topic.set_name(topic_data.name.clone());
+            topic.set_topic_id(topic_data.topic_id);
+            topic.set_partition_responses(partitions);
+            topic
+        })
+        .collect();
+    let mut data = ProduceResponseData::new();
+    data.set_responses(topics);
+    data
 }
 
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {
