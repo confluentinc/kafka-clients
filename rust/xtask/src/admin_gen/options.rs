@@ -838,6 +838,8 @@ impl Types<'_> {
 struct Uses {
     any: bool,
     unset: bool,
+    /// A setter takes a collection of `String`: `reject_str` guards it.
+    reject_str: bool,
     java_str: bool,
     copy_of: bool,
     illegal_argument: bool,
@@ -1012,6 +1014,25 @@ impl Renderer<'_> {
             t.push_str(" | None");
         }
         Ok(t)
+    }
+
+    /// The `reject_str` guard of a setter whose Java parameter is a collection of
+    /// `String` (CLAUDE.md, Python Binding Conventions, Signatures): a `str` would be
+    /// iterated by character. A nullable parameter keeps `None` as "not set".
+    fn str_guard(&mut self, s: &Setter, nullable: bool) -> Vec<String> {
+        let p = snake(&s.param.name);
+        if !matches!(s.param.ty.as_str(), "Set<String>" | "Collection<String>" | "List<String>") {
+            return Vec::new();
+        }
+        self.uses.reject_str = true;
+        if nullable {
+            vec![
+                format!("        if {p} is not None:"),
+                format!("            reject_str(\"{p}\", {p})"),
+            ]
+        } else {
+            vec![format!("        reject_str(\"{p}\", {p})")]
+        }
     }
 
     /// The setter's Python store expression and its comment.
@@ -1453,6 +1474,7 @@ impl Renderer<'_> {
                 let comment = comment.map(|c| format!("  # {c}")).unwrap_or_default();
                 lines.push(format!("        if {p} is {default}:"));
                 lines.push(format!("            {read}"));
+                lines.extend(self.str_guard(&s, nullable));
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
                 // What the setter stored (Java's copy of a collection, `Set.copyOf`,
                 // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
@@ -1485,6 +1507,7 @@ impl Renderer<'_> {
                 lines.extend(Self::comments(&s));
                 let (store, comment) = self.store_expr(&s)?;
                 let comment = comment.map(|c| format!("  # {c}")).unwrap_or_default();
+                lines.extend(self.str_guard(&s, nullable));
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
                 // What the setter stored (Java's copy of a collection, `Set.copyOf`,
                 // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
@@ -1783,6 +1806,9 @@ impl Renderer<'_> {
         }
         if self.uses.unset {
             imp.first("confluent_kafka._args", "UNSET");
+        }
+        if self.uses.reject_str {
+            imp.first("confluent_kafka._args", "reject_str");
         }
         if self.uses.java_str {
             imp.first("confluent_kafka._java", "java_str");
