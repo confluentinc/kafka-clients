@@ -863,8 +863,10 @@ impl ConsumerHandle {
 /// Java's `groupMetadata()` body (`AsyncKafkaConsumer.java:1559-1562`) over
 /// the consumer's shared slot, shared by [`AsyncKafkaConsumer::group_metadata`]
 /// and [`ConsumerHandle::group_metadata`]: the seeded metadata, or, for a
-/// groupless consumer whose slot was never seeded, a groupless stub (see the
-/// divergence note on [`AsyncKafkaConsumer::group_metadata`]).
+/// groupless consumer whose slot was never seeded, a groupless stub. Only the
+/// handle reaches the stub: [`AsyncKafkaConsumer::group_metadata`] first
+/// panics with Java's `InvalidGroupIdException` message when `group.id` is
+/// absent, as Java's `throwIfGroupIdNotDefined()` throws.
 fn group_metadata_from(
     slot: &Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>,
     group_id: Option<&str>,
@@ -875,9 +877,10 @@ fn group_metadata_from(
         None => {
             // Groupless (assignment-only) consumer: the slot was never
             // seeded — `initialize_group_metadata` returns `None` when
-            // `group.id` is absent (Java `:849`). Java would throw
-            // `InvalidGroupIdException` here; per the divergence above we
-            // return a groupless stub instead.
+            // `group.id` is absent (Java `:849`). The consumer's own getter
+            // has already panicked with Java's `InvalidGroupIdException`
+            // message; only `ConsumerHandle::group_metadata` gets here, and
+            // it returns a groupless stub.
             Arc::new(ConsumerGroupMetadataImpl::new(group_id.unwrap_or_default().to_string()))
         },
     }
@@ -2032,13 +2035,13 @@ const CONSUMER_CLOSED_MSG: &str = "This consumer has already been closed.";
 /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`.
 const PENDING_ASYNC_COMMIT_TIMEOUT_MSG: &str = "Timed out waiting for last pending async commit to complete";
 
-/// Translates Java's `throwIfGroupIdNotDefined()`
-/// (`AsyncKafkaConsumer.java:1192-1197`) over a borrowed `group.id`, so the
-/// owning consumer and its [`ConsumerHandle`] run the same check.
 /// Java's `InvalidGroupIdException` message from `throwIfGroupIdNotDefined`.
 const GROUP_ID_NOT_DEFINED_MSG: &str = "To use the group management or offset commit APIs, you must provide a \
                                         valid group.id in the consumer configuration.";
 
+/// Translates Java's `throwIfGroupIdNotDefined()`
+/// (`AsyncKafkaConsumer.java:1192-1197`) over a borrowed `group.id`, so the
+/// owning consumer and its [`ConsumerHandle`] run the same check.
 fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Error> {
     if group_id.map(str::is_empty).unwrap_or(true) {
         return Err(Error::invalid_group_id(GROUP_ID_NOT_DEFINED_MSG));
@@ -3368,6 +3371,13 @@ where
             commit.as_ref().map(Arc::clone),
             Arc::clone(&positions_validator),
         ));
+        // Wake the bg task when a LIST_OFFSETS / OFFSETS_FOR_LEADER_EPOCH
+        // forwarder queues its response, so `end_offsets` & co. complete as
+        // soon as the response is read (as Java's do inside `client.poll`)
+        // rather than after the network poll's own timeout.
+        if let Some(offsets_mgr) = offsets.as_ref() {
+            offsets_mgr.set_completion_notify(Arc::clone(&event_notify));
+        }
 
         // TopicMetadataRequestManager — always built.
         let topic_metadata = Some(TopicMetadataRequestManager::new(&config));
@@ -3964,6 +3974,15 @@ where
     #[cfg(test)]
     pub(crate) fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Test seam: weak references to the metadata and subscription state, so a
+    /// test can check that a closed and dropped consumer frees them.
+    #[cfg(test)]
+    pub(crate) fn metadata_and_subscriptions_for_test(
+        &self,
+    ) -> (std::sync::Weak<ConsumerMetadata>, std::sync::Weak<Mutex<SubscriptionState>>) {
+        (Arc::downgrade(&self.metadata), Arc::downgrade(&self.subscriptions))
     }
 
     /// Java: `Map<MetricName, ? extends Metric> metrics()`
@@ -9430,17 +9449,13 @@ mod tests {
         }
     }
 
-    /// Java: `testGroupMetadataAfterCreationWithGroupIdIsNull`
-    /// (`AsyncKafkaConsumerTest.java:1640-1653`). Asserts the EXACT Java
-    /// message on a groupless consumer's group-management surface.
-    ///
-    /// Rust divergence: Java throws `InvalidGroupIdException` from
-    /// `group_metadata()`; Rust returns a groupless stub metadata with an
-    /// empty group id instead (see the `group_metadata` getter rustdoc). The exact-message assertion is therefore made on the
-    /// equivalent error surface — `commit_sync()`'s group-id guard
-    /// (`return_error_if_group_id_not_defined`), which carries the Java
-    /// message verbatim — validating the message-text contract without a
-    /// Rust-side panic on the read-only `group_metadata()` accessor.
+    /// The group-id guard of `commit_sync()` on a groupless consumer
+    /// (`return_error_if_group_id_not_defined`, Java's
+    /// `throwIfGroupIdNotDefined()`) returns Java's `InvalidGroupIdException`
+    /// message verbatim. Java's `testGroupMetadataAfterCreationWithGroupIdIsNull`
+    /// (`AsyncKafkaConsumerTest.java:1640-1653`) itself asserts on
+    /// `groupMetadata()`, which in Rust panics with the same message; that
+    /// test is translated by `group_metadata_panics_without_group_id`.
     ///
     /// This test asserts on `commit_sync()`, not `group_metadata()`, so per
     /// the fixture refactor it keeps its post-construction `group_id = None`
@@ -9624,7 +9639,7 @@ mod tests {
     /// epoch update leaves the slot empty. Java's `updateGroupMetadata`
     /// (`AsyncKafkaConsumer.java:864-876`) is an `Optional.map` over the old
     /// value, so an empty slot stays empty and `group_metadata()` keeps
-    /// returning the groupless stub. This differs from the pre-C1 lazy-init
+    /// panicking with Java's `InvalidGroupIdException` message. This differs from the pre-C1 lazy-init
     /// notifier, which would have written a fresh entry on the first update —
     /// hence its own test.
     #[tokio::test]
