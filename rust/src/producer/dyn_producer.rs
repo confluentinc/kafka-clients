@@ -403,6 +403,11 @@ pub(crate) trait DynTrySend<K, V>: DynProducer<K, V> {
     where
         K: 'a,
         V: 'a;
+
+    /// Whether this producer has a sender task that no close has stopped: a
+    /// `KafkaProducer` not closed yet. The C binding's `destroy` closes such a
+    /// producer before dropping it. The mock has no sender.
+    fn has_unclosed_sender(&self) -> bool;
 }
 
 #[cfg(feature = "ffi")]
@@ -421,6 +426,10 @@ where
         V: 'a,
     {
         Box::pin(KafkaProducer::try_send(self, record, callback))
+    }
+
+    fn has_unclosed_sender(&self) -> bool {
+        self.is_running()
     }
 }
 
@@ -446,6 +455,10 @@ where
                 .await
                 .map(TrySendOutcome::Accepted)
         })
+    }
+
+    fn has_unclosed_sender(&self) -> bool {
+        false
     }
 }
 
