@@ -27,6 +27,17 @@ point it calls has a ``_cb`` completion form in the FFI header:
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
 there and may be ``async def``.
 
+By rule 3 ``AsyncKafkaConsumer`` is bound to one event loop
+(``_async.LoopBinding``), as ``AsyncKafkaProducer`` and ``AsyncKafkaAdminClient``
+are: the one running when it is constructed, or else the loop of its first
+waiting call; a waiting call from another loop raises ``RuntimeError("<class>
+is bound to a different event loop")``, as asyncio's own primitives do, before
+it has any effect. ``close()`` alone may run on another loop once the bound
+loop is closed (``LoopBinding.bind_for_close``), so a consumer whose loop ended
+can still be closed, as Java's ``close()`` always can be; it then releases what
+the ended loop left (the abandoned calls and their results). ``AsyncMockConsumer``
+is pure Python and not bound.
+
 Not generated: :class:`Consumer`'s omissions.
 """
 
@@ -39,12 +50,12 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, overloa
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import MISSING, java_forms, reject_str
-from confluent_kafka._async import await_to_end
+from confluent_kafka._async import LoopBinding, await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import (
-    _AT_CLOSE, _AT_POLL, _ConsumerState, abandoned_call_wait_s, blank_null_topics, close_args,
-    empty_input_timeout, poll_timeout_ms,
+    _AT_CALL, _AT_CLOSE, _AT_POLL, _ConsumerState, abandoned_call_wait_s, blank_null_topics,
+    close_args, empty_input_timeout, poll_timeout_ms,
 )
 from ._conversions import offsets_to_spec, tp_to_spec
 from .close_options import CloseOptions
@@ -70,6 +81,7 @@ __all__ = ["AsyncConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
+_R = TypeVar("_R")
 
 
 class _AsyncOffsetCommitCallback(Protocol):
@@ -96,6 +108,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 "AsyncConsumer is a non-instantiable base; use AsyncKafkaConsumer or "
                 "AsyncMockConsumer")
         _ConsumerState.__init__(self)
+        # The one event loop the waiting calls run on (see the module docstring).
+        self._binding = LoopBinding(type(self).__name__)
 
     def assignment(self) -> set[TopicPartition]:
         """See :meth:`Consumer.assignment`."""
@@ -519,10 +533,26 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb,
                                         partitions, timeout)
 
+    async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
+                         resolve: Callable[[tuple[Any, ...]], _R],
+                         free: Callable[[tuple[Any, ...]], None], wakeable: bool, *,
+                         raise_deferred: bool = True, site: int = _AT_CALL,
+                         abandoned: Any = None) -> _R:
+        """``_ConsumerState._run_async`` on the consumer's one event loop: a
+        call from another loop raises ``RuntimeError`` before anything else
+        (``_async.LoopBinding``)."""
+        self._binding.bind()
+        return await _ConsumerState._run_async(self, submit, resolve, free, wakeable,
+                                               raise_deferred=raise_deferred, site=site,
+                                               abandoned=abandoned)
+
     async def _a_close(self, option: CloseOptions) -> None:
         if self._is_closed():
             return
         timeout_ms, operation = close_args(option)
+        # Another loop's close() raises before it marks the consumer closing,
+        # unless the bound loop is closed (LoopBinding.bind_for_close).
+        self._binding.bind_for_close()
         # A deferred error (a coroutine commit callback's exception a poll kept,
         # see _finish_async) is raised once the consumer is closed, as Java's
         # close() raises a callback's exception: wrapped in "Failed to close

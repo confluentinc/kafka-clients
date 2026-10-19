@@ -3368,6 +3368,25 @@ def _dropped(caplog: pytest.LogCaptureFixture) -> list[str]:
             if r.name == "confluent_kafka.producer" and r.getMessage().startswith("The completion")]
 
 
+def _refused_or_closed(p: Any, call: str, real_schedule: Callable[[], None],
+                       freed_errors: list[int]) -> None:
+    """After the producer's bound loop closed: a ``flush()`` from another loop
+    is refused with no effect, and the producer is freed by hand; a
+    ``close()`` from another loop is allowed (``LoopBinding.bind_for_close``)
+    and frees it, the held pump schedules released first so its own
+    completion is pumped. Updated for close() rebinding (was: both refused)."""
+    if call == "close":
+        p._schedule_pump = real_schedule  # noqa: SLF001
+        asyncio.run(p.close(timeout=0))
+        assert p._closed  # noqa: SLF001
+        return
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    assert freed_errors == []
+    p._destroy()  # noqa: SLF001
+
+
 def _hold_pump_schedules(p: Any) -> tuple[threading.Event, Callable[[], None]]:
     """Hold the producer's pump schedules: the event is set once the notify
     hook asks for one, and calling the function schedules that one as the hook
@@ -3447,11 +3466,12 @@ def test_a_completion_for_a_stopped_loop_runs_when_the_loop_runs_again(
 
 def test_a_completion_left_for_a_closed_loop_is_dropped_when_the_producer_is_destroyed(
         monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    # Updated for the one-loop binding (was: close() from another loop drops
-    # it): the loop closes without running the pump scheduled on it, so the
-    # completion stays queued, the producer refuses a close() from another
-    # loop, and freeing the producer runs the completion, which is dropped
-    # with one warning. Updated for send() waiting for its handover: the
+    # The loop closes without running the pump scheduled on it, so the
+    # completion stays queued; close() from another loop, which the binding
+    # allows once the bound loop is closed (LoopBinding.bind_for_close),
+    # frees the producer, and freeing it runs the completion, which is
+    # dropped with one warning. Updated for close() rebinding (was: refused,
+    # the test freeing the producer by hand). Updated for send() waiting for its handover: the
     # record is handed over by the faked send (see _send_handed_over), and
     # Producer_destroy runs its queued completion first, as the core's
     # destroy runs the callbacks still pending.
@@ -3467,11 +3487,8 @@ def test_a_completion_left_for_a_closed_loop_is_dropped_when_the_producer_is_des
     monkeypatch.setattr(_lib, "Producer_destroy", destroy)
     ran: list[Exception | None] = []
     future = _send_on_a_loop_that_closes(p, captured, ran)
-    with pytest.raises(RuntimeError) as err:
-        asyncio.run(p.close())
-    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
     assert future._impl in p._futures and _dropped(caplog) == []  # noqa: SLF001
-    p._destroy()  # noqa: SLF001
+    asyncio.run(p.close(timeout=0))
     assert future._impl not in p._futures  # noqa: SLF001
     assert ran == []
     assert not future.is_done()
@@ -3580,11 +3597,7 @@ def test_an_operation_result_left_for_a_closed_loop_is_freed_when_the_producer_i
     stopped_loop.loop.close()
     assert freed_errors == []
 
-    with pytest.raises(RuntimeError) as err:
-        asyncio.run(getattr(p, call)())
-    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
-    assert freed_errors == []
-    p._destroy()  # noqa: SLF001
+    _refused_or_closed(p, call, schedule, freed_errors)
     assert len(freed_errors) == 1
 
 
@@ -3596,18 +3609,14 @@ def test_an_operation_result_handed_to_a_loop_that_closed_is_freed_when_the_prod
     # to the stopped loop, whose close discards its delivery, so it waits in
     # the producer, not in the C API, and the destroy frees it there.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    scheduled, _schedule = _hold_pump_schedules(p)
+    scheduled, schedule = _hold_pump_schedules(p)
     stopped_loop.start(p.begin_transaction())
     assert scheduled.wait(30)
     p._pump()  # noqa: SLF001
     stopped_loop.loop.close()
     assert freed_errors == []
 
-    with pytest.raises(RuntimeError) as err:
-        asyncio.run(getattr(p, call)())
-    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
-    assert freed_errors == []
-    p._destroy()  # noqa: SLF001
+    _refused_or_closed(p, call, schedule, freed_errors)
     assert len(freed_errors) == 1
 
 
@@ -3620,7 +3629,7 @@ def test_an_operation_result_delivered_to_a_task_left_on_a_closed_loop_is_freed_
     # take it. The producer cannot reach it; the task frees it when it goes
     # away, which closes its coroutine.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    scheduled, _schedule = _hold_pump_schedules(p)
+    scheduled, schedule = _hold_pump_schedules(p)
     stopped_loop.start(p.begin_transaction())
     assert scheduled.wait(30)
     p._pump()  # noqa: SLF001
@@ -3631,10 +3640,7 @@ def test_an_operation_result_delivered_to_a_task_left_on_a_closed_loop_is_freed_
     stopped_loop.loop.close()
     assert freed_errors == []
 
-    with pytest.raises(RuntimeError) as err:
-        asyncio.run(getattr(p, call)())
-    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
-    p._destroy()  # noqa: SLF001
+    _refused_or_closed(p, call, schedule, [])
     assert freed_errors == []
     stopped_loop.abandon()
     assert len(freed_errors) == 1
@@ -4336,3 +4342,69 @@ def test_the_sync_producer_sets_no_wake_fd(monkeypatch: pytest.MonkeyPatch) -> N
     p.close()
     assert set_calls == []
 
+
+
+def test_an_async_producer_whose_loop_ended_can_still_be_closed() -> None:
+    # close() alone may run on another loop once the bound loop is closed
+    # (LoopBinding.bind_for_close), as Java's close() always works; any
+    # other call from there stays refused.
+    p: AsyncKafkaProducer[bytes, bytes] = AsyncKafkaProducer(configs=UNREACHABLE)
+
+    async def flush() -> None:
+        await p.flush()
+
+    asyncio.run(flush())
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(flush())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    asyncio.run(p.close(timeout=0))
+    assert p._closed  # noqa: SLF001
+
+
+def test_a_close_on_a_new_loop_does_not_drain_beside_the_off_loop_pump(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Critic 103 item 10: on the callable wake path (a loop without
+    # add_reader, Windows' default loop) the completions for a closed loop are
+    # pumped by the off-loop helper thread. A close() moved to a new loop
+    # (LoopBinding.bind_for_close) pumps on entry: it must wait for the helper,
+    # one drainer at a time, as the admin client's _drain_lock; two drainers
+    # deadlock in the native call, which holds the GIL. The drain is faked to
+    # count drainers inside it at once.
+    p: AsyncKafkaProducer[bytes, bytes] = AsyncKafkaProducer(configs=UNREACHABLE)
+    p._WAKE_BY_FD = False  # noqa: SLF001 - the callable wake path
+
+    async def flush() -> None:
+        await p.flush()
+
+    asyncio.run(flush())  # binds the loop, which then closes
+    real = _lib.Producer__execute_callbacks
+    inside = [0]
+    most = [0]
+    helper_in = threading.Event()
+    release = threading.Event()
+    guard = threading.Lock()
+
+    def execute(c_producer: Any) -> Any:
+        with guard:
+            inside[0] += 1
+            most[0] = max(most[0], inside[0])
+        try:
+            if threading.current_thread().name == "confluent-kafka-producer-pump":
+                helper_in.set()
+                release.wait(10)
+            return real(c_producer)
+        finally:
+            with guard:
+                inside[0] -= 1
+
+    monkeypatch.setattr(_lib, "Producer__execute_callbacks", execute)
+    p._schedule_pump()  # noqa: SLF001 - the hook, its loop closed: the helper pumps
+    assert helper_in.wait(10)
+    closer = threading.Thread(target=lambda: asyncio.run(p.close(timeout=0)), daemon=True)
+    closer.start()
+    time.sleep(0.3)  # the close is now waiting for the helper's drain
+    release.set()
+    closer.join(10)
+    assert not closer.is_alive(), "close() on the new loop hung"
+    assert most[0] == 1, "two drainers at once"
+    assert p._closed  # noqa: SLF001

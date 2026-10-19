@@ -219,7 +219,8 @@ class AsyncAdmin(_AdminState):
     ``Admin``'s, its futures :class:`~confluent_kafka.common.AsyncKafkaFuture`\\ s
     (Futures). The client is bound to one event loop (``_async.LoopBinding``): the
     one running when it is constructed, or else the loop of its first call made on
-    a running loop; the notify hook schedules the client's queued callbacks
+    a running loop (``close()`` alone may run on another loop once that loop is
+    closed, ``LoopBinding.bind_for_close``); the notify hook schedules the client's queued callbacks
     (``kafka_admin_Admin__execute_callbacks``) there with ``call_soon_threadsafe``,
     so the futures complete, and their ``then_apply`` functions and
     ``when_complete`` actions run, on that loop. Until a loop is bound, or once it
@@ -319,7 +320,7 @@ class AsyncAdmin(_AdminState):
         if self._closed:
             return
         timeout_ms = close_timeout_ms(timeout)
-        loop = self._binding.bind()
+        loop = self._binding.bind_for_close()
         if not self._begin_close():
             return
         closed = threading.Event()

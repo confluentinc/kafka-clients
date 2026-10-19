@@ -684,3 +684,28 @@ async def test_async_client_is_bound_to_one_loop() -> None:
     assert len(errors) == 1
     assert str(errors[0]) == "AsyncKafkaAdminClient is bound to a different event loop"
     await admin.close()
+
+
+def test_async_client_whose_loop_ended_can_still_be_closed() -> None:
+    """``close()`` alone may run on another loop once the bound loop is closed
+    (``LoopBinding.bind_for_close``), as Java's ``close()`` always works; a
+    close from another loop while the bound loop is open is refused."""
+    async def use() -> AsyncAdmin:
+        return AsyncAdmin.create(configs=UNREACHABLE)
+
+    loop = asyncio.new_event_loop()
+    admin = loop.run_until_complete(use())
+    with pytest.raises(RuntimeError) as e:
+        asyncio.run(admin.close())
+    assert str(e.value) == "AsyncKafkaAdminClient is bound to a different event loop"
+    loop.close()
+    with pytest.raises(RuntimeError) as e:
+        asyncio.run(_list_topics_on_loop(admin))
+    assert str(e.value) == "AsyncKafkaAdminClient is bound to a different event loop"
+    asyncio.run(admin.close())
+    with pytest.raises(IllegalStateError):
+        asyncio.run(_list_topics_on_loop(admin))
+
+
+async def _list_topics_on_loop(admin: AsyncAdmin) -> None:
+    admin.list_topics(options=ListTopicsOptions(timeout_ms=SHORT))

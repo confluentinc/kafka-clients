@@ -250,7 +250,9 @@ def test_async_loop_ending_with_a_poll_pending(kafka_broker: Any,
         assert poll.cancelled()
         del poll, pending[:]
         gc.collect()
-        # The consumer is free for a call on another loop.
+        # The consumer is bound to the loop that ended (_async.LoopBinding);
+        # close() alone may run on another loop once that loop is closed, and
+        # the poll the ended loop left does not hold it.
         started = time.monotonic()
         asyncio.run(consumer.close(option=CloseOptions(timeout=5)))
         assert time.monotonic() - started < 10

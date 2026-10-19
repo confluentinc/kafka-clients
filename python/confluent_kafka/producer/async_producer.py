@@ -28,7 +28,9 @@ of the waiting calls -- are run by ``kafka_producer_Producer__execute_callbacks`
 on the producer's event loop, with the GIL held from the first callback to the
 last. By rule 3 the producer is bound to one loop: the one running when it is
 constructed, or else the loop of its first async call; a call from another
-loop raises ``RuntimeError``, as asyncio's own primitives do. The C API's
+loop raises ``RuntimeError``, as asyncio's own primitives do, except a
+``close()`` once the bound loop is closed (``LoopBinding.bind_for_close``),
+which moves the producer, and its wake-ups, to its own loop. The C API's
 notify hook wakes that loop through a socket pair it watches (one byte written
 from the Rust task's thread, no GIL taken there; see
 :meth:`AsyncProducer._install_wake`), or, before the loop is bound and where
@@ -441,6 +443,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # pump; once it has closed, a helper thread pumps instead.
         self._binding = LoopBinding(type(self).__name__)
         self._off_loop_pump = OffLoopPump(self._pump, "confluent-kafka-producer-pump")
+        # One drainer at a time, as the admin client's _drain_lock: the loop and
+        # the off-loop pump never drain at once, which a close() moved to a new
+        # loop (LoopBinding.bind_for_close) could otherwise do while the helper
+        # still drains, the second drainer blocking in the native call with the
+        # GIL held. Reentrant: a callback's own send() pumps on entry.
+        self._drain_lock = threading.RLock()
         # The socket pair the loop watches for the native producer's wake-ups
         # (see _install_wake), set once the loop is bound; None before, once the
         # producer is destroyed, and when the loop cannot watch a socket.
@@ -488,7 +496,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if not self._c_producer or not self._pump_use():
             return
         try:
-            _lib.Producer__execute_callbacks(self._c_producer)
+            with self._drain_lock:
+                _lib.Producer__execute_callbacks(self._c_producer)
         finally:
             self._end_use()
         loop = self._binding.loop
@@ -557,6 +566,25 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             _lib.Producer__set_wake_fd(self._c_producer, writer.fileno())
         finally:
             self._end_use()
+
+    def _move_wake_off(self, closed: asyncio.AbstractEventLoop) -> None:
+        """``close()`` moved the producer off ``closed``, its bound loop that
+        has closed: the socket pair that loop watched is closed (no loop
+        watches it any more) and the native producer falls back to the
+        callable hook, so the next :meth:`_enter` gives the new loop a socket
+        pair of its own."""
+        reader, writer = self._wake_r, self._wake_w
+        self._wake_r = self._wake_w = None
+        self._wake_tried = False
+        if reader is None or writer is None:
+            return
+        if self._pump_use():
+            try:
+                _lib.Producer__set_wake_fd(self._c_producer, -1)
+            finally:
+                self._end_use()
+        reader.close()
+        writer.close()
 
     def _on_wake(self, reader: socket.socket) -> None:
         """The loop's reader callback for the socket pair: drop the bytes the
@@ -954,8 +982,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if self._closed:
             return
         timeout_ms = close_timeout_ms(timeout)
-        # Another loop's close() raises before it marks the producer closing.
-        self._binding.bind()
+        # Another loop's close() raises before it marks the producer closing,
+        # unless the bound loop is closed (LoopBinding.bind_for_close): the
+        # producer then moves to this loop, its wake-ups with it.
+        bound = self._binding.loop
+        if self._binding.bind_for_close() is not bound and bound is not None:
+            self._move_wake_off(bound)
         # Check and set at once: exactly one close() tears the producer down.
         if not self._begin_close():
             return

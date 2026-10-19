@@ -470,13 +470,10 @@ def test_asyncio_run_ends_with_a_task_awaiting_get(reports: _Reports) -> None:
     reports.assert_silent()
 
 
-@pytest.mark.xfail(strict=True, raises=RuntimeError, reason=(
-    "rule gap (owner decision pending): an asyncio client is bound to its event loop "
-    "(Threads and callbacks), so once that loop has closed, close() from another loop "
-    "raises RuntimeError('AsyncKafkaAdminClient is bound to a different event loop') "
-    "and the native client is never freed; whether close() may then run from any loop "
-    "or none is not decided"))
 def test_async_client_closes_after_its_loop_closed() -> None:
+    # Owner decision (2026-10-20): close() alone may run on another loop once
+    # the bound loop is closed (LoopBinding.bind_for_close), so a client whose
+    # loop ended can still be closed, as Java's close() always can be.
     loop = asyncio.new_event_loop()
     admin = loop.run_until_complete(_create_async_on_loop())
     loop.close()

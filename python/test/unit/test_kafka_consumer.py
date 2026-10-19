@@ -1382,9 +1382,13 @@ def test_async_close_from_another_thread_fails_before_changing_anything(
     worker.start()
     try:
         assert polling.wait(WAIT)
-        with pytest.raises(ConcurrentModificationError) as e:
+        # Updated for the one-loop binding (was: the guard's
+        # ConcurrentModificationError): a close() from another thread's loop
+        # is refused before it changes anything, as the consumer is bound to
+        # the worker's loop.
+        with pytest.raises(RuntimeError) as e:
             asyncio.run(consumer.close(option=CloseOptions.timeout(timeout=0)))
-        assert str(e.value) == CONCURRENT
+        assert str(e.value) == BOUND_ELSEWHERE
         assert calls == []
     finally:
         release.set()
@@ -2596,20 +2600,30 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     # trampoline, which printed it and left the result's handles allocated.
     #
     # On the branch C API a completion is delivered only by a drain of the
-    # consumer's callbacks vector, which the stopped loop never runs: the next
-    # call on the consumer, from another loop, drains it (and delivers the result
-    # to the closed loop), so the test makes that call.
+    # consumer's callbacks vector, which the stopped loop never runs. Under the
+    # one-loop binding the only call another loop may make is close(), once
+    # the bound loop is closed (LoopBinding.bind_for_close): it drains the
+    # vector (and delivers the result to the closed loop), so the test makes
+    # that call; any other call from there is refused first.
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
     _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
     assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
-    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+
+    def is_closed() -> bool:
+        # The delivery's check (Undelivered.hand_over) saw the loop open;
+        # everything else (the binding, the abandoned-use release) sees it closed.
+        return sys._getframe(1).f_code.co_name != "hand_over"
+
+    loop.is_closed = is_closed  # type: ignore[method-assign]
     capfd.readouterr()
     held.release.set()
     _await_queued_completion(consumer)
-    asyncio.run(consumer.assign(partitions=[TP0]))
+    _refused_from_another_loop(lambda: consumer.assign(partitions=[TP0]))
+    assert not held.delivered.is_set()
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
     assert held.delivered.is_set()
     del loop.is_closed
     ((_, error),) = held.payloads
@@ -2617,17 +2631,17 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     assert held.raised == []
     assert capfd.readouterr().err == ""
     assert freed_errors == [error]
-    _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
 
 def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The result is left for its loop while the loop is stopped, and the loop
-    # then closes, so it can never be delivered there: the consumer's next
-    # awaiting call, from another loop, frees it. (On the branch C API that call
-    # is also the drain that delivers the result, the stopped loop draining
-    # nothing.)
+    # then closes, so it can never be delivered there: close() from another
+    # loop, the one call the binding then allows (LoopBinding.bind_for_close),
+    # frees it; any other call from there is refused first. (On the branch C
+    # API that close is also the drain that delivers the result, the stopped
+    # loop draining nothing.)
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
     _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
@@ -2635,12 +2649,13 @@ def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     stopped_loop.loop.close()
     _await_queued_completion(consumer)
     assert freed_errors == []
-    asyncio.run(consumer.assign(partitions=[TP0]))
+    _refused_from_another_loop(lambda: consumer.assign(partitions=[TP0]))
+    assert freed_errors == []
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
     assert held.delivered.is_set()
     ((_, error),) = held.payloads
     assert error
     assert freed_errors == [error]
-    _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
 
 @pytest.mark.parametrize("same_thread", [True, False], ids=["same thread", "another thread"])
@@ -2907,10 +2922,23 @@ def _await_queued_completion(consumer: AsyncKafkaConsumer[Any, Any]) -> None:
     assert consumer._pending_event.wait(WAIT)  # noqa: SLF001
 
 
+BOUND_ELSEWHERE = "AsyncKafkaConsumer is bound to a different event loop"
+
+
+def _refused_from_another_loop(call: Any) -> None:
+    """The one-loop binding (``_async.LoopBinding``): a waiting call other than
+    ``close()`` from a fresh loop, after the consumer's own loop closed, is
+    refused with ``RuntimeError`` and no effect."""
+    with pytest.raises(RuntimeError) as e:
+        asyncio.run(call())
+    assert str(e.value) == BOUND_ELSEWHERE
+
+
 def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) -> None:
     """``close()`` from a fresh loop on this thread, which must not wait for the
     call left on ``stopped_loop``. Should it wait, a timer ends that call's use
-    after WAIT, so the test fails instead of hanging the suite."""
+    after WAIT, so the test fails instead of hanging the suite. The bound loop
+    being closed, the fresh loop's close() is allowed (LoopBinding.bind_for_close)."""
     fired = threading.Event()
 
     def end_the_call() -> None:
@@ -3525,3 +3553,74 @@ def test_sigint_while_polling_wakes_up_once_then_reraises_and_consumer_reusable(
         assert consumer.poll(timeout=0).is_empty()
     finally:
         consumer.close(option=CloseOptions.timeout(timeout=0))
+
+
+# ---- the one-loop binding (N7; as AsyncKafkaProducer's and AsyncKafkaAdminClient's) ----
+def test_an_async_call_from_another_loop_is_refused_before_it_has_any_effect() -> None:
+    # By rule 3 the async consumer is bound to one event loop
+    # (_async.LoopBinding): the loop of its first waiting call here, as it
+    # was built outside any loop. A waiting call from another loop raises
+    # RuntimeError before anything else, and the consumer stays usable on its
+    # own loop.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+
+    async def main() -> None:
+        await consumer.assign(partitions=[TP0])
+        loop = asyncio.get_running_loop()
+        for call in (lambda: consumer.assign(partitions=[TP1]),
+                     lambda: consumer.position(partition=TP0, timeout=0),
+                     lambda: consumer.poll(timeout=0),
+                     lambda: consumer.close()):
+            with pytest.raises(RuntimeError) as e:
+                await loop.run_in_executor(None, lambda c=call: asyncio.run(c()))
+            assert str(e.value) == BOUND_ELSEWHERE
+        assert consumer.assignment() == {TP0}
+        assert not consumer._is_closed()  # noqa: SLF001
+        await consumer.assign(partitions=[TP1])
+        assert consumer.assignment() == {TP1}
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
+
+
+def test_an_async_consumer_built_on_a_loop_is_bound_to_it() -> None:
+    # Built while a loop runs, the consumer is bound to that loop before any
+    # call, so even its first waiting call from another loop is refused.
+    async def build() -> AsyncKafkaConsumer[bytes, bytes]:
+        return AsyncKafkaConsumer(configs=configs())
+
+    loop = asyncio.new_event_loop()
+    try:
+        consumer = loop.run_until_complete(build())
+        with pytest.raises(RuntimeError) as e:
+            asyncio.run(consumer.assign(partitions=[TP0]))
+        assert str(e.value) == BOUND_ELSEWHERE
+        assert consumer.assignment() == set()
+        loop.run_until_complete(consumer.close(option=CloseOptions.timeout(timeout=0)))
+    finally:
+        loop.close()
+
+
+def test_the_async_mock_consumer_is_not_bound_to_a_loop() -> None:
+    # AsyncMockConsumer is pure Python, as AsyncMockProducer: no callback
+    # queue to drain, so no binding.
+    consumer: AsyncMockConsumer[bytes, bytes] = AsyncMockConsumer(offset_reset_strategy="earliest")
+    asyncio.run(consumer.assign(partitions=[TP0]))
+    asyncio.run(consumer.assign(partitions=[TP1]))
+    assert consumer.assignment() == {TP1}
+    asyncio.run(consumer.close())
+
+def test_an_async_consumer_whose_loop_ended_can_still_be_closed() -> None:
+    # The real path the gap 39-41 recovery serves: use the consumer on a loop
+    # that ends, then close() it from another loop, which the binding allows
+    # once the bound loop is closed (LoopBinding.bind_for_close), as Java's
+    # close() always works. Any other call from there stays refused.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+
+    async def use() -> None:
+        await consumer.assign(partitions=[TP0])
+
+    asyncio.run(use())
+    _refused_from_another_loop(lambda: consumer.poll(timeout=0))
+    asyncio.run(consumer.close(option=CloseOptions.timeout(timeout=0)))
+    assert consumer._is_closed()  # noqa: SLF001
