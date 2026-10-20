@@ -835,7 +835,10 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_cb(
 /// `byte[] serialize(String topic, Headers headers, T data)`; the bytes
 /// are delivered as for [`kafka_common_serialization_Serializer_serialize`].
 /// The implementation may add to or remove from `headers`, in place: its
-/// changes are in `headers` when this returns.
+/// changes are in `headers` when this returns. Header handles obtained
+/// through `headers` before the call (its `__as_Headers` view's
+/// `last_header`, `headers`, `to_array`) are invalid after it, as after a
+/// change made through the view itself; ask the view again.
 ///
 /// # Safety
 ///
@@ -876,7 +879,8 @@ pub type kafka_common_serialization_Serializer_serialize_with_headers_cb_t =
 /// `topic` is copied; `headers` and `data` must stay valid until `cb`
 /// fires, and `headers` unused otherwise until then: the implementation
 /// reads and changes them in place, so what it adds or removes is in
-/// `headers` when `cb` fires.
+/// `headers` when `cb` fires. Header handles obtained through `headers`
+/// before the call are invalid after it, as for the blocking form.
 ///
 /// # Safety
 ///
@@ -2037,6 +2041,142 @@ mod tests {
             // SAFETY: Test code: every call reported; the handle is destroyed once.
             unsafe { kafka_common_serialization_Serializer_destroy(handle.get().cast()) };
         }
+    }
+
+    /// A C serializer that removes the record's `k` header and adds `new`
+    /// and `second`, reporting during the call.
+    unsafe extern "C" fn swap_header(
+        self_: *mut c_void,
+        _topic: *const c_char,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
+        _data: *const c_void,
+        id: i64,
+    ) {
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
+        use crate::ffi::common::header::{
+            kafka_common_header_Headers_add_with_key_value, kafka_common_header_Headers_remove,
+        };
+        // SAFETY: Test code: `headers` is the non-`const` handle of a serializer call, valid and
+        // used by nothing else until the report below, so its view may be changed; `self_` is the
+        // `HeaderAdder` the test registered, which outlives every call.
+        unsafe {
+            let view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_remove(view, c"k".as_ptr(), &raw mut err);
+            assert!(err.is_null());
+            kafka_common_header_Headers_add_with_key_value(
+                view,
+                c"new".as_ptr(),
+                kafka_Bytes_t::from_slice(b"by C"),
+                &raw mut err,
+            );
+            assert!(err.is_null());
+            kafka_common_header_Headers_add_with_key_value(
+                view,
+                c"second".as_ptr(),
+                kafka_Bytes_t::from_slice(b"2"),
+                &raw mut err,
+            );
+            assert!(err.is_null());
+            (*(self_ as *const HeaderAdder)).report(id);
+        }
+    }
+
+    /// The caller's `__as_Headers` view, read before a C serializer changes
+    /// the headers, reads the changed headers after it: the handles it cached
+    /// are dropped, not left pointing at the headers the serializer removed.
+    /// Through the blocking invoker and the `_cb` twin.
+    #[test]
+    fn the_callers_headers_view_reads_what_a_c_serializer_changed() {
+        use crate::ffi::common::header::internals::record_header::kafka_common_header_internals_RecordHeader__as_Header;
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
+        use crate::ffi::common::header::{
+            kafka_common_header_Header_key, kafka_common_header_Header_value, kafka_common_header_Headers_last_header,
+            kafka_common_header_Headers_to_array,
+        };
+        use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size};
+
+        let imp = HeaderAdder::new(true);
+        let handle = kafka_common_serialization_Serializer_new_async(
+            &imp as *const HeaderAdder as *mut c_void,
+            async_serialize,
+            Some(swap_header),
+            None,
+            None,
+        );
+        imp.handle.store(handle, std::sync::atomic::Ordering::SeqCst);
+        let topic = CString::new("t").unwrap();
+        let data = c"x";
+        for cb in [false, true] {
+            let (record_headers, _) = record_headers_with_k();
+            let headers = box_record_headers(record_headers);
+            let completions = Completions::default();
+            // SAFETY: Test code: the handles are valid until destroyed, once, below; `err` is a valid
+            // slot pointing at null; the serializer reports inside each call, so `topic`, `data`,
+            // `headers` and `completions` outlive it; nothing else uses the caller's view meanwhile.
+            unsafe {
+                let view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
+                // Reads that cache header handles over the current headers.
+                let k = kafka_common_header_Headers_last_header(view, c"k".as_ptr());
+                assert!(!k.is_null());
+                let array = kafka_common_header_Headers_to_array(view);
+                assert_eq!(kafka_List_size(array), 1);
+                kafka_List_destroy(array);
+
+                if cb {
+                    kafka_common_serialization_Serializer_serialize_with_headers_cb(
+                        handle,
+                        topic.as_ptr(),
+                        headers,
+                        data.as_ptr().cast(),
+                        record_completion,
+                        &completions as *const Completions as *mut c_void,
+                    );
+                    assert_eq!(completions.lock().unwrap().len(), 1);
+                } else {
+                    let mut err = ptr::null_mut();
+                    let out = kafka_common_serialization_Serializer_serialize_with_headers(
+                        handle,
+                        topic.as_ptr(),
+                        headers,
+                        data.as_ptr().cast(),
+                        &raw mut err,
+                    );
+                    assert!(err.is_null());
+                    assert_eq!(bytes_of(out), None);
+                }
+
+                assert!(
+                    kafka_common_header_Headers_last_header(view, c"k".as_ptr()).is_null(),
+                    "cb={cb}"
+                );
+                let new = kafka_common_header_Headers_last_header(view, c"new".as_ptr());
+                assert!(!new.is_null(), "cb={cb}");
+                assert_eq!(
+                    bytes_of(kafka_common_header_Header_value(
+                        kafka_common_header_internals_RecordHeader__as_Header(new)
+                    )),
+                    Some(b"by C".to_vec()),
+                    "cb={cb}"
+                );
+                let array = kafka_common_header_Headers_to_array(view);
+                let keys: Vec<_> = (0..kafka_List_size(array))
+                    .map(|index| {
+                        let header = kafka_List_get(array, index)
+                            as *const crate::ffi::common::header::internals::record_header::kafka_common_header_internals_RecordHeader_t;
+                        std::ffi::CStr::from_ptr(kafka_common_header_Header_key(
+                            kafka_common_header_internals_RecordHeader__as_Header(header),
+                        ))
+                        .to_owned()
+                    })
+                    .collect();
+                assert_eq!(keys, [c"new", c"second"], "cb={cb}");
+                kafka_List_destroy(array);
+                kafka_common_header_internals_RecordHeaders_destroy(headers);
+            }
+        }
+        // SAFETY: Test code: every call reported; the handle is destroyed once.
+        unsafe { kafka_common_serialization_Serializer_destroy(handle) };
     }
 
     /// A header a C serializer adds is on the record a producer sends: here

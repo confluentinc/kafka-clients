@@ -176,16 +176,23 @@ impl HeadersInner {
         // SAFETY: `headers` points at an implementation that outlives this view, as
         // `HeadersInner::borrowed`'s rustdoc requires of its caller: the `RecordHeaders` of the
         // handle that caches this view (`RecordHeadersInner::headers_view`). The implementation is
-        // mutated only through `headers_mut`, which takes `&mut self`, or by
-        // `kafka_common_header_internals_RecordHeaders_set_read_only`, which requires that no other
-        // call use the handle at the same time, so no mutation overlaps this shared reference,
-        // bounded by `&self`.
+        // mutated only through `headers_mut`, which takes `&mut self`, through the handle's own
+        // `record_headers_mut` (a serializer invoker's), or by
+        // `kafka_common_header_internals_RecordHeaders_set_read_only`; the last two require that
+        // no other call use the handle at the same time, so no mutation overlaps this shared
+        // reference, bounded by `&self`.
         unsafe { &*self.headers }
+    }
+
+    /// Drops the header handles the getters handed out, which a change to
+    /// the headers would leave dangling; they are rebuilt on the next request.
+    pub(crate) fn clear_views(&mut self) {
+        self.views.take();
     }
 
     /// Mutable access, dropping the views the mutation would invalidate.
     fn headers_mut(&mut self) -> &mut dyn Headers {
-        self.views.take();
+        self.clear_views();
         // SAFETY: As in `headers`, `headers` points at an implementation that outlives this view.
         // The mutating callers reach it only through a handle whose headers may be mutated and that
         // no other call uses at the same time (the `# Safety` of the free `headers_mut`), so the
@@ -203,9 +210,11 @@ impl HeadersInner {
                 .iter()
                 // SAFETY: Each header lives in the implementation this view points at, which
                 // outlives the view (`HeadersInner::borrowed`). The handles are dropped before the
-                // headers can change: every mutation through this view goes through
-                // `headers_mut`, which drops them first, and the other code that mutates the
-                // implementation (`set_read_only`) leaves its headers untouched.
+                // headers can change: a mutation through this view goes through `headers_mut`,
+                // and one through the handle that owns it (a serializer invoker's
+                // `record_headers_mut`) through `RecordHeadersInner::clear_view_cache`, both of
+                // which drop them first; the other code that mutates the implementation
+                // (`set_read_only`) leaves its headers untouched.
                 .map(|header| unsafe { RecordHeaderInner::borrowed(header) })
                 .collect()
         })

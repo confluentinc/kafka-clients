@@ -135,6 +135,26 @@ impl RecordHeadersInner {
         }
     }
 
+    /// Drops the header handles the `Headers` view of the handle at `this`
+    /// cached, if it was built: a change made to the headers through the
+    /// handle itself (not through the view) would leave them dangling.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point at a live handle, with no other reference to it or
+    /// to its view in use during the call.
+    unsafe fn clear_view_cache(this: *mut Self) {
+        // SAFETY: Per this function's `# Safety`, `this` points at a live `RecordHeadersInner`
+        // whose `view` field no other reference uses, so the shared reference to its `OnceLock`
+        // aliases no exclusive one.
+        if let Some(view) = unsafe { &(*this).view }.get() {
+            // SAFETY: `view` is the `Box::into_raw` of the `HeadersInner` `headers_view` built,
+            // alive as long as the handle (see `Drop`), and per this function's `# Safety` no other
+            // reference to it is in use, so the exclusive one, for this statement, aliases nothing.
+            unsafe { &mut *(view.0 as *mut HeadersInner) }.clear_views();
+        }
+    }
+
     /// A borrowed handle on `self`, valid as long as `self`.
     pub(crate) fn as_ptr(&self) -> *const kafka_common_header_internals_RecordHeaders_t {
         self as *const Self as *const kafka_common_header_internals_RecordHeaders_t
@@ -210,15 +230,22 @@ pub(crate) unsafe fn record_headers_ref<'a>(
     unsafe { &*(headers as *const RecordHeadersInner) }.headers()
 }
 
-/// The headers behind a handle, mutable.
+/// The headers behind a handle, mutable. The header handles the handle's
+/// `Headers` view handed out before (`last_header`, `headers`, `to_array`)
+/// are invalid from here on, as after a change made through the view itself;
+/// the view rebuilds them on the next request.
 ///
 /// # Safety
 ///
 /// `headers` must be a valid record-headers handle, alive for `'a`, with no
-/// other reference to it in use for `'a`.
+/// other reference to it, its view or a header handle that view handed out
+/// in use for `'a`.
 pub(crate) unsafe fn record_headers_mut<'a>(
     headers: *mut kafka_common_header_internals_RecordHeaders_t,
 ) -> &'a mut RecordHeaders {
+    // SAFETY: Per this function's `# Safety`, `headers` points at a live `RecordHeadersInner` (see
+    // `record_headers_ref`) with no other reference to it or its view in use.
+    unsafe { RecordHeadersInner::clear_view_cache(headers as *mut RecordHeadersInner) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, so it
     // points at a live `RecordHeadersInner` (see `record_headers_ref`), as `headers_ptr` requires,
     // and no other reference to it is in use for `'a`, so the exclusive reference to its headers
