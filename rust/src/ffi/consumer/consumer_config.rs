@@ -50,9 +50,6 @@ struct ConsumerConfigHandle {
     config: ConsumerConfig,
     /// The values [`kafka_consumer_ConsumerConfig_get_string`] lent out.
     strings: LentStrings,
-    /// The documentation [`kafka_consumer_ConsumerConfig_documentation_of`]
-    /// lent out.
-    docs: LentStrings,
 }
 
 /// The handle's state.
@@ -98,11 +95,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
-        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle {
-            config,
-            strings: LentStrings::default(),
-            docs: LentStrings::default(),
-        })) as *mut kafka_consumer_ConsumerConfig_t,
+        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle { config, strings: LentStrings::default() }))
+            as *mut kafka_consumer_ConsumerConfig_t,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
     }
@@ -267,25 +261,6 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
     let handle = unsafe { handle_ref(self_) };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
     unsafe { config_getters::get_list(key, out_err, |key| handle.config.get_list(key)) }
-}
-
-/// `documentationOf(String key)`: the documentation of the configuration
-/// `key`, borrowed from the handle and valid until it is destroyed, or `NULL`
-/// when the configuration does not define `key`.
-///
-/// # Safety
-///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_documentation_of(
-    self_: *const kafka_consumer_ConsumerConfig_t,
-    key: *const c_char,
-) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
-    // SAFETY: Per this function's `# Safety`, `key` is as `documentation_of` requires.
-    unsafe { config_getters::documentation_of(&handle.docs, key, |key| handle.config.documentation_of(key)) }
 }
 
 /// `unused()`: the keys of the properties never read through this handle's
@@ -636,11 +611,9 @@ mod tests {
         }
     }
 
-    /// `getList` hands out an owned list, or fails a key of another type;
-    /// `documentationOf` lends the key's documentation, `NULL` for a key the
-    /// configuration does not define.
+    /// `getList` hands out an owned list, or fails a key of another type.
     #[test]
-    fn list_and_documentation_getters() {
+    fn list_getter() {
         let config = config_with(&[("client.id", "c1")]);
         let mut error = std::ptr::null_mut();
         let key = |k: &str| CString::new(k).unwrap();
@@ -652,14 +625,6 @@ mod tests {
             assert_eq!(take_list(servers), ["localhost:9092"]);
             assert!(kafka_consumer_ConsumerConfig_get_list(config, key("client.id").as_ptr(), &mut error).is_null());
             assert_eq!(take_error(&mut error), "Configuration 'client.id' is of type STRING, not LIST");
-
-            let doc = kafka_consumer_ConsumerConfig_documentation_of(config, key("client.id").as_ptr());
-            assert_eq!(c_str_to_string(doc), crate::CommonClientConfigs::CLIENT_ID_DOC);
-            assert_eq!(
-                kafka_consumer_ConsumerConfig_documentation_of(config, key("client.id").as_ptr()),
-                doc
-            );
-            assert!(kafka_consumer_ConsumerConfig_documentation_of(config, key("no.such.key").as_ptr()).is_null());
 
             kafka_consumer_ConsumerConfig_destroy(config);
         }

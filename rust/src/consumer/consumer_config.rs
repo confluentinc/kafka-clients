@@ -49,9 +49,7 @@ use std::sync::atomic::{self, AtomicI32};
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::abstract_config::{
-    AbstractConfig, CONFIG_PROVIDERS_DOC, ConfigMap, ValuesReader, string_originals,
-};
+use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
     CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, NonEmptyString, ParsedValue, Range, Type,
     ValidList, ValidString,
@@ -71,135 +69,6 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// to match Java's static scope, so successive consumers in one process get
 /// distinct ids.
 static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
-
-/// Java's `ConsumerConfig.MAX_POLL_RECORDS_DOC`.
-const MAX_POLL_RECORDS_DOC: &str = "The maximum number of records returned in a single call to poll(). \
-    Note, that <code>max.poll.records</code> does not impact the underlying fetching behavior. The consumer \
-    will cache the records from each fetch request and returns them incrementally from each poll.";
-
-/// Java's `ConsumerConfig.GROUP_PROTOCOL_DOC`.
-const GROUP_PROTOCOL_DOC: &str = "The group protocol that the consumer uses. The supported values are \
-    <code>classic</code> or <code>consumer</code>. The default value is <code>classic</code>.";
-
-/// Java's `ConsumerConfig.GROUP_REMOTE_ASSIGNOR_DOC`.
-const GROUP_REMOTE_ASSIGNOR_DOC: &str = "The name of the server-side assignor to use. If not specified, the \
-    group coordinator will pick the first assignor defined in the broker config group.consumer.assignors.This \
-    configuration is applied only if <code>group.protocol</code> is set to \"consumer\".";
-
-/// Java's `ConsumerConfig.ENABLE_AUTO_COMMIT_DOC`.
-const ENABLE_AUTO_COMMIT_DOC: &str = "If true the consumer's offset will be periodically committed in the background.";
-
-/// Java's `ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_DOC`.
-const AUTO_COMMIT_INTERVAL_MS_DOC: &str = "The frequency in milliseconds that the consumer offsets are \
-    auto-committed to Kafka if <code>enable.auto.commit</code> is set to <code>true</code>.";
-
-/// Java's `ConsumerConfig.AUTO_OFFSET_RESET_DOC` (KAFKA-20539).
-const AUTO_OFFSET_RESET_DOC: &str = "What to do when there is no initial offset in Kafka or if the current \
-    offset does not exist any more on the server (e.g. because that data has been deleted): \
-    <ul><li>earliest: automatically reset the offset to the earliest offset</li>\
-    <li>latest: automatically reset the offset to the latest offset</li>\
-    <li>by_duration:&lt;duration&gt;: automatically reset the offset to a configured &lt;duration&gt; from the \
-    current timestamp. &lt;duration&gt; must be specified in ISO8601 format (PnDTnHnMn.nS). \
-    Negative duration is not allowed.</li>\
-    <li>none: throw exception to the consumer if no previous offset is found for the consumer's group</li>\
-    <li>anything else: throw exception to the consumer.</li></ul>\
-    <p>Note that increasing a topic's partition count while this config is set to <code>latest</code> may cause \
-    silent message loss: producers may begin appending records to a newly created partition before the consumer \
-    discovers it, and <code>latest</code> resets the position to the log end offset, skipping any records \
-    produced during that discovery gap.</p>\
-    <p>To avoid this, prefer <code>by_duration:&lt;duration&gt;</code>. When a partition has no committed \
-    offset, <code>by_duration</code> determines the starting position by issuing a <code>ListOffsets</code> \
-    lookup for <code>now() - duration</code>. If the target timestamp is earlier than the partition's creation \
-    time, the lookup returns the partition's start offset, ensuring that records produced during the discovery \
-    window are still consumed. Size the duration to cover the worst-case partition-discovery latency for the \
-    group protocol in use:</p>\
-    <ul><li>With the <code>consumer</code> group protocol (KIP-848), newly assigned partitions are pushed on the \
-    next group heartbeat, so a value at least as large as <code>group.consumer.heartbeat.interval.ms</code> \
-    (server default 5000&nbsp;ms) is sufficient, for example <code>by_duration:PT5S</code>.</li>\
-    <li>With the <code>classic</code> group protocol, new partitions are discovered through periodic metadata \
-    refresh and a subsequent rebalance, so the duration must exceed <code>metadata.max.age.ms</code> (client \
-    default 300000&nbsp;ms) plus the rebalance time, for example <code>by_duration:PT6M</code>.</li></ul>\
-    <p>Consumers with a valid committed offset are unaffected. The reset applies only to partitions whose offset \
-    is missing or out of range, so <code>by_duration</code> does not force existing consumers to replay \
-    historical data on restart.</p>";
-
-/// Java's `ConsumerConfig.FETCH_MIN_BYTES_DOC`.
-const FETCH_MIN_BYTES_DOC: &str = "The minimum amount of data the server should return for a fetch request. \
-    If insufficient data is available the request will wait for that much data to accumulate before answering \
-    the request. The default setting of 1 byte means that fetch requests are answered as soon as that many \
-    byte(s) of data is available or the fetch request times out waiting for data to arrive. Setting this to a \
-    larger value will cause the server to wait for larger amounts of data to accumulate which can improve \
-    server throughput a bit at the cost of some additional latency. Even if the total data available in the \
-    broker exceeds fetch.min.bytes, the actual returned size may still be less than this value due to \
-    per-partition limits max.partition.fetch.bytes and max returned limits fetch.max.bytes.";
-
-/// Java's `ConsumerConfig.FETCH_MAX_BYTES_DOC`.
-const FETCH_MAX_BYTES_DOC: &str = "The maximum amount of data the server should return for a fetch request. \
-    Records are fetched in batches by the consumer, and if the first record batch in the first non-empty \
-    partition of the fetch is larger than this value, the record batch will still be returned to ensure that \
-    the consumer can make progress. As such, this is not a absolute maximum. The maximum record batch size \
-    accepted by the broker is defined via <code>message.max.bytes</code> (broker config) or \
-    <code>max.message.bytes</code> (topic config). A fetch request consists of many partitions, and there is \
-    another setting that controls how much data is returned for each partition in a fetch request - see \
-    <code>max.partition.fetch.bytes</code>. Note that the consumer performs multiple fetches in parallel.";
-
-/// Java's `ConsumerConfig.FETCH_MAX_WAIT_MS_DOC`.
-const FETCH_MAX_WAIT_MS_DOC: &str = "The maximum amount of time the server will block before answering the \
-    fetch request there isn't sufficient data to immediately satisfy the requirement given by fetch.min.bytes. \
-    This config is used only for local log fetch. To tune the remote fetch maximum wait time, please refer to \
-    'remote.fetch.max.wait.ms' broker config";
-
-/// Java's `ConsumerConfig.MAX_PARTITION_FETCH_BYTES_DOC`.
-const MAX_PARTITION_FETCH_BYTES_DOC: &str = "The maximum amount of data per-partition the server will return. \
-    Records are fetched in batches by the consumer. If the first record batch in the first non-empty partition \
-    of the fetch is larger than this limit, the batch will still be returned to ensure that the consumer can \
-    make progress. The maximum record batch size accepted by the broker is defined via \
-    <code>message.max.bytes</code> (broker config) or <code>max.message.bytes</code> (topic config). See \
-    fetch.max.bytes for limiting the consumer request size.";
-
-/// Java's `ConsumerConfig.CHECK_CRCS_DOC`.
-const CHECK_CRCS_DOC: &str = "Automatically check the CRC32 of the records consumed. This ensures no \
-    on-the-wire or on-disk corruption to the messages occurred. This check adds some overhead, so it may be \
-    disabled in cases seeking extreme performance.";
-
-/// Java's `ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_DOC`.
-const EXCLUDE_INTERNAL_TOPICS_DOC: &str = "Whether internal topics matching a subscribed pattern should be \
-    excluded from the subscription. It is always possible to explicitly subscribe to an internal topic.";
-
-/// Java's `ConsumerConfig.ISOLATION_LEVEL_DOC`, with "(the default)" on
-/// `read_committed`, this client's default ([`ConsumerConfig::DEFAULT_ISOLATION_LEVEL`]).
-const ISOLATION_LEVEL_DOC: &str = "Controls how to read messages written transactionally. If set to \
-    <code>read_committed</code> (the default), consumer.poll() will only return transactional messages which \
-    have been committed. If set to <code>read_uncommitted</code>, consumer.poll() will return all messages, \
-    even transactional messages which have been aborted. Non-transactional messages will be returned \
-    unconditionally in either mode. <p>Messages will always be returned in offset order. Hence, in  \
-    <code>read_committed</code> mode, consumer.poll() will only return messages up to the last stable offset \
-    (LSO), which is the one less than the offset of the first open transaction. In particular any messages \
-    appearing after messages belonging to ongoing transactions will be withheld until the relevant transaction \
-    has been completed. As a result, <code>read_committed</code> consumers will not be able to read up to the \
-    high watermark when there are in flight transactions.</p><p> Further, when in <code>read_committed</code> \
-    the seekToEnd method will return the LSO</p>";
-
-/// Java's `ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_DOC`.
-const ALLOW_AUTO_CREATE_TOPICS_DOC: &str = "Allow automatic topic creation on the broker when subscribing to \
-    or assigning a topic. A topic being subscribed to will be automatically created only if the broker allows \
-    for it using <code>auto.create.topics.enable</code> broker configuration.";
-
-/// Java's `ConsumerConfig.SHARE_ACKNOWLEDGEMENT_MODE_DOC`.
-const SHARE_ACKNOWLEDGEMENT_MODE_DOC: &str = "Controls the acknowledgement mode for a share consumer. If set \
-    to <code>implicit</code>, the acknowledgement mode of the consumer is implicit and it must not use \
-    <code>org.apache.kafka.clients.consumer.ShareConsumer.acknowledge()</code> to acknowledge delivery of \
-    records. Instead, delivery is acknowledged implicitly on the next call to poll or commit. If set to \
-    <code>explicit</code>, the acknowledgement mode of the consumer is explicit and it must use \
-    <code>org.apache.kafka.clients.consumer.ShareConsumer.acknowledge()</code> to acknowledge delivery of \
-    records.";
-
-/// Java's `ConsumerConfig.SHARE_ACQUIRE_MODE_DOC`.
-const SHARE_ACQUIRE_MODE_DOC: &str = "Controls the acquire mode for a share consumer. If set to \
-    <code>record_limit</code>, the number of records returned in each poll() will not exceed the value of \
-    <code>max.poll.records</code>. If set to <code>batch_optimized</code>, the number of records returned in \
-    each poll() call may exceed <code>max.poll.records</code> to align with batch boundaries for \
-    optimization.";
 
 /// Java's `ConsumerConfig.CLASSIC_PROTOCOL_UNSUPPORTED_CONFIGS`: the keys not
 /// supported for the `CLASSIC` protocol.
@@ -228,7 +97,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConfigDef::NO_DEFAULT_VALUE,
             ValidList::any_non_duplicate_values(false, false),
             Importance::High,
-            CommonClientConfigs::BOOTSTRAP_SERVERS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG,
@@ -239,7 +107,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly.config_value(),
             ]),
             Importance::Medium,
-            CommonClientConfigs::CLIENT_DNS_LOOKUP_DOC,
         )
         .define_with_validator(
             ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
@@ -247,14 +114,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             Range::at_least(0_i64),
             Importance::High,
-            CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_DOC,
         )
         .define(
             ConsumerConfig::GROUP_ID_CONFIG,
             Type::String,
             DefaultValue::Null,
             Importance::High,
-            CommonClientConfigs::GROUP_ID_DOC,
         )
         .define_with_validator(
             ConsumerConfig::GROUP_INSTANCE_ID_CONFIG,
@@ -262,22 +127,9 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             DefaultValue::Null,
             NonEmptyString,
             Importance::Medium,
-            CommonClientConfigs::GROUP_INSTANCE_ID_DOC,
         )
-        .define(
-            ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG,
-            Type::Int,
-            45000,
-            Importance::High,
-            CommonClientConfigs::SESSION_TIMEOUT_MS_DOC,
-        )
-        .define(
-            ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG,
-            Type::Int,
-            3000,
-            Importance::High,
-            CommonClientConfigs::HEARTBEAT_INTERVAL_MS_DOC,
-        )
+        .define(ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG, Type::Int, 45000, Importance::High)
+        .define(ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG, Type::Int, 3000, Importance::High)
         // `partition.assignment.strategy` is a list of classes (CLAUDE.md §2)
         // and the client-side assignors are out of scope: not defined.
         .define_with_validator(
@@ -286,14 +138,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5 * 60 * 1000_i64,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METADATA_MAX_AGE_DOC,
         )
         .define(
             ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG,
             Type::Boolean,
             true,
             Importance::Medium,
-            ENABLE_AUTO_COMMIT_DOC,
         )
         .define_with_validator(
             ConsumerConfig::AUTO_COMMIT_INTERVAL_MS_CONFIG,
@@ -301,21 +151,13 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5000,
             Range::at_least(0),
             Importance::Low,
-            AUTO_COMMIT_INTERVAL_MS_DOC,
         )
-        .define(
-            ConsumerConfig::CLIENT_ID_CONFIG,
-            Type::String,
-            "",
-            Importance::Low,
-            CommonClientConfigs::CLIENT_ID_DOC,
-        )
+        .define(ConsumerConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Low)
         .define(
             ConsumerConfig::CLIENT_RACK_CONFIG,
             Type::String,
             ConsumerConfig::DEFAULT_CLIENT_RACK,
             Importance::Low,
-            CommonClientConfigs::CLIENT_RACK_DOC,
         )
         .define_with_validator(
             ConsumerConfig::MAX_PARTITION_FETCH_BYTES_CONFIG,
@@ -323,7 +165,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_MAX_PARTITION_FETCH_BYTES,
             Range::at_least(0),
             Importance::High,
-            MAX_PARTITION_FETCH_BYTES_DOC,
         )
         .define_with_validator(
             ConsumerConfig::SEND_BUFFER_CONFIG,
@@ -331,7 +172,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             128 * 1024,
             Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            CommonClientConfigs::SEND_BUFFER_DOC,
         )
         .define_with_validator(
             ConsumerConfig::RECEIVE_BUFFER_CONFIG,
@@ -339,7 +179,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             64 * 1024,
             Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            CommonClientConfigs::RECEIVE_BUFFER_DOC,
         )
         .define_with_validator(
             ConsumerConfig::FETCH_MIN_BYTES_CONFIG,
@@ -347,7 +186,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_FETCH_MIN_BYTES,
             Range::at_least(0),
             Importance::High,
-            FETCH_MIN_BYTES_DOC,
         )
         .define_with_validator(
             ConsumerConfig::FETCH_MAX_BYTES_CONFIG,
@@ -355,7 +193,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_FETCH_MAX_BYTES,
             Range::at_least(0),
             Importance::Medium,
-            FETCH_MAX_BYTES_DOC,
         )
         .define_with_validator(
             ConsumerConfig::FETCH_MAX_WAIT_MS_CONFIG,
@@ -363,7 +200,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_FETCH_MAX_WAIT_MS,
             Range::at_least(0),
             Importance::Low,
-            FETCH_MAX_WAIT_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::RECONNECT_BACKOFF_MS_CONFIG,
@@ -371,7 +207,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             50_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RECONNECT_BACKOFF_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG,
@@ -379,7 +214,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             1000_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RECONNECT_BACKOFF_MAX_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::RETRY_BACKOFF_MS_CONFIG,
@@ -387,7 +221,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RETRY_BACKOFF_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::RETRY_BACKOFF_MAX_MS_CONFIG,
@@ -395,37 +228,22 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MAX_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RETRY_BACKOFF_MAX_MS_DOC,
         )
-        .define(
-            ConsumerConfig::ENABLE_METRICS_PUSH_CONFIG,
-            Type::Boolean,
-            true,
-            Importance::Low,
-            CommonClientConfigs::ENABLE_METRICS_PUSH_DOC,
-        )
+        .define(ConsumerConfig::ENABLE_METRICS_PUSH_CONFIG, Type::Boolean, true, Importance::Low)
         .define_with_validator(
             ConsumerConfig::AUTO_OFFSET_RESET_CONFIG,
             Type::String,
             AutoOffsetResetStrategy::LATEST.name(),
             auto_offset_reset_strategy::Validator,
             Importance::Medium,
-            AUTO_OFFSET_RESET_DOC,
         )
-        .define(
-            ConsumerConfig::CHECK_CRCS_CONFIG,
-            Type::Boolean,
-            true,
-            Importance::Low,
-            CHECK_CRCS_DOC,
-        )
+        .define(ConsumerConfig::CHECK_CRCS_CONFIG, Type::Boolean, true, Importance::Low)
         .define_with_validator(
             ConsumerConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG,
             Type::Long,
             30000_i64,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METRICS_SAMPLE_WINDOW_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::METRICS_NUM_SAMPLES_CONFIG,
@@ -433,7 +251,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             2,
             Range::at_least(1),
             Importance::Low,
-            CommonClientConfigs::METRICS_NUM_SAMPLES_DOC,
         )
         .define_with_validator(
             ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG,
@@ -441,7 +258,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             "INFO",
             ValidString::r#in(&["INFO", "DEBUG", "TRACE"]),
             Importance::Low,
-            CommonClientConfigs::METRICS_RECORDING_LEVEL_DOC,
         )
         // `metric.reporters`, `key.deserializer` and `value.deserializer` are
         // classes (CLAUDE.md §2): not defined.
@@ -451,7 +267,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             30000,
             Range::at_least(0),
             Importance::Medium,
-            CommonClientConfigs::REQUEST_TIMEOUT_MS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
@@ -459,28 +274,24 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             60000,
             Range::at_least(0),
             Importance::Medium,
-            CommonClientConfigs::DEFAULT_API_TIMEOUT_MS_DOC,
         )
         .define(
             ConsumerConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG,
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
             Importance::Medium,
-            CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC,
         )
         .define(
             ConsumerConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG,
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
             Importance::Medium,
-            CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC,
         )
         .define(
             ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG,
             Type::Long,
             9 * 60 * 1000_i64,
             Importance::Medium,
-            CommonClientConfigs::CONNECTIONS_MAX_IDLE_MS_DOC,
         )
         // `interceptor.classes` is a list of classes (CLAUDE.md §2): not defined.
         .define_with_validator(
@@ -489,7 +300,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_MAX_POLL_RECORDS,
             Range::at_least(1),
             Importance::Medium,
-            MAX_POLL_RECORDS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG,
@@ -497,14 +307,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             300000,
             Range::at_least(1),
             Importance::Medium,
-            CommonClientConfigs::MAX_POLL_INTERVAL_MS_DOC,
         )
         .define(
             ConsumerConfig::EXCLUDE_INTERNAL_TOPICS_CONFIG,
             Type::Boolean,
             ConsumerConfig::DEFAULT_EXCLUDE_INTERNAL_TOPICS,
             Importance::Medium,
-            EXCLUDE_INTERNAL_TOPICS_DOC,
         )
         .define_internal(
             ConsumerConfig::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
@@ -518,14 +326,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_ISOLATION_LEVEL,
             ValidString::r#in(&["read_committed", "read_uncommitted"]),
             Importance::Medium,
-            ISOLATION_LEVEL_DOC,
         )
         .define(
             ConsumerConfig::ALLOW_AUTO_CREATE_TOPICS_CONFIG,
             Type::Boolean,
             ConsumerConfig::DEFAULT_ALLOW_AUTO_CREATE_TOPICS,
             Importance::Medium,
-            ALLOW_AUTO_CREATE_TOPICS_DOC,
         )
         .define_with_validator(
             ConsumerConfig::GROUP_PROTOCOL_CONFIG,
@@ -533,14 +339,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::DEFAULT_GROUP_PROTOCOL,
             CaseInsensitiveValidString::r#in(&["CLASSIC", "CONSUMER"]),
             Importance::High,
-            GROUP_PROTOCOL_DOC,
         )
         .define(
             ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG,
             Type::String,
             DefaultValue::Null,
             Importance::Medium,
-            GROUP_REMOTE_ASSIGNOR_DOC,
         )
         // security support; `security.providers` (JCA providers) is not defined.
         .define_with_validator(
@@ -549,7 +353,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL,
             CaseInsensitiveValidString::r#in(&SecurityProtocol::names()),
             Importance::Medium,
-            CommonClientConfigs::SECURITY_PROTOCOL_DOC,
         )
         .with_client_ssl_support()
         .with_client_sasl_support()
@@ -559,7 +362,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_STRATEGY,
             CaseInsensitiveValidString::r#in(&["NONE", "REBOOTSTRAP"]),
             Importance::Low,
-            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG,
@@ -567,14 +369,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC,
         )
         .define(
             CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
             Type::Boolean,
             true,
             Importance::Low,
-            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_DOC,
         )
         // Java validates the two share keys with `ShareAcknowledgementMode.Validator`
         // and `ShareAcquireMode.Validator`; the share consumer is out of scope
@@ -585,14 +385,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Type::String,
             "implicit",
             Importance::Medium,
-            SHARE_ACKNOWLEDGEMENT_MODE_DOC,
         )
         .define(
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
             Type::String,
             "batch_optimized",
             Importance::Medium,
-            SHARE_ACQUIRE_MODE_DOC,
         )
         .define_with_validator(
             ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
@@ -600,7 +398,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Vec::<String>::new(),
             ValidList::any_non_duplicate_values(true, false),
             Importance::Low,
-            CONFIG_PROVIDERS_DOC,
         )
 });
 
@@ -1390,13 +1187,6 @@ impl ConsumerConfig {
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         self.config.get_string(key)
-    }
-
-    /// The documentation of the configuration `key`, `None` when this class
-    /// does not define it.
-    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#documentationOf")]
-    pub fn documentation_of(&self, key: &str) -> Option<&str> {
-        self.config.documentation_of(key)
     }
 
     /// The keys of the properties this configuration was built from that were
@@ -2806,16 +2596,9 @@ mod tests {
         );
     }
 
-    /// `documentationOf` and `configNames`.
+    /// `configNames`.
     #[test]
-    fn test_documentation_of_and_config_names() {
-        let config = ConsumerConfig::new(&base_props()).unwrap();
-        assert_eq!(
-            Some(CommonClientConfigs::GROUP_ID_DOC),
-            config.documentation_of(ConsumerConfig::GROUP_ID_CONFIG)
-        );
-        assert_eq!(Some(CHECK_CRCS_DOC), config.documentation_of(ConsumerConfig::CHECK_CRCS_CONFIG));
-        assert_eq!(None, config.documentation_of("no.such.key"));
+    fn test_config_names() {
         let names = ConsumerConfig::config_names();
         for key in [
             ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG,

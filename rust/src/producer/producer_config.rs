@@ -134,7 +134,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConfigDef::NO_DEFAULT_VALUE,
             ValidList::any_non_duplicate_values(false, false),
             Importance::High,
-            "",
         )
         .define_with_validator(
             ProducerConfig::CLIENT_DNS_LOOKUP_CONFIG,
@@ -145,7 +144,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly.config_value(),
             ]),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::BUFFER_MEMORY_CONFIG,
@@ -153,7 +151,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             32 * 1024 * 1024_i64,
             Range::at_least(0_i64),
             Importance::High,
-            "",
         )
         // Internal until the incremental strategy is fully implemented
         .define_internal_with_validator(
@@ -165,7 +162,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
                 ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
             ]),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RETRIES_CONFIG,
@@ -173,7 +169,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             i32::MAX,
             Range::between(0, i32::MAX),
             Importance::High,
-            "",
         )
         .define_with_validator(
             ProducerConfig::ACKS_CONFIG,
@@ -181,7 +176,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             "all",
             ValidString::r#in(&["all", "-1", "0", "1"]),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::COMPRESSION_TYPE_CONFIG,
@@ -189,7 +183,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CompressionType::None.name(),
             ValidString::r#in(&CompressionType::names()),
             Importance::High,
-            "",
         )
         .define_with_validator(
             ProducerConfig::COMPRESSION_GZIP_LEVEL_CONFIG,
@@ -197,7 +190,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             default_level(CompressionType::Gzip),
             level_validator(CompressionType::Gzip),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::COMPRESSION_LZ4_LEVEL_CONFIG,
@@ -205,7 +197,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             default_level(CompressionType::Lz4),
             level_validator(CompressionType::Lz4),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::COMPRESSION_ZSTD_LEVEL_CONFIG,
@@ -213,7 +204,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             default_level(CompressionType::Zstd),
             level_validator(CompressionType::Zstd),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::BATCH_SIZE_CONFIG,
@@ -221,14 +211,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             16384,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
         .define(
             ProducerConfig::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG,
             Type::Boolean,
             true,
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG,
@@ -236,21 +224,18 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             0_i64,
             Range::at_least(0),
             Importance::Low,
-            "",
         )
         .define(
             ProducerConfig::PARTITIONER_IGNORE_KEYS_CONFIG,
             Type::Boolean,
             false,
             Importance::Medium,
-            "",
         )
         .define(
             ProducerConfig::PARTITIONER_RACK_AWARE_CONFIG,
             Type::Boolean,
             false,
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::LINGER_MS_CONFIG,
@@ -258,7 +243,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5_i64,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
@@ -266,15 +250,13 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             120 * 1000,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
-        .define(ProducerConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium, "")
+        .define(ProducerConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium)
         .define(
             ProducerConfig::CLIENT_RACK_CONFIG,
             Type::String,
             ProducerConfig::DEFAULT_CLIENT_RACK,
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::SEND_BUFFER_CONFIG,
@@ -282,7 +264,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             128 * 1024,
             Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RECEIVE_BUFFER_CONFIG,
@@ -290,7 +271,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             32 * 1024,
             Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::MAX_REQUEST_SIZE_CONFIG,
@@ -298,7 +278,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             1024 * 1024,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RECONNECT_BACKOFF_MS_CONFIG,
@@ -306,7 +285,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             50_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG,
@@ -314,7 +292,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             1000_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RETRY_BACKOFF_MS_CONFIG,
@@ -322,7 +299,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::RETRY_BACKOFF_MAX_MS_CONFIG,
@@ -330,7 +306,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MAX_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
@@ -338,22 +313,14 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             Range::at_least(0_i64),
             Importance::High,
-            "",
         )
-        .define(
-            ProducerConfig::ENABLE_METRICS_PUSH_CONFIG,
-            Type::Boolean,
-            true,
-            Importance::Low,
-            "",
-        )
+        .define(ProducerConfig::ENABLE_METRICS_PUSH_CONFIG, Type::Boolean, true, Importance::Low)
         .define_with_validator(
             ProducerConfig::MAX_BLOCK_MS_CONFIG,
             Type::Long,
             60 * 1000_i64,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
@@ -361,7 +328,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             30 * 1000,
             Range::at_least(0),
             Importance::Medium,
-            "",
         )
         .define_with_validator(
             ProducerConfig::METADATA_MAX_AGE_CONFIG,
@@ -369,7 +335,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5 * 60 * 1000_i64,
             Range::at_least(0),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::METADATA_MAX_IDLE_CONFIG,
@@ -377,7 +342,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5 * 60 * 1000_i64,
             Range::at_least(5000),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG,
@@ -385,7 +349,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             30000_i64,
             Range::at_least(0),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::METRICS_NUM_SAMPLES_CONFIG,
@@ -393,7 +356,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             2,
             Range::at_least(1),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::METRICS_RECORDING_LEVEL_CONFIG,
@@ -401,7 +363,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             "INFO",
             ValidString::r#in(&["INFO", "DEBUG", "TRACE"]),
             Importance::Low,
-            "",
         )
         // `metric.reporters` is a list of classes (CLAUDE.md §2): not defined.
         .define_with_validator(
@@ -410,7 +371,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             5,
             Range::at_least(1),
             Importance::Low,
-            "",
         )
         // `key.serializer` and `value.serializer` are classes (CLAUDE.md §2):
         // not defined.
@@ -419,14 +379,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
             Importance::Medium,
-            "",
         )
         .define(
             ProducerConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG,
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
             Importance::Medium,
-            "",
         )
         // default is set to be a bit lower than the server default (10 min), to avoid both client and server closing
         // connection at same time
@@ -435,7 +393,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Type::Long,
             9 * 60 * 1000_i64,
             Importance::Medium,
-            "",
         )
         // `partitioner.class` is a class (CLAUDE.md §2): the Rust-only
         // `partitioner.type` names a built-in partitioner in its place.
@@ -445,7 +402,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             DefaultValue::Null,
             partitioner_type_validator(),
             Importance::Medium,
-            "",
         )
         // `interceptor.classes` is a list of classes (CLAUDE.md §2): not defined.
         .define_with_validator(
@@ -454,40 +410,25 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL,
             CaseInsensitiveValidString::r#in(&SecurityProtocol::names()),
             Importance::Medium,
-            "",
         )
         // `security.providers` names JCA security providers, which have no
         // counterpart: not defined.
         .with_client_ssl_support()
         .with_client_sasl_support()
-        .define(
-            ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG,
-            Type::Boolean,
-            true,
-            Importance::Low,
-            "",
-        )
-        .define(
-            ProducerConfig::TRANSACTION_TIMEOUT_CONFIG,
-            Type::Int,
-            60000,
-            Importance::Low,
-            "",
-        )
+        .define(ProducerConfig::ENABLE_IDEMPOTENCE_CONFIG, Type::Boolean, true, Importance::Low)
+        .define(ProducerConfig::TRANSACTION_TIMEOUT_CONFIG, Type::Int, 60000, Importance::Low)
         .define_with_validator(
             ProducerConfig::TRANSACTIONAL_ID_CONFIG,
             Type::String,
             DefaultValue::Null,
             NonEmptyString,
             Importance::Low,
-            "",
         )
         .define(
             ProducerConfig::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG,
             Type::Boolean,
             false,
             Importance::Low,
-            "",
         )
         .define_with_validator(
             CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG,
@@ -495,7 +436,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_STRATEGY,
             CaseInsensitiveValidString::r#in(&["NONE", "REBOOTSTRAP"]),
             Importance::Low,
-            "",
         )
         .define_with_validator(
             CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG,
@@ -503,14 +443,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
             Range::at_least(0),
             Importance::Low,
-            "",
         )
         .define(
             CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
             Type::Boolean,
             true,
             Importance::Low,
-            "",
         )
         .define_with_validator(
             ProducerConfig::CONFIG_PROVIDERS_CONFIG,
@@ -518,7 +456,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Vec::<String>::new(),
             ValidList::any_non_duplicate_values(true, false),
             Importance::Low,
-            "",
         )
 });
 

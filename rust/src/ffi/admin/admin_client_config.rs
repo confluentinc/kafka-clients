@@ -52,9 +52,6 @@ pub(crate) struct AdminClientConfigInner {
     config: AdminClientConfig,
     /// The values [`kafka_admin_AdminClientConfig_get_string`] lent out.
     strings: LentStrings,
-    /// The documentation [`kafka_admin_AdminClientConfig_documentation_of`]
-    /// lent out.
-    docs: LentStrings,
 }
 
 impl AdminClientConfigInner {
@@ -103,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
     };
-    let inner = AdminClientConfigInner { props, config, strings: LentStrings::default(), docs: LentStrings::default() };
+    let inner = AdminClientConfigInner { props, config, strings: LentStrings::default() };
     Box::into_raw(Box::new(inner)) as *mut kafka_admin_AdminClientConfig_t
 }
 
@@ -289,25 +286,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_list(
     let inner = unsafe { admin_client_config_ref(self_) };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
     unsafe { config_getters::get_list(key, out_err, |key| inner.config.get_list(key)) }
-}
-
-/// `documentationOf(String key)`: the documentation of the configuration
-/// `key`, borrowed from the handle and valid until it is destroyed, or `NULL`
-/// when the configuration does not define `key`.
-///
-/// # Safety
-///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_AdminClientConfig_documentation_of(
-    self_: *const kafka_admin_AdminClientConfig_t,
-    key: *const c_char,
-) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
-    // SAFETY: Per this function's `# Safety`, `key` is as `documentation_of` requires.
-    unsafe { config_getters::documentation_of(&inner.docs, key, |key| inner.config.documentation_of(key)) }
 }
 
 /// `unused()`: the keys of the properties never read through this handle's
@@ -502,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn string_list_and_documentation_getters() {
+    fn string_and_list_getters() {
         let config = config_with(&[("client.id", "admin-1")]);
         let mut error = std::ptr::null_mut();
         let key = |k: &str| CString::new(k).unwrap();
@@ -531,10 +509,6 @@ mod tests {
             assert_eq!(take_list(servers), ["localhost:9092"]);
             assert!(kafka_admin_AdminClientConfig_get_list(config, key("client.id").as_ptr(), &mut error).is_null());
             assert_eq!(take_error(&mut error), "Configuration 'client.id' is of type STRING, not LIST");
-
-            let doc = kafka_admin_AdminClientConfig_documentation_of(config, key("client.id").as_ptr());
-            assert_eq!(c_str_to_string(doc), crate::CommonClientConfigs::CLIENT_ID_DOC);
-            assert!(kafka_admin_AdminClientConfig_documentation_of(config, key("no.such.key").as_ptr()).is_null());
 
             kafka_admin_AdminClientConfig_destroy(config);
         }

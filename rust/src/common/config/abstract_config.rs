@@ -25,7 +25,7 @@
 //! What is translated: the constructor with its `preProcessParsedConfig` /
 //! `postProcessParsedConfig` hooks and the re-parse that validates the
 //! post-processed values, `get` and the typed getters, `ignore`, `unused`,
-//! `documentationOf`, `logUnused`, `logAll`, `equals` and `hashCode`.
+//! `logUnused`, `logAll`, `equals` and `hashCode`.
 //!
 //! What is not, each deferred to the public translation (see `CHANGELOG.md`):
 //!
@@ -40,6 +40,8 @@
 //! - `getClass`, `getConfiguredInstance(s)`: a configuration never takes a
 //!   class (CLAUDE.md §2).
 //! - `typeOf`: it returns `ConfigDef.Type`, not public.
+//! - `documentationOf`: the keys' documentation strings are not kept (see
+//!   [`ConfigDef`]'s module documentation).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -52,12 +54,6 @@ use crate::common::config::types::Password;
 
 /// A configuration map as Java's `Map<String, ?>`: `None` is a `null` value.
 pub(crate) type ConfigMap = HashMap<String, Option<ParsedValue>>;
-
-/// Java's `AbstractConfig.CONFIG_PROVIDERS_DOC`.
-pub(crate) const CONFIG_PROVIDERS_DOC: &str = "Comma-separated alias names for classes implementing the \
-    <code>ConfigProvider</code> interface. This enables loading configuration data (such as passwords, API \
-    keys, and other credentials) from external sources. For example, see \
-    <a href=\"https://kafka.apache.org/documentation/#config_providers\">Configuration Providers</a>.";
 
 /// A convenient base class for configurations to extend, Java's
 /// `AbstractConfig`.
@@ -144,12 +140,6 @@ impl AbstractConfig {
             config.log_all(class_name);
         }
         Ok(config)
-    }
-
-    /// The configuration definition.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no caller outside AbstractConfigTest yet"))]
-    pub(crate) fn definition(&self) -> &'static ConfigDef {
-        self.definition
     }
 
     /// The originals as given, without marking any key used: the crate's
@@ -276,13 +266,6 @@ impl AbstractConfig {
     )]
     pub(crate) fn get_password(&self, key: &str) -> Result<Option<&Password>, Error> {
         as_password(key, self.get(key)?)
-    }
-
-    /// Java's `documentationOf(key)`: the documentation of `key`, `None` when
-    /// it is not defined.
-    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#documentationOf")]
-    pub(crate) fn documentation_of(&self, key: &str) -> Option<&'static str> {
-        self.definition.config_key(key).map(|k| k.documentation.as_str())
     }
 
     /// The keys of the originals that were never read: Java's `unused()`.
@@ -597,6 +580,9 @@ pub(crate) fn string_originals(props: &HashMap<String, String>) -> ConfigMap {
 ///   `testImmutableOriginalsWithConfigProvidersProps`,
 ///   `testAutoConfigResolution*`, `testConfigProviderConfigurationWithConfigParams`:
 ///   config providers are not translated.
+/// - `testDocumentationOf`, `testDocumentationOfExpectNull`: the documentation
+///   strings are not kept, because only the untranslated renderers and
+///   `documentationOf` read them.
 #[cfg(test)]
 mod tests {
     use std::sync::LazyLock;
@@ -616,7 +602,7 @@ mod tests {
     }
 
     static EMPTY_LIST_DEF: LazyLock<ConfigDef> = LazyLock::new(|| {
-        ConfigDef::new().define_with_validator("a", Type::List, "", NonNullValidator, Importance::High, "doc")
+        ConfigDef::new().define_with_validator("a", Type::List, "", NonNullValidator, Importance::High)
     });
 
     #[test]
@@ -637,20 +623,8 @@ mod tests {
 
     static TEST_CONFIG_DEF: LazyLock<ConfigDef> = LazyLock::new(|| {
         ConfigDef::new()
-            .define(
-                METRIC_REPORTER_CLASSES_CONFIG,
-                Type::List,
-                "",
-                Importance::Low,
-                "A list of classes to use as metrics reporters.",
-            )
-            .define(
-                PREPROCESSOR_CONFIG,
-                Type::String,
-                "",
-                Importance::Low,
-                "Override from preprocess step.",
-            )
+            .define(METRIC_REPORTER_CLASSES_CONFIG, Type::List, "", Importance::Low)
+            .define(PREPROCESSOR_CONFIG, Type::String, "", Importance::Low)
     });
 
     /// Java's `TestConfig`, whose `preProcessParsedConfig` sets `preprocess`.
@@ -697,37 +671,17 @@ mod tests {
         );
     }
 
-    const INDIRECT_CONFIGS: &str = "indirect.variables";
-    const INDIRECT_CONFIGS_DOC: &str = "Variables whose values can be obtained from ConfigProviders";
-
-    static INDIRECT_DEF: LazyLock<ConfigDef> = LazyLock::new(|| {
-        ConfigDef::new().define(INDIRECT_CONFIGS, Type::List, "", Importance::Low, INDIRECT_CONFIGS_DOC)
-    });
-
-    #[test]
-    fn test_documentation_of() {
-        let config = AbstractConfig::new(&INDIRECT_DEF, ConfigMap::new(), true).unwrap();
-        assert_eq!(config.documentation_of(INDIRECT_CONFIGS), Some(INDIRECT_CONFIGS_DOC));
-    }
-
-    #[test]
-    fn test_documentation_of_expect_null() {
-        let config = AbstractConfig::new(&INDIRECT_DEF, ConfigMap::new(), true).unwrap();
-        assert_eq!(config.documentation_of("xyz"), None);
-        assert!(std::ptr::eq(config.definition(), &*INDIRECT_DEF));
-    }
-
     static TYPED_DEF: LazyLock<ConfigDef> = LazyLock::new(|| {
         ConfigDef::new()
-            .define("short", Type::Short, 1i16, Importance::High, "docs")
-            .define("int", Type::Int, 2, Importance::High, "docs")
-            .define("long", Type::Long, 3i64, Importance::High, "docs")
-            .define("double", Type::Double, 4.5, Importance::High, "docs")
-            .define("boolean", Type::Boolean, true, Importance::High, "docs")
-            .define("string", Type::String, " s ", Importance::High, "docs")
-            .define("list", Type::List, "a, b", Importance::High, "docs")
-            .define("password", Type::Password, DefaultValue::Null, Importance::High, "docs")
-            .define("null.int", Type::Int, DefaultValue::Null, Importance::High, "docs")
+            .define("short", Type::Short, 1i16, Importance::High)
+            .define("int", Type::Int, 2, Importance::High)
+            .define("long", Type::Long, 3i64, Importance::High)
+            .define("double", Type::Double, 4.5, Importance::High)
+            .define("boolean", Type::Boolean, true, Importance::High)
+            .define("string", Type::String, " s ", Importance::High)
+            .define("list", Type::List, "a, b", Importance::High)
+            .define("password", Type::Password, DefaultValue::Null, Importance::High)
+            .define("null.int", Type::Int, DefaultValue::Null, Importance::High)
     });
 
     /// Each typed getter answers its type, Java's `null` as `None`, and marks
@@ -820,14 +774,13 @@ mod tests {
 
     static POST_DEF: LazyLock<ConfigDef> = LazyLock::new(|| {
         ConfigDef::new()
-            .define("a", Type::Int, 1, Importance::High, "docs")
+            .define("a", Type::Int, 1, Importance::High)
             .define_with_validator(
                 "b",
                 Type::Int,
                 1,
                 crate::common::config::config_def::Range::at_least(0),
                 Importance::High,
-                "docs",
             )
     });
 

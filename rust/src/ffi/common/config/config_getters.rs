@@ -126,26 +126,6 @@ pub(crate) unsafe fn get_list<'a>(
     }
 }
 
-/// A `documentationOf` export: the documentation borrowed from the handle
-/// (`docs`), `NULL` for a key the configuration does not define.
-///
-/// # Safety
-///
-/// `key` must be a valid NUL-terminated string.
-pub(crate) unsafe fn documentation_of<'a>(
-    docs: &LentStrings,
-    key: *const c_char,
-    get: impl FnOnce(&str) -> Option<&'a str>,
-) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let key = unsafe { c_str_to_string(key) };
-    match get(&key) {
-        Some(doc) => docs.lend(key, doc),
-        None => std::ptr::null(),
-    }
-}
-
 /// An `ignore` export.
 ///
 /// # Safety

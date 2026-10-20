@@ -115,7 +115,7 @@ breaking changes.
 - `ConsumerConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
-  `documentation_of`, `unused`, `ignore`, `log_unused`, and the static
+  `unused`, `ignore`, `log_unused`, and the static
   `config_names`. Its `PartialEq` / `Hash` compare the properties it was built
   from, as Java's `equals` / `hashCode` do.
 - The consumer logs its configuration values at INFO when it is built, as
@@ -138,7 +138,7 @@ breaking changes.
 - `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
-  `documentation_of`, `unused`, `ignore`, `log_unused`, and the static
+  `unused`, `ignore`, `log_unused`, and the static
   `config_names`. It is `Clone`, and its `PartialEq` / `Hash` compare the
   properties it was built from, as Java's `equals` / `hashCode` do.
 - The admin client logs its configuration values at INFO when it is built, as
@@ -205,8 +205,10 @@ breaking changes.
   its validators, `ConfigValue` and `LambdaValidator`; `get_password` (a
   public `Password`); `type_of` (a public `ConfigDef.Type`); `originals*()` /
   `values*()` (Java returns a `RecordingMap`, and a plain `HashMap` now would
-  fix the wrong return type); how Java's `Object` config values are typed;
-  and, in C, an `__as_AbstractConfig` view. The class-valued keys
+  fix the wrong return type); `documentation_of` (the keys' documentation
+  strings are not kept, as only it and Java's documentation renderers read
+  them); how Java's `Object` config values are typed; and, in C, an
+  `__as_AbstractConfig` view. The class-valued keys
   (`ssl.engine.factory.class`, the `sasl.*.class` keys) stay undefined, as
   configurations never take a class.
 - **Breaking:** `DynSerializer`, `DynDeserializer` and `InlineFuture` are no
@@ -249,13 +251,13 @@ breaking changes.
 - `kafka_admin_AdminClientConfig_t` answers `AbstractConfig`'s getters:
   `kafka_admin_AdminClientConfig_get_short`, `_get_int`, `_get_long`,
   `_get_double` and `_get_boolean` return `1` with the value in `*out_value`
-  and `0` for Java's `null`; `_get_string` and `_documentation_of` return a
-  string borrowed from the handle; `_get_list`, `_unused` and `_config_names`
+  and `0` for Java's `null`; `_get_string` returns a string borrowed from the
+  handle; `_get_list`, `_unused` and `_config_names`
   return an owned `kafka_List_t`; plus `_ignore` and `_log_unused`. A client
   created from the handle keeps its own record of the keys it used.
 - `kafka_consumer_ConsumerConfig_t` answers the same getters:
   `kafka_consumer_ConsumerConfig_get_short`, `_get_int`, `_get_long`,
-  `_get_double`, `_get_boolean`, `_get_list`, `_documentation_of`, `_unused`,
+  `_get_double`, `_get_boolean`, `_get_list`, `_unused`,
   `_ignore`, `_log_unused` and `_config_names`, beside the existing
   `_get_string`. A consumer created from the handle starts from a copy of its
   record of the keys used.

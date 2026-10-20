@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! Translated from `org.apache.kafka.common.config.ConfigDef`: the definition
-//! of a client's configuration keys (name, type, default, validator,
-//! importance and documentation) and the parser that turns the user's values
+//! of a client's configuration keys (name, type, default, validator and
+//! importance) and the parser that turns the user's values
 //! into typed values with Java's checks and messages.
 //!
 //! Crate-private: the client configs (`ProducerConfig`, `ConsumerConfig`,
@@ -36,6 +36,10 @@
 //! - The documentation renderers (`toHtml`, `toRst`, `toEnrichedRst`,
 //!   `convertToString`, `niceMemoryUnits`, `niceTimeUnits`), which nothing in
 //!   the clients calls.
+//! - The keys' documentation: `ConfigKey.documentation` and the
+//!   `documentation` argument of every `define` overload. Only the renderers
+//!   and `AbstractConfig.documentationOf` read it, and neither is translated,
+//!   so the strings would only take space in the binary.
 //! - `validate` / `validateAll`, `ConfigValue`, `Recommender`, groups, widths,
 //!   display names and dependents: only `validate` uses them, and it is a
 //!   public API of the deferred public `ConfigDef`.
@@ -366,14 +370,13 @@ pub(crate) fn config_error(name: &str, value: Option<&ParsedValue>, message: imp
 }
 
 /// The definition of a configuration key, Java's `ConfigDef.ConfigKey`,
-/// without the fields only `validate` and the renderers read (group,
-/// order in group, width, display name, dependents, recommender, alternative
-/// string). Java's `public final` fields are `pub(crate)` here.
+/// without the fields only `validate` and the renderers read (documentation,
+/// group, order in group, width, display name, dependents, recommender,
+/// alternative string). Java's `public final` fields are `pub(crate)` here.
 #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ConfigKey")]
 pub(crate) struct ConfigKey {
     pub(crate) name: String,
     pub(crate) r#type: Type,
-    pub(crate) documentation: String,
     /// The default, already parsed with [`Self::r#type`] (Java's constructor
     /// runs `parseType` on it).
     pub(crate) default_value: DefaultValue,
@@ -404,7 +407,6 @@ impl ConfigKey {
         default_value: DefaultValue,
         validator: Option<Box<dyn Validator>>,
         importance: Importance,
-        documentation: &str,
         internal_config: bool,
     ) -> Result<Self, Error> {
         let default_value = match default_value {
@@ -425,7 +427,6 @@ impl ConfigKey {
         Ok(Self {
             name: name.to_string(),
             r#type,
-            documentation: documentation.to_string(),
             default_value,
             validator,
             importance,
@@ -493,7 +494,6 @@ impl ConfigDef {
     /// With the `ConfigException` message Java's `ConfigKey` constructor
     /// throws when the default cannot be parsed or fails the validator, and
     /// as [`Self::define_key`].
-    #[expect(clippy::too_many_arguments, reason = "Java's ConfigKey constructor arguments")]
     fn define_full(
         self,
         name: &str,
@@ -501,18 +501,9 @@ impl ConfigDef {
         default_value: DefaultValue,
         validator: Option<Box<dyn Validator>>,
         importance: Importance,
-        documentation: &str,
         internal_config: bool,
     ) -> Self {
-        match ConfigKey::new(
-            name,
-            r#type,
-            default_value,
-            validator,
-            importance,
-            documentation,
-            internal_config,
-        ) {
+        match ConfigKey::new(name, r#type, default_value, validator, importance, internal_config) {
             Ok(key) => self.define_key(key),
             // Java's `ConfigException` message, without the Rust type prefix.
             Err(Error::Config(e)) => panic!("{}", e.message()),
@@ -534,9 +525,8 @@ impl ConfigDef {
         r#type: Type,
         default_value: impl Into<DefaultValue>,
         importance: Importance,
-        documentation: &str,
     ) -> Self {
-        self.define_full(name, r#type, default_value.into(), None, importance, documentation, false)
+        self.define_full(name, r#type, default_value.into(), None, importance, false)
     }
 
     /// Define a new configuration with a validator: Java's `define(name, type,
@@ -552,17 +542,8 @@ impl ConfigDef {
         default_value: impl Into<DefaultValue>,
         validator: impl Validator + 'static,
         importance: Importance,
-        documentation: &str,
     ) -> Self {
-        self.define_full(
-            name,
-            r#type,
-            default_value.into(),
-            Some(Box::new(validator)),
-            importance,
-            documentation,
-            false,
-        )
+        self.define_full(name, r#type, default_value.into(), Some(Box::new(validator)), importance, false)
     }
 
     /// Define a new internal configuration. Internal configuration won't show
@@ -580,7 +561,7 @@ impl ConfigDef {
         default_value: impl Into<DefaultValue>,
         importance: Importance,
     ) -> Self {
-        self.define_full(name, r#type, default_value.into(), None, importance, "", true)
+        self.define_full(name, r#type, default_value.into(), None, importance, true)
     }
 
     /// Java's `defineInternal(name, type, defaultValue, validator,
@@ -596,17 +577,8 @@ impl ConfigDef {
         default_value: impl Into<DefaultValue>,
         validator: impl Validator + 'static,
         importance: Importance,
-        documentation: &str,
     ) -> Self {
-        self.define_full(
-            name,
-            r#type,
-            default_value.into(),
-            Some(Box::new(validator)),
-            importance,
-            documentation,
-            true,
-        )
+        self.define_full(name, r#type, default_value.into(), Some(Box::new(validator)), importance, true)
     }
 
     /// Add standard SSL client configuration options: Java's
@@ -639,6 +611,7 @@ impl ConfigDef {
     }
 
     /// Java's `configKeys().get(name)`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read only by ConfigDefTest"))]
     pub(crate) fn config_key(&self, name: &str) -> Option<&ConfigKey> {
         self.index.get(name).map(|&i| &self.config_keys[i])
     }
@@ -1551,6 +1524,9 @@ impl fmt::Display for ListSize {
 ///   [`java_double_to_string`], which the messages use.
 /// - `testMissingDependentConfigs`, `testBaseConfigDefDependents`: dependents
 ///   are not translated.
+/// - Every assertion on a key's documentation: the documentation strings are
+///   not kept, because only the untranslated renderers and `documentationOf`
+///   read them.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,15 +1554,15 @@ mod tests {
     #[test]
     fn test_basic_types() {
         let def = ConfigDef::new()
-            .define_with_validator("a", Type::Int, 5, Range::between(0, 14), Importance::High, "docs")
-            .define("b", Type::Long, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("c", Type::String, "hello", Importance::High, "docs")
-            .define("d", Type::List, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("e", Type::Double, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("g", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("h", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("i", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("j", Type::Password, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs");
+            .define_with_validator("a", Type::Int, 5, Range::between(0, 14), Importance::High)
+            .define("b", Type::Long, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("c", Type::String, "hello", Importance::High)
+            .define("d", Type::List, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("e", Type::Double, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("g", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("h", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("i", Type::Boolean, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("j", Type::Password, ConfigDef::NO_DEFAULT_VALUE, Importance::High);
 
         let props = props(&[
             ("a", "1   ".into()),
@@ -1617,7 +1593,7 @@ mod tests {
     fn test_invalid_default() {
         assert_eq!(
             panic_message(|| {
-                ConfigDef::new().define("a", Type::Int, "hello", Importance::High, "docs");
+                ConfigDef::new().define("a", Type::Int, "hello", Importance::High);
             }),
             "Invalid value hello for configuration a: Not a number of type INT"
         );
@@ -1625,14 +1601,14 @@ mod tests {
 
     #[test]
     fn test_null_default() {
-        let def = ConfigDef::new().define("a", Type::Int, DefaultValue::Null, Importance::High, "docs");
+        let def = ConfigDef::new().define("a", Type::Int, DefaultValue::Null, Importance::High);
         let vals = def.parse(&HashMap::new()).unwrap();
         assert_eq!(vals["a"], None);
     }
 
     #[test]
     fn test_missing_required() {
-        let def = ConfigDef::new().define("a", Type::Int, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs");
+        let def = ConfigDef::new().define("a", Type::Int, ConfigDef::NO_DEFAULT_VALUE, Importance::High);
         assert_eq!(
             config_error_message(def.parse(&HashMap::new())),
             "Missing required configuration \"a\" which has no default value."
@@ -1642,7 +1618,7 @@ mod tests {
     #[test]
     fn test_parsing_empty_default_value_for_string_field_should_succeed() {
         ConfigDef::new()
-            .define("a", Type::String, "", Importance::High, "docs")
+            .define("a", Type::String, "", Importance::High)
             .parse(&HashMap::new())
             .unwrap();
     }
@@ -1652,8 +1628,8 @@ mod tests {
         assert_eq!(
             panic_message(|| {
                 ConfigDef::new()
-                    .define("a", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-                    .define("a", Type::Int, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs");
+                    .define("a", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+                    .define("a", Type::Int, ConfigDef::NO_DEFAULT_VALUE, Importance::High);
             }),
             "Configuration a is defined twice."
         );
@@ -1661,7 +1637,7 @@ mod tests {
 
     fn check_bad_inputs(r#type: Type, values: &[(ParsedValue, &str)]) {
         for (value, message) in values {
-            let def = ConfigDef::new().define("name", r#type, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs");
+            let def = ConfigDef::new().define("name", r#type, ConfigDef::NO_DEFAULT_VALUE, Importance::High);
             assert_eq!(
                 config_error_message(def.parse(&props(&[("name", value.clone())]))),
                 *message,
@@ -1778,14 +1754,7 @@ mod tests {
     fn test_invalid_default_range() {
         assert_eq!(
             panic_message(|| {
-                ConfigDef::new().define_with_validator(
-                    "name",
-                    Type::Int,
-                    -1,
-                    Range::between(0, 10),
-                    Importance::High,
-                    "docs",
-                );
+                ConfigDef::new().define_with_validator("name", Type::Int, -1, Range::between(0, 10), Importance::High);
             }),
             "Invalid value -1 for configuration name: Value must be at least 0"
         );
@@ -1801,7 +1770,6 @@ mod tests {
                     "bad",
                     ValidString::r#in(&["valid", "values"]),
                     Importance::High,
-                    "docs",
                 );
             }),
             "Invalid value bad for configuration name: String must be one of: valid, values"
@@ -1815,8 +1783,7 @@ mod tests {
         ok_values: &[ParsedValue],
         bad_values: &[(Option<ParsedValue>, &str)],
     ) {
-        let def =
-            ConfigDef::new().define_with_validator("name", r#type, default_val, validator, Importance::High, "docs");
+        let def = ConfigDef::new().define_with_validator("name", r#type, default_val, validator, Importance::High);
         for value in ok_values {
             def.parse(&props(&[("name", value.clone())])).unwrap();
         }
@@ -2020,7 +1987,6 @@ mod tests {
             ConfigDef::NO_DEFAULT_VALUE,
             ValidString::r#in(&["ONE", "TWO", "THREE"]),
             Importance::High,
-            "docs",
         );
         let vals = def.parse(&props(&[(key, "ONE".into())])).unwrap();
         assert_eq!(vals[key], Some(ParsedValue::String("ONE".into())));
@@ -2035,14 +2001,13 @@ mod tests {
         let key = config_def.config_key(config_name).unwrap();
         assert!(key.internal_config);
         assert_eq!(key.importance, Importance::Low);
-        assert_eq!(key.documentation, "");
     }
 
     #[test]
     fn test_names() {
         let config_def = ConfigDef::new()
-            .define("a", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::Low, "docs")
-            .define("b", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::Low, "docs");
+            .define("a", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::Low)
+            .define("b", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::Low);
         assert_eq!(config_def.names(), HashSet::from(["a".to_string(), "b".to_string()]));
         // Definition order is kept, as Java's `LinkedHashMap` keeps it.
         let ordered: Vec<&str> = config_def.config_keys().map(|k| k.name.as_str()).collect();
@@ -2074,7 +2039,6 @@ mod tests {
                     vec!["a".to_string(), "b".to_string()],
                     ListSize::at_most_of_size(1),
                     Importance::High,
-                    "lst doc",
                 );
             }),
             "Invalid value [a, b] for configuration lst: exceeds maximum list size of [1]."
@@ -2091,7 +2055,6 @@ mod tests {
             lst,
             ListSize::at_most_of_size(size),
             Importance::High,
-            "lst doc",
         );
     }
 
@@ -2103,7 +2066,6 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
             ListSize::at_most_of_size(3),
             Importance::High,
-            "lst doc",
         );
     }
 
@@ -2203,7 +2165,6 @@ mod tests {
             Vec::<String>::new(),
             ValidList::any_non_duplicate_values(true, true),
             Importance::High,
-            "list doc",
         );
         let parsed = def.parse(&props(&[("list", "a,b,c,a,b".into())])).unwrap();
         assert_eq!(parsed["list"], Some(ParsedValue::List(list(&["a", "b", "c"]))));
@@ -2317,9 +2278,9 @@ mod tests {
     #[test]
     fn test_has_default() {
         let def = ConfigDef::new()
-            .define("required", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::High, "docs")
-            .define("null", Type::String, DefaultValue::Null, Importance::High, "docs")
-            .define("value", Type::Int, 5, Importance::High, "docs");
+            .define("required", Type::String, ConfigDef::NO_DEFAULT_VALUE, Importance::High)
+            .define("null", Type::String, DefaultValue::Null, Importance::High)
+            .define("value", Type::Int, 5, Importance::High);
         assert!(!def.config_key("required").unwrap().has_default());
         assert!(def.config_key("null").unwrap().has_default());
         assert!(def.config_key("value").unwrap().has_default());
@@ -2330,17 +2291,10 @@ mod tests {
     #[test]
     fn test_can_add_internal_config_with_validator() {
         let name = "internal.config";
-        let def = ConfigDef::new().define_internal_with_validator(
-            name,
-            Type::Int,
-            1,
-            Range::at_least(0),
-            Importance::Low,
-            "docs",
-        );
+        let def =
+            ConfigDef::new().define_internal_with_validator(name, Type::Int, 1, Range::at_least(0), Importance::Low);
         let key = def.config_key(name).unwrap();
         assert!(key.internal_config);
-        assert_eq!(key.documentation, "docs");
         assert_eq!(
             def.parse(&props(&[(name, "3".into())])).unwrap()[name],
             Some(ParsedValue::Int(3))
@@ -2357,7 +2311,6 @@ mod tests {
                     -1,
                     Range::at_least(0),
                     Importance::Low,
-                    "docs",
                 );
             }),
             "Invalid value -1 for configuration internal.config: Value must be at least 0"
@@ -2367,7 +2320,7 @@ mod tests {
     /// The `SHORT` arms of `parseType`, which `testBasicTypes` does not cover.
     #[test]
     fn test_parse_short() {
-        let def = ConfigDef::new().define("s", Type::Short, 7i16, Importance::High, "docs");
+        let def = ConfigDef::new().define("s", Type::Short, 7i16, Importance::High);
         assert_eq!(def.parse(&props(&[])).unwrap()["s"], Some(ParsedValue::Short(7)));
         assert_eq!(
             def.parse(&props(&[("s", " 12 ".into())])).unwrap()["s"],
@@ -2418,7 +2371,6 @@ mod tests {
             assert!(def.config_key(class_key).is_none(), "{class_key}");
         }
         assert!(def.config_key(SaslConfigs::SASL_JAAS_CONFIG).unwrap().r#type.is_sensitive());
-        assert!(!def.config_key(SaslConfigs::SASL_MECHANISM).unwrap().documentation.is_empty());
         assert_eq!(
             config_error_message(def.parse(&props(&[("sasl.login.refresh.buffer.seconds", "3601".into())]))),
             "Invalid value 3601 for configuration sasl.login.refresh.buffer.seconds: Value must be no more than 3600"

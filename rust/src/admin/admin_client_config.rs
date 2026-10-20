@@ -45,11 +45,6 @@ use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
-/// Java's `AdminClientConfig.BOOTSTRAP_CONTROLLERS_DOC`.
-const BOOTSTRAP_CONTROLLERS_DOC: &str = "A list of host/port pairs to use for establishing the initial \
-    connection to the KRaft controller quorum. This list should be in the form \
-    <code>host1:port1,host2:port2,...</code>.";
-
 /// Java's `AdminClientConfig.CONFIG`, built in its static initializer.
 static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
     ConfigDef::new()
@@ -59,7 +54,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Vec::<String>::new(),
             ValidList::any_non_duplicate_values(true, false),
             Importance::High,
-            CommonClientConfigs::BOOTSTRAP_SERVERS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG,
@@ -67,22 +61,14 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Vec::<String>::new(),
             ValidList::any_non_duplicate_values(true, false),
             Importance::High,
-            BOOTSTRAP_CONTROLLERS_DOC,
         )
-        .define(
-            AdminClientConfig::CLIENT_ID_CONFIG,
-            Type::String,
-            "",
-            Importance::Medium,
-            CommonClientConfigs::CLIENT_ID_DOC,
-        )
+        .define(AdminClientConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium)
         .define_with_validator(
             AdminClientConfig::METADATA_MAX_AGE_CONFIG,
             Type::Long,
             5 * 60 * 1000_i64,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METADATA_MAX_AGE_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::SEND_BUFFER_CONFIG,
@@ -90,7 +76,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             128 * 1024,
             Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            CommonClientConfigs::SEND_BUFFER_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::RECEIVE_BUFFER_CONFIG,
@@ -98,7 +83,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             64 * 1024,
             Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND),
             Importance::Medium,
-            CommonClientConfigs::RECEIVE_BUFFER_DOC,
         )
         .define_with_validator(
             AdminClientConfig::RECONNECT_BACKOFF_MS_CONFIG,
@@ -106,7 +90,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             50_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RECONNECT_BACKOFF_MS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG,
@@ -114,7 +97,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             1000_i64,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RECONNECT_BACKOFF_MAX_MS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::RETRY_BACKOFF_MS_CONFIG,
@@ -122,7 +104,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RETRY_BACKOFF_MS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::RETRY_BACKOFF_MAX_MS_CONFIG,
@@ -130,7 +111,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MAX_MS,
             Range::at_least(0_i64),
             Importance::Low,
-            CommonClientConfigs::RETRY_BACKOFF_MAX_MS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
@@ -138,14 +118,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             Range::at_least(0_i64),
             Importance::High,
-            CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_DOC,
         )
         .define(
             CommonClientConfigs::ENABLE_METRICS_PUSH_CONFIG,
             Type::Boolean,
             false,
             Importance::Low,
-            CommonClientConfigs::ENABLE_METRICS_PUSH_DOC,
         )
         .define_with_validator(
             AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG,
@@ -153,28 +131,24 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             30000,
             Range::at_least(0),
             Importance::Medium,
-            CommonClientConfigs::REQUEST_TIMEOUT_MS_DOC,
         )
         .define(
             AdminClientConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG,
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
             Importance::Medium,
-            CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC,
         )
         .define(
             CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG,
             Type::Long,
             CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
             Importance::Medium,
-            CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC,
         )
         .define(
             AdminClientConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG,
             Type::Long,
             5 * 60 * 1000_i64,
             Importance::Medium,
-            CommonClientConfigs::CONNECTIONS_MAX_IDLE_MS_DOC,
         )
         .define_with_validator(
             AdminClientConfig::RETRIES_CONFIG,
@@ -182,7 +156,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             i32::MAX,
             Range::between(0, i32::MAX),
             Importance::Low,
-            CommonClientConfigs::RETRIES_DOC,
         )
         .define_with_validator(
             AdminClientConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
@@ -190,7 +163,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             60000,
             Range::at_least(0),
             Importance::Medium,
-            CommonClientConfigs::DEFAULT_API_TIMEOUT_MS_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::METRICS_SAMPLE_WINDOW_MS_CONFIG,
@@ -198,7 +170,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             30000_i64,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METRICS_SAMPLE_WINDOW_MS_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::METRICS_NUM_SAMPLES_CONFIG,
@@ -206,7 +177,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             2,
             Range::at_least(1),
             Importance::Low,
-            CommonClientConfigs::METRICS_NUM_SAMPLES_DOC,
         )
         // `metric.reporters` is a list of classes (CLAUDE.md §2): not defined.
         .define_with_validator(
@@ -215,7 +185,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             "INFO",
             ValidString::r#in(&["INFO", "DEBUG", "TRACE"]),
             Importance::Low,
-            CommonClientConfigs::METRICS_RECORDING_LEVEL_DOC,
         )
         .define_with_validator(
             AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG,
@@ -226,7 +195,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly.config_value(),
             ]),
             Importance::Medium,
-            CommonClientConfigs::CLIENT_DNS_LOOKUP_DOC,
         )
         // security support; `security.providers` (JCA providers) is not defined.
         .define_with_validator(
@@ -235,7 +203,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL,
             CaseInsensitiveValidString::r#in(&SecurityProtocol::names()),
             Importance::Medium,
-            CommonClientConfigs::SECURITY_PROTOCOL_DOC,
         )
         .with_client_ssl_support()
         .with_client_sasl_support()
@@ -245,7 +212,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_STRATEGY,
             CaseInsensitiveValidString::r#in(&["NONE", "REBOOTSTRAP"]),
             Importance::Low,
-            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_DOC,
         )
         .define_with_validator(
             CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG,
@@ -253,14 +219,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             CommonClientConfigs::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
             Range::at_least(0),
             Importance::Low,
-            CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC,
         )
         .define(
             AdminClientConfig::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
             Type::Boolean,
             true,
             Importance::Low,
-            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_DOC,
         )
     // `config.providers` is not defined: config providers are not translated.
 });
@@ -633,13 +597,6 @@ impl AdminClientConfig {
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         self.config.get_string(key)
-    }
-
-    /// The documentation of the configuration `key`, `None` when this class
-    /// does not define it.
-    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#documentationOf")]
-    pub fn documentation_of(&self, key: &str) -> Option<&str> {
-        self.config.documentation_of(key)
     }
 
     /// The keys of the properties this configuration was built from that were
@@ -1082,15 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn test_documentation_of_and_config_names() {
-        let config = AdminClientConfig::new(&bootstrap_props()).unwrap();
-        assert_eq!(
-            config.documentation_of("bootstrap.controllers"),
-            Some(BOOTSTRAP_CONTROLLERS_DOC)
-        );
-        assert_eq!(config.documentation_of("client.id"), Some(CommonClientConfigs::CLIENT_ID_DOC));
-        assert_eq!(config.documentation_of("no.such.key"), None);
-
+    fn test_config_names() {
         let names = AdminClientConfig::config_names();
         for key in [
             "bootstrap.servers",
