@@ -278,7 +278,7 @@ impl ConsumerConfig {
 
             exclude_internal_topics: true,
             throw_on_fetch_stable_offset_unsupported: false,
-            isolation_level: "read_uncommitted".to_string(),
+            isolation_level: Self::DEFAULT_ISOLATION_LEVEL.to_string(),
             allow_auto_create_topics: true,
 
             enable_metrics_push: true,
@@ -466,6 +466,14 @@ impl ConsumerConfig {
         "internal.throw.on.fetch.stable.offset.unsupported";
     /// Config key: `isolation.level`.
     pub const ISOLATION_LEVEL_CONFIG: &'static str = "isolation.level";
+    /// Default for `isolation.level`: `read_committed`, so a consumer returns
+    /// only the transactional records that were committed.
+    ///
+    /// This deviates from Java, whose `DEFAULT_ISOLATION_LEVEL` is
+    /// `read_uncommitted` (`ConsumerConfig.java:382`); `read_committed` is
+    /// librdkafka's default, which users of the other Confluent clients
+    /// expect. Set `isolation.level=read_uncommitted` for Java's behaviour.
+    pub const DEFAULT_ISOLATION_LEVEL: &'static str = "read_committed";
     /// Config key: `allow.auto.create.topics`.
     pub const ALLOW_AUTO_CREATE_TOPICS_CONFIG: &'static str = "allow.auto.create.topics";
     /// Default value of `allow.auto.create.topics`.
@@ -1838,7 +1846,10 @@ mod tests {
             (ConsumerConfig::CLIENT_RACK_CONFIG, Some("")),
             (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, Some("latest")),
             (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, Some("rebootstrap")),
-            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, Some("read_uncommitted")),
+            (
+                ConsumerConfig::ISOLATION_LEVEL_CONFIG,
+                Some(ConsumerConfig::DEFAULT_ISOLATION_LEVEL),
+            ),
             (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, Some("INFO")),
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, Some("implicit")),
             (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("batch_optimized")),
@@ -1882,7 +1893,7 @@ mod tests {
             (ConsumerConfig::CLIENT_RACK_CONFIG, " rack-1 ", "rack-1"),
             (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, "earliest", "earliest"),
             (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, "none", "none"),
-            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, "read_committed", "read_committed"),
+            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, "read_uncommitted", "read_uncommitted"),
             (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, "DEBUG", "DEBUG"),
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, "explicit", "explicit"),
             (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, "record_limit", "record_limit"),

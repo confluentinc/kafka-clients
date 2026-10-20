@@ -482,6 +482,8 @@ mod tests {
             ("bootstrap.servers".to_string(), broker.bootstrap()),
             ("group.protocol".to_string(), "consumer".to_string()),
             ("auto.offset.reset".to_string(), "earliest".to_string()),
+            // Java's `newConsumer` sets it too (`KafkaConsumerTest.java:3626`).
+            ("isolation.level".to_string(), "read_uncommitted".to_string()),
         ]);
         KafkaConsumer::new(
             ConsumerConfig::new(&props).expect("config validates"),

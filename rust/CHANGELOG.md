@@ -43,6 +43,11 @@ breaking changes.
 - **Breaking:** `ConsumerHandle::group_metadata` now panics like
   `KafkaConsumer::group_metadata` on a consumer without `group.id` instead of
   returning a group-less value.
+- **Breaking:** `isolation.level` defaults to `read_committed`, as in
+  librdkafka, instead of Java's `read_uncommitted`: a consumer no longer returns
+  records of aborted or still open transactions, and reads only up to the last
+  stable offset. The new `ConsumerConfig::DEFAULT_ISOLATION_LEVEL` holds the
+  default. Set `isolation.level=read_uncommitted` for the previous behaviour.
 
 ### Common
 
