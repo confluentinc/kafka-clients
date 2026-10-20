@@ -154,6 +154,7 @@ void test_config_invalid_value(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(config);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_CONFIG, kafka_common_Error__enum(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
     const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
@@ -220,7 +221,6 @@ void test_close_with_negative_timeout_is_rejected(void) {
     kafka_producer_Producer_close_with_timeout(view, -1, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
-    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(err));
     kafka_common_Error_destroy(err);
 
     callback_pump_t pump;
