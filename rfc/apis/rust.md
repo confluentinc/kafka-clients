@@ -357,7 +357,7 @@ The `Consumer<K, V>` trait and its type parameters are both `Send + 'static` bec
 
 Most of the methods of the `Consumer<K, V>` trait take a mutable reference to the consumer. This is because, just like in Java, the consumer instance is not shareable across threads.
 
-Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns an `UnsupportedVersion` error for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
+Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns a `LocalUnsupportedOperationError` (Java's `UnsupportedOperationException`) for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
 
 ```rust
 pub trait Consumer<K, V>: Send + 'static
