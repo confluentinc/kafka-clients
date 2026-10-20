@@ -81,7 +81,7 @@ version lines, and `cargo xtask bump-version` (`make bump-version`) keeps them s
   `0.2.0-beta.1`, ...), not aligned to Apache Kafka. `cargo xtask api-compat` enforces
   Cargo's semver rule against the last release tag.
 - **Python packages** (`python/pyproject.toml`, `tools/translation_agent`) follow their own
-  PEP 440 line, which already tracks Apache Kafka (`4.4.0b1`). It only moves up: the
+  PEP 440 line, which already tracks Apache Kafka (`4.4.0.dev1`). It only moves up: the
   command refuses any Python version lower, in PEP 440 order, than the one a package has.
   Without `--python-version` (`PYTHON_VERSION=`) the packages get the PEP 440 form of the
   crate version, which is refused while that is the lower one; pass the Python version
