@@ -89,7 +89,7 @@ pub struct InlineFuture<'a, T> {
 
 impl<'a, T> InlineFuture<'a, T> {
     /// Stores `future`, inline when it fits the buffer, boxed otherwise.
-    pub fn new<F>(future: F) -> Self
+    pub(crate) fn new<F>(future: F) -> Self
     where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
