@@ -28,17 +28,18 @@ Java's behaviour instead and says so:
 ``create_rejects_a_negative_broker_count`` (Java: ``IndexOutOfBoundsException`` /
 ``IllegalArgumentException`` from ``List.get`` / ``subList``), the two "leader with
 no log directories" tests (Java: ``IndexOutOfBoundsException`` thrown by the call,
-the empty log-dir list being seeded through ``Builder.brokerLogDirs`` as the Rust
-``set_broker_log_dirs`` has no Java counterpart), and the two
+the empty log-dir list being seeded through ``Builder.brokerLogDirs``, the Rust
+``Builder.set_broker_log_dirs``), and the two
 ``list_partition_reassignments_after_topic_*`` tests (Java: a ``RuntimeException``
 and an ``IndexOutOfBoundsException`` thrown by the call, not a failed future).
 
-Skipped: ``mock_set_broker_log_dirs_rejects_an_unknown_broker`` (``set_broker_log_dirs``
-is a Rust-only helper, not in Java's mock).
+Not translated: the Rust tree's former ``mock_set_broker_log_dirs_rejects_an_unknown_broker``,
+removed with the instance method it tested; the Rust ``set_broker_log_dirs`` is now
+``Builder.brokerLogDirs``, which, as Java's, checks nothing.
 
 Then the features, delegation-token and ``list_consumer_group_offsets`` tests (the
-rest of the 53), with the same adaptations: the Rust ``set_feature_levels`` (not in
-Java's mock) is the ``Builder``'s three feature-level setters; the five
+rest of the 53), with the same adaptations: the Rust tests seed the feature levels
+through the ``Builder``'s three feature-level setters, as Python does; the five
 ``mock_update_features_rejects_*`` tests are one parametrized test; a describe of
 every token passes ``owners=[]``, as Java's default ``null`` owners raise
 ``NullPointerError()`` (its own test); with no renewer
@@ -949,8 +950,8 @@ def cause_of(future: Any) -> BaseException:
 
 
 def admin_with_features() -> MockAdminClient:
-    # The Rust helper set_feature_levels has no Java counterpart: the
-    # Builder's three feature-level setters seed the same maps.
+    # Builder.featureLevels, minSupportedFeatureLevels and
+    # maxSupportedFeatureLevels, as the Rust tests seed them.
     return (MockAdminClient.create().num_brokers(num_brokers=1)
             .feature_levels(feature_levels={"feature": 3})
             .min_supported_feature_levels(min_supported_feature_levels={"feature": 1})

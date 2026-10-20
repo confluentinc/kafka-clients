@@ -75,7 +75,8 @@ fn wrap(serialized: &[u8]) -> Bytes {
 /// The `String` entry of Java's `allSerdesShouldRoundtripInput`
 /// (`SerializationTest.java:72-91`), through both deserializer overloads.
 #[tokio::test]
-async fn test_string_serde_should_roundtrip_input() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldRoundtripInput")]
+async fn all_serdes_should_roundtrip_input_with_string() {
     let serializer = StringSerializer::new();
     let deserializer = StringDeserializer::new();
     let value = "my string";
@@ -103,7 +104,8 @@ async fn test_string_serde_should_roundtrip_input() {
 /// the `byte[]` overload `deserialize(topic, null, (byte[]) value)` for its
 /// second check, plus the KIP-863 overload the consumer calls.
 #[tokio::test]
-async fn test_byte_array_serde_should_roundtrip_input() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldRoundtripInput")]
+async fn all_serdes_should_roundtrip_input_with_byte_array() {
     let serializer = ByteArraySerializer::new();
     let deserializer = ByteArrayDeserializer::new();
     let value: &[u8] = b"my string";
@@ -137,7 +139,8 @@ async fn test_byte_array_serde_should_roundtrip_input() {
 
 /// The `Bytes` entry of Java's `allSerdesShouldRoundtripInput`.
 #[tokio::test]
-async fn test_bytes_serde_should_roundtrip_input() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldRoundtripInput")]
+async fn all_serdes_should_roundtrip_input_with_bytes() {
     let serializer = ByteArraySerializer::new();
     let deserializer = BytesDeserializer::new();
     let value = Bytes::from_static(b"my string");
@@ -165,7 +168,8 @@ async fn test_bytes_serde_should_roundtrip_input() {
 /// (`SerializationTest.java:93-105`) for the String and byte[] serdes (the
 /// latter also serializes Java's `Bytes`).
 #[tokio::test]
-async fn test_serializers_should_support_null() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldSupportNull")]
+async fn all_serdes_should_support_null() {
     assert!(
         Serializer::<str>::serialize(&StringSerializer::new(), TOPIC, None)
             .await
@@ -200,7 +204,8 @@ async fn test_serializers_should_support_null() {
 /// (`SerializationTest.java:119-132`), configured through `key.*.encoding` as
 /// Java's `getStringSerde` does.
 #[tokio::test]
-async fn test_string_serde_should_support_utf8_encoding() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#stringSerdeShouldSupportDifferentEncodings")]
+async fn string_serde_should_support_different_encodings() {
     let value = "my string";
     let mut serializer = StringSerializer::new();
     let serializer_configs = [("key.serializer.encoding".to_string(), "UTF-8".to_string())].into();
@@ -224,7 +229,8 @@ async fn test_string_serde_should_support_utf8_encoding() {
 /// of a buffer twice its size, as Java's heap buffer of
 /// `serializedBytes.length << 1`.
 #[tokio::test]
-async fn test_string_deserializer_support_byte_buffer() {
+#[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#stringDeserializerSupportByteBuffer")]
+async fn string_deserializer_support_byte_buffer() {
     let data = "Hello, ByteBuffer!";
     let serializer = StringSerializer::new();
     let serialized = Serializer::<str>::serialize(&serializer, TOPIC, Some(data))
