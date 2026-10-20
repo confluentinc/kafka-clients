@@ -18,7 +18,7 @@ from typing import Any, ClassVar, overload
 
 __all__ = ["IllegalArgumentError"]
 
-class IllegalArgumentError(RuntimeError):
+class IllegalArgumentError(ValueError, RuntimeError):
     _ffi_id: ClassVar[int]
     @overload
     def __init__(self) -> None: ...

@@ -136,15 +136,15 @@ def _python_module(java_package: str) -> str:
     return f"confluent_kafka.{rest}"
 
 
-# The Java built-ins and their Python base (CLAUDE.md, Types).
-_JDK: dict[str, type[BaseException]] = {
-    "java.lang.IllegalStateException": RuntimeError,
-    "java.lang.IllegalArgumentException": RuntimeError,
-    "java.util.ConcurrentModificationException": RuntimeError,
-    "java.util.concurrent.TimeoutException": builtins.TimeoutError,
-    "java.util.concurrent.ExecutionException": Exception,
-    "java.util.NoSuchElementException": RuntimeError,
-    "java.lang.UnsupportedOperationException": RuntimeError,
+# The Java built-ins and their declared Python bases, in order (CLAUDE.md, Types).
+_JDK: dict[str, tuple[type[BaseException], ...]] = {
+    "java.lang.IllegalStateException": (RuntimeError,),
+    "java.lang.IllegalArgumentException": (ValueError, RuntimeError),
+    "java.util.ConcurrentModificationException": (RuntimeError,),
+    "java.util.concurrent.TimeoutException": (builtins.TimeoutError,),
+    "java.util.concurrent.ExecutionException": (Exception,),
+    "java.util.NoSuchElementException": (RuntimeError,),
+    "java.lang.UnsupportedOperationException": (RuntimeError,),
 }
 
 _BY_JAVA: dict[str, type[BaseException]] = {
@@ -184,7 +184,7 @@ def test_every_java_class_has_its_python_class_with_the_java_parent() -> None:
     Java parent (a Python builtin for a JDK class and for KafkaException)."""
     for java, cls in _BY_JAVA.items():
         if java in _JDK:
-            assert cls.__bases__ == (_JDK[java],), java
+            assert cls.__bases__ == _JDK[java], java
             continue
         parent = _java_parent(java)
         if parent == "java.lang.RuntimeException":
@@ -882,3 +882,22 @@ def test_the_type_is_the_predicate() -> None:
         raise TopicAuthorizationError(message="nope")
     for name in ("code", "is_retriable", "is_fatal"):
         assert not hasattr(KafkaError(message="x"), name)
+
+
+def test_illegal_argument_error_is_a_value_error_and_a_runtime_error() -> None:
+    # Owner ruling 7 (2026-10-20): Python's class for a bad argument value,
+    # then Java's RuntimeException chain, in that order.
+    assert IllegalArgumentError.__bases__ == (ValueError, RuntimeError)
+    assert not issubclass(IllegalArgumentError, KafkaError)
+    for caught in (ValueError, RuntimeError):
+        try:
+            raise IllegalArgumentError(message="bad")
+        except caught as e:  # noqa: PERF203
+            assert str(e) == "bad"
+    original = IllegalArgumentError(message="bad", cause=ValueError("v"))
+    for rebuilt in (pickle.loads(pickle.dumps(original)), copy.copy(original),
+                    copy.deepcopy(original)):
+        assert type(rebuilt) is IllegalArgumentError
+        assert str(rebuilt) == "bad"
+        assert isinstance(rebuilt, ValueError) and isinstance(rebuilt, RuntimeError)
+        assert type(rebuilt.__cause__) is ValueError

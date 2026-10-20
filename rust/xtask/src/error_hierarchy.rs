@@ -1967,9 +1967,14 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.";
 fn py_base(g: &Graph, info: &ClassInfo) -> String {
     if TERMINAL_BASES.contains(&info.parent_fqn.as_str()) {
         // A Java unchecked exception subclasses `RuntimeError`, a checked one `Exception`;
-        // `TimeoutException` subclasses `builtins.TimeoutError` (CLAUDE.md, Types).
+        // `TimeoutException` subclasses `builtins.TimeoutError`, and
+        // `IllegalArgumentException` `ValueError` and `RuntimeError`, in that order:
+        // Python's class for a bad argument value, and Java's `RuntimeException` chain
+        // (CLAUDE.md, Types).
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
+        } else if info.java_fqn == "java.lang.IllegalArgumentException" {
+            "ValueError, RuntimeError".into()
         } else if info.parent_fqn == "java.lang.Exception" {
             "Exception".into()
         } else {
@@ -3335,6 +3340,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.TimeoutException"), "builtins.TimeoutError");
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
+        assert_eq!(base("java.lang.IllegalArgumentException"), "ValueError, RuntimeError");
         assert_eq!(base("java.lang.UnsupportedOperationException"), "RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),

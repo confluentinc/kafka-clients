@@ -29,7 +29,7 @@ from confluent_kafka._args import MISSING
 __all__ = ["IllegalArgumentError"]
 
 
-class IllegalArgumentError(RuntimeError):
+class IllegalArgumentError(ValueError, RuntimeError):
     """Java's built-in ``java.lang.IllegalArgumentException``."""
 
     __module__ = "confluent_kafka"
