@@ -112,10 +112,7 @@ pub struct ConsumerConfig {
     /// `auto.commit.interval.ms` — frequency of auto-commits.
     pub(crate) auto_commit_interval_ms: i32,
 
-    // --- Assignment / Offsets ---
-    /// `partition.assignment.strategy` — list of class names for classic
-    /// protocol assignors. Accepted silently per scope.
-    pub(crate) partition_assignment_strategy: Vec<String>,
+    // --- Offsets ---
     /// `auto.offset.reset` — the reset strategy when no offset is found.
     pub(crate) auto_offset_reset: String,
 
@@ -198,8 +195,6 @@ pub struct ConsumerConfig {
     pub(crate) share_acquire_mode: String,
 
     // --- Security ---
-    /// `security.providers`
-    pub(crate) security_providers: Option<String>,
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
     pub(crate) security_protocol: SecurityProtocol,
@@ -247,7 +242,6 @@ impl ConsumerConfig {
             enable_auto_commit: true,
             auto_commit_interval_ms: 5_000,
 
-            partition_assignment_strategy: Vec::new(),
             auto_offset_reset: AutoOffsetResetStrategy::LATEST.name(),
 
             fetch_min_bytes: 1,
@@ -289,7 +283,6 @@ impl ConsumerConfig {
             share_acknowledgement_mode: "implicit".to_string(),
             share_acquire_mode: "batch_optimized".to_string(),
 
-            security_providers: None,
             security_protocol: SecurityProtocol::Plaintext,
             security_protocol_config: CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL.to_string(),
             sasl_config: SaslConfigs::default(),
@@ -493,9 +486,6 @@ impl ConsumerConfig {
     /// Config key: `share.acquire.mode`.
     pub const SHARE_ACQUIRE_MODE_CONFIG: &'static str = "share.acquire.mode";
 
-    /// Config key: `security.providers`.
-    pub const SECURITY_PROVIDERS_CONFIG: &'static str = "security.providers";
-
     /// Config key: `config.providers`.
     pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
 
@@ -546,7 +536,6 @@ impl ConsumerConfig {
             Self::METRICS_RECORDING_LEVEL_CONFIG => Some(self.metrics_recording_level.as_str()),
             Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
             Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
-            Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
             CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => Some(self.security_protocol_config.as_str()),
             SaslConfigs::SASL_MECHANISM => Some(self.sasl_config.mechanism.as_str()),
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => self.ssl_config.truststore_location.as_deref(),
@@ -624,7 +613,6 @@ impl ConsumerConfig {
             | Self::ENABLE_METRICS_PUSH_CONFIG
             | CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => Some("BOOLEAN"),
             Self::BOOTSTRAP_SERVERS_CONFIG
-            | Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG
             | Self::CONFIG_PROVIDERS_CONFIG
             | SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG
             | SslConfigs::SSL_CIPHER_SUITES_CONFIG => Some("LIST"),
@@ -859,11 +847,6 @@ impl ConsumerConfig {
                 Self::AUTO_COMMIT_INTERVAL_MS_CONFIG => {
                     config.auto_commit_interval_ms = parse_i32(key, value)?;
                 },
-                Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG => {
-                    // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:480`).
-                    config.partition_assignment_strategy = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
                     // Java attaches `new AutoOffsetResetStrategy.Validator()` to
                     // this key's `ConfigDef` entry, so an invalid value is
@@ -1014,9 +997,6 @@ impl ConsumerConfig {
                 Self::SHARE_ACQUIRE_MODE_CONFIG => {
                     // Accepted silently per scope §20.
                     config.share_acquire_mode = value.clone();
-                },
-                Self::SECURITY_PROVIDERS_CONFIG => {
-                    config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
                     // `ConfigDef.parseType` trims the value (`ConfigDef.java:731-733`)
@@ -1694,10 +1674,7 @@ mod tests {
     /// empty list is allowed.
     #[test]
     fn test_other_list_configs_valid_list() {
-        for key in [
-            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
-            ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
-        ] {
+        for key in [ConsumerConfig::CONFIG_PROVIDERS_CONFIG] {
             let with = |value: &str| {
                 HashMap::from([
                     ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
@@ -1853,7 +1830,6 @@ mod tests {
             (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, Some("INFO")),
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, Some("implicit")),
             (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("batch_optimized")),
-            (ConsumerConfig::SECURITY_PROVIDERS_CONFIG, None),
             (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, Some("PLAINTEXT")),
             (SaslConfigs::SASL_MECHANISM, Some("GSSAPI")),
             (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, None),
@@ -1897,7 +1873,6 @@ mod tests {
             (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, "DEBUG", "DEBUG"),
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, "explicit", "explicit"),
             (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, "record_limit", "record_limit"),
-            (ConsumerConfig::SECURITY_PROVIDERS_CONFIG, "my.Provider", "my.Provider"),
             (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, " sasl_ssl ", "sasl_ssl"),
             (SaslConfigs::SASL_MECHANISM, " PLAIN ", "PLAIN"),
             (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, " /trust.pem ", "/trust.pem"),
@@ -2040,18 +2015,38 @@ mod tests {
         assert!(!config.throw_on_fetch_stable_offset_unsupported());
     }
 
-    /// Translated from `ConsumerConfigTest.testDefaultPartitionAssignor`.
-    ///
-    /// `partition.assignment.strategy` is a classic-protocol-only key in Java.
-    /// Per consumer-threading.md §20 it is accepted silently and stored untyped
-    /// (as a list of class-name strings). Its default is empty in the Rust struct
-    /// (Java's default is `[RangeAssignor, CooperativeStickyAssignor]`, class
-    /// objects that are not translated).
+    /// `ConsumerConfigTest.testDefaultPartitionAssignor` is not translated: it
+    /// checks Java's default `[RangeAssignor, CooperativeStickyAssignor]`, and
+    /// the client-side assignors are out of scope (consumer-threading.md §20).
+    /// The key is not a consumer config here: it falls to the unknown-key path,
+    /// which warns and ignores it.
     #[test]
-    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultPartitionAssignor")]
-    fn test_default_partition_assignor() {
-        let config = ConsumerConfig::new(&base_props()).unwrap();
-        assert!(config.partition_assignment_strategy.is_empty());
+    fn test_partition_assignment_strategy_is_unknown() {
+        let mut props = base_props();
+        props.insert(
+            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG.to_string(),
+            "org.apache.kafka.clients.consumer.RangeAssignor".to_string(),
+        );
+        let config = ConsumerConfig::new(&props).unwrap();
+        match config.get_string(ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG) {
+            Err(Error::Config(e)) => {
+                assert_eq!("Unknown configuration 'partition.assignment.strategy'", e.message())
+            },
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
+    }
+
+    /// `security.providers` names JSSE `SecurityProviderCreator` classes, which
+    /// have no rustls counterpart: the key falls to the unknown-key path.
+    #[test]
+    fn test_security_providers_is_unknown() {
+        let mut props = base_props();
+        props.insert("security.providers".to_string(), "my.Provider".to_string());
+        let config = ConsumerConfig::new(&props).unwrap();
+        match config.get_string("security.providers") {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'security.providers'", e.message()),
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
     }
 
     /// Translated from `ConsumerConfigTest.testOverrideClientId`.

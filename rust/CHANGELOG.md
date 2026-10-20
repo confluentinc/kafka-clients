@@ -48,6 +48,11 @@ breaking changes.
   records of aborted or still open transactions, and reads only up to the last
   stable offset. The new `ConsumerConfig::DEFAULT_ISOLATION_LEVEL` holds the
   default. Set `isolation.level=read_uncommitted` for the previous behaviour.
+- **Breaking:** `ConsumerConfig::SECURITY_PROVIDERS_CONFIG` is removed.
+  `security.providers` and `partition.assignment.strategy` are no longer
+  consumer configs: nothing read them (JSSE providers and client-side assignors
+  have no counterpart here). Setting either now logs the unknown-key warning,
+  and `get_string` on them returns a `ConfigError`.
 
 ### Common
 
