@@ -1050,12 +1050,12 @@ where
         &mut self,
         _timestamps_to_search: HashMap<TopicPartition, i64>,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        // Java line 534-537 throws UnsupportedOperationException("Not
-        // implemented yet."). Rust analog is Error::unsupported_version
-        // (`admin-client.md` §9). That rule requires a *faithful* translation
-        // and DoD #3 makes the message text part of the contract, so the text
-        // is Java's verbatim rather than a Rust-side restatement.
-        Err(Error::unsupported_version("Not implemented yet."))
+        // Java throws UnsupportedOperationException("Not implemented yet.")
+        // (`MockConsumer.java:611`), translated as Error::LocalUnsupportedOperation
+        // (`admin-client.md` §9). DoD #3 makes the message text part of the
+        // contract, so the text is Java's verbatim rather than a Rust-side
+        // restatement.
+        Err(Error::local_unsupported_operation("Not implemented yet."))
     }
 
     async fn offsets_for_times_with_timeout(
@@ -1467,11 +1467,9 @@ mod tests {
 
     /// Java's `MockConsumer.offsetsForTimes` throws
     /// `UnsupportedOperationException("Not implemented yet.")`
-    /// (`MockConsumer.java:610-612`). The message text is part of the contract
-    /// (DoD #3), and `admin-client.md` §9 sanctions the
-    /// `UnsupportedOperationException` -> `unsupported_version` mapping only as
-    /// a *faithful* translation — so the text must be Java's, not a Rust-side
-    /// restatement.
+    /// (`MockConsumer.java:611`), translated as
+    /// [`Error::LocalUnsupportedOperation`]. The message text is part of the
+    /// contract (DoD #3), so it must be Java's, not a Rust-side restatement.
     #[tokio::test]
     async fn offsets_for_times_reports_javas_not_implemented_message() {
         let mut consumer: MockConsumer<String, String> =
@@ -1480,6 +1478,7 @@ mod tests {
             .offsets_for_times(HashMap::new())
             .await
             .expect_err("Java's mock does not implement this");
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
         assert_eq!("Not implemented yet.", err.message());
     }
 

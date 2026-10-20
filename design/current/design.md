@@ -728,8 +728,8 @@ method for method:
   implemented here too.
 - A method that Java leaves as
   `UnsupportedOperationException("Not implemented yet")` fails with
-  `unsupported_version("Not implemented yet")` on the returned future, not
-  with a panic, since a public API must not panic (CLAUDE.md §12.1).
+  `local_unsupported_operation("Not implemented yet")` on the returned future,
+  not with a panic, since a public API must not panic (CLAUDE.md §12.1).
 
 Java ships the mock in its test jar. Here it stays public through its
 `#[doc(alias = "public-in-rust")]` tag.

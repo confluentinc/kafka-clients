@@ -1388,6 +1388,7 @@ mod tests {
             ),
         ] {
             let error = described.all().get().await.expect_err("the mock does not implement this");
+            assert!(error.is_local_unsupported_operation_error(), "{error:?}");
             assert_eq!(error.message(), "Not implemented yet");
         }
     }

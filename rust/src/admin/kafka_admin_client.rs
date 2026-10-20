@@ -9347,7 +9347,8 @@ mod tests {
         let tp = TopicPartition::new("foo", 0);
         let result = mock.describe_producers_with_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `abort_transaction` mirrors Java's `UnsupportedOperationException`.
@@ -9358,7 +9359,9 @@ mod tests {
             .expect("a fresh builder has one broker");
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
         let result = mock.abort_transaction_with_options(spec, AbortTransactionOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- describeTransactions / fenceProducers -------------------------------
@@ -9586,10 +9589,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.describe_transactions_with_options(&["t".to_string()], DescribeTransactionsOptions::new());
-        assert_eq!(
-            result.description("t").unwrap().get().await.unwrap_err().error(),
-            Errors::UnsupportedVersion
-        );
+        let err = result.description("t").unwrap().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `fence_producers` mirrors Java's `UnsupportedOperationException`.
@@ -9599,7 +9601,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.fence_producers_with_options(&["t".to_string()], FenceProducersOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- listTransactions / forceTerminateTransaction ------------------------
@@ -9726,7 +9730,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.list_transactions_with_options(ListTransactionsOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `force_terminate_transaction` mirrors Java's `UnsupportedOperationException`.
@@ -9736,7 +9742,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.force_terminate_transaction_with_options("t", TerminateTransactionOptions::new());
-        assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.result().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- describeCluster -----------------------------------------------------
@@ -12531,7 +12539,8 @@ mod tests {
             .expect("a fresh builder has one broker");
         let result = mock.elect_leaders_with_options(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // ---- Group listing / describe (Tier 2 Phase 1) ----
@@ -13435,7 +13444,8 @@ mod tests {
         let result =
             mock.describe_consumer_groups_with_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `describe_classic_groups` mirrors Java's
@@ -13448,7 +13458,8 @@ mod tests {
         let result =
             mock.describe_classic_groups_with_options(&["g1".to_string()], DescribeClassicGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- consumer group offsets (list / alter / delete) ---------------------
