@@ -275,7 +275,6 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
 ///
 /// Equality and hashing are Java's `equals` / `hashCode`: two configurations
 /// are equal when they were built from equal properties.
-#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     /// The originals, the parsed values and the keys used so far.
@@ -1123,9 +1122,8 @@ mod tests {
 
         config.get_int("request.timeout.ms").unwrap();
         config.ignore("some.unknown.key");
-        let clone = config.clone();
         assert_eq!(
-            clone.unused(),
+            config.unused(),
             HashSet::from([
                 "bootstrap.servers".to_string(),
                 "send.buffer.bytes".to_string(),
@@ -1135,13 +1133,11 @@ mod tests {
 
         // The client reads `bootstrap.servers`; the `ssl.*` keys only for an
         // SSL protocol, and `send.buffer.bytes` not at all.
-        clone.mark_read_keys_used();
+        config.mark_read_keys_used();
         assert_eq!(
-            clone.unused(),
+            config.unused(),
             HashSet::from(["send.buffer.bytes".to_string(), "ssl.keystore.location".to_string()])
         );
-        // The clone has its own used set.
-        assert_eq!(config.unused().len(), 3);
 
         props.insert("security.protocol".to_string(), "SSL".to_string());
         props.insert("ssl.keystore.password".to_string(), "p".to_string());

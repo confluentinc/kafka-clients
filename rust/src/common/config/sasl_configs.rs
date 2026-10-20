@@ -73,7 +73,7 @@ impl SaslConfigs {
 /// `sasl.*` properties of a client config, as a Java caller does.
 ///
 /// Currently supports PLAIN mechanism only.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SaslConfigs")]
 pub struct SaslConfigs {
@@ -1092,21 +1092,6 @@ mod tests {
         assert_eq!(SaslConfigs::SASL_JAAS_CONFIG, "sasl.jaas.config");
         assert_eq!(SaslConfigs::DEFAULT_SASL_MECHANISM, "GSSAPI");
         assert_eq!(SaslConfigs::GSSAPI_MECHANISM, "GSSAPI");
-    }
-
-    #[test]
-    fn test_clone() {
-        let config = SaslConfigs {
-            mechanism: "SCRAM-SHA-256".to_owned(),
-            jaas_config: Some(Password::new("ScramLoginModule required;")),
-            username: Some("user".to_owned()),
-            password: Some(Password::new("pass")),
-        };
-        let cloned = config.clone();
-        assert_eq!(config.mechanism, cloned.mechanism);
-        assert_eq!(config.jaas_config, cloned.jaas_config);
-        assert_eq!(config.username, cloned.username);
-        assert_eq!(config.password, cloned.password);
     }
 
     /// The finding's requested test: `{:?}` of a config holding credentials

@@ -73,43 +73,40 @@ fn client_config(props: &[(&str, &str)]) -> AdminClientConfig {
     AdminClientConfig::new(&map).unwrap()
 }
 
-/// Helper: SSL config trusting `ca_cert_pem`, hostname verification disabled
-/// (tests connect via 127.0.0.1).
-fn ssl_configs(ca_cert_pem: &str) -> SslConfigs {
+/// Helper: a client config whose SSL config trusts `ca_cert_pem`, hostname
+/// verification disabled (tests connect via 127.0.0.1).
+fn ssl_client_config(ca_cert_pem: &str) -> AdminClientConfig {
     client_config(&[
         (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, ca_cert_pem),
         (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
     ])
-    .ssl_config()
-    .clone()
 }
 
-/// Helper: SASL config for `mechanism` with credentials in `sasl.jaas.config`.
-fn sasl_configs(mechanism: &str, login_module: &str, username: &str, password: &str) -> SaslConfigs {
+/// Helper: a client config whose SASL config uses `mechanism` with
+/// credentials in `sasl.jaas.config`.
+fn sasl_client_config(mechanism: &str, login_module: &str, username: &str, password: &str) -> AdminClientConfig {
     let jaas = format!("{login_module} required username=\"{username}\" password=\"{password}\";");
     client_config(&[
         (SaslConfigs::SASL_MECHANISM, mechanism),
         (SaslConfigs::SASL_JAAS_CONFIG, &jaas),
     ])
-    .sasl_config()
-    .clone()
 }
 
 const PLAIN_LOGIN_MODULE: &str = "org.apache.kafka.common.security.plain.PlainLoginModule";
 
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
-    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
+    let ssl_factory = SslFactory::new(ssl_client_config(ca_cert_pem).ssl_config()).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
     Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
 fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
-    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
-        sasl_config,
+        sasl_config.sasl_config(),
         None,
         None,
         "integration-test",
@@ -121,11 +118,11 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
-    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
-    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let ssl_factory = SslFactory::new(ssl_client_config(ca_cert_pem).ssl_config()).unwrap();
+    let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslSsl,
-        sasl_config,
+        sasl_config.sasl_config(),
         Some(ssl_factory),
         None,
         "integration-test",
@@ -335,7 +332,7 @@ async fn test_sasl_wrong_credentials() {
 async fn test_sasl_unsupported_mechanism() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     // Use SCRAM-SHA-256 mechanism which the broker doesn't have enabled
-    let sasl_config = sasl_configs(
+    let sasl_config = sasl_client_config(
         "SCRAM-SHA-256",
         "org.apache.kafka.common.security.scram.ScramLoginModule",
         SASL_USERNAME,
@@ -343,7 +340,7 @@ async fn test_sasl_unsupported_mechanism() {
     );
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
-        sasl_config,
+        sasl_config.sasl_config(),
         None,
         None,
         "integration-test",

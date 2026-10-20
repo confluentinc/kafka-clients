@@ -136,7 +136,7 @@ impl SslConfigs {
 ///
 /// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
 /// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
 pub struct SslConfigs {
@@ -569,19 +569,6 @@ mod tests {
         assert_eq!(config.endpoint_identification_algorithm, "");
         // Inherited from default
         assert_eq!(config.truststore_type, "PEM");
-    }
-
-    #[test]
-    fn test_clone() {
-        let config = SslConfigs::default();
-        let cloned = config.clone();
-        assert_eq!(config.truststore_type, cloned.truststore_type);
-        assert_eq!(config.keystore_type, cloned.keystore_type);
-        assert_eq!(config.enabled_protocols, cloned.enabled_protocols);
-        assert_eq!(
-            config.endpoint_identification_algorithm,
-            cloned.endpoint_identification_algorithm
-        );
     }
 
     #[test]

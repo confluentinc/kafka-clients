@@ -31,6 +31,7 @@ use super::PlaintextTransportLayer;
 use super::SslTransportLayer;
 
 use crate::common::config::SaslConfigs;
+use crate::common::config::types::Password;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::authenticator::SaslClientAuthenticator;
 use crate::common::security::ssl::SslFactory;
@@ -53,7 +54,7 @@ impl std::fmt::Debug for SaslChannelBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SaslChannelBuilder")
             .field("security_protocol", &self.security_protocol)
-            .field("mechanism", &self.sasl_config.mechanism)
+            .field("client_sasl_mechanism", &self.client_sasl_mechanism)
             .field("ssl_factory", &self.ssl_factory.is_some())
             .field("client_id", &self.client_id)
             .finish_non_exhaustive()
@@ -64,8 +65,13 @@ impl std::fmt::Debug for SaslChannelBuilder {
 pub struct SaslChannelBuilder {
     /// The security protocol (SASL_PLAINTEXT or SASL_SSL).
     security_protocol: SecurityProtocol,
-    /// SASL configuration (mechanism, credentials).
-    sasl_config: SaslConfigs,
+    /// The client's SASL mechanism (Java's `clientSaslMechanism`).
+    client_sasl_mechanism: String,
+    /// The username the authenticator sends, resolved from the SASL
+    /// configuration when the builder was created.
+    username: String,
+    /// The password the authenticator sends, resolved likewise.
+    password: Password,
     /// SSL factory for SASL_SSL connections.
     ssl_factory: Option<SslFactory>,
     /// The listener name, if any (server-side only).
@@ -83,7 +89,8 @@ impl SaslChannelBuilder {
     /// # Arguments
     ///
     /// * `security_protocol` - Must be `SASL_PLAINTEXT` or `SASL_SSL`
-    /// * `sasl_config` - SASL configuration (mechanism, username, password)
+    /// * `sasl_config` - SASL configuration (mechanism, username, password),
+    ///   read here: the builder keeps the mechanism and the credentials
     /// * `ssl_factory` - Required for `SASL_SSL`, `None` for `SASL_PLAINTEXT`
     /// * `listener_name` - The listener name (server-side only, `None` for clients)
     /// * `client_id` - The Kafka client ID
@@ -98,7 +105,7 @@ impl SaslChannelBuilder {
     #[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder#SaslChannelBuilder")]
     pub fn new(
         security_protocol: SecurityProtocol,
-        sasl_config: SaslConfigs,
+        sasl_config: &SaslConfigs,
         ssl_factory: Option<SslFactory>,
         listener_name: Option<ListenerName>,
         client_id: &str,
@@ -116,18 +123,18 @@ impl SaslChannelBuilder {
         }
 
         // Validate credentials
-        if sasl_config.resolve_username().is_none() {
+        let Some(username) = sasl_config.resolve_username() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SASL PLAIN authentication requires a username",
             ));
-        }
-        if sasl_config.resolve_password().is_none() {
+        };
+        let Some(password) = sasl_config.resolve_password() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SASL PLAIN authentication requires a password",
             ));
-        }
+        };
 
         // Validate SSL factory for SASL_SSL
         if security_protocol == SecurityProtocol::SaslSsl && ssl_factory.is_none() {
@@ -136,7 +143,9 @@ impl SaslChannelBuilder {
 
         Ok(Self {
             security_protocol,
-            sasl_config,
+            client_sasl_mechanism: sasl_config.mechanism.clone(),
+            username: username.to_string(),
+            password: Password::new(password),
             ssl_factory,
             listener_name,
             client_id: client_id.to_string(),
@@ -165,13 +174,10 @@ impl ChannelBuilder for SaslChannelBuilder {
                 Box::new(PlaintextTransportLayer::new(stream))
             };
 
-        let username = self.sasl_config.resolve_username().unwrap();
-        let password = self.sasl_config.resolve_password().unwrap();
-
         let authenticator = Box::new(SaslClientAuthenticator::new(
-            &self.sasl_config.mechanism,
-            username,
-            password,
+            &self.client_sasl_mechanism,
+            &self.username,
+            self.password.value(),
             id,
             peer_host,
             &self.client_id,
@@ -215,7 +221,7 @@ mod tests {
         };
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
-            sasl_config,
+            &sasl_config,
             None,
             None,
             "test-client",
@@ -250,7 +256,7 @@ mod tests {
         let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslSsl,
-            sasl_config,
+            &sasl_config,
             Some(ssl_factory),
             None,
             "test-client",
@@ -279,7 +285,7 @@ mod tests {
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
-            sasl_config,
+            &sasl_config,
             None,
             None,
             "test-client",
@@ -296,7 +302,7 @@ mod tests {
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
-            sasl_config,
+            &sasl_config,
             None,
             None,
             "test-client",
@@ -317,7 +323,7 @@ mod tests {
         };
         let result = SaslChannelBuilder::new(
             SecurityProtocol::Plaintext,
-            sasl_config,
+            &sasl_config,
             None,
             None,
             "test-client",
@@ -342,7 +348,7 @@ mod tests {
         };
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
-            sasl_config,
+            &sasl_config,
             None,
             None,
             "visible-client",

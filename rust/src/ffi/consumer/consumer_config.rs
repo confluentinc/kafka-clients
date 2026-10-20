@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::os::raw::c_char;
 
+use crate::common::Error;
 use crate::consumer::ConsumerConfig;
 use crate::ffi::common::config::config_getters::{self, LentStrings};
 use crate::ffi::common::fail_with;
@@ -43,11 +44,15 @@ pub struct kafka_consumer_ConsumerConfig_t {
     _private: [u8; 0],
 }
 
-/// What a handle points at: the configuration, and the strings its getters
-/// lent out, kept so the pointers they return live as long as the handle, as a
-/// Rust `&str` borrowed from the configuration does.
+/// What a handle points at: the configuration, the properties it was built
+/// from, and the strings its getters lent out, kept so the pointers they
+/// return live as long as the handle, as a Rust `&str` borrowed from the
+/// configuration does.
 struct ConsumerConfigHandle {
     config: ConsumerConfig,
+    /// The properties `config` was built from, for
+    /// [`consumer_config_for_client`].
+    props: HashMap<String, String>,
     /// The values [`kafka_consumer_ConsumerConfig_get_string`] lent out.
     strings: LentStrings,
     /// The documentation [`kafka_consumer_ConsumerConfig_documentation_of`]
@@ -73,10 +78,39 @@ unsafe fn handle_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a 
 /// # Safety
 ///
 /// `config` must be a live handle, kept alive for `'a`.
-pub(crate) unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfig {
+#[cfg(test)]
+unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfig {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, as
     // `handle_ref` requires.
     &unsafe { handle_ref(config) }.config
+}
+
+/// A configuration of the client's own built from the handle's properties, as
+/// Java's `KafkaConsumer(Map)` builds its `ConsumerConfig` from the map
+/// (`ConsumerConfig` is not `Clone`). The handle's `client.id` is pinned, so
+/// a derived `consumer-<group.id>-<n>` keeps its number instead of drawing
+/// another one from the sequence.
+///
+/// # Errors
+///
+/// The error of [`ConsumerConfig::new`]; none in practice, since the same
+/// properties built the handle's configuration.
+///
+/// # Safety
+///
+/// `config` must be a live handle, kept alive for this call.
+pub(crate) unsafe fn consumer_config_for_client(
+    config: *const kafka_consumer_ConsumerConfig_t,
+) -> Result<ConsumerConfig, Error> {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for this call, as
+    // `handle_ref` requires; the borrow ends within it.
+    let handle = unsafe { handle_ref(config) };
+    let mut props = handle.props.clone();
+    props.insert(
+        ConsumerConfig::CLIENT_ID_CONFIG.to_owned(),
+        handle.config.client_id().to_owned(),
+    );
+    ConsumerConfig::new(&props)
 }
 
 /// `new ConsumerConfig(Map<String, String> props)`: validates the
@@ -100,6 +134,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     match ConsumerConfig::new(&props) {
         Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle {
             config,
+            props,
             strings: LentStrings::default(),
             docs: LentStrings::default(),
         })) as *mut kafka_consumer_ConsumerConfig_t,

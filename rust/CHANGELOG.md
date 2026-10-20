@@ -58,6 +58,10 @@ breaking changes.
 
 ### Consumer
 
+- **Breaking:** `ConsumerConfig` is no longer `Clone`: a configuration holder
+  belongs to the client built from it, as Java's `KafkaConsumer` builds its
+  own `ConsumerConfig` from the properties. Build another one with
+  `ConsumerConfig::new(&props)` for a second consumer.
 - **Breaking:** `ConsumerRecord`, `ConsumerRecords`, `CloseOptions` and
   `ConsumerPartitionAssignor`'s `Subscription` and `Assignment` no longer
   implement `PartialEq` and `Eq`: Java's classes do not override `equals`, so
@@ -167,8 +171,8 @@ breaking changes.
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
   `documentation_of`, `unused`, `ignore`, `log_unused`, and the static
-  `config_names`. It is `Clone`, and its `PartialEq` / `Hash` compare the
-  properties it was built from, as Java's `equals` / `hashCode` do.
+  `config_names`. Its `PartialEq` / `Hash` compare the properties it was
+  built from, as Java's `equals` / `hashCode` do.
 - The admin client logs its configuration values at INFO when it is built, as
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
   did not use: `These configurations '[a, b]' were supplied but are not used
@@ -204,6 +208,8 @@ breaking changes.
 
 ### Common
 
+- **Breaking:** `SslConfigs` and `SaslConfigs` are no longer `Clone`, like the
+  client configurations that hold them.
 - **Breaking:** `Quota` is no longer `Copy`, and `MetricConfig::quota()`
   returns `Option<&Quota>` instead of a copy. `Quota` stays `Clone`; write
   `config.quota().cloned()` where an owned quota is needed.

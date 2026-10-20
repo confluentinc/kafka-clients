@@ -37,7 +37,7 @@ use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::serialization::deserializer::{
     DeserializerInner, kafka_common_serialization_Deserializer_t, take_deserializer,
 };
-use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_ConsumerConfig_t};
+use crate::ffi::consumer::consumer_config::{consumer_config_for_client, kafka_consumer_ConsumerConfig_t};
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
@@ -132,8 +132,9 @@ unsafe fn deserializer_from(
 /// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
 /// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
 /// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
-/// `*out_err` and returns `NULL`. The config is copied; each
-/// deserializer handle is consumed (its `self` stays the caller's until the
+/// `*out_err` and returns `NULL`. The consumer builds its own config from
+/// the properties of `config`, which stays the caller's; each deserializer
+/// handle is consumed (its `self` stays the caller's until the
 /// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
 /// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
 /// A constructor that fails after taking the deserializers closes them, as
@@ -154,8 +155,8 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_KafkaConsumer_t {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this
-    // statement, the only use of the reference, as `consumer_config_ref` requires.
-    let config = unsafe { consumer_config_ref(config) }.clone();
+    // call, as `consumer_config_for_client` requires.
+    let config = unsafe { consumer_config_for_client(config) };
     // SAFETY: Per this function's `# Safety`, `key_deserializer` is null or a live handle not used
     // afterwards, as `deserializer_from` requires.
     let (key, owns_key) = unsafe { deserializer_from(key_deserializer) };
@@ -165,7 +166,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
         // The boxes go in as they are: `new` would box them again (see
         // `with_boxed_deserializers`).
-        KafkaConsumer::with_boxed_deserializers(config, key, value)
+        KafkaConsumer::with_boxed_deserializers(config?, key, value)
             .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires;
