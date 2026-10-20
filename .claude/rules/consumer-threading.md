@@ -227,13 +227,16 @@ Java's consumer is single-threaded and enforces it at runtime with
 methods (§1) rules out concurrent calls through one reference, and `!Sync`
 rules out sharing `&KafkaConsumer` across threads, so an accidental `Sync`
 (every field happening to be `Sync`) cannot let the `&self` methods race the
-others. `KafkaConsumer` holds a zero-sized `PhantomData<Cell<()>>` marker for
-this; no new dependency. A task that must reach the consumer from another
-thread (to wake it, or from a listener) goes through `consumer.handle()`.
-Unit tests in `kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs`
-pin the auto traits through the `test_thread_safety` probe, two
-`compile_fail` doc tests on `KafkaConsumer` pin `!Sync` and the `&mut self`
-getter, and `check-consumer-receiver` (§1) pins the receivers.
+others. `KafkaConsumer` and `MockConsumer` each hold a zero-sized
+`PhantomData<Cell<()>>` marker for this; no new dependency. They are the only
+`!Sync` public types: every other one is `Send + Sync` (CLAUDE.md §3, "Super
+and auto traits"). A task that must reach the consumer from another thread (to
+wake it, or from a listener) goes through `consumer.handle()`. Unit tests in
+`kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs` pin the auto
+traits through the `test_thread_safety` probe, `rust/src/api_promises.rs` pins
+them for the whole public API (`check-thread-safety-probe` keeps it complete),
+`compile_fail` doc tests on both consumers pin `!Sync` and on `KafkaConsumer`
+the `&mut self` getter, and `check-consumer-receiver` (§1) pins the receivers.
 
 When the classic protocol is added, `KafkaConsumer`'s field becomes a private
 enum over the two delegates and `KafkaConsumer::new` gains a new arm; the
