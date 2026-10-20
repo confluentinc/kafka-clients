@@ -4799,13 +4799,15 @@ mod tests {
     }
 
     /// Translated from `KafkaProducerTest.configurableObjectsShouldSeeGeneratedClientId`
-    /// (`:2296-2310`), partitioner portion.
+    /// (`:2449-2463`), partitioner portion.
     ///
     /// A `configure`-able partitioner must see the generated `client.id` when the user
     /// sets none. Java asserts the same for the two serializers and the interceptor
-    /// (`CLIENT_IDS.size() == 4`); Rust's `Serializer` has no `configure(client.id)`
-    /// hook and no `ProducerInterceptor` exists yet, so only the partitioner is checked
-    /// here — hence exactly ONE recorded id rather than four. The partitioner is set
+    /// (`CLIENT_IDS.size() == 4`). Java configures only a serializer it builds from
+    /// `key.serializer` / `value.serializer`, never one passed as an instance
+    /// (`KafkaProducer.java:398-410`), and a Rust serializer is always passed as an
+    /// instance; no `ProducerInterceptor` exists yet. So only the partitioner is
+    /// checked here — hence exactly ONE recorded id rather than four. The partitioner is set
     /// with `ProducerConfig::set_partitioner`, as Java sets `partitioner.class`,
     /// so `new` builds and `configure`s it (the `with_options` seam does not
     /// configure).
