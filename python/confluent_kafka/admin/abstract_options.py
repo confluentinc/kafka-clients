@@ -19,15 +19,15 @@ it gets no keyword constructor, and its subclasses construct as Java's do (CLAUD
 Python Binding Conventions, Class family). Its type parameter
 ``T extends AbstractOptions`` only stands for the class itself, so the setter returns
 ``typing.Self``. ``timeoutMs()`` and ``timeoutMs(Integer)`` share one name: one
-method, two stubs; its argument defaults to ``_args.UNSET``, so an explicit ``None``
-sets Java's ``null`` instead of reading (Signatures).
+method, two stubs; left out, it reads, and an explicit ``None`` sets Java's ``null``
+(Signatures).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 
 __all__ = ["AbstractOptions"]
 
@@ -49,7 +49,7 @@ class AbstractOptions:
         # ones on the C options (CLAUDE.md conversion table, "an Options object").
         self._setters: dict[str, Any] = {}
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object.
@@ -57,7 +57,7 @@ class AbstractOptions:
         Without: the timeout in milliseconds for this operation or ``None`` if the
         default api timeout for the AdminClient should be used.
         """
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)

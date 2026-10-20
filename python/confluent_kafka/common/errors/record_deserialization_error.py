@@ -29,6 +29,7 @@ from confluent_kafka import _throwable
 from confluent_kafka.common.errors.serialization_error import SerializationError
 
 if TYPE_CHECKING:
+    from confluent_kafka.common.header import Header
     from confluent_kafka.common.headers import Headers
     from confluent_kafka.common.timestamp_type import TimestampType
     from confluent_kafka.common.topic_partition import TopicPartition
@@ -64,8 +65,8 @@ class RecordDeserializationError(SerializationError):
         timestamp_type: TimestampType,
         key_buffer: bytes | None,
         value_buffer: bytes | None,
-        headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
-        message: str,
+        headers: Iterable[Header | tuple[str, bytes | bytearray | memoryview | None]],
+        message: str | None,
         cause: BaseException | None,
     ) -> None:
         headers = _throwable.materialize(headers)

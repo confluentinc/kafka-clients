@@ -31,9 +31,8 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import Any, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["ConfigEntry"]
 
@@ -179,11 +178,11 @@ class ConfigEntry:
                                "is_read_only": False, "synonyms": (), "type": _UNKNOWN_TYPE,
                                "documentation": None}))
     def __init__(self, *, name: str, value: str | None,
-                 source: ConfigEntry.ConfigSource = UNSET, is_sensitive: bool = UNSET,
-                 is_read_only: bool = UNSET,
-                 synonyms: Sequence[ConfigEntry.ConfigSynonym] = UNSET,
-                 type: ConfigEntry.ConfigType = UNSET,  # noqa: A002 - Java's name
-                 documentation: str | None = UNSET) -> None:
+                 source: ConfigEntry.ConfigSource = MISSING, is_sensitive: bool = MISSING,
+                 is_read_only: bool = MISSING,
+                 synonyms: Sequence[ConfigEntry.ConfigSynonym] = MISSING,
+                 type: ConfigEntry.ConfigType = MISSING,  # noqa: A002 - Java's name
+                 documentation: str | None = MISSING) -> None:
         """Create a configuration entry with the provided values.
 
         ``name``: the non-null config name; ``value``: the config value or
@@ -198,7 +197,7 @@ class ConfigEntry:
         if type is _UNKNOWN_TYPE:
             type = ConfigEntry.ConfigType.UNKNOWN
         if name is None:
-            raise NullPointerError(message="name should not be null")
+            raise TypeError("name must not be None")
         self._name = name
         self._value = value
         self._source = source

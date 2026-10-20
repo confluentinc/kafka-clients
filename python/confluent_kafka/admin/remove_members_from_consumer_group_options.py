@@ -18,10 +18,11 @@
 Java has a constructor that takes arguments, so the class keeps only Java's
 constructors, ``(members)`` and ``()``, as one keyword-only constructor; every
 combination is one of them, so there is no ``java_forms`` check (CLAUDE.md, Python
-Binding Conventions, Signatures). ``members=None`` is the same as leaving it out: the
-``()`` form, which removes all members. Java's setter ``reason(String)`` returns
-``void``, so ``reason(reason=…)`` returns ``None``; it shares its name with the getter,
-and its argument is nullable ("an optional reason"), so it defaults to ``_args.UNSET``.
+Binding Conventions, Signatures). Leaving ``members`` out is the ``()`` form, which
+removes all members; ``members=None`` raises ``TypeError``, as Java's
+``members.isEmpty()`` on a null. Java's setter ``reason(String)`` returns ``void``, so
+``reason(reason=…)`` returns ``None``; it shares its name with the getter, and its
+argument is nullable ("an optional reason"), so ``reason(reason=None)`` sets ``null``.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -48,21 +49,23 @@ class RemoveMembersFromConsumerGroupOptions(AbstractOptions):
 
     __slots__ = ("_members", "_reason")
 
-    def __init__(self, *, members: Iterable[MemberToRemove] | None = None) -> None:
+    def __init__(self, *, members: Iterable[MemberToRemove] = MISSING) -> None:
         super().__init__()
         self._reason: str | None = None
-        if members is None:
+        if members is MISSING:
             self._members: set[MemberToRemove] = set()  # Collections.emptySet()
             return
+        if members is None:  # Java's members.isEmpty() on a null
+            raise TypeError("members must not be None")
         copied = set(members)
         if not copied:
             raise IllegalArgumentError(message="Invalid empty members has been provided")
         self._members = copied
 
-    def reason(self, *, reason: str | None = UNSET) -> Any:
+    def reason(self, *, reason: str | None = MISSING) -> Any:
         """With ``reason``: sets an optional reason (returns ``None``, as Java's
         ``void``). Without: the reason, or ``None``."""
-        if reason is UNSET:
+        if reason is MISSING:
             return self._reason
         self._reason = reason
         self._record("reason", self._reason)

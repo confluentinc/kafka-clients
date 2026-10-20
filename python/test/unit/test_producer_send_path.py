@@ -157,7 +157,7 @@ def _recorder(seen: Seen, returned: list[bool]) -> Any:
     """A callback recording the thread it runs on, whether ``send()`` had
     returned by then (``returned`` is set by the test once it has), the
     record's partition and its exception."""
-    def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         seen.append((threading.get_ident(), bool(returned), metadata.partition(), exception))
     return callback
 

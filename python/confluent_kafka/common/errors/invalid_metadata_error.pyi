@@ -14,9 +14,18 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.InvalidMetadataError).
 
+from typing import overload
+
 from confluent_kafka.common.errors.refresh_retriable_error import RefreshRetriableError
 
 __all__ = ["InvalidMetadataError"]
 
 class InvalidMetadataError(RefreshRetriableError):
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...

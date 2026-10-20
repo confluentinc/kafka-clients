@@ -15,12 +15,15 @@
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.TimeoutError).
 
 import builtins
-from typing import Any, ClassVar
+from typing import Any, ClassVar, overload
 
 __all__ = ["TimeoutError"]
 
 class TimeoutError(builtins.TimeoutError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
     def __str__(self) -> str: ...
     def __reduce__(self) -> str | tuple[Any, ...]: ...

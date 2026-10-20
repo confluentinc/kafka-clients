@@ -12,13 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# GENERATED, DO NOT EDIT (stub for confluent_kafka.NullPointerError).
+# GENERATED, DO NOT EDIT (stub for confluent_kafka.UnsupportedOperationError).
 
-from typing import Any
+from typing import Any, overload
 
-__all__ = ["NullPointerError"]
+__all__ = ["UnsupportedOperationError"]
 
-class NullPointerError(RuntimeError):
-    def __init__(self, *, message: str | None = None) -> None: ...
+class UnsupportedOperationError(NotImplementedError):
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
     def __str__(self) -> str: ...
     def __reduce__(self) -> str | tuple[Any, ...]: ...

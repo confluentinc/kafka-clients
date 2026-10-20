@@ -50,6 +50,7 @@ from types import FunctionType, MethodType
 from typing import TYPE_CHECKING, cast
 
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .record_metadata import RecordMetadata
@@ -57,7 +58,8 @@ from .record_metadata import RecordMetadata
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["MetadataTuple", "call_callback", "completion_to_python", "failure_metadata",
+__all__ = ["MetadataTuple", "call_callback", "check_callback", "completion_to_python",
+           "failure_metadata",
            "in_any_callback", "in_callback", "invoke_callback", "mark_completion_thread",
            "reject_coroutine_callback", "run_callback"]
 
@@ -137,6 +139,15 @@ def reject_coroutine_callback(callback: Callable[..., object]) -> None:
         raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
 
 
+def check_callback(callback: Callable[..., object]) -> None:
+    """The ``send()`` callback's keyword contract: it is called as
+    ``callback(metadata=..., exception=...)`` and must accept ``**kwargs``, or
+    ``send()`` raises ``IllegalArgumentError("callback must accept **kwargs")``
+    (CLAUDE.md, Python Binding Conventions, Signatures). One look at the code
+    object for a function or a bound method (``_kwargs.require_kwargs``)."""
+    require_kwargs(callback, "callback")
+
+
 def run_callback(producer: object, callback: Callable[..., object],
                  metadata: RecordMetadata, exception: Exception | None) -> object:
     """Call the user's callback for one completion and return what it returned
@@ -145,7 +156,7 @@ def run_callback(producer: object, callback: Callable[..., object],
     previous = getattr(_callback_scope, "producer", None)
     _callback_scope.producer = producer
     try:
-        return callback(metadata, exception)
+        return callback(metadata=metadata, exception=exception)
     finally:
         _callback_scope.producer = previous
 

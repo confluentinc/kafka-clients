@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.RecordBatchTooLargeError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.invalid_configuration_error import InvalidConfigurationError
 
@@ -22,4 +22,11 @@ __all__ = ["RecordBatchTooLargeError"]
 
 class RecordBatchTooLargeError(InvalidConfigurationError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...

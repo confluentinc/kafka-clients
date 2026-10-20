@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
@@ -40,11 +42,17 @@ class StringSerializer:
         if isinstance(encoding_value, str):
             self._encoding = normalize_encoding(encoding_value)
 
-    def __call__(self, topic: str, value: str | None,
-                 headers: Headers | None = None) -> bytes | None:
-        if value is None:
+    def __call__(self, *, topic: str, data: str | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: str | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
         try:
-            return encode(value, self._encoding)
+            return encode(data, self._encoding)
         except LookupError as exc:  # the name was validated; kept for safety
             raise SerializationError(message=f"Unsupported encoding {self._encoding}") from exc

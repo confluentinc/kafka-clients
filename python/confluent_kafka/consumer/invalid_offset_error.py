@@ -46,7 +46,7 @@ class InvalidOffsetError(KafkaError):
     def __init__(
         self,
         *,
-        message: str,
+        message: str | None,
     ) -> None:
         if type(self) is InvalidOffsetError:
             raise TypeError(

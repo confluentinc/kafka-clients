@@ -15,7 +15,7 @@
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.consumer.LogTruncationError).
 
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.consumer.offset_and_metadata import OffsetAndMetadata
@@ -25,5 +25,8 @@ __all__ = ["LogTruncationError"]
 
 class LogTruncationError(OffsetOutOfRangeError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, fetch_offsets: Mapping[TopicPartition, int], divergent_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None: ...
+    @overload
+    def __init__(self, *, fetch_offsets: Mapping[TopicPartition, int], divergent_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, fetch_offsets: Mapping[TopicPartition, int], divergent_offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> None: ...
     def divergent_offsets(self) -> dict[TopicPartition, OffsetAndMetadata]: ...

@@ -126,6 +126,18 @@ def check_type(name: str, value: object, type_name: str) -> object:
     raise ConfigError(name=name, value=value, message=f"Unknown type {type_name}")
 
 
+def _core_str(value: object) -> str:
+    """One value as the text the core parses: Java's ``String.valueOf`` spelling
+    (``null``, ``true``, ``false``), which ``java_str`` no longer uses for ``str()``."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return java_str(value)
+
+
 def convert_to_string(value: object, type_name: str | None) -> str | None:
     """``ConfigDef.convertToString(value, type)``: a type-checked value as the
     text the core parses (a password as its value, since the core needs it)."""
@@ -134,10 +146,10 @@ def convert_to_string(value: object, type_name: str | None) -> str | None:
     if isinstance(value, str):
         return value
     if type_name == "LIST" and isinstance(value, list):
-        return ",".join(java_str(v) for v in value)
+        return ",".join(_core_str(v) for v in value)
     if isinstance(value, type):
         return f"{value.__module__}.{value.__qualname__}"
-    return java_str(value)
+    return _core_str(value)
 
 
 def prepare(configs: Mapping[str, Any], *, client: Client,
@@ -151,7 +163,12 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
     constructor argument is given: the argument wins and the key is not
     parsed, as Java's ``ProducerConfig.appendSerializerToConfig`` /
     ``ConsumerConfig.appendDeserializerToConfig`` replace it with the
-    argument's class before ``ConfigDef`` parses the configs."""
+    argument's class before ``ConfigDef`` parses the configs. A ``None`` is
+    Java's null map, which ``new HashMap<>(configs)`` dereferences
+    (``ProducerConfig.java:717``, ``ConsumerConfig.java:794``,
+    ``Utils.castToStringObjectMap``): ``TypeError("configs must not be None")``."""
+    if configs is None:
+        raise TypeError("configs must not be None")
     if not isinstance(configs, Mapping):
         raise TypeError(f"configs must be a dict, not {type(configs).__name__}")
     for key, value in configs.items():
