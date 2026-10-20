@@ -14,6 +14,7 @@
 
 //! Configuration types for Kafka clients (org.apache.kafka.common.config).
 
+pub(crate) mod abstract_config;
 pub(crate) mod config_def;
 mod config_error;
 pub mod config_resource;

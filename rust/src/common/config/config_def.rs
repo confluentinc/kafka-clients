@@ -146,7 +146,11 @@ pub(crate) enum Importance {
 /// is one variant per such class. A `String` variant is also what a user's
 /// `String` value is before parsing, which is why `parse_type` takes and
 /// returns the same type. Java's `null` is `Option::None` around it.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality and hashing are Java's `equals` / `hashCode` of the boxed value:
+/// a `Double` compares by `Double.doubleToLongBits`, so every NaN equals every
+/// NaN and `0.0` differs from `-0.0`.
+#[derive(Debug, Clone)]
 pub(crate) enum ParsedValue {
     Boolean(bool),
     String(String),
@@ -174,6 +178,20 @@ impl ParsedValue {
         }
     }
 
+    /// The `Type` whose values are of this value's class.
+    pub(crate) fn config_type(&self) -> Type {
+        match self {
+            ParsedValue::Boolean(_) => Type::Boolean,
+            ParsedValue::String(_) => Type::String,
+            ParsedValue::Int(_) => Type::Int,
+            ParsedValue::Short(_) => Type::Short,
+            ParsedValue::Long(_) => Type::Long,
+            ParsedValue::Double(_) => Type::Double,
+            ParsedValue::List(_) => Type::List,
+            ParsedValue::Password(_) => Type::Password,
+        }
+    }
+
     /// Java's `Number.doubleValue()`, `None` when the value is not a
     /// `Number`.
     fn double_value(&self) -> Option<f64> {
@@ -184,6 +202,46 @@ impl ParsedValue {
             ParsedValue::Long(v) => Some(*v as f64),
             ParsedValue::Double(v) => Some(*v),
             _ => None,
+        }
+    }
+}
+
+/// Java's `Double.doubleToLongBits`: the bits, with every NaN collapsed to
+/// the canonical one.
+fn double_to_long_bits(v: f64) -> u64 {
+    if v.is_nan() { f64::NAN.to_bits() } else { v.to_bits() }
+}
+
+impl PartialEq for ParsedValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ParsedValue::Boolean(a), ParsedValue::Boolean(b)) => a == b,
+            (ParsedValue::String(a), ParsedValue::String(b)) => a == b,
+            (ParsedValue::Int(a), ParsedValue::Int(b)) => a == b,
+            (ParsedValue::Short(a), ParsedValue::Short(b)) => a == b,
+            (ParsedValue::Long(a), ParsedValue::Long(b)) => a == b,
+            (ParsedValue::Double(a), ParsedValue::Double(b)) => double_to_long_bits(*a) == double_to_long_bits(*b),
+            (ParsedValue::List(a), ParsedValue::List(b)) => a == b,
+            (ParsedValue::Password(a), ParsedValue::Password(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ParsedValue {}
+
+impl std::hash::Hash for ParsedValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            ParsedValue::Boolean(v) => v.hash(state),
+            ParsedValue::String(v) => v.hash(state),
+            ParsedValue::Int(v) => v.hash(state),
+            ParsedValue::Short(v) => v.hash(state),
+            ParsedValue::Long(v) => v.hash(state),
+            ParsedValue::Double(v) => double_to_long_bits(*v).hash(state),
+            ParsedValue::List(v) => v.hash(state),
+            ParsedValue::Password(v) => v.hash(state),
         }
     }
 }
@@ -904,7 +962,7 @@ fn java_equals_ignore_case(a: &str, b: &str) -> bool {
 /// (`hash ^ (hash >>> 16)` masked by the table size), and in insertion order
 /// within a bucket. Messages that print such a set therefore print it in
 /// Java's order.
-fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
+pub(crate) fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut distinct: Vec<String> = Vec::new();
     for v in values {
         if !distinct.contains(&v) {
@@ -917,6 +975,14 @@ fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> 
     while distinct.len() * 4 > capacity * 3 {
         capacity *= 2;
     }
+    java_hash_table_order(distinct, capacity)
+}
+
+/// The iteration order of distinct `values`, in insertion order, in a Java
+/// `HashMap` / `HashSet` table of `capacity` buckets (a power of two): by
+/// bucket (`hash ^ (hash >>> 16)` masked by the table size), and in insertion
+/// order within a bucket.
+pub(crate) fn java_hash_table_order(mut values: Vec<String>, capacity: usize) -> Vec<String> {
     let bucket = |s: &String| {
         let h = s
             .encode_utf16()
@@ -926,8 +992,8 @@ fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> 
     };
     // A stable sort keeps insertion order within a bucket, as Java's bucket
     // lists (and its order-preserving resize split) do.
-    distinct.sort_by_key(bucket);
-    distinct
+    values.sort_by_key(bucket);
+    values
 }
 
 /// Validation logic for numeric ranges, Java's `ConfigDef.Range`.
