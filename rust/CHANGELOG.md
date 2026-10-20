@@ -56,6 +56,36 @@ breaking changes.
   `kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION` (-31), built with
   `kafka_common_Error_local_unsupported_operation`. In Python it is the root
   class `confluent_kafka.UnsupportedOperationError`, a `NotImplementedError`.
+- **Breaking (Rust, C API, Python):** the calls that fail where Java throws
+  `UnsupportedOperationException`, or that this client does not support, now
+  fail with `LocalUnsupportedOperationError` instead of `UnsupportedVersionError`
+  (code 35):
+  - `KafkaConsumer::new` with `group.protocol=classic`, the default, so every
+    consumer that does not set the key;
+  - `AdminClientConfig::new` with `bootstrap.controllers` and no
+    `bootstrap.servers`;
+  - `KafkaProducer::new` with the incremental `buffer.memory` allocation
+    strategy and a compression type;
+  - the `MockAdminClient` methods Java's mock leaves "Not implemented yet", and
+    `incremental_alter_configs` for a resource type the mock does not handle;
+  - `MockConsumer::offsets_for_times`, and the async operations of a
+    `ConsumerHandle` taken from a `MockConsumer`;
+  - in Python also the pure-Python `MockAdminClient` / `AsyncMockAdminClient`
+    and `MockConsumer`, completing a `KafkaFuture.to_completion_stage()` future
+    from user code, and `send_offsets_to_transaction` with a mock consumer's
+    group metadata.
+
+  For these, `is_unsupported_version_error`, `is_api_error` and
+  `is_kafka_error` now answer `false`; match them with
+  `is_local_unsupported_operation_error()`. In C `kafka_common_Error__enum`
+  returns `kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION` (-31) instead of
+  `kafka_common_Error_UNSUPPORTED_VERSION`. In Python the class is not a
+  `KafkaError`, so `except UnsupportedVersionError`, `except ApiError` and
+  `except KafkaError` no longer catch them: use
+  `except UnsupportedOperationError` or `except NotImplementedError`.
+  `unregister_controller` / `unregister_broker` on the mock, where Java throws
+  `UnsupportedVersionException`, and every failure caused by the broker's
+  version keep `UnsupportedVersionError`.
 - **Breaking:** `InlineFuture::new` is no longer public. `InlineFuture` stays
   public as the future the sealed `DynSerializer` / `DynDeserializer` methods
   return; only their blanket implementations build one.
