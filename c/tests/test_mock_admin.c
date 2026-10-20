@@ -5153,6 +5153,17 @@ static void test_mock_admin_transactions_async_fires_once(void) {
     fixture_destroy(&f);
 }
 
+/* Each enum's `_to_string` prints the Java constant's name, as Java's inherited
+ * `Enum.toString()` does. */
+static void test_admin_enums_to_string_print_the_java_constant_name(void) {
+    assert_owned_string("UNSAFE_DOWNGRADE", kafka_admin_FeatureUpdate_UpgradeType_to_string(
+                                                kafka_admin_FeatureUpdate_UpgradeType_unsafe_downgrade()));
+    assert_owned_string("SCRAM_SHA_512", kafka_admin_ScramMechanism_to_string(kafka_admin_ScramMechanism_scram_sha_512()));
+    assert_owned_string("UNCLEAN", kafka_common_ElectionType_to_string(kafka_common_ElectionType_unclean()));
+    assert_owned_string("BROKER_LOGGER", kafka_common_config_ConfigResource_Type_to_string(
+                                             kafka_common_config_ConfigResource_Type_broker_logger()));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -5289,5 +5300,6 @@ int main(void) {
     RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
     RUN_TEST(test_mock_admin_unregister_controller_follows_raft_controller);
     RUN_TEST(test_mock_admin_transactions_async_fires_once);
+    RUN_TEST(test_admin_enums_to_string_print_the_java_constant_name);
     return UNITY_END();
 }

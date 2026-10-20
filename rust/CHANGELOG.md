@@ -128,6 +128,8 @@ breaking changes.
 - `GroupProtocol` and `CloseOptions`' `GroupMembershipOperation` implement
   `PartialOrd` and `Ord`, ordering their values as Java's `Enum.compareTo`,
   by declaration.
+- `GroupMembershipOperation` implements `Display`, printing the Java
+  constant's name (`LEAVE_GROUP`), as Java's `Enum.toString()` does.
 
 ### Admin client
 
@@ -169,6 +171,9 @@ breaking changes.
 - The admin enums `OpType`, `ConfigSource`, `ConfigType`, `UpgradeType`,
   `ScramMechanism` and `TransactionState` implement `PartialOrd` and `Ord`,
   ordering their values as Java's `Enum.compareTo`, by declaration.
+- `FeatureUpdate`'s `UpgradeType` and `ScramMechanism` implement `Display`,
+  printing the Java constant's name (`SAFE_DOWNGRADE`, `SCRAM_SHA_256`), as
+  Java's `Enum.toString()` does.
 
 ### Common
 
@@ -251,6 +256,10 @@ breaking changes.
   `ClassicGroupState`, `ConfigResource`'s `Type`, `SslClientAuth`,
   `ElectionType`, `DeserializationErrorOrigin`, `GroupState`, `GroupType`,
   `IsolationLevel`, `RecordingLevel`, `TimestampType` and `SecurityProtocol`.
+- `ConfigResource`'s `Type`, `ElectionType`, `RecordingLevel` and
+  `DeserializationErrorOrigin` implement `Display`, printing the Java
+  constant's name (`BROKER_LOGGER`, `UNCLEAN`), as Java's `Enum.toString()`
+  does.
 
 ### C API
 
@@ -298,6 +307,15 @@ breaking changes.
   `_get_double`, `_get_boolean`, `_get_string`, `_get_list`, `_unused`,
   `_ignore`, `_log_unused` and `_config_names`. A producer created from the
   handle keeps its own record of the keys it used.
+- New `_to_string` exports, each returning an owned string freed with
+  `kafka_string_destroy`, for the enums that gained `Display`:
+  `kafka_admin_FeatureUpdate_UpgradeType_to_string`,
+  `kafka_admin_ScramMechanism_to_string`,
+  `kafka_common_ElectionType_to_string`,
+  `kafka_common_config_ConfigResource_Type_to_string`,
+  `kafka_common_metrics_Sensor_RecordingLevel_to_string`,
+  `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string`
+  and `kafka_consumer_CloseOptions_GroupMembershipOperation_to_string`.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

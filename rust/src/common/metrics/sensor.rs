@@ -43,6 +43,13 @@ pub enum RecordingLevel {
     Trace,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for RecordingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 impl RecordingLevel {
     /// The permanent and immutable id of this level.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#id")]

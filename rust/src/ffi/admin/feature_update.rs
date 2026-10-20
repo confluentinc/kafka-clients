@@ -138,6 +138,22 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
     enum_of(unsafe { upgrade_type_value_of(self_) })
 }
 
+/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
+/// with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_to_string(
+    self_: *const kafka_admin_FeatureUpdate_UpgradeType_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `upgrade_type_value_of` requires; the value is copied out and its name copied into an owned string.
+    into_c_string(&unsafe { upgrade_type_value_of(self_) }.to_string())
+}
+
 /// `UpgradeType.code()`: the wire-protocol byte of the upgrade type.
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`

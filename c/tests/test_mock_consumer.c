@@ -1460,6 +1460,17 @@ static void test_mock_consumer_close_with_options(void) {
     fixture_destroy(&f);
 }
 
+/* Each enum's `_to_string` prints the Java constant's name, as Java's inherited
+ * `Enum.toString()` does. */
+static void test_consumer_enums_to_string_print_the_java_constant_name(void) {
+    assert_owned_string("REMAIN_IN_GROUP", kafka_consumer_CloseOptions_GroupMembershipOperation_to_string(
+                                               kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group()));
+    assert_owned_string("VALUE", kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string(
+                                     kafka_common_RecordDeserializationError_DeserializationErrorOrigin_value()));
+    assert_owned_string("TRACE", kafka_common_metrics_Sensor_RecordingLevel_to_string(
+                                     kafka_common_metrics_Sensor_RecordingLevel_trace()));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
@@ -1491,5 +1502,6 @@ int main(void) {
     RUN_TEST(test_mock_consumer_current_lag_and_metrics);
     RUN_TEST(test_mock_consumer_close);
     RUN_TEST(test_mock_consumer_close_with_options);
+    RUN_TEST(test_consumer_enums_to_string_print_the_java_constant_name);
     return UNITY_END();
 }

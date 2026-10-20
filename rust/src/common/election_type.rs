@@ -31,6 +31,13 @@ pub enum ElectionType {
     Unclean,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for ElectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).name())
+    }
+}
+
 impl ElectionType {
     /// Returns the wire-protocol byte value used to encode this election type.
     ///

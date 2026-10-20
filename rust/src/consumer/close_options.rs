@@ -41,6 +41,17 @@ pub enum GroupMembershipOperation {
     Default,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for GroupMembershipOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LeaveGroup => "LEAVE_GROUP",
+            Self::RemainInGroup => "REMAIN_IN_GROUP",
+            Self::Default => "DEFAULT",
+        })
+    }
+}
+
 /// Options for controlling the consumer close behavior.
 ///
 /// This type allows customization of the close timeout and group membership

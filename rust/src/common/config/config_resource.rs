@@ -37,6 +37,20 @@ pub enum Type {
     Unknown,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Group => "GROUP",
+            Self::ClientMetrics => "CLIENT_METRICS",
+            Self::BrokerLogger => "BROKER_LOGGER",
+            Self::Broker => "BROKER",
+            Self::Topic => "TOPIC",
+            Self::Unknown => "UNKNOWN",
+        })
+    }
+}
+
 impl Type {
     /// Returns the wire id for this resource type.
     ///

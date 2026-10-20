@@ -191,6 +191,14 @@ static inline void assert_ok(kafka_common_Error_t *err, const char *what) {
     }
 }
 
+/* Asserts that an owned string a `_to_string` export returned equals
+ * `expected`, then frees it with `kafka_string_destroy`. */
+static inline void assert_owned_string(const char *expected, char *actual) {
+    TEST_ASSERT_NOT_NULL(actual);
+    TEST_ASSERT_EQUAL_STRING(expected, actual);
+    kafka_string_destroy(actual);
+}
+
 /* The consumer's state reads (`assignment`, `subscription`, `paused`,
  * `current_lag`, `group_metadata`) fail with LOCAL_CONCURRENT_MODIFICATION
  * only while another call holds the consumer, as Java's `acquire()` throws

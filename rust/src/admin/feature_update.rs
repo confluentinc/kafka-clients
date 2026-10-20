@@ -37,6 +37,18 @@ pub enum UpgradeType {
     UnsafeDowngrade,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for UpgradeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Upgrade => "UPGRADE",
+            Self::SafeDowngrade => "SAFE_DOWNGRADE",
+            Self::UnsafeDowngrade => "UNSAFE_DOWNGRADE",
+        })
+    }
+}
+
 impl UpgradeType {
     /// Returns the wire-protocol code for this upgrade type.
     ///

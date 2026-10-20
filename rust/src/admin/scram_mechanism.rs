@@ -37,6 +37,17 @@ pub enum ScramMechanism {
     ScramSha512,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for ScramMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "UNKNOWN",
+            Self::ScramSha256 => "SCRAM_SHA_256",
+            Self::ScramSha512 => "SCRAM_SHA_512",
+        })
+    }
+}
+
 impl ScramMechanism {
     /// All mechanisms, in declaration order (mirrors Java's `values()`).
     const VALUES: [ScramMechanism; 3] = [
