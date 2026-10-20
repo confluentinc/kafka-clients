@@ -157,6 +157,7 @@ breaking changes.
   `unused`, `ignore`, `log_unused`, and the static
   `config_names`. Its `PartialEq` / `Hash` compare the
   properties it was built from, as Java's `equals` / `hashCode` do.
+- New `AdminClientConfig::CONFIG_PROVIDERS_CONFIG`, for `config.providers`.
 - The admin client logs its configuration values at INFO when it is built, as
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
   did not use: `These configurations '[a, b]' were supplied but are not used
