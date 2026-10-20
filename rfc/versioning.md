@@ -86,3 +86,7 @@ version lines, and `cargo xtask bump-version` (`make bump-version`) keeps them s
   Without `--python-version` (`PYTHON_VERSION=`) the packages get the PEP 440 form of the
   crate version, which is refused while that is the lower one; pass the Python version
   explicitly, for example `make bump-version VERSION=0.2.0 PYTHON_VERSION=4.4.0`.
+
+Versions only move forward: the command refuses a version below the current one, in SemVer
+order for the crates and PEP 440 order for the Python packages, where a pre-release comes
+before its release, so a pre-release `X.Y.Z-beta.N` is cut before `X.Y.Z`, never after.
