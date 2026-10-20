@@ -52,6 +52,9 @@ breaking changes.
   and the `is_local_unsupported_operation_error` predicate. In C it is
   `kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION` (-31), built with
   `kafka_common_Error_local_unsupported_operation`.
+- **Breaking:** `InlineFuture::new` is no longer public. `InlineFuture` stays
+  public as the future the sealed `DynSerializer` / `DynDeserializer` methods
+  return; only their blanket implementations build one.
 
 ### C API
 
