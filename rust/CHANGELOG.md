@@ -99,6 +99,19 @@ breaking changes.
   `unregister_controller` / `unregister_broker` on the mock, where Java throws
   `UnsupportedVersionException`, and every failure caused by the broker's
   version keep `UnsupportedVersionError`.
+- Java's `ConfigDef` (types, defaults, the `parse` checks and messages, and
+  the `Range`, `ValidList`, `ValidString`, `CaseInsensitiveValidString`,
+  `NonEmptyString`, `NonNullValidator`, `CompositeValidator` and `ListSize`
+  validators) and the `ssl.*` / `sasl.*` key definitions are translated as
+  crate-internal code, for the client configs to be built on. Deferred to
+  later work, because each needs a new public type: a public `ConfigDef`,
+  its validators, `ConfigValue` and `LambdaValidator`; `get_password` (a
+  public `Password`); `type_of` (a public `ConfigDef.Type`); `originals*()` /
+  `values*()` (Java returns a `RecordingMap`, and a plain `HashMap` now would
+  fix the wrong return type); how Java's `Object` config values are typed;
+  and, in C, an `__as_AbstractConfig` view. The class-valued keys
+  (`ssl.engine.factory.class`, the `sasl.*.class` keys) stay undefined, as
+  configurations never take a class.
 - **Breaking:** `InlineFuture::new` is no longer public. `InlineFuture` stays
   public as the future the sealed `DynSerializer` / `DynDeserializer` methods
   return; only their blanket implementations build one.

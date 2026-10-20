@@ -30,7 +30,7 @@
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
 
 use crate::common::Error;
-use crate::common::config::config_def::ValidList;
+use crate::common::config::config_def::{ConfigDef, DefaultValue, Importance, Type, ValidList};
 use crate::common::config::types::Password;
 
 // ---------------------------------------------------------------------------
@@ -298,6 +298,207 @@ impl SslConfigs {
             },
         }
         Ok(())
+    }
+}
+
+// Documentation of the `ssl.*` keys, Java's `SslConfigs.*_DOC` constants,
+// which Java declares public and this crate keeps private: only the
+// crate-private `ConfigDef` reads them.
+const SSL_PROTOCOL_DOC: &str = "The SSL protocol used to generate the SSLContext. The default is 'TLSv1.3', which should \
+    be fine for most use cases. A typical alternative to the default is 'TLSv1.2'. Allowed \
+    values for this config are dependent on the JVM. Clients using the defaults for this \
+    config and 'ssl.enabled.protocols' will downgrade to 'TLSv1.2' if the server does not \
+    support 'TLSv1.3'. If this config is set to 'TLSv1.2', however, clients will not use \
+    'TLSv1.3' even if it is one of the values in <code>ssl.enabled.protocols</code> and the \
+    server only supports 'TLSv1.3'.";
+const SSL_PROVIDER_DOC: &str = "The name of the security provider used for SSL connections. Default value is the default \
+    security provider of the JVM.";
+const SSL_CIPHER_SUITES_DOC: &str = "A list of cipher suites. This is a named combination of authentication, encryption, MAC \
+    and key exchange algorithm used to negotiate the security settings for a network \
+    connection using TLS or SSL network protocol. By default all the available cipher suites \
+    are supported.";
+const SSL_ENABLED_PROTOCOLS_DOC: &str = "The list of protocols enabled for SSL connections. The default is 'TLSv1.2,TLSv1.3'. This \
+    means that clients and servers will prefer TLSv1.3 if both support it and fallback to \
+    TLSv1.2 otherwise (assuming both support at least TLSv1.2). This default should be fine \
+    for most use cases. If this configuration is set to an empty list, Kafka will use the \
+    protocols enabled by default in the underlying SSLEngine, which may include additional \
+    protocols depending on the JVM version. Also see the config documentation for \
+    <code>ssl.protocol</code> to understand how it can impact the TLS version negotiation \
+    behavior.";
+const SSL_KEYSTORE_TYPE_DOC: &str = "The file format of the key store file. This is optional for client. The values currently \
+    supported by the default <code>ssl.engine.factory.class</code> are [JKS, PKCS12, PEM].";
+const SSL_KEYSTORE_KEY_DOC: &str = "Private key in the format specified by 'ssl.keystore.type'. Default SSL engine factory \
+    supports only PEM format with PKCS#8 keys. If the key is encrypted, key password must be \
+    specified using 'ssl.key.password'";
+const SSL_KEYSTORE_CERTIFICATE_CHAIN_DOC: &str = "Certificate chain in the format specified by 'ssl.keystore.type'. Default SSL engine \
+    factory supports only PEM format with a list of X.509 certificates";
+const SSL_TRUSTSTORE_CERTIFICATES_DOC: &str = "Trusted certificates in the format specified by 'ssl.truststore.type'. Default SSL engine \
+    factory supports only PEM format with X.509 certificates.";
+const SSL_KEYSTORE_LOCATION_DOC: &str = "The location of the key store file. This is optional for client and can be used for \
+    two-way authentication for client.";
+const SSL_KEYSTORE_PASSWORD_DOC: &str = "The store password for the key store file. This is optional for client and only needed if \
+    'ssl.keystore.location' is configured. Key store password is not supported for PEM format.";
+const SSL_KEY_PASSWORD_DOC: &str = "The password of the private key in the key store file or the PEM key specified in \
+    'ssl.keystore.key'.";
+const SSL_TRUSTSTORE_TYPE_DOC: &str = "The file format of the trust store file. The values currently supported by the default \
+    <code>ssl.engine.factory.class</code> are [JKS, PKCS12, PEM].";
+const SSL_TRUSTSTORE_LOCATION_DOC: &str = "The location of the trust store file.";
+const SSL_TRUSTSTORE_PASSWORD_DOC: &str = "The password for the trust store file. If a password is not set, trust store file \
+    configured will still be used, but integrity checking is disabled. Trust store password is \
+    not supported for PEM format.";
+const SSL_KEYMANAGER_ALGORITHM_DOC: &str = "The algorithm used by key manager factory for SSL connections. Default value is the key \
+    manager factory algorithm configured for the Java Virtual Machine.";
+const SSL_TRUSTMANAGER_ALGORITHM_DOC: &str = "The algorithm used by trust manager factory for SSL connections. Default value is the \
+    trust manager factory algorithm configured for the Java Virtual Machine.";
+const SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_DOC: &str = "The endpoint identification algorithm to validate server hostname using server \
+    certificate. ";
+const SSL_SECURE_RANDOM_IMPLEMENTATION_DOC: &str =
+    "The SecureRandom PRNG implementation to use for SSL cryptography operations. ";
+
+impl SslConfigs {
+    /// Java's `SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM`, which is
+    /// `KeyManagerFactory.getDefaultAlgorithm()`, the JVM's default: `SunX509`
+    /// unless the `ssl.KeyManagerFactory.algorithm` security property says
+    /// otherwise. Without a JVM it is the literal default.
+    const DEFAULT_SSL_KEYMANGER_ALGORITHM: &str = "SunX509";
+
+    /// Java's `SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM`, which is
+    /// `TrustManagerFactory.getDefaultAlgorithm()`: `PKIX` on a stock JVM.
+    const DEFAULT_SSL_TRUSTMANAGER_ALGORITHM: &str = "PKIX";
+
+    /// Defines the client `ssl.*` keys on `config`: Java's
+    /// `SslConfigs.addClientSslSupport(ConfigDef)`, in Java's order, except
+    /// `ssl.engine.factory.class`, a class-valued key (CLAUDE.md §2).
+    pub(crate) fn add_client_ssl_support(config: ConfigDef) -> ConfigDef {
+        config
+            .define(
+                SslConfigs::SSL_PROTOCOL_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_PROTOCOL,
+                Importance::Medium,
+                SSL_PROTOCOL_DOC,
+            )
+            .define(
+                SslConfigs::SSL_PROVIDER_CONFIG,
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+                SSL_PROVIDER_DOC,
+            )
+            .define_with_validator(
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
+                Type::List,
+                Vec::<String>::new(),
+                ValidList::any_non_duplicate_values(true, false),
+                Importance::Low,
+                SSL_CIPHER_SUITES_DOC,
+            )
+            .define_with_validator(
+                SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
+                Type::List,
+                SslConfigs::DEFAULT_SSL_ENABLED_PROTOCOLS,
+                ValidList::any_non_duplicate_values(true, false),
+                Importance::Medium,
+                SSL_ENABLED_PROTOCOLS_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE,
+                Importance::Medium,
+                SSL_KEYSTORE_TYPE_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG,
+                Type::String,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_KEYSTORE_LOCATION_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_KEYSTORE_PASSWORD_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEY_PASSWORD_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_KEY_PASSWORD_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYSTORE_KEY_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_KEYSTORE_KEY_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_KEYSTORE_CERTIFICATE_CHAIN_DOC,
+            )
+            .define(
+                SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_TRUSTSTORE_CERTIFICATES_DOC,
+            )
+            .define(
+                SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_TRUSTSTORE_TYPE,
+                Importance::Medium,
+                SSL_TRUSTSTORE_TYPE_DOC,
+            )
+            .define(
+                SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG,
+                Type::String,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_TRUSTSTORE_LOCATION_DOC,
+            )
+            .define(
+                SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::High,
+                SSL_TRUSTSTORE_PASSWORD_DOC,
+            )
+            .define(
+                SslConfigs::SSL_KEYMANAGER_ALGORITHM_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_KEYMANGER_ALGORITHM,
+                Importance::Low,
+                SSL_KEYMANAGER_ALGORITHM_DOC,
+            )
+            .define(
+                SslConfigs::SSL_TRUSTMANAGER_ALGORITHM_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_TRUSTMANAGER_ALGORITHM,
+                Importance::Low,
+                SSL_TRUSTMANAGER_ALGORITHM_DOC,
+            )
+            .define(
+                SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG,
+                Type::String,
+                SslConfigs::DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM,
+                Importance::Low,
+                SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_DOC,
+            )
+            .define(
+                SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
+                Type::String,
+                DefaultValue::Null,
+                Importance::Low,
+                SSL_SECURE_RANDOM_IMPLEMENTATION_DOC,
+            )
     }
 }
 
