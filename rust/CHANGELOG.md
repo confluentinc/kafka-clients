@@ -46,6 +46,12 @@ breaking changes.
   `PartialEq` / `Hash` compare the properties it was built from, as Java's
   `equals` / `hashCode` do. `get_string("acks")` answers the number
   `parseAcks` made of it (`-1` for `all`).
+- New `ProducerConfig` constants for keys Java's `ProducerConfig` names:
+  `COMPRESSION_GZIP_LEVEL_CONFIG`, `COMPRESSION_LZ4_LEVEL_CONFIG`,
+  `COMPRESSION_ZSTD_LEVEL_CONFIG`, `ENABLE_METRICS_PUSH_CONFIG`,
+  `SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG`,
+  `SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG` and
+  `CONFIG_PROVIDERS_CONFIG`.
 - The producer logs its configuration values at INFO when it is built, as
   Java's does, and then, in one INFO line, the supplied keys it did not use:
   `These configurations '[a, b]' were supplied but are not used yet.` This
