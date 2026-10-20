@@ -226,7 +226,7 @@ fn is_reported(prefix: &str) -> bool {
 /// `<prefix>__is_async(self)` tells a C implementation from a built-in
 /// class's view. There is no `<prefix>_new` and no synchronous `_fn_t`: a C
 /// function returning its result would hold a thread for every key and value
-/// it waits on. These are the serdes (CLAUDE.md §4 "Traits", §11).
+/// it waits on. These are the serdes (CLAUDE.md §4 "Serde interfaces").
 const ASYNC_ONLY_INTERFACES: &[&str] = &[
     "kafka_common_serialization_Serializer",
     "kafka_common_serialization_Deserializer",
