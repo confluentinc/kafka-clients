@@ -179,7 +179,7 @@ pub(super) const FFI_BASELINE: &str = "xtask/ffi-baseline.txt";
 
 /// The traits whose implementations are clients, which pump the queued
 /// callbacks (CLAUDE.md §4 rule 5).
-const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
+pub(super) const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
 
 /// Public Rust types that deliberately have no C counterpart: `KafkaError`
 /// is the embedded `KafkaException` base, which never crosses the boundary on
@@ -2988,6 +2988,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: crate::java::JavaKind::Class,
