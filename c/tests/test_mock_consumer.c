@@ -1471,6 +1471,89 @@ static void test_consumer_enums_to_string_print_the_java_constant_name(void) {
                                      kafka_common_metrics_Sensor_RecordingLevel_trace()));
 }
 
+/* The stats print Java's `toString()`: `SampledStat`'s for `Avg`, `Max`, `Min`,
+ * `WindowedCount` and `WindowedSum`, `CumulativeSum`'s for `CumulativeCount`,
+ * `Rate`'s for `SimpleRate`, the doubles as Java's `Double.toString`; the
+ * assignor's `Subscription` and `Assignment` print theirs, collections as
+ * Java's `List.toString()`. */
+static void test_metrics_stats_and_assignor_to_string_follow_java(void) {
+    const char *empty_window = "SampledStat(initialValue=0.0, current=0, samples=[])";
+    const char *empty_rate = "Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))";
+
+    kafka_common_metrics_stats_Avg_t *avg = kafka_common_metrics_stats_Avg_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_Avg_to_string(avg));
+    kafka_common_metrics_stats_Avg_destroy(avg);
+    kafka_common_metrics_stats_Max_t *max = kafka_common_metrics_stats_Max_new();
+    assert_owned_string("SampledStat(initialValue=-Infinity, current=0, samples=[])",
+                        kafka_common_metrics_stats_Max_to_string(max));
+    kafka_common_metrics_stats_Max_destroy(max);
+    kafka_common_metrics_stats_Min_t *min = kafka_common_metrics_stats_Min_new();
+    assert_owned_string("SampledStat(initialValue=1.7976931348623157E308, current=0, samples=[])",
+                        kafka_common_metrics_stats_Min_to_string(min));
+    kafka_common_metrics_stats_Min_destroy(min);
+    kafka_common_metrics_stats_WindowedCount_t *wcount = kafka_common_metrics_stats_WindowedCount_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_WindowedCount_to_string(wcount));
+    kafka_common_metrics_stats_WindowedCount_destroy(wcount);
+    kafka_common_metrics_stats_WindowedSum_t *wsum = kafka_common_metrics_stats_WindowedSum_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_WindowedSum_to_string(wsum));
+    kafka_common_metrics_stats_WindowedSum_destroy(wsum);
+
+    kafka_common_metrics_stats_CumulativeSum_t *csum = kafka_common_metrics_stats_CumulativeSum_with_value(1.5);
+    assert_owned_string("CumulativeSum(total=1.5)", kafka_common_metrics_stats_CumulativeSum_to_string(csum));
+    kafka_common_metrics_stats_CumulativeSum_destroy(csum);
+    kafka_common_metrics_stats_CumulativeCount_t *ccount = kafka_common_metrics_stats_CumulativeCount_new();
+    assert_owned_string("CumulativeSum(total=0.0)", kafka_common_metrics_stats_CumulativeCount_to_string(ccount));
+    kafka_common_metrics_stats_CumulativeCount_destroy(ccount);
+
+    kafka_common_metrics_stats_Rate_t *rate = kafka_common_metrics_stats_Rate_new();
+    assert_owned_string(empty_rate, kafka_common_metrics_stats_Rate_to_string(rate));
+    kafka_common_metrics_stats_Rate_destroy(rate);
+    kafka_common_metrics_stats_SimpleRate_t *simple = kafka_common_metrics_stats_SimpleRate_new();
+    assert_owned_string(empty_rate, kafka_common_metrics_stats_SimpleRate_to_string(simple));
+    kafka_common_metrics_stats_SimpleRate_destroy(simple);
+
+    kafka_common_MetricName_t *rate_name = kafka_common_MetricName_new("rate", "g", "d", NULL);
+    kafka_common_MetricName_t *total_name = kafka_common_MetricName_new("total", "g", "d", NULL);
+    kafka_common_metrics_stats_Meter_t *meter = kafka_common_metrics_stats_Meter_new(rate_name, total_name);
+    assert_owned_string("Meter(rate=Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[])), "
+                        "total=CumulativeSum(total=0.0), "
+                        "rateMetricName=MetricName [name=rate, group=g, description=d, tags={}], "
+                        "totalMetricName=MetricName [name=total, group=g, description=d, tags={}])",
+                        kafka_common_metrics_stats_Meter_to_string(meter));
+    kafka_common_metrics_stats_Meter_destroy(meter);
+    kafka_common_MetricName_destroy(rate_name);
+    kafka_common_MetricName_destroy(total_name);
+
+    kafka_common_metrics_stats_SampledStat_Sample_t *sample =
+        kafka_common_metrics_stats_SampledStat_Sample_new(2.5, 7);
+    assert_owned_string("Sample(value=2.5, eventCount=0, startTimeMs=7, lastEventMs=7, initialValue=2.5, "
+                        "timeWindowMs=-1)",
+                        kafka_common_metrics_stats_SampledStat_Sample_to_string(sample));
+    kafka_common_metrics_stats_SampledStat_Sample_destroy(sample);
+
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"a");
+    kafka_List_add(topics, (void *)"b");
+    kafka_consumer_ConsumerPartitionAssignor_Subscription_t *subscription =
+        kafka_consumer_ConsumerPartitionAssignor_Subscription_new(topics);
+    assert_owned_string("Subscription(topics=[a, b], ownedPartitions=[], groupInstanceId=null, generationId=-1, "
+                        "rackId=null)",
+                        kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string(subscription));
+    kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(subscription);
+    kafka_List_destroy(topics);
+
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("a", 0);
+    kafka_List_t *partitions = kafka_List_new();
+    kafka_List_add(partitions, tp);
+    kafka_consumer_ConsumerPartitionAssignor_Assignment_t *assignment =
+        kafka_consumer_ConsumerPartitionAssignor_Assignment_new(partitions);
+    assert_owned_string("Assignment(partitions=[a-0])",
+                        kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string(assignment));
+    kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy(assignment);
+    kafka_List_destroy(partitions);
+    kafka_common_TopicPartition_destroy(tp);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
@@ -1503,5 +1586,6 @@ int main(void) {
     RUN_TEST(test_mock_consumer_close);
     RUN_TEST(test_mock_consumer_close_with_options);
     RUN_TEST(test_consumer_enums_to_string_print_the_java_constant_name);
+    RUN_TEST(test_metrics_stats_and_assignor_to_string_follow_java);
     return UNITY_END();
 }

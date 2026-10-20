@@ -85,9 +85,24 @@ impl Measurable for WindowedSum {
     }
 }
 
+impl std::fmt::Display for WindowedSum {
+    /// Java's `SampledStat.toString()`, which `WindowedSum` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            WindowedSum::new().to_string(),
+            "SampledStat(initialValue=0.0, current=0, samples=[])"
+        );
+    }
 
     #[test]
     fn sums_over_window() {

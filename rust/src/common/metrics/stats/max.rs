@@ -67,9 +67,24 @@ impl Measurable for Max {
     }
 }
 
+impl std::fmt::Display for Max {
+    /// Java's `SampledStat.toString()`, which `Max` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Max::new().to_string(),
+            "SampledStat(initialValue=-Infinity, current=0, samples=[])"
+        );
+    }
     use crate::common::metrics::TimeUnit;
     use crate::common::utils::MockTime;
     use crate::common::utils::Time;

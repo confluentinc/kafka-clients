@@ -93,9 +93,24 @@ impl Measurable for WindowedCount {
     }
 }
 
+impl std::fmt::Display for WindowedCount {
+    /// Java's `SampledStat.toString()`, which `WindowedCount` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            WindowedCount::new().to_string(),
+            "SampledStat(initialValue=0.0, current=0, samples=[])"
+        );
+    }
     use crate::common::metrics::TimeUnit;
     use crate::common::utils::MockTime;
     use crate::common::utils::Time;

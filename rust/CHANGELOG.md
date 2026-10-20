@@ -130,6 +130,10 @@ breaking changes.
   by declaration.
 - `GroupMembershipOperation` implements `Display`, printing the Java
   constant's name (`LEAVE_GROUP`), as Java's `Enum.toString()` does.
+- `ConsumerPartitionAssignor`'s `Subscription` and `Assignment` implement
+  `Display` in the format of Java's `toString()`: lists print as `[a, b]`,
+  an absent group instance id or rack id as `null`, and the user data, when
+  set (even empty), only as its size.
 
 ### Admin client
 
@@ -267,6 +271,12 @@ breaking changes.
   `DeserializationErrorOrigin` implement `Display`, printing the Java
   constant's name (`BROKER_LOGGER`, `UNCLEAN`), as Java's `Enum.toString()`
   does.
+- The metric stats implement `Display` in the format of Java's `toString()`,
+  doubles printed as Java's `Double.toString`. `SampledStat` and its
+  `Sample` print their own format, and `Avg`, `Max`, `Min`, `WindowedCount`
+  and `WindowedSum` print the `SampledStat` they inherit it from, as in
+  Java. `CumulativeCount` prints as `CumulativeSum`, `SimpleRate` as `Rate`,
+  and `Meter` prints its rate, total and the two metric names.
 
 ### C API
 
@@ -333,6 +343,22 @@ breaking changes.
   `kafka_admin_TerminateTransactionOptions_to_string` and
   `kafka_admin_ListTransactionsOptions_to_string`. Each returns an owned
   string freed with `kafka_string_destroy`.
+- New `_to_string` exports for the stats and assignor types that gained
+  `Display`: `kafka_common_metrics_stats_SampledStat_to_string`,
+  `kafka_common_metrics_stats_SampledStat_Sample_to_string`,
+  `kafka_common_metrics_stats_Avg_to_string`,
+  `kafka_common_metrics_stats_Max_to_string`,
+  `kafka_common_metrics_stats_Min_to_string`,
+  `kafka_common_metrics_stats_WindowedCount_to_string`,
+  `kafka_common_metrics_stats_WindowedSum_to_string`,
+  `kafka_common_metrics_stats_CumulativeSum_to_string`,
+  `kafka_common_metrics_stats_CumulativeCount_to_string`,
+  `kafka_common_metrics_stats_Rate_to_string`,
+  `kafka_common_metrics_stats_SimpleRate_to_string`,
+  `kafka_common_metrics_stats_Meter_to_string`,
+  `kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string` and
+  `kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string`. Each
+  returns an owned string freed with `kafka_string_destroy`.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

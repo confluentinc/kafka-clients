@@ -69,9 +69,24 @@ impl Measurable for Min {
     }
 }
 
+impl std::fmt::Display for Min {
+    /// Java's `SampledStat.toString()`, which `Min` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Min::new().to_string(),
+            "SampledStat(initialValue=1.7976931348623157E308, current=0, samples=[])"
+        );
+    }
 
     #[test]
     fn min_of_records() {

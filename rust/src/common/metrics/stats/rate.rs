@@ -148,9 +148,28 @@ impl Measurable for Rate {
     }
 }
 
+impl std::fmt::Display for Rate {
+    /// Java's `toString()`, which `SimpleRate` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rate(unit={}, stat={})", self.unit.name(), self.stat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Rate::new().to_string(),
+            "Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))"
+        );
+        assert_eq!(
+            Rate::with_unit(TimeUnit::Milliseconds).to_string(),
+            "Rate(unit=MILLISECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))"
+        );
+    }
     use crate::common::metrics::internals::MetricsUtils;
     use crate::common::utils::MockTime;
     use crate::common::utils::Time;
