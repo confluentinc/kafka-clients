@@ -136,6 +136,10 @@ unsafe fn deserializer_from(
 /// deserializer handle is consumed (its `self` stays the caller's until the
 /// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
 /// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
+/// A constructor that fails after taking the deserializers closes them, as
+/// Java's does (`AsyncKafkaConsumer.java:596-603`), and returns without
+/// waiting for a C deserializer's `close` to report: that report may arrive
+/// after this returned, on the handle, which stays valid for it.
 ///
 /// # Safety
 ///

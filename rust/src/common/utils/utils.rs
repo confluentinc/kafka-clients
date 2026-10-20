@@ -136,9 +136,14 @@ impl Utils {
     /// failures, as `closeQuietly` does.
     ///
     /// Rust-only (DoD #7). The close is polled once on the calling task, which
-    /// completes it for any closeable that does not wait. One that does wait is
-    /// finished on the ambient Tokio runtime; without one it cannot be driven,
-    /// and that is logged under `name`.
+    /// completes it for any closeable that does not wait. One that does wait
+    /// (an asynchronous C serde whose `close` reports later, maybe from the
+    /// very thread that called the constructor) cannot be waited for here, so
+    /// it is finished on a task of its own, on a thread with its own
+    /// runtime: not on the ambient runtime, which may be the failed client's
+    /// own and dropped with it, cancelling the close before the value serde's
+    /// `close` was even called. A close that never completes keeps that thread
+    /// parked.
     pub(crate) fn close_quietly_from_sync(
         close: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         name: &str,
@@ -149,13 +154,13 @@ impl Utils {
         if close.as_mut().now_or_never().is_some() {
             return;
         }
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(close);
-            },
-            Err(_) => {
-                log::error!("Failed to close {name}: the close is pending and no Tokio runtime can finish it")
-            },
+        let closed = name.to_string();
+        let finish = move || match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime.block_on(close),
+            Err(error) => log::error!("Failed to close {closed}: no runtime can finish the pending close: {error}"),
+        };
+        if let Err(error) = std::thread::Builder::new().name(format!("{name} close")).spawn(finish) {
+            log::error!("Failed to close {name}: the close is pending and no task can finish it: {error}");
         }
     }
 }
@@ -180,6 +185,64 @@ mod tests {
         // ... and not U+00A0 / U+3000, which Rust's `trim` would strip.
         assert!(!Utils::is_blank(Some("\u{a0}")));
         assert!(!Utils::is_blank(Some("\u{3000}")));
+    }
+
+    /// A close that is done at its first poll runs on the calling thread.
+    #[test]
+    fn close_quietly_from_sync_completes_a_ready_close_inline() {
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&closed);
+        Utils::close_quietly_from_sync(
+            Box::pin(async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) }),
+            "test",
+        );
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A close still pending at its first poll is finished on a task of its
+    /// own after the call returned, whether or not a runtime is ambient, and
+    /// whether or not the ambient one outlives the call.
+    #[test]
+    fn close_quietly_from_sync_finishes_a_pending_close_on_its_own_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        {
+            let _enter = runtime.enter();
+            let done_tx = done_tx.clone();
+            Utils::close_quietly_from_sync(
+                Box::pin(async move {
+                    release_rx.await.unwrap();
+                    // A timer works: the task has a runtime of its own.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    done_tx.send("with a runtime").unwrap();
+                }),
+                "test",
+            );
+        }
+        // The ambient runtime goes away, as a failed FFI client's does.
+        drop(runtime);
+        assert!(done_rx.try_recv().is_err(), "the close is still pending");
+        release_tx.send(()).unwrap();
+        assert_eq!(Ok("with a runtime"), done_rx.recv_timeout(std::time::Duration::from_secs(10)));
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        Utils::close_quietly_from_sync(
+            Box::pin(async move {
+                release_rx.await.unwrap();
+                done_tx.send("without a runtime").unwrap();
+            }),
+            "test",
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            Ok("without a runtime"),
+            done_rx.recv_timeout(std::time::Duration::from_secs(10))
+        );
     }
 
     #[test]

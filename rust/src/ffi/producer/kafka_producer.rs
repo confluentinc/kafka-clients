@@ -204,7 +204,11 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 
 /// `new KafkaProducer(ProducerConfig, Serializer<K>, Serializer<V>)`: the
 /// configuration stays the caller's; the producer is delivered owned, freed
-/// with [`kafka_producer_KafkaProducer_destroy`].
+/// with [`kafka_producer_KafkaProducer_destroy`]. A constructor that fails
+/// after taking the serializers closes them, as Java's does
+/// (`KafkaProducer.java:519-523`), and returns without waiting for a C
+/// serializer's `close` to report: that report may arrive after this
+/// returned, on the handle, which stays valid for it.
 ///
 /// # Safety
 ///

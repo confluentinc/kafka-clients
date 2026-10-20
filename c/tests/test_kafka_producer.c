@@ -154,7 +154,6 @@ void test_config_invalid_value(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(config);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_CONFIG, kafka_common_Error__enum(err));
-    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
     const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
@@ -221,6 +220,7 @@ void test_close_with_negative_timeout_is_rejected(void) {
     kafka_producer_Producer_close_with_timeout(view, -1, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(err));
     kafka_common_Error_destroy(err);
 
     callback_pump_t pump;
@@ -275,6 +275,70 @@ void test_create_with_string_serializers(void) {
     close_and_destroy(producer);
     kafka_common_serialization_StringSerializer_destroy(key_ser);
     kafka_common_serialization_StringSerializer_destroy(value_ser);
+}
+
+/* A C serializer whose `close` keeps its `callback_id` and returns without
+ * reporting, so the test reports it after the constructor returned. */
+typedef struct {
+    kafka_common_serialization_Serializer_t *handle;
+    atomic_int close_calls;
+    atomic_llong close_id;
+} late_close_serializer_t;
+
+static void late_close_serialize(void *self, const char *topic, const void *data, int64_t callback_id) {
+    (void)topic;
+    (void)data;
+    late_close_serializer_t *imp = self;
+    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+}
+
+static void late_close_close(void *self, int64_t callback_id) {
+    late_close_serializer_t *imp = self;
+    atomic_store(&imp->close_id, callback_id);
+    atomic_fetch_add(&imp->close_calls, 1);
+}
+
+/* A constructor that fails after taking the serializers closes them, as
+ * Java's does (`KafkaProducer.java:519-523`), without waiting for a C `close`
+ * to report: the report arrives after the constructor returned, on the
+ * consumed handle, which stays valid for it (run under valgrind: no read of
+ * freed memory, no leak). */
+void test_failed_create_keeps_a_closing_serializer_until_it_reports(void) {
+    static const char *const BAD_DELIVERY_TIMEOUT[] = { "bootstrap.servers", "localhost:9092",
+                                                        "delivery.timeout.ms", "1", NULL };
+    kafka_producer_ProducerConfig_t *config = make_config(BAD_DELIVERY_TIMEOUT);
+    late_close_serializer_t key = {0};
+    late_close_serializer_t value = {0};
+    key.handle = kafka_common_serialization_Serializer_new_async(&key, late_close_serialize, NULL, NULL,
+                                                                 late_close_close);
+    value.handle = kafka_common_serialization_Serializer_new_async(&value, late_close_serialize, NULL, NULL,
+                                                                   late_close_close);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_KafkaProducer_t *producer = kafka_producer_KafkaProducer_new(config, key.handle, value.handle, &err);
+    kafka_producer_ProducerConfig_destroy(config);
+    TEST_ASSERT_NULL(producer);
+    TEST_ASSERT_NOT_NULL(err);
+    /* Java's `KafkaException("Failed to construct kafka producer", t)` around
+     * the `ConfigException` (`KafkaProducer.java:522`). */
+    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
+    const kafka_common_Error_t *cause = kafka_common_Error_source(err);
+    TEST_ASSERT_NOT_NULL(cause);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(cause));
+    TEST_ASSERT_EQUAL_STRING("delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms",
+                             kafka_common_Error_message(cause));
+    kafka_common_Error_destroy(err);
+
+    /* The key's `close` was called inside the constructor; the value's comes
+     * after the key's reports, as Java closes them one after the other. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&key.close_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&value.close_calls));
+    nanosleep(&(struct timespec){ 0, 50 * 1000000L }, NULL); /* the constructor's runtime is gone by now */
+    kafka_common_serialization_Serializer__set_callback_result(key.handle, atomic_load(&key.close_id), NULL, NULL);
+    for (int i = 0; i < 1000 && atomic_load(&value.close_calls) == 0; i++) {
+        nanosleep(&(struct timespec){ 0, 10 * 1000000L }, NULL);
+    }
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&value.close_calls));
+    kafka_common_serialization_Serializer__set_callback_result(value.handle, atomic_load(&value.close_id), NULL, NULL);
 }
 
 void test_create_multiple_config(void) {
@@ -894,6 +958,7 @@ int main(void) {
     RUN_TEST(test_create_destroy_without_close);
     RUN_TEST(test_destroy_null);
     RUN_TEST(test_create_with_string_serializers);
+    RUN_TEST(test_failed_create_keeps_a_closing_serializer_until_it_reports);
     RUN_TEST(test_create_multiple_config);
     RUN_TEST(test_close_with_negative_timeout_is_rejected);
 

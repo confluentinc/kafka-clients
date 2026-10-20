@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
 
@@ -248,13 +248,14 @@ pub(crate) struct DeserializerInner {
 impl DeserializerInner {
     /// A handle the C caller owns.
     fn owned(imp: FfiDeserializer, results: Option<Arc<Results>>) -> *mut kafka_common_serialization_Deserializer_t {
-        Arc::into_raw(Arc::new(Self {
-            imp: Arc::new(tokio::sync::Mutex::new(imp)),
-            owned: true,
-            results,
-        }))
-        .cast_mut()
-        .cast()
+        let inner = Arc::new(Self { imp: Arc::new(tokio::sync::Mutex::new(imp)), owned: true, results });
+        if let Some(results) = &inner.results {
+            // A call whose future is dropped before C reports keeps the handle alive until the
+            // report (`CallbackResults::set_owner`).
+            let owner: Weak<Self> = Arc::downgrade(&inner);
+            results.set_owner(owner);
+        }
+        Arc::into_raw(inner).cast_mut().cast()
     }
 
     /// The view a class handle caches.
@@ -551,9 +552,13 @@ static EMPTY_HEADERS: std::sync::LazyLock<RecordHeaders> = std::sync::LazyLock::
 /// handle with the `callback_id` it was given, from any thread, during the
 /// call or later; the pointers it was given stay valid until it reports. The
 /// handle stays valid for that report until it is destroyed with
-/// [`kafka_common_serialization_Deserializer_destroy`] or, once a client
-/// consumed it, until that client is destroyed: every call must report
-/// before then. The caller owns `self_` and keeps it alive until every call
+/// [`kafka_common_serialization_Deserializer_destroy`], which every call made
+/// through its own invokers must report before. Once a client consumed it, it
+/// stays valid for the report of every call the client started, also when the
+/// client is destroyed, or its constructor fails, before the call reports: a
+/// failed constructor closes the deserializers it was given, and that `close`
+/// may report after the constructor returned. A call that never reports then
+/// leaks the handle. The caller owns `self_` and keeps it alive until every call
 /// made through the handle has reported. A consumer makes one call at a time,
 /// under the handle's lock, and awaits the report without holding a thread;
 /// the `_cb` twins do not take part in that lock, so the C caller is
@@ -610,14 +615,18 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer__is_async(
 /// `deserialize*` call, `NULL` for `configure` / `close`); on failure
 /// `error` is an owned error, taken over, and `result` is ignored. Callable
 /// from any thread, during the call or later, even after a client consumed
-/// the handle (until that client is destroyed). A report for an unknown id,
-/// or a second one for the same id, is ignored and its error freed; so is any
-/// report on a built-in class's view.
+/// the handle: the handle stays valid for the report of every call a client
+/// started, also once that client was destroyed or its constructor failed (a
+/// failed constructor's `close` of the deserializers may report after it
+/// returned). A report for an unknown id, or a second one for the same id,
+/// is ignored and its error freed; so is any report on a built-in class's
+/// view.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid deserializer handle, or one a live client
-/// consumed, and `error` null or an owned error.
+/// `self_` must be a valid deserializer handle, one a live client consumed, or one
+/// whose call `callback_id`, started by a client, has not reported yet,
+/// and `error` null or an owned error.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer__set_callback_result(
@@ -630,10 +639,16 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer__set_callback_r
     // requires; it is consumed here.
     let error = unsafe { take_error(error) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, kept alive by
-    // its owner or by the client holding its `Arc`, as `deserializer_ref` requires.
-    if let Some(results) = &unsafe { deserializer_ref(self_) }.results {
-        results.complete(callback_id, result, error);
-    }
+    // its owner, by the client holding its `Arc`, or by the registry slot of the pending call
+    // `callback_id` whose future was dropped (`CallbackResults::set_owner`), as `deserializer_ref`
+    // requires.
+    let kept = match &unsafe { deserializer_ref(self_) }.results {
+        Some(results) => results.complete_owned(callback_id, result, error).1,
+        None => None,
+    };
+    // After the last use of the handle: `kept` may be its last reference, kept since the call's
+    // future was dropped.
+    drop(kept);
 }
 
 /// Returns a deserialized value, or stores the owned error in `*out_err`.
@@ -1285,6 +1300,55 @@ mod tests {
         fn handle(&self) -> *const kafka_common_serialization_Deserializer_t {
             self.handle.load(std::sync::atomic::Ordering::SeqCst)
         }
+    }
+
+    /// A `close` whose future is dropped before C reports, with the client
+    /// that consumed the handle: the handle stays valid for the later report,
+    /// which frees it, as a failed consumer constructor needs (its runtime
+    /// drops the pending close).
+    #[test]
+    fn a_dropped_close_keeps_the_consumed_handle_until_it_reports() {
+        #[derive(Default)]
+        struct PendingClose {
+            ids: Mutex<Vec<i64>>,
+        }
+        unsafe extern "C" fn unused(_: *mut c_void, _: *const c_char, _: kafka_Bytes_t, _: i64) {
+            unreachable!("deserialize is not called");
+        }
+        unsafe extern "C" fn pending_close(self_: *mut c_void, id: i64) {
+            // SAFETY: Test code: `self_` is the `&PendingClose` registered below, which outlives
+            // the handle.
+            unsafe { &*(self_ as *const PendingClose) }.ids.lock().unwrap().push(id);
+        }
+        let imp = PendingClose::default();
+        let handle = kafka_common_serialization_Deserializer_new_async(
+            &imp as *const PendingClose as *mut c_void,
+            unused,
+            None,
+            None,
+            None,
+            Some(pending_close),
+        );
+        // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after but
+        // for the report below.
+        let deserializer = unsafe { take_deserializer(handle) };
+        let alive = Arc::downgrade(&deserializer);
+        let mut close = Box::pin(async move { Deserializer::close(&mut *deserializer.imp().lock().await).await });
+        assert!(
+            std::pin::pin!(close.as_mut())
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending(),
+            "the close waits for its report"
+        );
+        drop(close);
+        assert!(alive.upgrade().is_some(), "the pending close keeps the handle");
+        let id = imp.ids.lock().unwrap()[0];
+        // SAFETY: Test code: the handle is kept alive by the pending close `id`; a `NULL` result is
+        // the success of a `void` method.
+        unsafe {
+            kafka_common_serialization_Deserializer__set_callback_result(handle, id, ptr::null_mut(), ptr::null_mut())
+        };
+        assert!(alive.upgrade().is_none(), "the report released the handle");
     }
 
     fn async_upper<'a>(self_: *mut c_void) -> &'a AsyncUpper {

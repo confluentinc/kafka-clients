@@ -48,7 +48,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use futures_util::FutureExt;
 
@@ -89,8 +89,9 @@ pub struct kafka_common_serialization_Serializer_t {
 /// small enough to be stored inline by `DynSerializer`.
 pub(crate) enum FfiSerializer {
     /// A C implementation registered with
-    /// [`kafka_common_serialization_Serializer_new_async`].
-    C(CSerializer),
+    /// [`kafka_common_serialization_Serializer_new_async`], boxed: it is far
+    /// larger than the built-ins, which carry no state.
+    C(Box<CSerializer>),
     /// `kafka_common_serialization_StringSerializer_t`.
     String(GenericStringSerializer),
     /// `kafka_common_serialization_ByteArraySerializer_t`.
@@ -245,9 +246,14 @@ pub(crate) struct SerializerInner {
 impl SerializerInner {
     /// A handle the C caller owns.
     pub(crate) fn owned(imp: Arc<FfiSerializer>) -> *mut kafka_common_serialization_Serializer_t {
-        Arc::into_raw(Arc::new(Self { imp, owned: true, output: Mutex::new(None) }))
-            .cast_mut()
-            .cast()
+        let inner = Arc::new(Self { imp, owned: true, output: Mutex::new(None) });
+        if let FfiSerializer::C(c) = &*inner.imp {
+            // A call whose future is dropped before C reports keeps the handle alive until the
+            // report (`CallbackResults::set_owner`).
+            let owner: Weak<Self> = Arc::downgrade(&inner);
+            c.results.set_owner(owner);
+        }
+        Arc::into_raw(inner).cast_mut().cast()
     }
 
     /// The view a class handle caches.
@@ -541,9 +547,13 @@ impl Serializer<GenericValue> for CSerializer {
 /// handle with the `callback_id` it was given, from any thread, during the
 /// call or later; the pointers it was given, the caller's `data` included,
 /// stay valid until it reports. The handle stays valid for that report until
-/// it is destroyed with [`kafka_common_serialization_Serializer_destroy`] or,
-/// once a client consumed it, until that client is destroyed: every call must
-/// report before then. The caller owns `self_` and keeps it alive until every
+/// it is destroyed with [`kafka_common_serialization_Serializer_destroy`], which
+/// every call made through its own invokers must report before. Once a client
+/// consumed it, it stays valid for the report of every call the client
+/// started, also when the client is destroyed, or its constructor fails,
+/// before the call reports: a failed constructor closes the serializers it
+/// was given, and that `close` may report after the constructor returned. A
+/// call that never reports then leaks the handle. The caller owns `self_` and keeps it alive until every
 /// call made through the handle has reported. The functions may be called
 /// from any thread, concurrently, so the C caller is responsible for their
 /// thread-safety on `self_`. A producer's `send_cb` never calls them, or
@@ -559,14 +569,14 @@ pub extern "C" fn kafka_common_serialization_Serializer_new_async(
     configure: kafka_common_serialization_Serializer_configure_async_fn_t,
     close: kafka_common_serialization_Serializer_close_async_fn_t,
 ) -> *mut kafka_common_serialization_Serializer_t {
-    SerializerInner::owned(Arc::new(FfiSerializer::C(CSerializer {
+    SerializerInner::owned(Arc::new(FfiSerializer::C(Box::new(CSerializer {
         self_,
         serialize,
         serialize_with_headers,
         configure,
         close,
         results: Results::with_keep_alive(),
-    })))
+    }))))
 }
 
 /// Whether the handle stands for an asynchronous implementation, one that
@@ -594,13 +604,17 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer__is_async(
 /// (`NULL`, or a `data == NULL` array, for Java's `null` array), whose bytes
 /// are copied before this returns, or `NULL` for `configure` / `close`; on failure `error` is an owned error, taken over, and
 /// `result` is ignored. Callable from any thread, during the call or later,
-/// even after a client consumed the handle (until that client is destroyed).
-/// A report for an unknown id, or a second one for the same id, is ignored
-/// and its error freed; so is any report on a built-in class's view.
+/// even after a client consumed the handle: the handle stays valid for the
+/// report of every call a client started, also once that client was destroyed
+/// or its constructor failed (a failed constructor's `close` of the
+/// serializers may report after it returned). A report for an unknown id, or
+/// a second one for the same id, is ignored and its error freed; so is any
+/// report on a built-in class's view.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid serializer handle, or one a live client consumed,
+/// `self_` must be a valid serializer handle, one a live client consumed, or one
+/// whose call `callback_id`, started by a client, has not reported yet,
 /// `result` null or a valid `kafka_Bytes_t`, and `error` null or an owned
 /// error.
 #[ffi_guard]
@@ -615,11 +629,16 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer__set_callback_res
     // requires; it is consumed here.
     let error = unsafe { take_error(error) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, kept alive by
-    // its owner or by the client holding its `Arc`, as `serializer_ref` requires.
-    let serializer = unsafe { serializer_ref(self_) };
-    if let FfiSerializer::C(c) = serializer.get() {
-        c.results.complete(callback_id, result, error);
-    }
+    // its owner, by the client holding its `Arc`, or by the registry slot of the pending call
+    // `callback_id` whose future was dropped (`CallbackResults::set_owner`), as `serializer_ref`
+    // requires.
+    let kept = match unsafe { serializer_ref(self_) }.get() {
+        FfiSerializer::C(c) => c.results.complete_owned(callback_id, result, error).1,
+        _ => None,
+    };
+    // After the last use of the handle: `kept` may be its last reference, kept since the call's
+    // future was dropped.
+    drop(kept);
 }
 
 /// Runs a serialize method on the implementation behind `self_` and returns
@@ -1091,14 +1110,14 @@ mod tests {
 
     #[test]
     fn owned_handles_are_consumed_and_views_are_shared() {
-        let imp = Arc::new(FfiSerializer::C(CSerializer {
+        let imp = Arc::new(FfiSerializer::C(Box::new(CSerializer {
             self_: ptr::null_mut(),
             serialize: async_serialize,
             serialize_with_headers: None,
             configure: None,
             close: None,
             results: Results::with_keep_alive(),
-        }));
+        })));
         let owned = SerializerInner::owned(Arc::clone(&imp));
         assert_eq!(Arc::strong_count(&imp), 2);
         // SAFETY: Test code: `owned` comes from `SerializerInner::owned` and is consumed once, by
@@ -1572,6 +1591,49 @@ mod tests {
         assert_eq!(*imp.calls.lock().unwrap(), ["with_headers k=true", "topic kept"]);
         // SAFETY: Test code: every call reported; the handle is destroyed once.
         unsafe { kafka_common_serialization_Serializer_destroy(handle.get().cast()) };
+    }
+
+    /// A `close` whose future is dropped before C reports, with the client
+    /// that consumed the handle (here the producer's `ArcSerializer`): the
+    /// handle stays valid for the later report, which frees it, as a failed
+    /// producer constructor needs (its runtime drops the pending close).
+    #[test]
+    fn a_dropped_close_keeps_the_consumed_handle_until_it_reports() {
+        #[derive(Default)]
+        struct PendingClose {
+            ids: Mutex<Vec<i64>>,
+        }
+        unsafe extern "C" fn unused(_: *mut c_void, _: *const c_char, _: *const c_void, _: i64) {
+            unreachable!("serialize is not called");
+        }
+        unsafe extern "C" fn pending_close(self_: *mut c_void, id: i64) {
+            // SAFETY: Test code: `self_` is the `&PendingClose` registered below, which outlives
+            // the handle.
+            unsafe { &*(self_ as *const PendingClose) }.ids.lock().unwrap().push(id);
+        }
+        let imp = PendingClose::default();
+        let handle = kafka_common_serialization_Serializer_new_async(
+            &imp as *const PendingClose as *mut c_void,
+            unused,
+            None,
+            None,
+            Some(pending_close),
+        );
+        // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after but
+        // for the report below.
+        let serializer = crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle) });
+        let alive = Arc::downgrade(&serializer.0);
+        let mut close = Box::pin(async move { Serializer::close(&serializer).await });
+        assert!(poll_once(close.as_mut()).is_pending(), "the close waits for its report");
+        drop(close);
+        assert!(alive.upgrade().is_some(), "the pending close keeps the handle");
+        let id = imp.ids.lock().unwrap()[0];
+        // SAFETY: Test code: the handle is kept alive by the pending close `id`; a `NULL` result is
+        // the success of a `void` method.
+        unsafe {
+            kafka_common_serialization_Serializer__set_callback_result(handle, id, ptr::null_mut(), ptr::null_mut())
+        };
+        assert!(alive.upgrade().is_none(), "the report released the handle");
     }
 
     /// An asynchronous C serializer recording its `configure` and `close`
