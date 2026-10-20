@@ -1970,11 +1970,15 @@ fn py_base(g: &Graph, info: &ClassInfo) -> String {
         // `TimeoutException` subclasses `builtins.TimeoutError`, and
         // `IllegalArgumentException` `ValueError` and `RuntimeError`, in that order:
         // Python's class for a bad argument value, and Java's `RuntimeException` chain
-        // (CLAUDE.md, Types).
+        // (CLAUDE.md, Types); `UnsupportedOperationException` subclasses
+        // `NotImplementedError`.
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
         } else if info.java_fqn == "java.lang.IllegalArgumentException" {
             "ValueError, RuntimeError".into()
+        } else if info.java_fqn == "java.lang.UnsupportedOperationException" {
+            // `NotImplementedError` subclasses `RuntimeError`, so Java's chain is kept.
+            "NotImplementedError".into()
         } else if info.parent_fqn == "java.lang.Exception" {
             "Exception".into()
         } else {
@@ -3341,7 +3345,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
         assert_eq!(base("java.lang.IllegalArgumentException"), "ValueError, RuntimeError");
-        assert_eq!(base("java.lang.UnsupportedOperationException"), "RuntimeError");
+        assert_eq!(base("java.lang.UnsupportedOperationException"), "NotImplementedError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"

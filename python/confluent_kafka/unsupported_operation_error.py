@@ -29,7 +29,7 @@ from confluent_kafka._args import MISSING
 __all__ = ["UnsupportedOperationError"]
 
 
-class UnsupportedOperationError(RuntimeError):
+class UnsupportedOperationError(NotImplementedError):
     """Java's built-in ``java.lang.UnsupportedOperationException``."""
 
     __module__ = "confluent_kafka"

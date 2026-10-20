@@ -329,7 +329,7 @@ The Python client, package `confluent_kafka` in `python/`, is built only on the 
   | a Kafka exception class | its `…Error` class; `KafkaError` subclasses `RuntimeError`, as `KafkaException` extends `RuntimeException` |
   | a Java built-in exception the translated code throws (`IllegalStateException`, `IllegalArgumentException`, `ConcurrentModificationException`, `TimeoutException`, `NoSuchElementException`, `ExecutionException`, `UnsupportedOperationException`) | a root class of Java's name with `Error`, subclassing `RuntimeError` for a Java unchecked exception and `Exception` for a checked one, unless a row below names a Python built-in (`TimeoutError` subclasses `builtins.TimeoutError`, `ExecutionError` subclasses `Exception`) |
   | `IllegalArgumentException` | a root `IllegalArgumentError` subclassing `ValueError` and `RuntimeError`, in that order: Python's class for a bad argument value, and Java's `RuntimeException` chain. `except ValueError` and `except RuntimeError` both catch it. |
-  | `UnsupportedOperationException` | a root `UnsupportedOperationError` subclassing `RuntimeError`, like the other Java built-ins |
+  | `UnsupportedOperationException` | a root `UnsupportedOperationError` subclassing `NotImplementedError`: Python's class for an operation an object does not provide, which already subclasses `RuntimeError`, so Java's `RuntimeException` chain is kept and `except RuntimeError` still catches it. |
   | `java.util.concurrent.TimeUnit` | merged with the `long` it qualifies into one `Duration`, in seconds (`get(long timeout, TimeUnit unit)` -> `get(*, timeout)`) |
   | `InterruptedException` | `KeyboardInterrupt` |
   | `java.util.concurrent.CancellationException` | the inner future's `CancelledError` (Futures) |

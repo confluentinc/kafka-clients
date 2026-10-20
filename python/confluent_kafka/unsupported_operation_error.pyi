@@ -18,7 +18,7 @@ from typing import Any, overload
 
 __all__ = ["UnsupportedOperationError"]
 
-class UnsupportedOperationError(RuntimeError):
+class UnsupportedOperationError(NotImplementedError):
     @overload
     def __init__(self) -> None: ...
     @overload

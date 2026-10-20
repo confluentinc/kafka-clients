@@ -144,7 +144,7 @@ _JDK: dict[str, tuple[type[BaseException], ...]] = {
     "java.util.concurrent.TimeoutException": (builtins.TimeoutError,),
     "java.util.concurrent.ExecutionException": (Exception,),
     "java.util.NoSuchElementException": (RuntimeError,),
-    "java.lang.UnsupportedOperationException": (RuntimeError,),
+    "java.lang.UnsupportedOperationException": (NotImplementedError,),
 }
 
 _BY_JAVA: dict[str, type[BaseException]] = {
@@ -901,3 +901,22 @@ def test_illegal_argument_error_is_a_value_error_and_a_runtime_error() -> None:
         assert str(rebuilt) == "bad"
         assert isinstance(rebuilt, ValueError) and isinstance(rebuilt, RuntimeError)
         assert type(rebuilt.__cause__) is ValueError
+
+
+def test_unsupported_operation_error_is_a_not_implemented_error() -> None:
+    # Owner ruling 8 (2026-10-20): Python's class for an operation an object
+    # does not provide; NotImplementedError subclasses RuntimeError, so Java's
+    # RuntimeException chain is kept.
+    assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert issubclass(UnsupportedOperationError, RuntimeError)
+    assert not issubclass(UnsupportedOperationError, KafkaError)
+    for caught in (NotImplementedError, RuntimeError):
+        try:
+            raise UnsupportedOperationError(message="Not implemented yet.")
+        except caught as e:  # noqa: PERF203
+            assert str(e) == "Not implemented yet."
+    original = UnsupportedOperationError(message="Not implemented yet.")
+    for rebuilt in (pickle.loads(pickle.dumps(original)), copy.copy(original),
+                    copy.deepcopy(original)):
+        assert type(rebuilt) is UnsupportedOperationError
+        assert str(rebuilt) == "Not implemented yet."
