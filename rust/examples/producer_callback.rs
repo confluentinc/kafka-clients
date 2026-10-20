@@ -24,6 +24,7 @@ use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::callback;
 
 use uuid::Uuid;
 
@@ -77,11 +78,11 @@ async fn produce_records(
     Ok(())
 }
 
-fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Callback {
+fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Box<dyn Callback> {
     // Per the `Callback` contract, on failure `metadata` is still `Some` but holds a
     // sentinel `-1` offset (and `-1` partition if none could be resolved), so `error`
     // must be checked first to tell success from failure.
-    Box::new(move |metadata, error| match error {
+    Box::new(callback::new(move |metadata, error| match error {
         Some(error) => {
             eprintln!("Failed to deliver record {index}: {error}");
             first_delivery_error.lock().unwrap().get_or_insert_with(|| error.clone());
@@ -95,7 +96,7 @@ fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>
             ),
             None => eprintln!("Record {index} completed with neither metadata nor error"),
         },
-    })
+    }))
 }
 
 fn bootstrap_servers() -> String {

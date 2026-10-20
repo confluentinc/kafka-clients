@@ -46,7 +46,7 @@ use crate::ffi::common::metrics::metric_config::{
     box_metric_config, kafka_common_metrics_MetricConfig_t, metric_config_arc, metric_config_option,
 };
 use crate::ffi::common::metrics::metric_value_provider::{
-    kafka_common_metrics_MetricValueProvider_t, metric_value_provider_of,
+    kafka_common_metrics_MetricValueProvider_t, take_metric_value_provider,
 };
 use crate::ffi::common::metrics::metrics_reporter::{kafka_common_metrics_MetricsReporter_t, take_metrics_reporter};
 use crate::ffi::common::metrics::sensor::{
@@ -669,19 +669,22 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_measurable
 }
 
 /// `addMetric(MetricName metricName, MetricValueProvider<?> metricValueProvider)`:
-/// the provider is shared with the metric.
+/// `metric_name` is copied, `metric_value_provider` is consumed (an owned
+/// handle is freed, the view of a stat class is shared), whatever the
+/// outcome.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, `metric_name` a valid metric-name
-/// handle and `metric_value_provider` a valid provider handle. `out_err` must
-/// be a valid slot pointing at null.
+/// handle and `metric_value_provider` a valid provider handle, not used again
+/// by the caller when it was owned. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_metric_value_provider(
     self_: *const kafka_common_metrics_Metrics_t,
     metric_name: *const kafka_common_MetricName_t,
-    metric_value_provider: *const kafka_common_metrics_MetricValueProvider_t,
+    metric_value_provider: *mut kafka_common_metrics_MetricValueProvider_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
@@ -689,11 +692,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_metric_val
     match unsafe { metrics_ref(self_) }
         // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
         // `metric_name_ref` requires, and `metric_value_provider` a valid metric-value-provider
-        // handle, as `metric_value_provider_of` requires; the name is cloned and the provider
-        // returned is a fresh value sharing the implementation, so nothing borrows either handle
-        // after this call.
+        // handle not used again when owned, as `take_metric_value_provider` requires; the name is
+        // cloned, so nothing borrows either handle after this call.
         .add_metric_with_metric_value_provider(unsafe { metric_name_ref(metric_name) }.clone(), unsafe {
-            metric_value_provider_of(metric_value_provider)
+            take_metric_value_provider(metric_value_provider)
         }) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -715,7 +717,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_config_met
     self_: *const kafka_common_metrics_Metrics_t,
     metric_name: *const kafka_common_MetricName_t,
     config: *const kafka_common_metrics_MetricConfig_t,
-    provider: *const kafka_common_metrics_MetricValueProvider_t,
+    provider: *mut kafka_common_metrics_MetricValueProvider_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
@@ -730,9 +732,8 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_config_met
         // handle after this call.
         unsafe { metric_config_option(config) },
         // SAFETY: Per this function's `# Safety`, `provider` is a valid metric-value-provider
-        // handle, as `metric_value_provider_of` requires; it returns a fresh value sharing the
-        // implementation, so nothing borrows the handle after this call.
-        unsafe { metric_value_provider_of(provider) },
+        // handle not used again when owned, as `take_metric_value_provider` requires.
+        unsafe { take_metric_value_provider(provider) },
     ) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -754,7 +755,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_if_absent(
     self_: *const kafka_common_metrics_Metrics_t,
     metric_name: *const kafka_common_MetricName_t,
     config: *const kafka_common_metrics_MetricConfig_t,
-    provider: *const kafka_common_metrics_MetricValueProvider_t,
+    provider: *mut kafka_common_metrics_MetricValueProvider_t,
 ) -> *mut kafka_common_metrics_KafkaMetric_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call. The metric returned is an owned `Arc`.
@@ -768,9 +769,8 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_if_absent(
         // handle after this call.
         unsafe { metric_config_option(config) },
         // SAFETY: Per this function's `# Safety`, `provider` is a valid metric-value-provider
-        // handle, as `metric_value_provider_of` requires; it returns a fresh value sharing the
-        // implementation, so nothing borrows the handle after this call.
-        unsafe { metric_value_provider_of(provider) },
+        // handle not used again when owned, as `take_metric_value_provider` requires.
+        unsafe { take_metric_value_provider(provider) },
     ))
 }
 
@@ -1250,16 +1250,13 @@ mod tests {
         kafka_common_metrics_MetricConfig_destroy, kafka_common_metrics_MetricConfig_new,
         kafka_common_metrics_MetricConfig_samples, kafka_common_metrics_MetricConfig_set_samples,
     };
-    use crate::ffi::common::metrics::metric_value_provider::{
-        kafka_common_metrics_MetricValueProvider_destroy, kafka_common_metrics_MetricValueProvider_measurable,
-    };
     use crate::ffi::common::metrics::sensor::{
         kafka_common_metrics_Sensor_RecordingLevel_debug, kafka_common_metrics_Sensor_destroy,
         kafka_common_metrics_Sensor_name, kafka_common_metrics_Sensor_should_record, sensor_ref,
     };
     use crate::ffi::common::metrics::stats::avg::{
-        kafka_common_metrics_stats_Avg__as_Measurable, kafka_common_metrics_stats_Avg_destroy,
-        kafka_common_metrics_stats_Avg_new,
+        kafka_common_metrics_stats_Avg__as_Measurable, kafka_common_metrics_stats_Avg__as_MetricValueProvider,
+        kafka_common_metrics_stats_Avg_destroy, kafka_common_metrics_stats_Avg_new,
     };
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_argument_error;
@@ -1510,9 +1507,9 @@ mod tests {
             kafka_common_metrics_MetricConfig_destroy(shared);
 
             let metric_name = kafka_common_metrics_Metrics_metric_name(registry, name.as_ptr(), group.as_ptr());
-            let provider = kafka_common_metrics_MetricValueProvider_measurable(
-                kafka_common_metrics_stats_Avg__as_Measurable(kafka_common_metrics_stats_Avg_new()) as *mut _,
-            );
+            let avg = kafka_common_metrics_stats_Avg_new();
+            // A stat class's view is shared, not consumed, by each `*mut` parameter.
+            let provider = kafka_common_metrics_stats_Avg__as_MetricValueProvider(avg) as *mut _;
             let mut err = ptr::null_mut();
             kafka_common_metrics_Metrics_add_metric_with_metric_value_provider(
                 registry,
@@ -1537,7 +1534,7 @@ mod tests {
             assert!(Arc::ptr_eq(kafka_metric_ref(existing), kafka_metric_ref(registered)));
             kafka_common_metrics_KafkaMetric_destroy(existing);
             kafka_common_metrics_KafkaMetric_destroy(registered);
-            kafka_common_metrics_MetricValueProvider_destroy(provider);
+            kafka_common_metrics_stats_Avg_destroy(avg);
             kafka_common_MetricName_destroy(metric_name);
 
             // Templates: tags must match the template's tag names.

@@ -79,6 +79,7 @@ use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::callback;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -879,7 +880,7 @@ async fn producer_perf_test() {
         let start_time = Instant::now();
         let metrics_cb = Arc::clone(&metrics);
         let latency_hist_cb = Arc::clone(&latency_hist);
-        let callback: Callback = Box::new(move |md, _err| {
+        let callback: Box<dyn Callback> = Box::new(callback::new(move |md, _err| {
             // On success `md` is Some; on failure it is None (err is Some) and no
             // latency is recorded, matching the completion task's Ok-only path.
             if md.is_some() {
@@ -888,7 +889,7 @@ async fn producer_perf_test() {
                 let ms = (latency_us / 1000) as usize;
                 latency_hist_cb[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
             }
-        });
+        }));
         match producer.send(record, Some(callback)).await {
             Ok(produce_call) => {
                 messages_sent.fetch_add(1, Ordering::Relaxed);

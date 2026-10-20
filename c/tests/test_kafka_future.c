@@ -44,7 +44,7 @@ typedef struct {
     int calls;
 } doubler_t;
 
-static void *double_apply(void *self, void *a, kafka_common_Error_t **out_err) {
+static void *double_apply(void *self, const void *a, kafka_common_Error_t **out_err) {
     (void)out_err;
     doubler_t *doubler = self;
     doubler->calls++;
@@ -54,7 +54,7 @@ static void *double_apply(void *self, void *a, kafka_common_Error_t **out_err) {
 
 // Fails the way every fallible method pointer does: an owned error in
 // *out_err, whose return value is then ignored.
-static void *failing_apply(void *self, void *a, kafka_common_Error_t **out_err) {
+static void *failing_apply(void *self, const void *a, kafka_common_Error_t **out_err) {
     (void)self;
     (void)a;
     *out_err = kafka_common_Error_local_illegal_argument("apply failed");
@@ -146,9 +146,9 @@ static void test_then_apply_runs_the_function_once_and_borrows_its_result(void) 
     doubler_t doubler = {0, 0};
     kafka_common_KafkaFuture_BaseFunction_t *function = kafka_common_KafkaFuture_BaseFunction_new(&doubler, double_apply);
 
+    // `then_apply` consumes the function handle; `self` must outlive the
+    // derived future.
     kafka_common_KafkaFuture_t *derived = kafka_common_KafkaFuture_then_apply(source, function);
-    // The derived future copied the registration; `self` must outlive it.
-    kafka_common_KafkaFuture_BaseFunction_destroy(function);
     TEST_ASSERT_EQUAL_INT(0, doubler.calls);
 
     kafka_common_Error_t *error = NULL;
@@ -172,7 +172,6 @@ static void test_then_apply_runs_the_function_once_and_borrows_its_result(void) 
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_PTR(&value, out);
 
-    kafka_common_KafkaFuture_BaseFunction_destroy(function);
     kafka_common_KafkaFuture_destroy(chained);
     kafka_common_KafkaFuture_destroy(derived);
     kafka_common_KafkaFuture_destroy(source);
@@ -205,8 +204,6 @@ static void test_then_apply_fails_with_the_functions_error_or_the_sources(void) 
     kafka_common_Error_destroy(error);
     TEST_ASSERT_EQUAL_INT(0, doubler.calls);
 
-    kafka_common_KafkaFuture_BaseFunction_destroy(failing);
-    kafka_common_KafkaFuture_BaseFunction_destroy(function);
     kafka_common_KafkaFuture_destroy(derived);
     kafka_common_KafkaFuture_destroy(source);
     kafka_common_KafkaFuture_destroy(from_failed);
@@ -277,7 +274,6 @@ static void test_a_future_without_a_client_starts_no_thread(void) {
     kafka_common_KafkaFuture_t *source = kafka_common_KafkaFuture_completed_future(&value, NULL);
     kafka_common_KafkaFuture_BaseFunction_t *function = kafka_common_KafkaFuture_BaseFunction_new(&doubler, double_apply);
     kafka_common_KafkaFuture_t *derived = kafka_common_KafkaFuture_then_apply(source, function);
-    kafka_common_KafkaFuture_BaseFunction_destroy(function);
     kafka_List_t *futures = kafka_List_new();
     kafka_List_add(futures, source);
     kafka_List_add(futures, derived);

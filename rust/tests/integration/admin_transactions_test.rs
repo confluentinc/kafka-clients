@@ -82,13 +82,13 @@ use std::time::Duration;
 
 use confluent_kafka::admin::{
     AbortTransactionSpec, DescribeClusterOptions, DescribeProducersOptions, DescribeTransactionsOptions,
-    FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, OffsetSpec, TerminateTransactionOptions,
+    FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, TerminateTransactionOptions,
     TransactionListing, TransactionState,
 };
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 
-use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{AdminBackend, OffsetSpecArg, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, txn_single_broker};
 use crate::common::test_context::TestContext;
@@ -233,7 +233,7 @@ async fn produce_one_idempotent_record(ctx: &TestContext, topic: &str) {
 /// appended a control record.
 async fn latest_offset<B: AdminBackend>(admin: &B, tp: &TopicPartition) -> i64 {
     let backend = admin.name();
-    let specs = HashMap::from([(tp.clone(), OffsetSpec::latest())]);
+    let specs = HashMap::from([(tp.clone(), OffsetSpecArg::Latest)]);
     let outcomes = admin
         .list_offsets(&specs, ListOffsetsOptions::new())
         .await

@@ -16,9 +16,12 @@
 
 Every producer's ``send()`` returns a :class:`~confluent_kafka.common.KafkaFuture`
 (an :class:`~confluent_kafka.common.AsyncKafkaFuture` on the asyncio
-producers) over Python state, a ``_KafkaFutureImpl`` the record's completion
-completes once its callback has returned (CLAUDE.md, Python Binding
-Conventions, Futures and Threads and callbacks). The classes here keep Java's
+producers) over Python state the record's completion completes once its
+callback has returned (CLAUDE.md, Python Binding Conventions, Futures and
+Threads and callbacks): a ``_KafkaFutureImpl`` on the sync producers and the
+mocks, the record object itself on the asyncio producer
+(``async_producer._AsyncRecord``, an :class:`AsyncRecordFuture` that is its
+own state). The classes here keep Java's
 ``FutureRecordMetadata.cancel()`` answer: ``False``, cancelling nothing, since
 the record is already on its way. The inner future :meth:`to_completion_stage`
 returns refuses cancellation in the same way, so nothing but the record's
@@ -34,9 +37,9 @@ from confluent_kafka.common.kafka_future import (
     _ERROR,
     AsyncKafkaFuture,
     KafkaFuture,
+    _FutureState,
     _InnerAsyncFuture,
     _InnerFuture,
-    _KafkaFutureImpl,
 )
 
 from .record_metadata import RecordMetadata
@@ -44,7 +47,7 @@ from .record_metadata import RecordMetadata
 __all__ = ["AsyncRecordFuture", "RecordFuture", "complete_record"]
 
 
-def complete_record(future: _KafkaFutureImpl[RecordMetadata], metadata: RecordMetadata,
+def complete_record(future: _FutureState[RecordMetadata], metadata: RecordMetadata,
                     exception: BaseException | None) -> None:
     """Complete a record's future: with ``metadata``, or with ``exception`` as
     an ordinary failure, a ``CancelledError`` included. Java's

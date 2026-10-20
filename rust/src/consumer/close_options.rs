@@ -55,15 +55,6 @@ pub struct CloseOptions {
 }
 
 impl CloseOptions {
-    /// Default timeout (milliseconds) applied when [`CloseOptions::timeout`] is
-    /// not set. In Java this constant lives in `ConsumerUtils`; we expose it here
-    /// for now and a later phase will move it to its canonical location and
-    /// re-export from there.
-    ///
-    /// NOTE: Phase 6 will move this constant to a `ConsumerUtils` translation
-    /// and re-export it here for backwards compatibility.
-    pub const DEFAULT_CLOSE_TIMEOUT_MS: u64 = 30_000;
-
     /// Create a new `CloseOptions` with default values.
     ///
     /// Equivalent to Java's private no-arg constructor.

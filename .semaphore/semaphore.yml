@@ -46,6 +46,11 @@ name: build-test-release
 #      unaffected by the linux_arm64 SIGSEGV in item 2.
 #   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
 #      crate with warnings denied.
+#   6. "Check crate package (Linux amd64)" -- packages the crate as crates.io
+#      publishes it and builds a project depending on it.
+#   7. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
+#      C ABI with the last release tag; a breaking change fails unless the
+#      Cargo.toml version allows it.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -325,6 +330,37 @@ blocks:
         - name: "package-check (Linux amd64)"
           commands:
             - make package-check
+
+  - name: "Check API compatibility (Linux amd64)"
+    # Compares the public surface with the last release tag
+    # (`cargo xtask api-compat`): the Rust API as crates.io publishes it with
+    # cargo-semver-checks, the C ABI of the `ffi` shared library with
+    # libabigail's abidiff. A breaking change fails the job unless the version
+    # in rust/Cargo.toml allows it over the tag's: a major bump, or a minor
+    # bump while the major version is 0. So the job stays red after a breaking
+    # change until the version is bumped (from 0.1.x, to 0.2.0).
+    #
+    # The baseline is the highest vX.Y.Z tag not above the Cargo.toml version;
+    # set API_COMPAT_BASELINE to compare with another tag. `checkout` is a
+    # shallow clone without tags, hence the fetch.
+    dependencies: []
+    execution_time_limit:
+      minutes: 40
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+          - sudo apt install -y abigail-tools
+          # The prebuilt release, pinned by version and checksum.
+          - curl -sSfL -o /tmp/cargo-semver-checks.tar.gz https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
+          - echo "cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65  /tmp/cargo-semver-checks.tar.gz" | sha256sum -c -
+          - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-semver-checks.tar.gz -C "$HOME/.cargo/bin"
+          - export PATH="$HOME/.cargo/bin:$PATH"
+          - git fetch --depth=1 --force origin 'refs/tags/v*:refs/tags/v*'
+      jobs:
+        - name: "api-compat (Linux amd64)"
+          commands:
+            - make check-api-compat
 
 promotions:
   - name: Start translation plan

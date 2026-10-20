@@ -29,6 +29,68 @@ use std::time::Duration;
 
 use crate::common::Error;
 
+/// A function which takes objects of type `A` and returns objects of type `B`.
+///
+/// Java's `KafkaFuture.BaseFunction<A, B>`, a functional interface: every
+/// `Fn(A) -> Result<B, Error> + Send + Sync` closure implements it, so
+/// [`KafkaFuture::then_apply`] takes a closure as Java takes a lambda.
+/// [`BaseFunction_new`] makes one from a function explicitly.
+#[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
+pub trait BaseFunction<A, B>: Send + Sync {
+    /// Applies this function to `a`.
+    ///
+    /// Java's `apply` may throw, failing the future `thenApply` returned; an
+    /// `Err` returned here fails it the same way.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction#apply")]
+    fn apply(&self, a: A) -> Result<B, Error>;
+}
+
+impl<A, B, F> BaseFunction<A, B> for F
+where
+    F: Fn(A) -> Result<B, Error> + Send + Sync,
+{
+    fn apply(&self, a: A) -> Result<B, Error> {
+        self(a)
+    }
+}
+
+/// A [`BaseFunction`] that calls `function`, standing in for a Java lambda
+/// implementing `KafkaFuture.BaseFunction`: `function` is
+/// [`apply`](BaseFunction::apply). A method Java adds later as an overload of
+/// `apply` gets its own factory, `BaseFunction_with_<parameter>`.
+///
+/// `BaseFunction` is nested in `KafkaFuture`, so its factory lives in this
+/// module with the interface's name as a prefix (CLAUDE.md §2). `A` is a
+/// parameter of this function, not of the caller's, so the closure's
+/// parameter type must be written out:
+///
+/// ```
+/// use confluent_kafka::common::kafka_future::{self, BaseFunction};
+///
+/// let len = kafka_future::BaseFunction_new(|s: String| Ok(s.len()));
+/// assert_eq!(len.apply("four".to_string()).unwrap(), 4);
+/// ```
+// stands in for a Java lambda implementing `KafkaFuture.BaseFunction` (CLAUDE.md §3)
+#[doc(alias = "rust-only")]
+#[expect(non_snake_case)]
+pub fn BaseFunction_new<A, B, F>(function: F) -> impl BaseFunction<A, B>
+where
+    F: Fn(A) -> Result<B, Error> + Send + Sync,
+{
+    struct FunctionBaseFunction<F>(F);
+
+    impl<A, B, F> BaseFunction<A, B> for FunctionBaseFunction<F>
+    where
+        F: Fn(A) -> Result<B, Error> + Send + Sync,
+    {
+        fn apply(&self, a: A) -> Result<B, Error> {
+            (self.0)(a)
+        }
+    }
+
+    FunctionBaseFunction(function)
+}
+
 /// Internal trait representing the abstract methods of `KafkaFuture`.
 ///
 /// This is the Rust equivalent of the abstract method set in Java's `KafkaFuture<T>`.
@@ -97,8 +159,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// Returns the error from the underlying operation if it failed.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
-    pub async fn get(&self) -> Result<T, Error> {
-        self.inner.get().await
+    pub fn get(&self) -> impl Future<Output = Result<T, Error>> + Send {
+        async move { self.inner.get().await }
     }
 
     /// Await the result of this future with a timeout.
@@ -117,8 +179,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
     /// the underlying operation if it failed.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
-    pub async fn get_with_timeout(&self, timeout: Duration) -> Result<T, Error> {
-        self.inner.get_with_timeout(timeout).await
+    pub fn get_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<T, Error>> + Send {
+        async move { self.inner.get_with_timeout(timeout).await }
     }
 
     /// Whether this future is complete.
@@ -179,7 +241,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     where
         T: Clone + Sync,
         R: Clone + Send + Sync + 'static,
-        F: Fn(T) -> Result<R, Error> + Send + Sync + 'static,
+        F: BaseFunction<T, R> + 'static,
     {
         KafkaFuture::new(Arc::new(ThenApplyFuture { source: self.clone(), function: Arc::new(function) }))
     }
@@ -275,7 +337,7 @@ where
     R: Clone + Send + Sync + 'static,
 {
     source: KafkaFuture<T>,
-    function: Arc<dyn Fn(T) -> Result<R, Error> + Send + Sync>,
+    function: Arc<dyn BaseFunction<T, R>>,
 }
 
 impl<T, R> KafkaFutureOps<R> for ThenApplyFuture<T, R>
@@ -286,7 +348,7 @@ where
     fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
         Box::pin(async move {
             let value = self.source.get().await?;
-            (self.function)(value)
+            self.function.apply(value)
         })
     }
 
@@ -501,6 +563,27 @@ mod tests {
         let mapped = handle.future().then_apply(|v| Ok(v * 2));
         handle.complete(21);
         assert_eq!(mapped.get().await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn then_apply_takes_a_base_function_made_by_the_factory() {
+        let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let mapped = handle.future().then_apply(BaseFunction_new(|v: i32| Ok(v.to_string())));
+        handle.complete(21);
+        assert_eq!(mapped.get().await.unwrap(), "21");
+    }
+
+    #[test]
+    fn base_function_new_returns_the_function_result() {
+        let function = BaseFunction_new(|v: i32| {
+            if v < 0 {
+                Err(Error::local_illegal_argument("negative".to_string()))
+            } else {
+                Ok(v * 2)
+            }
+        });
+        assert_eq!(function.apply(4).unwrap(), 8);
+        assert!(matches!(function.apply(-1), Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]

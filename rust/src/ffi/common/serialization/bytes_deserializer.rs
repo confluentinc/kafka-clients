@@ -18,19 +18,20 @@
 //!
 //! Its `void *` is an owned `kafka_Bytes_t *` freed with
 //! `kafka_Bytes_destroy`. Through the plain `deserialize` it is a copy; through
-//! `deserialize_from_shared` it is a slice sharing the source buffer the
-//! invoker copied once, so many records from one source cost one copy.
+//! `deserialize_with_headers_bytes` it is the `Bytes` the invoker copied the
+//! data into, returned without a second copy.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 
 use bytes::Bytes;
+use futures_util::FutureExt;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::{BytesDeserializer, Deserializer};
 use crate::ffi::common::serialization::DeserializerHandle;
-use crate::ffi::common::serialization::deserializer::kafka_common_serialization_Deserializer_t;
+use crate::ffi::common::serialization::deserializer::{FfiDeserializer, kafka_common_serialization_Deserializer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
 
@@ -51,34 +52,40 @@ fn bytes_value(result: Result<Bytes, Error>) -> Result<GenericValue, Error> {
 }
 
 impl Deserializer<GenericValue> for GenericBytesDeserializer {
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
-        bytes_value(self.0.deserialize(topic, data))
+    // `map` rather than `async fn`: the future holds only the inner one, which
+    // keeps the consumer's wrapper within `InlineFuture`'s buffer.
+    fn deserialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize(topic, data).map(bytes_value)
     }
 
-    fn deserialize_with_headers(&self, topic: &str, headers: &dyn Headers, data: &[u8]) -> Result<GenericValue, Error> {
-        bytes_value(self.0.deserialize_with_headers(topic, headers, data))
+    fn deserialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize_with_headers(topic, headers, data).map(bytes_value)
     }
 
-    fn deserialize_from_shared(&self, topic: &str, source: &Bytes, data: &[u8]) -> Result<GenericValue, Error> {
-        bytes_value(self.0.deserialize_from_shared(topic, source, data))
+    fn deserialize_with_headers_bytes<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: &'a Bytes,
+    ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
+        self.0.deserialize_with_headers_bytes(topic, headers, data).map(bytes_value)
     }
 
-    fn deserialize_from_shared_with_headers(
-        &self,
-        topic: &str,
-        headers: &dyn Headers,
-        source: &Bytes,
-        data: &[u8],
-    ) -> Result<GenericValue, Error> {
-        bytes_value(self.0.deserialize_from_shared_with_headers(topic, headers, source, data))
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        self.0.configure(configs, is_key).await;
     }
 
-    fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.configure(configs, is_key);
-    }
-
-    fn close(&mut self) {
-        self.0.close();
+    async fn close(&mut self) {
+        self.0.close().await;
     }
 }
 
@@ -87,14 +94,12 @@ impl Deserializer<GenericValue> for GenericBytesDeserializer {
 /// # Safety
 ///
 /// `self_` must be a valid bytes-deserializer handle, alive for `'a`.
-unsafe fn handle<'a>(
-    self_: *const kafka_common_serialization_BytesDeserializer_t,
-) -> &'a DeserializerHandle<GenericBytesDeserializer> {
+unsafe fn handle<'a>(self_: *const kafka_common_serialization_BytesDeserializer_t) -> &'a DeserializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid bytes-deserializer handle alive
     // for `'a`, the `DeserializerHandle::boxed` of
     // `kafka_common_serialization_BytesDeserializer_new`, as `DeserializerHandle::from_ptr`
     // requires.
-    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle<GenericBytesDeserializer>) }
+    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
 }
 
 /// `new BytesDeserializer()`. Owned, freed with
@@ -103,7 +108,7 @@ unsafe fn handle<'a>(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_BytesDeserializer_new()
 -> *mut kafka_common_serialization_BytesDeserializer_t {
-    DeserializerHandle::boxed(GenericBytesDeserializer(BytesDeserializer::new()))
+    DeserializerHandle::boxed(FfiDeserializer::Bytes(GenericBytesDeserializer(BytesDeserializer::new())))
         as *mut kafka_common_serialization_BytesDeserializer_t
 }
 
@@ -141,7 +146,7 @@ pub unsafe extern "C" fn kafka_common_serialization_BytesDeserializer_destroy(
     // SAFETY: Per this function's `# Safety`, `self_` is null or an owned bytes-deserializer handle
     // not yet destroyed, as `DeserializerHandle::destroy` requires: the `DeserializerHandle::boxed`
     // of `kafka_common_serialization_BytesDeserializer_new`.
-    unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle<GenericBytesDeserializer>) }
+    unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle) }
 }
 
 #[cfg(test)]
@@ -150,16 +155,13 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::common::header::RecordHeaders;
     use crate::ffi::common::header::internals::record_headers::{
-        box_record_headers, kafka_common_header_internals_RecordHeaders__as_Headers,
-        kafka_common_header_internals_RecordHeaders_destroy,
+        box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
     };
     use crate::ffi::common::serialization::deserializer::{
         kafka_common_serialization_Deserializer_deserialize,
-        kafka_common_serialization_Deserializer_deserialize_from_shared,
-        kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers,
         kafka_common_serialization_Deserializer_deserialize_with_headers,
+        kafka_common_serialization_Deserializer_deserialize_with_headers_bytes,
     };
     use crate::ffi::util::{kafka_Bytes_destroy, kafka_Bytes_t};
 
@@ -178,17 +180,16 @@ mod tests {
     fn produces_owned_bytes_through_the_view() {
         let handle = kafka_common_serialization_BytesDeserializer_new();
         let topic = CString::new("t").unwrap();
-        let record_headers = box_record_headers(RecordHeaders::new());
+        let headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
-        // the end, after the last use of its view `view`; `record_headers` comes from
-        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
-        // valid slot pointing at null, left null by every call (asserted), and every value returned
-        // is an owned array that `take_bytes` frees once.
+        // the end, after the last use of its view `view`; `headers` comes from
+        // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
+        // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
+        // null, left null by every call (asserted), and every value returned is an owned array that
+        // `take_bytes` frees once.
         unsafe {
             let view = kafka_common_serialization_BytesDeserializer__as_Deserializer(handle);
-            let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut err = ptr::null_mut();
 
             let out = kafka_common_serialization_Deserializer_deserialize(
@@ -210,29 +211,24 @@ mod tests {
             assert!(err.is_null());
             assert_eq!(take_bytes(out), b"raw");
 
-            // The shared path slices the invoker's copy of the source: the
-            // two results point into one buffer, `len` bytes apart.
-            let out = kafka_common_serialization_Deserializer_deserialize_from_shared(
+            // The `Bytes` overload returns the invoker's one copy of the
+            // data itself: the result is that copy, not the caller's buffer.
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
                 view,
                 topic.as_ptr(),
-                kafka_Bytes_t::from_slice(source),
+                headers,
                 kafka_Bytes_t::from_slice(&source[6..]),
                 &raw mut err,
             );
             assert!(err.is_null());
-            let out2 = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
-                view,
-                topic.as_ptr(),
-                headers,
-                kafka_Bytes_t::from_slice(source),
-                kafka_Bytes_t::from_slice(&source[..5]),
-                &raw mut err,
+            assert_ne!(
+                (*(out as *const kafka_Bytes_t)).data,
+                source[6..].as_ptr(),
+                "the invoker's copy"
             );
-            assert!(err.is_null());
             assert_eq!(take_bytes(out), b"world");
-            assert_eq!(take_bytes(out2), b"hello");
 
-            kafka_common_header_internals_RecordHeaders_destroy(record_headers);
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_BytesDeserializer_destroy(handle);
             kafka_common_serialization_BytesDeserializer_destroy(ptr::null_mut());
         }

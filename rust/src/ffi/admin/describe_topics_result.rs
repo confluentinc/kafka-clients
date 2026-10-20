@@ -15,56 +15,28 @@
 //! `kafka_admin_DescribeTopicsResult_t`:
 //! `org.apache.kafka.clients.admin.DescribeTopicsResult` (CLAUDE.md §4).
 //!
-//! The Rust result is an enum keyed either by topic id or by topic name, so
-//! besides the Java accessors C gets the `kafka_admin_DescribeTopicsResult_e`
-//! discriminator, `__enum`, and one factory per variant
-//! (`by_topic_id` / `by_topic_name`, Java's `ofTopicIds` / `ofTopicNames`).
-//! The accessors of the other variant answer `NULL`, as the Rust ones answer
-//! `None`.
-
-#![expect(non_camel_case_types)]
+//! A result is keyed by topic id or by topic name, never both: the accessors
+//! for the other key answer `NULL`, as Java's answer `null` (the Rust ones
+//! `None`). Java's constructor is protected and its `ofTopicIds` /
+//! `ofTopicNames` factories package-private, so C gets no constructor.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 
 use crate::admin::{DescribeTopicsResult, TopicDescription};
 use crate::common::{KafkaFuture, Uuid};
-use crate::ffi::admin::topic_description::{
-    box_topic_description, destroy_topic_description_element, kafka_admin_TopicDescription_t, topic_description_ref,
-};
+use crate::ffi::admin::topic_description::{box_topic_description, destroy_topic_description_element};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
-use crate::ffi::common::take_error;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::kafka_future::{kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_t};
-use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, kafka_Map_t, map_entries};
+use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
+use crate::ffi::util::{box_map, box_string_keyed_map, destroy_boxed, kafka_Map_t};
 
 /// Opaque handle to a [`DescribeTopicsResult`], owned and freed with
 /// [`kafka_admin_DescribeTopicsResult_destroy`].
 #[repr(C)]
 pub struct kafka_admin_DescribeTopicsResult_t {
     _private: [u8; 0],
-}
-
-/// The variants of [`DescribeTopicsResult`], for a C `switch`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum kafka_admin_DescribeTopicsResult_e {
-    kafka_admin_DescribeTopicsResult_BY_TOPIC_ID,
-    kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME,
-}
-
-/// Exhaustive, so a variant Java adds fails to compile until it has its C
-/// enumerator.
-fn enum_of(result: &DescribeTopicsResult) -> kafka_admin_DescribeTopicsResult_e {
-    match result {
-        DescribeTopicsResult::ByTopicId(_) => {
-            kafka_admin_DescribeTopicsResult_e::kafka_admin_DescribeTopicsResult_BY_TOPIC_ID
-        },
-        DescribeTopicsResult::ByTopicName(_) => {
-            kafka_admin_DescribeTopicsResult_e::kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME
-        },
-    }
 }
 
 /// Compares two `kafka_common_Uuid_t *` keys by value, for `kafka_Map_get`.
@@ -132,35 +104,6 @@ fn ids_map(map: HashMap<Uuid, TopicDescription>) -> *mut c_void {
     ) as *mut c_void
 }
 
-/// Reads back a C future whose value is a `kafka_admin_TopicDescription_t *`
-/// as a completed Rust future: `get` is called on it, so a future that is
-/// still pending blocks until it resolves, and a failed one becomes a
-/// future failed with the same error.
-///
-/// # Safety
-///
-/// `future` must be a valid future handle whose value, when it succeeds, is
-/// a live topic-description handle.
-unsafe fn resolved_description(future: *const kafka_common_KafkaFuture_t) -> KafkaFuture<TopicDescription> {
-    let mut error = std::ptr::null_mut();
-    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut error`
-    // points at a local null, so it is a valid slot, as `kafka_common_KafkaFuture_get` requires.
-    let value = unsafe { kafka_common_KafkaFuture_get(future, &mut error) };
-    // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
-    // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
-    match unsafe { take_error(error) } {
-        Some(error) => KafkaFuture::completed_future(Err(error)),
-        // SAFETY: `get` succeeded, so `value` is the future's value, borrowed from the future,
-        // which the caller keeps alive for this call. Per this function's `# Safety` it is a live
-        // topic-description handle, as `topic_description_ref` requires; the borrow ends with the
-        // `clone`.
-        None => KafkaFuture::completed_future(Ok(unsafe {
-            topic_description_ref(value as *const kafka_admin_TopicDescription_t)
-        }
-        .clone())),
-    }
-}
-
 /// Hands `result` to C (used by the RPC functions in `rpc.rs`).
 pub(crate) fn box_describe_topics_result(
     result: DescribeTopicsResult,
@@ -182,106 +125,12 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeTopicsResult_t) -> &'a Re
     unsafe { result_ref(self_) }
 }
 
-/// `DescribeTopicsResult.ofTopicIds(Map<Uuid, KafkaFuture<TopicDescription>>)`:
-/// builds the by-id variant from a borrowed map of
-/// `const kafka_common_Uuid_t *` keys to `kafka_common_KafkaFuture_t *`
-/// values whose value is a `kafka_admin_TopicDescription_t *` (such as one
-/// from `kafka_common_KafkaFuture_completed_future`). A Rust future cannot
-/// be built from an arbitrary C one, so each value is resolved with `get`
-/// during the call — a pending future blocks until it resolves — and copied
-/// into a completed future; a failed one keeps its error. Null reads as
-/// empty. Owned, freed with [`kafka_admin_DescribeTopicsResult_destroy`];
-/// the futures it hands out belong to no client.
-///
-/// # Safety
-///
-/// `value` must be null or a valid map whose keys are valid uuid handles and
-/// whose values are valid future handles delivering live topic-description
-/// handles.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_id(
-    value: *const kafka_Map_t,
-) -> *mut kafka_admin_DescribeTopicsResult_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
-    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
-    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
-    // same time. That is what `map_entries` requires.
-    let futures: HashMap<Uuid, KafkaFuture<TopicDescription>> = unsafe { map_entries(value) }
-        .iter()
-        .map(|&(k, v)| {
-            // SAFETY: Per this function's `# Safety`, the key `k` is a valid uuid handle, as
-            // `uuid_of` requires, and the value `v` a valid future handle delivering a
-            // topic-description handle, as `resolved_description` requires; the caller keeps both
-            // alive for this call.
-            (unsafe { uuid_of(k as *const kafka_common_Uuid_t) }, unsafe {
-                resolved_description(v as *const kafka_common_KafkaFuture_t)
-            })
-        })
-        .collect();
-    box_result(DescribeTopicsResult::of_topic_ids(futures), &FutureCtx::detached())
-}
-
-/// `DescribeTopicsResult.ofTopicNames(Map<String, KafkaFuture<TopicDescription>>)`:
-/// builds the by-name variant from a borrowed map of `const char *` keys to
-/// `kafka_common_KafkaFuture_t *` values, read exactly as in
-/// [`kafka_admin_DescribeTopicsResult_by_topic_id`]. Owned, freed with
-/// [`kafka_admin_DescribeTopicsResult_destroy`].
-///
-/// # Safety
-///
-/// `value` must be null or a valid map whose keys are valid NUL-terminated
-/// strings and whose values are valid future handles delivering live
-/// topic-description handles.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_name(
-    value: *const kafka_Map_t,
-) -> *mut kafka_admin_DescribeTopicsResult_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
-    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
-    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
-    // same time. That is what `map_entries` requires.
-    let futures: HashMap<String, KafkaFuture<TopicDescription>> = unsafe { map_entries(value) }
-        .iter()
-        .map(|&(k, v)| {
-            // SAFETY: Per this function's `# Safety`, the key `k` is a valid NUL-terminated string,
-            // as `c_str_to_string` requires, and the value `v` a valid future handle delivering a
-            // topic-description handle, as `resolved_description` requires; the caller keeps both
-            // alive for this call.
-            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
-                resolved_description(v as *const kafka_common_KafkaFuture_t)
-            })
-        })
-        .collect();
-    box_result(DescribeTopicsResult::of_topic_names(futures), &FutureCtx::detached())
-}
-
-/// The variant of a result, for a `switch`.
-///
-/// A caught Rust panic returns `kafka_admin_DescribeTopicsResult_BY_TOPIC_ID`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
-/// # Safety
-///
-/// `self_` must be a live result handle.
-#[ffi_guard(fallback = kafka_admin_DescribeTopicsResult_e::kafka_admin_DescribeTopicsResult_BY_TOPIC_ID)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult__enum(
-    self_: *const kafka_admin_DescribeTopicsResult_t,
-) -> kafka_admin_DescribeTopicsResult_e {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
-    // call, as `handle` requires.
-    enum_of(&unsafe { handle(self_) }.result)
-}
-
-/// `topicIdValues()`: for a by-id result, an owned `kafka_Map_t` (freed with
+/// `topicIdValues()`: for a result keyed by topic id, an owned `kafka_Map_t` (freed with
 /// `kafka_Map_destroy`, which frees its keys and values) of owned
 /// `kafka_common_Uuid_t *` keys, ordered by their string form and compared
 /// by value in `kafka_Map_get`, to owned `kafka_common_KafkaFuture_t *`
 /// whose `get` delivers a `kafka_admin_TopicDescription_t *` owned by the
-/// future; `NULL` for a by-name result.
+/// future; `NULL` for a result keyed by topic name.
 ///
 /// # Safety
 ///
@@ -305,11 +154,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
     }
 }
 
-/// `topicNameValues()`: for a by-name result, an owned `kafka_Map_t` (freed
+/// `topicNameValues()`: for a result keyed by topic name, an owned `kafka_Map_t` (freed
 /// with `kafka_Map_destroy`, which frees its keys and values) of owned
 /// `char *` topic names, sorted, to owned `kafka_common_KafkaFuture_t *`
 /// whose `get` delivers a `kafka_admin_TopicDescription_t *` owned by the
-/// future; `NULL` for a by-id result.
+/// future; `NULL` for a result keyed by topic id.
 ///
 /// # Safety
 ///
@@ -328,10 +177,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
     }
 }
 
-/// `allTopicNames()`: for a by-name result, an owned future freed with
+/// `allTopicNames()`: for a result keyed by topic name, an owned future freed with
 /// `kafka_common_KafkaFuture_destroy` whose `get` delivers a `kafka_Map_t *`
 /// (owned by the future) of `char *` topic names, sorted, to
-/// `kafka_admin_TopicDescription_t *`; `NULL` for a by-id result.
+/// `kafka_admin_TopicDescription_t *`; `NULL` for a result keyed by topic id.
 ///
 /// # Safety
 ///
@@ -354,11 +203,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
     }
 }
 
-/// `allTopicIds()`: for a by-id result, an owned future freed with
+/// `allTopicIds()`: for a result keyed by topic id, an owned future freed with
 /// `kafka_common_KafkaFuture_destroy` whose `get` delivers a `kafka_Map_t *`
 /// (owned by the future) of `kafka_common_Uuid_t *` keys, ordered by their
 /// string form and compared by value in `kafka_Map_get`, to
-/// `kafka_admin_TopicDescription_t *`; `NULL` for a by-name result.
+/// `kafka_admin_TopicDescription_t *`; `NULL` for a result keyed by topic name.
 ///
 /// # Safety
 ///

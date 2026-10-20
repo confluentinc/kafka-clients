@@ -374,8 +374,8 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
         f = calloc(1, sizeof(V3Future));
         atomic_init(&f->done_ns, 0);
         kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
+        // The send consumes the callback handle, whatever the outcome.
         f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
-        kafka_producer_Callback_destroy(callback);
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
