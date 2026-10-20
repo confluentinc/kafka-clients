@@ -581,7 +581,7 @@ send path. The symmetric rule on the receive path:
 An `async fn` in the trait (`impl Future`, no box). No `#[async_trait]`.
 `data: &[u8]` borrowed from the fetch buffer. Code holding a deserializer of
 any type uses the dyn-compatible `DynDeserializer`, whose futures are
-`InlineFuture`s, so a call through `dyn` allocates nothing per record.
+`InlineFuture`s, so a call through `dyn` allocates nothing per record for a future that fits `InlineFuture`'s buffer.
 
 **Compression handling:**
 

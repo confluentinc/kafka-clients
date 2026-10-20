@@ -130,9 +130,10 @@ def serde_caller(serde: Callable[..., object],
       signature that cannot be read) is called by keyword through one closure
       made here.
 
-    A parameter Java adds later goes by keyword to every serde, the positional
-    ones included (``call(topic, data, headers, new=...)``), so one that does
-    not name it receives it in its ``**kwargs``."""
+    The ``_fast`` entries and the keyword closures pass exactly today's
+    parameters. When Java adds one, the binding must start passing it (a code
+    change on that day); user serdes then receive it through their
+    ``**kwargs``, or by naming it."""
     if type(serde).__module__.startswith(_BUILT_IN_SERDES):
         fast = getattr(serde, "_fast", None)
         if fast is not None:
