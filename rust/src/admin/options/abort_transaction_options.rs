@@ -51,9 +51,29 @@ impl AbortTransactionOptions {
     }
 }
 
+impl std::fmt::Display for AbortTransactionOptions {
+    /// Java's `toString()`: an unset timeout prints as `null`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let timeout_ms = self.timeout_ms.map_or_else(|| "null".to_string(), |t| t.to_string());
+        write!(f, "AbortTransactionOptions(timeoutMs={timeout_ms})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            AbortTransactionOptions::new().to_string(),
+            "AbortTransactionOptions(timeoutMs=null)"
+        );
+        assert_eq!(
+            AbortTransactionOptions::new().set_timeout_ms(Some(500)).to_string(),
+            "AbortTransactionOptions(timeoutMs=500)"
+        );
+    }
 
     #[test]
     fn defaults_match_java() {

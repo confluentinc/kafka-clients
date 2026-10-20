@@ -174,6 +174,13 @@ breaking changes.
 - `FeatureUpdate`'s `UpgradeType` and `ScramMechanism` implement `Display`,
   printing the Java constant's name (`SAFE_DOWNGRADE`, `SCRAM_SHA_256`), as
   Java's `Enum.toString()` does.
+- `ConsumerGroupDescription`, `ClassicGroupDescription`,
+  `AbortTransactionOptions`, `DescribeProducersOptions`,
+  `DescribeTransactionsOptions`, `FenceProducersOptions`,
+  `TerminateTransactionOptions` and `ListTransactionsOptions` implement
+  `Display` in the format of Java's `toString()`. An absent value prints as
+  `null`, and a set as `[a, b]`. `ListTransactionsOptions` prints its states
+  in declaration order and its producer ids in ascending order.
 
 ### Common
 
@@ -316,6 +323,16 @@ breaking changes.
   `kafka_common_metrics_Sensor_RecordingLevel_to_string`,
   `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string`
   and `kafka_consumer_CloseOptions_GroupMembershipOperation_to_string`.
+- New `_to_string` exports for the admin types that gained `Display`:
+  `kafka_admin_ConsumerGroupDescription_to_string`,
+  `kafka_admin_ClassicGroupDescription_to_string`,
+  `kafka_admin_AbortTransactionOptions_to_string`,
+  `kafka_admin_DescribeProducersOptions_to_string`,
+  `kafka_admin_DescribeTransactionsOptions_to_string`,
+  `kafka_admin_FenceProducersOptions_to_string`,
+  `kafka_admin_TerminateTransactionOptions_to_string` and
+  `kafka_admin_ListTransactionsOptions_to_string`. Each returns an owned
+  string freed with `kafka_string_destroy`.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

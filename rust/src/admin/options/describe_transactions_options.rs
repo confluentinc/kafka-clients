@@ -51,9 +51,29 @@ impl DescribeTransactionsOptions {
     }
 }
 
+impl std::fmt::Display for DescribeTransactionsOptions {
+    /// Java's `toString()`: an unset timeout prints as `null`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let timeout_ms = self.timeout_ms.map_or_else(|| "null".to_string(), |t| t.to_string());
+        write!(f, "DescribeTransactionsOptions(timeoutMs={timeout_ms})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            DescribeTransactionsOptions::new().to_string(),
+            "DescribeTransactionsOptions(timeoutMs=null)"
+        );
+        assert_eq!(
+            DescribeTransactionsOptions::new().set_timeout_ms(Some(500)).to_string(),
+            "DescribeTransactionsOptions(timeoutMs=500)"
+        );
+    }
 
     #[test]
     fn defaults_match_java() {

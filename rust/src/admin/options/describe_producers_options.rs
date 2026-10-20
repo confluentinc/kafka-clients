@@ -68,9 +68,36 @@ impl DescribeProducersOptions {
     }
 }
 
+impl std::fmt::Display for DescribeProducersOptions {
+    /// Java's `toString()`: the broker id prints as Java's `OptionalInt`
+    /// (`OptionalInt[3]`, `OptionalInt.empty`) and an unset timeout as `null`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let broker_id = self
+            .broker_id
+            .map_or_else(|| "OptionalInt.empty".to_string(), |id| format!("OptionalInt[{id}]"));
+        let timeout_ms = self.timeout_ms.map_or_else(|| "null".to_string(), |t| t.to_string());
+        write!(f, "DescribeProducersOptions(brokerId={broker_id}, timeoutMs={timeout_ms})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            DescribeProducersOptions::new().to_string(),
+            "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)"
+        );
+        assert_eq!(
+            DescribeProducersOptions::new()
+                .set_broker_id(3)
+                .set_timeout_ms(Some(500))
+                .to_string(),
+            "DescribeProducersOptions(brokerId=OptionalInt[3], timeoutMs=500)"
+        );
+    }
 
     #[test]
     fn defaults_match_java() {
