@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, ClassVar
 from confluent_kafka._java import java_str
 from confluent_kafka.common.access_control_entry_filter import AccessControlEntryFilter
 from confluent_kafka.common.resource_pattern_filter import ResourcePatternFilter
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.common.acl_binding import AclBinding
@@ -49,10 +48,10 @@ class AclBindingFilter:
         ``pattern_filter`` a non-null pattern filter, ``entry_filter`` a
         non-null access control entry filter."""
         if pattern_filter is None:
-            raise NullPointerError(message="patternFilter")
+            raise TypeError("pattern_filter must not be None")
         self._pattern_filter = pattern_filter
         if entry_filter is None:
-            raise NullPointerError(message="entryFilter")
+            raise TypeError("entry_filter must not be None")
         self._entry_filter = entry_filter
 
     def is_unknown(self) -> bool:

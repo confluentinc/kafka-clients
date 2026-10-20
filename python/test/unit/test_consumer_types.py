@@ -35,8 +35,8 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, NullPointerError
-from confluent_kafka.common import TimestampType, TopicPartition
+from confluent_kafka import IllegalArgumentError
+from confluent_kafka.common import Headers, TimestampType, TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
     ConsumerGroupMetadata,
@@ -87,14 +87,14 @@ def test_offset_and_metadata_forms() -> None:
     assert (OffsetAndMetadata(offset=5).metadata(), OffsetAndMetadata(offset=5).leader_epoch()) == (
         "", None)
     assert OffsetAndMetadata(offset=5, metadata="m").leader_epoch() is None
-    # metadata is UNSET: an explicit "" is given, so (offset, leaderEpoch, metadata).
+    # metadata is MISSING: an explicit "" is given, so (offset, leaderEpoch, metadata).
     assert OffsetAndMetadata(offset=5, leader_epoch=3, metadata="").leader_epoch() == 3
     with pytest.raises(IllegalArgumentError) as exc:
         OffsetAndMetadata(offset=5, leader_epoch=3)
     assert str(exc.value) == (
         "OffsetAndMetadata() takes one of (offset, leader_epoch, metadata), "
         "(offset, metadata), (offset); got (offset, leader_epoch)")
-    # leader_epoch is UNSET too ((offset, metadata) passes Optional.empty()): a
+    # leader_epoch is MISSING too ((offset, metadata) passes Optional.empty()): a
     # None leader epoch is given, so it selects the three-argument constructor,
     # and without metadata it is refused, as Java has no (offset, leaderEpoch).
     assert OffsetAndMetadata(offset=5, leader_epoch=None, metadata="m").metadata() == "m"
@@ -104,7 +104,7 @@ def test_offset_and_metadata_forms() -> None:
     assert str(OffsetAndMetadata(offset=5, leader_epoch=3, metadata="m")) == (
         "OffsetAndMetadata{offset=5, leaderEpoch=3, metadata='m'}")
     assert str(OffsetAndMetadata(offset=5)) == (
-        "OffsetAndMetadata{offset=5, leaderEpoch=null, metadata=''}")
+        "OffsetAndMetadata{offset=5, leaderEpoch=None, metadata=''}")
     with pytest.raises(TypeError):
         OffsetAndMetadata(5)  # type: ignore[call-arg]
 
@@ -121,11 +121,11 @@ def test_offset_and_timestamp() -> None:
     assert o == OffsetAndTimestamp(offset=1, timestamp=2)
     assert hash(o) == hash(OffsetAndTimestamp(offset=1, timestamp=2))
     assert o != OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=4)
-    # leader_epoch is UNSET ((offset, timestamp) passes Optional.empty()); both
+    # leader_epoch is MISSING ((offset, timestamp) passes Optional.empty()); both
     # sets are Java constructors, so a None one is the three-argument form.
     assert o == OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None)
     assert OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None).leader_epoch() is None
-    assert str(o) == "(timestamp=2, leaderEpoch=null, offset=1)"
+    assert str(o) == "(timestamp=2, leaderEpoch=None, offset=1)"
     with pytest.raises(IllegalArgumentError) as exc:
         OffsetAndTimestamp(offset=-1, timestamp=0)
     assert str(exc.value) == "Invalid negative offset"
@@ -176,45 +176,78 @@ def test_kafka_consumer_group_metadata_deep_copies_to_itself() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CloseOptions: CloseOptionsTest
+# CloseOptions: CloseOptionsTest, then the binding's own checks of the keyword
+# constructor Java builds through setters (CLAUDE.md, Python Binding
+# Conventions, Signatures).
 # --------------------------------------------------------------------------- #
 
 
 def test_operation_should_not_be_null() -> None:
-    with pytest.raises(NullPointerError) as exc:
-        CloseOptions.group_membership_operation(None)  # type: ignore[arg-type]
-    assert str(exc.value) == "operation should not be null"
-    with pytest.raises(NullPointerError):
-        CloseOptions.timeout(0).with_group_membership_operation(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError) as exc:
+        CloseOptions.group_membership_operation(operation=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "operation must not be None"
+    with pytest.raises(TypeError) as none:
+        CloseOptions.timeout(timeout=0).with_group_membership_operation(operation=None)  # type: ignore[arg-type]
+    assert str(none.value) == "operation must not be None"
+    # The keyword constructor calls the setter, so an explicit None raises as it does.
+    with pytest.raises(TypeError) as exc:
+        CloseOptions(operation=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "operation must not be None"
 
 
 def test_operation_should_have_default_value() -> None:
-    assert CloseOptions.timeout(0).group_membership_operation() is _DEFAULT
+    assert CloseOptions.timeout(timeout=0).group_membership_operation() is _DEFAULT
 
 
 def test_timeout_could_be_null() -> None:
-    options = CloseOptions.timeout(None)
+    options = CloseOptions.timeout(timeout=None)
     assert options.timeout() is None
+    assert CloseOptions(timeout=None).timeout() is None
 
 
 def test_timeout_should_be_default_empty() -> None:
-    assert CloseOptions.group_membership_operation(_DEFAULT).timeout() is None
+    assert CloseOptions.group_membership_operation(operation=_DEFAULT).timeout() is None
 
 
-def test_close_options_builder_shape() -> None:
-    with pytest.raises(TypeError) as exc:
-        CloseOptions()
-    assert str(exc.value) == (
-        "CloseOptions cannot be constructed directly; use CloseOptions.timeout(...) or "
-        "CloseOptions.group_membership_operation(...)")
+def test_close_options_keyword_constructor() -> None:
+    """Java's private ``CloseOptions()``, then one keyword per setter field."""
+    default = CloseOptions()
+    assert default.timeout() is None and default.group_membership_operation() is _DEFAULT
     leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
-    options = CloseOptions.timeout(timedelta(seconds=3)).with_group_membership_operation(leave)
+    options = CloseOptions(timeout=timedelta(seconds=3), operation=leave)
     # A returned Duration is a float of seconds.
     assert options.timeout() == 3.0
     assert options.group_membership_operation() is leave
-    assert options.with_timeout(1.5) is options and options.timeout() == 1.5
+    assert CloseOptions(operation=leave).timeout() is None
+    assert CloseOptions(timeout=2.5).group_membership_operation() is _DEFAULT
+
+
+def test_close_options_factories_and_setters() -> None:
+    leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
+    options = CloseOptions.timeout(timeout=timedelta(seconds=3)).with_group_membership_operation(
+        operation=leave)
+    assert options.timeout() == 3.0
+    assert options.group_membership_operation() is leave
+    assert options.with_timeout(timeout=1.5) is options and options.timeout() == 1.5
+    assert CloseOptions.group_membership_operation(operation=leave).group_membership_operation() is leave
     assert [m.value for m in CloseOptions.GroupMembershipOperation] == [
         "LEAVE_GROUP", "REMAIN_IN_GROUP", "DEFAULT"]
+
+
+def test_close_options_positional_calls_are_type_errors() -> None:
+    """Every parameter is keyword-only (Signatures); the one-argument setters and
+    factories included, since ruling 13 removed the fluent-setter exemption."""
+    leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
+    with pytest.raises(TypeError):
+        CloseOptions(1.0)  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        CloseOptions.timeout(1.0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions.group_membership_operation(leave)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions().with_timeout(1.0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        CloseOptions().with_group_membership_operation(leave)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
@@ -256,7 +289,7 @@ def test_short_constructor() -> None:
     assert record.serialized_value_size() == ConsumerRecord.NULL_SIZE
     assert record.leader_epoch() is None
     assert record.delivery_count() is None
-    assert record.headers() == ()
+    assert record.headers() == Headers() and record.headers().to_array() == ()
 
 
 def test_long_constructor() -> None:
@@ -271,8 +304,15 @@ def test_long_constructor() -> None:
     assert record.timestamp() == 23434217432432
     assert (record.serialized_key_size(), record.serialized_value_size()) == (100, 1142)
     assert record.leader_epoch() is None and record.delivery_count() is None
-    assert [(k, bytes(v or b"")) for k, v in record.headers()] == [
+    assert [(h.key(), bytes(h.value() or b"")) for h in record.headers()] == [
         ("header key", b"header value")]
+    # A Headers argument is kept as it is, as Java's ConsumerRecord keeps it.
+    given = Headers(headers=headers)
+    kept = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
+                          timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
+                          serialized_value_size=1142, key="key", value="value",
+                          headers=given, leader_epoch=None)
+    assert kept.headers() is given
     record = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
                             timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
                             serialized_value_size=1142, key="key", value="value",
@@ -284,19 +324,19 @@ def test_long_constructor() -> None:
 def test_consumer_record_null_checks_and_forms() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic=None, partition=0, offset=0, key=None, value=None)  # type: ignore[call-overload]
-    assert str(exc.value) == "Topic cannot be null"
+    assert str(exc.value) == "Topic cannot be None"
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,  # type: ignore[call-overload]
                        timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=0,
                        serialized_value_size=0, key=None, value=None, headers=None,
                        leader_epoch=None)
-    assert str(exc.value) == "Headers cannot be null"
+    assert str(exc.value) == "Headers cannot be None"
     # A delivery count needs the full form (Java has no shorter one taking it).
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None,  # type: ignore[call-overload]
                        delivery_count=2)
     assert str(exc.value).endswith("got (topic, partition, offset, key, value, delivery_count)")
-    # delivery_count is UNSET (the 11-argument form passes Optional.empty()): a
+    # delivery_count is MISSING (the 11-argument form passes Optional.empty()): a
     # None one is given, so it is refused with the short form too, selects the
     # full form with the long one, and the short form is filled with no count.
     with pytest.raises(IllegalArgumentError) as exc:
@@ -309,17 +349,17 @@ def test_consumer_record_null_checks_and_forms() -> None:
                           leader_epoch=None, delivery_count=None).delivery_count() is None
     assert ConsumerRecord(topic="t", partition=0, offset=0, key=None,
                           value=None).delivery_count() is None
-    # UNSET: Java's default values given explicitly still select the full form.
+    # MISSING: Java's default values given explicitly still select the full form.
     full = ConsumerRecord(topic="t", partition=0, offset=0, timestamp=-1,
                           timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, serialized_key_size=-1,
                           serialized_value_size=-1, key=None, value=None, headers=(),
                           leader_epoch=None, delivery_count=2)
     assert full.delivery_count() == 2
     assert str(full) == (
-        "ConsumerRecord(topic = t, partition = 0, leaderEpoch = null, offset = 0, "
+        "ConsumerRecord(topic = t, partition = 0, leaderEpoch = None, offset = 0, "
         "NoTimestampType = -1, deliveryCount = 2, serialized key size = -1, "
-        "serialized value size = -1, headers = RecordHeaders(headers = [], isReadOnly = false), "
-        "key = null, value = null)")
+        "serialized value size = -1, headers = RecordHeaders(headers = [], isReadOnly = False), "
+        "key = None, value = None)")
     with pytest.raises(TypeError):
         ConsumerRecord("t", 0, 0, None, None)  # type: ignore[call-overload]
 
@@ -393,11 +433,43 @@ def test_records_by_partition() -> None:
 
 
 def test_records_by_null_topic() -> None:
-    # Java's records(null) throws "Topic must be non-null."; in Python a None
-    # topic is not given, so java_forms rejects the call naming both forms.
+    # Java's records(null) throws "Topic must be non-null."; a None is Java's
+    # null, and Java's message reads None (Types).
     with pytest.raises(IllegalArgumentError) as exc:
         ConsumerRecords.empty().records(topic=None)  # type: ignore[call-overload]
-    assert str(exc.value) == "records() takes one of (partition), (topic); got ()"
+    assert str(exc.value) == "Topic must be non-None."
+
+
+def test_records_by_null_partition_is_an_empty_list() -> None:
+    # Java's records((TopicPartition) null): the map lookup finds nothing.
+    tp = TopicPartition(topic="t", partition=0)
+    rec = ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=b"v")
+    records = ConsumerRecords(records={tp: [rec]}, next_offsets={})
+    assert records.records(partition=None) == []
+
+
+def test_records_with_both_or_neither_is_rejected() -> None:
+    records = ConsumerRecords.empty()
+    for kwargs in ({}, {"partition": None, "topic": None}):
+        with pytest.raises(IllegalArgumentError) as exc:
+            records.records(**kwargs)  # type: ignore[call-overload]
+        assert str(exc.value).startswith("records() takes one of (partition), (topic); got (")
+
+
+def test_records_constructor_null_maps() -> None:
+    # Java's Map.copyOf(nextOffsets) throws on a null; a null records map is
+    # stored by Java and fails at its first use, here at construction.
+    with pytest.raises(TypeError) as exc:
+        ConsumerRecords(records={}, next_offsets=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "next_offsets must not be None"
+    with pytest.raises(TypeError) as exc:
+        ConsumerRecords(records=None, next_offsets=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "next_offsets must not be None"
+    # A null records map is stored, as Java's, and fails at its first use.
+    stored = ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
+    with pytest.raises(TypeError) as exc:
+        stored.is_empty()
+    assert str(exc.value) == "records must not be None"
 
 
 def test_records_by_topic() -> None:

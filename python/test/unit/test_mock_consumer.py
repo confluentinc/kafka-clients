@@ -38,7 +38,8 @@ import pytest
 
 from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, Node, PartitionInfo, TimestampType, TopicPartition
-from confluent_kafka.common.errors import UnsupportedVersionError, WakeupError
+from confluent_kafka import UnsupportedOperationError
+from confluent_kafka.common.errors import WakeupError
 from confluent_kafka.consumer import (
     AsyncMockConsumer, CloseOptions, ConsumerRebalanceListener, ConsumerRecord, MockConsumer,
     NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError, SubscriptionPattern,
@@ -344,7 +345,7 @@ def test_constructor_takes_the_strategy_name() -> None:
 
 
 @pytest.mark.parametrize("strategy, message", [
-    (None, "Auto offset reset strategy is null"),
+    (None, "Auto offset reset strategy is None"),
     ("by_duration", "<:duration> part is missing in by_duration auto offset reset strategy."),
     ("EARLIEST", "Unknown auto offset reset strategy: EARLIEST"),
     ("by_duration:1H", "Unable to parse duration string in by_duration offset reset strategy."),
@@ -542,7 +543,7 @@ def test_set_offsets_exception_raises_the_injected_instance_and_clears() -> None
 
 def test_offsets_for_times_is_not_implemented() -> None:
     consumer = earliest()
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         consumer.offsets_for_times(timestamps_to_search={tp("t", 0): 0})
     assert str(e.value) == "Not implemented yet."
 
@@ -576,7 +577,7 @@ def test_the_duration_overloads_ignore_the_timeout() -> None:
         assert consumer.list_topics(timeout=timeout) == {}
         assert consumer.beginning_offsets(partitions=[partition], timeout=timeout) == {partition: 2}
         assert consumer.end_offsets(partitions=[partition], timeout=timeout) == {partition: 7}
-        with pytest.raises(UnsupportedVersionError) as e:
+        with pytest.raises(UnsupportedOperationError) as e:
             consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=timeout)
         assert str(e.value) == "Not implemented yet."
     consumer.close()
@@ -601,7 +602,7 @@ def test_the_async_duration_overloads_ignore_the_timeout() -> None:
         assert await consumer.beginning_offsets(partitions=[partition], timeout=-1) == {
             partition: 2}
         assert await consumer.end_offsets(partitions=[partition], timeout=-1) == {partition: 7}
-        with pytest.raises(UnsupportedVersionError):
+        with pytest.raises(UnsupportedOperationError):
             await consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=-1)
 
     asyncio.run(main())
@@ -734,7 +735,7 @@ def test_close_marks_closed_and_later_calls_raise() -> None:
 def test_close_with_a_negative_timeout_closes_the_mock() -> None:
     # Java's MockConsumer.close(CloseOptions) never reads the timeout.
     consumer = earliest()
-    consumer.close(option=CloseOptions.timeout(-1))
+    consumer.close(option=CloseOptions.timeout(timeout=-1))
     assert consumer.closed()
 
 
@@ -782,11 +783,12 @@ def test_commit_nowait_callback_runs_inline_and_propagates() -> None:
     seen: list[Any] = []
     offsets = {partition: OffsetAndMetadata(offset=3)}
     consumer.commit_nowait(offsets=offsets,
-                           callback=lambda o, e: seen.append((o, e, threading.get_ident())))
+                           callback=lambda *, offsets, exception, **_:
+                                        seen.append((offsets, exception, threading.get_ident())))
     assert seen == [(offsets, None, threading.get_ident())]
     assert consumer.committed(partitions=[partition]) == offsets
 
-    def boom(o: Any, e: Any) -> None:
+    def boom(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         raise ValueError("callback")
 
     with pytest.raises(ValueError):
@@ -1064,11 +1066,63 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
         consumer.wakeup()
         with pytest.raises(WakeupError):
             await consumer.poll(timeout=0)
-        with pytest.raises(UnsupportedVersionError):
+        with pytest.raises(UnsupportedOperationError):
             await consumer.offsets_for_times(timestamps_to_search={partition: 0})
         assert await consumer.current_lag(topic_partition=partition) == 0
         async with consumer:
             pass
         assert consumer.closed()
+
+    asyncio.run(main())
+
+
+def test_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> None:
+    # The calls the real consumer's ConsumerHandle now carries inside a
+    # listener (partitions_for, list_topics, group_metadata, the Duration
+    # overloads) are all allowed by Java's reentrant mock too.
+    consumer = earliest()
+    info = PartitionInfo(topic="t", partition=0, leader=None, replicas=(), in_sync_replicas=())
+    consumer.update_partitions(topic="t", partitions=[info])
+    consumer.update_end_offsets(new_offsets={tp("t", 0): 7})
+    seen: dict[str, Any] = {}
+
+    class Listener(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            seen["partitions_for"] = consumer.partitions_for(topic="t", timeout=1.0)
+            seen["list_topics"] = consumer.list_topics(timeout=1.0)
+            seen["group_id"] = consumer.group_metadata().group_id()
+            seen["end_offsets"] = consumer.end_offsets(partitions=[tp("t", 0)], timeout=1.0)
+            consumer.commit(offsets={tp("t", 0): OffsetAndMetadata(offset=3)}, timeout=1.0)
+            seen["committed"] = consumer.committed(partitions=[tp("t", 0)], timeout=1.0)
+
+    consumer.subscribe(topics=["t"], callback=Listener())
+    consumer.rebalance(new_assignment=[tp("t", 0)])
+    assert seen == {"partitions_for": [info], "list_topics": {"t": [info]},
+                    "group_id": "dummy.group.id", "end_offsets": {tp("t", 0): 7},
+                    "committed": {tp("t", 0): OffsetAndMetadata(offset=3)}}
+
+
+def test_async_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> None:
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        info = PartitionInfo(topic="t", partition=0, leader=None, replicas=(),
+                             in_sync_replicas=())
+        consumer.update_partitions(topic="t", partitions=[info])
+        consumer.update_end_offsets(new_offsets={tp("t", 0): 7})
+        seen: dict[str, Any] = {}
+
+        class Listener(ConsumerRebalanceListener):
+            async def on_partitions_assigned(  # type: ignore[override]
+                    self, partitions: set[TopicPartition]) -> None:
+                seen["partitions_for"] = await consumer.partitions_for(topic="t", timeout=1.0)
+                seen["list_topics"] = await consumer.list_topics(timeout=1.0)
+                seen["group_id"] = consumer.group_metadata().group_id()
+                seen["end_offsets"] = await consumer.end_offsets(partitions=[tp("t", 0)],
+                                                                 timeout=1.0)
+
+        await consumer.subscribe(topics=["t"], callback=Listener())
+        await consumer.rebalance(new_assignment=[tp("t", 0)])
+        assert seen == {"partitions_for": [info], "list_topics": {"t": [info]},
+                        "group_id": "dummy.group.id", "end_offsets": {tp("t", 0): 7}}
 
     asyncio.run(main())

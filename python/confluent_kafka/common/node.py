@@ -19,7 +19,7 @@ Java's three constructors ``(id, host, port)``, ``(id, host, port, rack)`` and
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures):
 ``(id, host, port)`` passes ``null`` and ``false`` to the longest, and
 ``(id, host, port, rack)`` sets ``isFenced`` to ``false``. ``rack`` and
-``is_fenced`` default to ``UNSET``, so ``rack=None`` and ``is_fenced=False`` are
+``is_fenced`` default to ``MISSING``, so ``rack=None`` and ``is_fenced=False`` are
 given: ``Node(id=…, host=…, port=…, rack=None, is_fenced=True)`` is Java's
 five-argument constructor, while ``(id, host, port, is_fenced)`` is no Java
 constructor and is rejected, whatever ``is_fenced`` is; so three stubs, one per
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 
 __all__ = ["Node"]
@@ -58,7 +58,7 @@ class Node:
                 Form("id", "host", "port", "rack", "is_fenced",
                      defaults={"rack": None, "is_fenced": False}))
     def __init__(self, *, id: int, host: str, port: int,  # noqa: A002 - Java's name
-                 rack: str | None = UNSET, is_fenced: bool = UNSET) -> None:
+                 rack: str | None = MISSING, is_fenced: bool = MISSING) -> None:
         self._id = id
         self._id_string = str(id)
         self._host = host

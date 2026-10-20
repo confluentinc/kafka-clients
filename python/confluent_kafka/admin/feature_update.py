@@ -24,7 +24,6 @@ from enum import IntEnum
 
 from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["FeatureUpdate"]
 
@@ -79,7 +78,7 @@ class FeatureUpdate:
         """
         if max_version_level == 0:
             if upgrade_type is None:
-                raise NullPointerError()
+                raise TypeError("upgrade_type must not be None")
             if upgrade_type is FeatureUpdate.UpgradeType.UPGRADE:
                 raise IllegalArgumentError(message=(
                     "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE "

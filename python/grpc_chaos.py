@@ -167,7 +167,7 @@ class _RecordOutcomes:
         state for :meth:`send_raised`."""
         state = [0, False]  # callbacks fired, send() failure reported
 
-        def on_delivery(metadata, exception):
+        def on_delivery(*, metadata, exception, **_kwargs):
             with self._lock:
                 state[0] += 1
                 absorbed = state[1] and state[0] == 1
@@ -269,7 +269,7 @@ def _commit_callback(emit):
     reports a failed commit, which otherwise nobody would see (the call itself
     only initiates the commit)."""
 
-    def on_commit(_offsets, exception):
+    def on_commit(*, offsets, exception, **_kwargs):
         if exception is not None:
             emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, exception))
 

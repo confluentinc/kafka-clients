@@ -41,13 +41,14 @@ from confluent_kafka import (
     IllegalArgumentError,
     IllegalStateError,
     NoSuchElementError,
-    NullPointerError,
+    UnsupportedOperationError,
 )
 from confluent_kafka import TimeoutError as RootTimeoutError
 from confluent_kafka import _errors as errmod
 from confluent_kafka._error_registry import ERRORS
 from confluent_kafka._errors import class_for_ffi_id, error_classes, from_ffi_error, to_ffi_id
 from confluent_kafka.common import (
+    Headers,
     InvalidRecordError,
     KafkaError,
     KafkaMetric,
@@ -143,7 +144,7 @@ _JDK: dict[str, type[BaseException]] = {
     "java.util.concurrent.TimeoutException": builtins.TimeoutError,
     "java.util.concurrent.ExecutionException": Exception,
     "java.util.NoSuchElementException": RuntimeError,
-    "java.lang.NullPointerException": RuntimeError,
+    "java.lang.UnsupportedOperationException": RuntimeError,
 }
 
 _BY_JAVA: dict[str, type[BaseException]] = {
@@ -206,14 +207,15 @@ def test_every_python_error_class_is_a_java_class() -> None:
 
     defined = walk(KafkaError)
     for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                 RootTimeoutError, NoSuchElementError, NullPointerError, ExecutionError):
+                 RootTimeoutError, NoSuchElementError, ExecutionError,
+                 UnsupportedOperationError):
         defined |= walk(root)
     assert defined == set(error_classes())
     expected = set(_bridge().values()) | {
         "org.apache.kafka.common.KafkaException",
         "java.util.NoSuchElementException",
-        "java.lang.NullPointerException",
         "java.util.concurrent.ExecutionException",
+        "java.lang.UnsupportedOperationException",
         "org.apache.kafka.common.errors.RetriableException",
         "org.apache.kafka.common.errors.RefreshRetriableException",
         "org.apache.kafka.common.errors.InvalidMetadataException",
@@ -258,10 +260,10 @@ def test_each_error_lives_in_the_module_of_its_java_package() -> None:
 def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
     assert sorted(confluent_kafka.__all__) == sorted([
         "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
-        "IllegalStateError", "NoSuchElementError", "NullPointerError", "TimeoutError"])
+        "IllegalStateError", "NoSuchElementError", "TimeoutError", "UnsupportedOperationError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                NoSuchElementError, NullPointerError):
+                NoSuchElementError, UnsupportedOperationError):
         assert issubclass(cls, RuntimeError)
         assert not issubclass(cls, KafkaError)
     # ExecutionException is checked: an Exception, not a RuntimeError.
@@ -320,7 +322,7 @@ def test_the_base_carries_unknown_server_error_which_unknown_server_error_owns()
 
 
 def test_built_ins_the_core_does_not_model_have_no_id() -> None:
-    for cls in (NoSuchElementError, NullPointerError):
+    for cls in (NoSuchElementError, UnsupportedOperationError):
         assert not hasattr(cls, "_ffi_id")
         assert to_ffi_id(cls(message="x")) == -1
     assert not hasattr(ExecutionError, "_ffi_id")
@@ -381,7 +383,6 @@ def test_message_is_the_keyword_message() -> None:
     with pytest.raises(TypeError):
         KafkaError("positional")  # type: ignore[call-arg]
     assert str(IllegalStateError(message="s")) == "s"
-    assert str(NullPointerError()) == ""
     assert str(RootTimeoutError(message="t")) == "t"
 
 
@@ -391,7 +392,7 @@ def test_topic_authorization_constructors() -> None:
     assert e.unauthorized_topics() == {"t"}
     # (String message) passes Collections.emptySet(): the Java-given default.
     assert TopicAuthorizationError(message="x").unauthorized_topics() == set()
-    # UNSET: an explicit empty set is given, so (unauthorizedTopics) is used.
+    # MISSING: an explicit empty set is given, so (unauthorizedTopics) is used.
     assert str(TopicAuthorizationError(unauthorized_topics=())) == (
         "Not authorized to access topics: []")
     with pytest.raises(IllegalArgumentError) as exc:
@@ -405,7 +406,7 @@ def test_config_error_constructors() -> None:
     assert str(ConfigError(message="plain")) == "plain"
     assert str(ConfigError(name="a.b", value=5)) == "Invalid value 5 for configuration a.b"
     assert str(ConfigError(name="a.b", value=True, message="m")) == (
-        "Invalid value true for configuration a.b: m")
+        "Invalid value True for configuration a.b: m")
     assert str(ConfigError(name="a.b", value=[1, 2], message="m")) == (
         "Invalid value [1, 2] for configuration a.b: m")
     with pytest.raises(IllegalArgumentError) as exc:
@@ -516,7 +517,7 @@ def test_record_deserialization_constructors() -> None:
     assert e.topic_partition() == _TP and e.offset() == 7 and e.timestamp() == 10
     assert bytes(e.key_buffer() or b"") == b"k"
     assert bytes(e.value_buffer() or b"") == b"v"
-    assert [(k, bytes(v or b"")) for k, v in e.headers()] == [("h", b"1")]
+    assert [(h.key(), bytes(h.value() or b"")) for h in e.headers()] == [("h", b"1")]
     assert e.__cause__ is cause
     # Java's null buffers and origin are values of the full constructor.
     # Every Java constructor takes the cause, so a null one is cause=None.
@@ -524,7 +525,8 @@ def test_record_deserialization_constructors() -> None:
         origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
         timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
         headers=(), message="m", cause=None)
-    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (
+        None, None, None, Headers())
     # A record without a key (CompletedFetch passes record.key(), null) or a
     # tombstone keeps the other buffer.
     k = RecordDeserializationError(

@@ -22,7 +22,7 @@ CLAUDE.md, Python Binding Conventions, Errors:
 - Python -> core (:func:`to_ffi_id`): ``type(error)._ffi_id``. The base
   ``KafkaError`` carries ``UNKNOWN_SERVER_ERROR`` (-1), which
   ``UnknownServerError`` owns in the ``id -> class`` table; an error class
-  without an id (``NullPointerError``, a user's own exception) reports -1 too.
+  without an id (``NoSuchElementError``, a user's own exception) reports -1 too.
 
 The ``id -> class`` table is derived from the generated registry, every class
 with its own ``_ffi_id``.

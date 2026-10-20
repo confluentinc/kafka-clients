@@ -21,6 +21,8 @@ Java's byte for byte.
 
 from __future__ import annotations
 
+from typing import Any
+
 import uuid
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
@@ -48,12 +50,18 @@ class UUIDSerializer:
         if isinstance(encoding_value, str):
             self._encoding = encoding_value
 
-    def __call__(self, topic: str, value: uuid.UUID | None,
-                 headers: Headers | None = None) -> bytes | None:
-        if value is None:
+    def __call__(self, *, topic: str, data: uuid.UUID | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: uuid.UUID | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
         try:
-            return encode(str(value), self._encoding)
+            return encode(str(data), self._encoding)
         except LookupError:
             # Java passes no cause.
             raise SerializationError(

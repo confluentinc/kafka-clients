@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.admin._futures import Async, KindT, Sync
 
@@ -75,10 +75,10 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
                            "future_replica_offset_lag": _INVALID_OFFSET_LAG}),
             name="ReplicaLogDirInfo",
         )
-        def _new(cls, *, current_replica_log_dir: str | None = UNSET,
-                 current_replica_offset_lag: int | None = None,
-                 future_replica_log_dir: str | None = UNSET,
-                 future_replica_offset_lag: int | None = None
+        def _new(cls, *, current_replica_log_dir: str | None = MISSING,
+                 current_replica_offset_lag: int = MISSING,
+                 future_replica_log_dir: str | None = MISSING,
+                 future_replica_offset_lag: int = MISSING
                  ) -> DescribeReplicaLogDirsResult.ReplicaLogDirInfo:
             """Java's package-private ``ReplicaLogDirInfo()`` and
             ``ReplicaLogDirInfo(currentReplicaLogDir, currentReplicaOffsetLag,

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from .user_scram_credential_alteration import UserScramCredentialAlteration
 
@@ -47,7 +46,7 @@ class UserScramCredentialDeletion(UserScramCredentialAlteration):
         mechanism."""
         super().__init__(user=user)
         if mechanism is None:
-            raise NullPointerError()
+            raise TypeError("mechanism must not be None")
         self._mechanism = mechanism
 
     def mechanism(self) -> ScramMechanism:

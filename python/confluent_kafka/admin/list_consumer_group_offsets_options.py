@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["ListConsumerGroupOffsetsOptions"]
@@ -41,22 +41,24 @@ class ListConsumerGroupOffsetsOptions(AbstractOptions):
 
     __slots__ = ("_require_stable",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, require_stable: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, require_stable: bool = MISSING) -> None:
         super().__init__()
         self._require_stable = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if require_stable is not UNSET:
+        if require_stable is not MISSING:
             self.require_stable(require_stable=require_stable)
 
-    def require_stable(self, *, require_stable: bool | None = None) -> Any:
+    def require_stable(self, *, require_stable: bool = MISSING) -> Any:
         """With ``require_stable``: sets an optional requireStable flag, and return this
         object.
 
         Without: the current value.
         """
-        if require_stable is None:
+        if require_stable is MISSING:
             return self._require_stable
+        if require_stable is None:  # a boolean: Java cannot pass null
+            raise TypeError("require_stable must not be None")
         self._require_stable = require_stable
         self._record("require_stable", self._require_stable)
         return self

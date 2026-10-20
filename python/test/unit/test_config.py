@@ -289,7 +289,7 @@ def test_a_serializer_encoding_reaches_configure_not_the_core() -> None:
     assert native == {}
     serializer = resolve_serde(None, originals, "value.serializer", is_key=False,
                                default=bytes_serializer())
-    assert serializer("t", "a") == "a".encode("utf-16-be")
+    assert serializer(topic="t", data="a") == "a".encode("utf-16-be")
 
 
 def test_old_client_keys_are_accepted() -> None:

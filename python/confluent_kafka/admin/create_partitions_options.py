@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["CreatePartitionsOptions"]
@@ -40,27 +40,29 @@ class CreatePartitionsOptions(AbstractOptions):
 
     __slots__ = ("_validate_only", "_retry_on_quota_violation")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, validate_only: bool = UNSET,
-                 retry_on_quota_violation: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, validate_only: bool = MISSING,
+                 retry_on_quota_violation: bool = MISSING) -> None:
         super().__init__()
         self._validate_only = False
         self._retry_on_quota_violation = True
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if validate_only is not UNSET:
+        if validate_only is not MISSING:
             self.validate_only(validate_only=validate_only)
-        if retry_on_quota_violation is not UNSET:
+        if retry_on_quota_violation is not MISSING:
             self.retry_on_quota_violation(retry_on_quota_violation=retry_on_quota_violation)
 
-    def validate_only(self, *, validate_only: bool | None = None) -> Any:
+    def validate_only(self, *, validate_only: bool = MISSING) -> Any:
         """With ``validate_only``: set to true if the request should be validated
         without creating new partitions, and return this object.
 
         Without: return true if the request should be validated without creating new
         partitions.
         """
-        if validate_only is None:
+        if validate_only is MISSING:
             return self._validate_only
+        if validate_only is None:  # a boolean: Java cannot pass null
+            raise TypeError("validate_only must not be None")
         self._validate_only = validate_only
         self._record("validate_only", self._validate_only)
         return self
@@ -68,6 +70,8 @@ class CreatePartitionsOptions(AbstractOptions):
     def retry_on_quota_violation(self, *,
                                  retry_on_quota_violation: bool) -> CreatePartitionsOptions:
         """Set to true if quota violation should be automatically retried."""
+        if retry_on_quota_violation is None:  # a boolean: Java cannot pass null
+            raise TypeError("retry_on_quota_violation must not be None")
         self._retry_on_quota_violation = retry_on_quota_violation
         self._record("retry_on_quota_violation", self._retry_on_quota_violation)
         return self

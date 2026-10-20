@@ -680,12 +680,18 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "",
         &[&[], &[("String", "s")]],
     ),
+    // Java's `UnsupportedOperationException`, thrown by the pure-Python mocks
+    // (`MockConsumer.offsetsForTimes`, `MockAdminClient`'s "Not implemented yet").
+    // The core models no id for it yet (core-ffi-improvements-list.md B8), so an
+    // error from the core stays `UnsupportedVersionError`.
     (
-        "java.lang.NullPointerException",
+        "java.lang.UnsupportedOperationException",
         "java.lang.RuntimeException",
         "",
-        &[&[], &[("String", "s")]],
+        JDK_FOUR,
     ),
+    // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
+    // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
 ];
 
 /// JDK classes at the top of every chain: `Throwable`'s constructors decide the
@@ -718,7 +724,7 @@ const BLOCK_END: &str = "# END GENERATED ERRORS";
 struct ClassInfo {
     java_fqn: String,
     py_name: String,
-    /// `(constant name, value)`; `None` for the abstract classes and the two
+    /// `(constant name, value)`; `None` for the abstract classes and the
     /// built-ins the core does not model.
     ffi_id: Option<(String, i32)>,
     is_abstract: bool,
@@ -1363,8 +1369,8 @@ fn throwable_effect(vals: &[PyVal]) -> anyhow::Result<Effect> {
 }
 
 /// Store a value in a field of Java type `ty`: collections and buffers are
-/// copied into their output form (a `set`, a `dict`, a `memoryview`, header
-/// tuples) unless the value is a constant.
+/// copied into their output form (a `set`, a `dict`, a `memoryview`, a
+/// `Headers`) unless the value is a constant.
 fn convert_for_field(ty: &str, v: PyVal) -> PyVal {
     if v.konst.is_some() || v.expr.starts_with("_throwable.") || v.expr.starts_with('{') {
         return v;
@@ -1396,23 +1402,15 @@ fn stored_param(expr: &str) -> &str {
 // The Python model of a class's constructors (CLAUDE.md, Signatures, Errors)
 // ---------------------------------------------------------------------------
 
+/// A parameter's implementation-signature default (CLAUDE.md, Signatures):
+/// required (in every constructor), or `MISSING`, the private "no argument
+/// here" of every parameter some constructor omits. What a shorter
+/// constructor passes for it is filled by `java_forms` (or, without the
+/// decorator, by the body), never written as a default.
 #[derive(Clone, Debug, PartialEq)]
 enum Dflt {
     Required,
-    NoneDefault,
-    Unset,
-    Const(String),
-}
-
-impl Dflt {
-    fn python(&self) -> String {
-        match self {
-            Dflt::Required => String::new(),
-            Dflt::NoneDefault => "None".into(),
-            Dflt::Unset => "UNSET".into(),
-            Dflt::Const(c) => c.clone(),
-        }
-    }
+    Missing,
 }
 
 /// Parameters Java passes `null` for at a real call site although no shorter
@@ -1440,8 +1438,9 @@ struct PyParam {
     name: String,
     java_ty: String,
     default: Dflt,
-    /// Java's null is one of its Java-given defaults, so the implementation
-    /// signature types it `T | None` even when its default is `UNSET`.
+    /// Java's null is one of its Java-given defaults (or it is a message or a
+    /// cause), so the implementation signature and the stubs type it
+    /// `T | None`.
     nullable: bool,
     /// Its Java-given default `null` is a field default (a shorter
     /// constructor assigns null to the field this parameter fills), so the
@@ -1481,8 +1480,9 @@ struct PyModel {
     /// Form indices a call can select, in priority order (most parameters,
     /// then declaration order).
     reachable: Vec<usize>,
-    /// `@overload` stubs: (parameter names, optional names), in stub order.
-    stubs: Vec<(Vec<String>, BTreeSet<String>)>,
+    /// `@overload` stubs, one per Java constructor (its parameter names, no
+    /// defaults), in Java's declaration order; none for a single constructor.
+    stubs: Vec<Vec<String>>,
 }
 
 /// The constructors the Python class offers: the public ones (the protected
@@ -1720,59 +1720,6 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
     // Union order and the forms of the @overload stubs.
     let orders: Vec<Vec<String>> = forms.iter().map(|f| f.params.clone()).collect();
     let order = merge_order(&orders)?;
-    let n = forms.len();
-    let is_prefix = |a: &Vec<String>, b: &Vec<String>| a.len() < b.len() && b[..a.len()] == a[..];
-    let mut root: Vec<usize> = (0..n).collect();
-    for (i, slot) in root.iter_mut().enumerate() {
-        let mut cur = i;
-        while let Some(j) = (0..n).find(|&j| j != cur && is_prefix(&forms[cur].params, &forms[j].params)) {
-            cur = j;
-        }
-        *slot = cur;
-    }
-    // stub groups: root -> members. Two constructors share a stub only if
-    // every set the shared stub admits is a constructor (CLAUDE.md,
-    // Signatures, "A stub admits ..."): members join their root's stub from
-    // the longest down, and one that would make it admit another set keeps a
-    // stub of its own.
-    let form_sets: BTreeSet<BTreeSet<&String>> = forms.iter().map(|f| f.params.iter().collect()).collect();
-    let admits_only_forms = |r: usize, members: &[usize]| {
-        let names = &forms[r].params;
-        let optional: Vec<&String> = names
-            .iter()
-            .filter(|p| members.iter().any(|m| !forms[*m].params.contains(p)))
-            .collect();
-        (0..(1u64 << optional.len())).all(|subset| {
-            let set: BTreeSet<&String> = names
-                .iter()
-                .filter(|p| optional.iter().position(|o| o == p).is_none_or(|i| subset & (1 << i) != 0))
-                .collect();
-            form_sets.contains(&set)
-        })
-    };
-    let mut chains: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (i, r) in root.iter().enumerate() {
-        chains.entry(*r).or_default().push(i);
-    }
-    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (r, mut members) in chains {
-        members.sort_by_key(|&m| (std::cmp::Reverse(forms[m].params.len()), m));
-        let mut kept: Vec<usize> = Vec::new();
-        for m in members {
-            kept.push(m);
-            if !admits_only_forms(r, &kept) {
-                kept.pop();
-                groups.insert(m, vec![m]);
-            }
-        }
-        groups.insert(r, kept);
-    }
-    let mut stub_groups: Vec<(usize, Vec<usize>)> = groups.into_iter().collect();
-    stub_groups.sort_by_key(|(r, members)| {
-        let all_deprecated = members.iter().all(|m| forms[*m].deprecated.is_some());
-        (all_deprecated, *members.iter().min().unwrap(), *r)
-    });
-
     // Defaults of the implementation signature.
     let mut params: Vec<PyParam> = Vec::new();
     for p in &order {
@@ -1782,40 +1729,18 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
             .iter()
             .filter_map(|f| f.defaults.get(p).or_else(|| f.field_defaults.get(p)).cloned())
             .collect();
-        let required_by_one = forms.iter().any(|f| f.params.contains(p) && !f.defaults.contains_key(p));
         // `message` is nullable everywhere: Java's `(String) null` is a legal
         // message, `getMessage()` is then null, which `str(e)` maps to `""`
         // (CLAUDE.md, Errors); so is a `Throwable` cause.
         let nullable = java_defaults.iter().any(|d| d == "None") || p == "message" || throwable_like(&jty);
-        // Dropping it from a constructor that has it leaves a set that is no
-        // constructor.
-        let dropped_is_no_form = forms.iter().any(|f| {
-            f.params.contains(p) && !form_sets.contains(&f.params.iter().filter(|q| *q != p).collect::<BTreeSet<_>>())
-        });
-        let default = if in_every {
-            Dflt::Required
-        } else if (required_by_one && !java_defaults.is_empty()) || (nullable && dropped_is_no_form) {
-            // UNSET (CLAUDE.md, Signatures, "'Given' means ..."): one
-            // constructor requires it and another defaults it (a field default
-            // is a value, not an overload: the constructor that requires the
-            // parameter must still see `None` as given); or it is nullable and
-            // an explicit None must count as given to select the constructor
-            // that has it.
-            Dflt::Unset
-        } else if let Some(first) = java_defaults.first() {
+        if let Some(first) = java_defaults.first() {
             if java_defaults.iter().any(|d| d != first) {
                 anyhow::bail!("{fqn}: parameter `{p}` has different Java-given defaults {java_defaults:?}");
             }
-            if first == "None" {
-                Dflt::NoneDefault
-            } else {
-                Dflt::Const(first.clone())
-            }
-        } else if header_type(&jty) {
-            Dflt::Const("()".into())
-        } else {
-            Dflt::NoneDefault
-        };
+        }
+        // Every parameter some constructor omits defaults to MISSING; an
+        // explicit None is Java's null (CLAUDE.md, Signatures).
+        let default = if in_every { Dflt::Required } else { Dflt::Missing };
         let field_nullable = forms
             .iter()
             .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
@@ -1885,40 +1810,20 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
     let mut reachable: Vec<usize> = reachable_set.into_iter().collect();
     reachable.sort_by_key(|&f| (std::cmp::Reverse(forms[f].params.len()), f));
 
-    let mut stubs: Vec<(Vec<String>, BTreeSet<String>)> = if decorated {
-        stub_groups
+    // One `@overload` stub per Java constructor, with exactly its parameters
+    // (CLAUDE.md, Signatures: "One `@typing.overload` stub per Java
+    // overload"), in Java's declaration order; a single constructor has none.
+    let mut stubs: Vec<Vec<String>> = Vec::new();
+    for form in &forms {
+        if !stubs
             .iter()
-            .map(|(r, members)| {
-                let names = forms[*r].params.clone();
-                let optional: BTreeSet<String> = names
-                    .iter()
-                    .filter(|p| members.iter().any(|m| !forms[*m].params.contains(p)))
-                    .cloned()
-                    .collect();
-                (names, optional)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    // A stub an earlier one already accepts (every name of it in the earlier
-    // stub, every other name of the earlier stub optional there) can never be
-    // matched.
-    let mut k = 0;
-    while k < stubs.len() {
-        let subsumed = (0..k).any(|j| {
-            let (earlier, earlier_optional) = &stubs[j];
-            let (names, optional) = &stubs[k];
-            names
-                .iter()
-                .all(|n| earlier.contains(n) && (earlier_optional.contains(n) || !optional.contains(n)))
-                && earlier.iter().all(|n| names.contains(n) || earlier_optional.contains(n))
-        });
-        if subsumed {
-            stubs.remove(k);
-        } else {
-            k += 1;
+            .any(|names| names.iter().collect::<BTreeSet<_>>() == form.params.iter().collect::<BTreeSet<_>>())
+        {
+            stubs.push(form.params.clone());
         }
+    }
+    if stubs.len() < 2 {
+        stubs.clear();
     }
 
     Ok(PyModel { params, forms, decorated, reachable, stubs })
@@ -1935,6 +1840,7 @@ fn import_source(name: &str) -> Option<(&'static str, &'static str)> {
         "OffsetAndMetadata" => ("confluent_kafka.consumer.offset_and_metadata", "OffsetAndMetadata"),
         "KafkaMetric" => ("confluent_kafka.common.kafka_metric", "KafkaMetric"),
         "TimestampType" => ("confluent_kafka.common.timestamp_type", "TimestampType"),
+        "Header" => ("confluent_kafka.common.header", "Header"),
         "Headers" => ("confluent_kafka.common.headers", "Headers"),
         "Iterable" => ("collections.abc", "Iterable"),
         "Mapping" => ("collections.abc", "Mapping"),
@@ -1979,9 +1885,11 @@ fn py_type(ty: &str, input: bool, info: &ClassInfo, used: &mut BTreeSet<String>)
         "Map" => format!("dict[{}, {}]", arg(0, used)?, arg(1, used)?),
         "ByteBuffer" | "byte[]" if input => "bytes".into(),
         "ByteBuffer" | "byte[]" => "memoryview".into(),
-        _ if header_type(ty) && input => {
-            format!("{}[tuple[str, bytes | bytearray | memoryview | None]]", named("Iterable", used))
-        },
+        _ if header_type(ty) && input => format!(
+            "{}[{} | tuple[str, bytes | bytearray | memoryview | None]]",
+            named("Iterable", used),
+            named("Header", used)
+        ),
         _ if header_type(ty) => named("Headers", used),
         "TopicPartition" | "OffsetAndMetadata" | "KafkaMetric" | "TimestampType" => named(base, used),
         other if info.java.enums.iter().any(|e| e.name == other) => format!("{}.{}", info.py_name, other),
@@ -2126,22 +2034,25 @@ fn class_doc(info: &ClassInfo, model: &PyModel) -> String {
     parts.join("\n\n")
 }
 
+/// "Given" means "not left at `MISSING`" (CLAUDE.md, Signatures).
 fn given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "True".into(),
-        Dflt::NoneDefault => format!("{} is not None", p.name),
-        Dflt::Unset => format!("is_given({}, UNSET)", p.name),
-        Dflt::Const(c) => format!("is_given({}, {})", p.name, c),
+        Dflt::Missing => format!("{} is not MISSING", p.name),
     }
 }
 
 fn not_given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "False".into(),
-        Dflt::NoneDefault => format!("{} is None", p.name),
-        Dflt::Unset => format!("not is_given({}, UNSET)", p.name),
-        Dflt::Const(c) => format!("not is_given({}, {})", p.name, c),
+        Dflt::Missing => format!("{} is MISSING", p.name),
     }
+}
+
+/// Whether Java gives null a meaning for the parameter, so the signature and
+/// the stubs type it `T | None` (CLAUDE.md, Signatures, Nullability).
+fn takes_null(p: &PyParam) -> bool {
+    p.nullable || p.field_nullable || p.evidenced
 }
 
 /// One constructor branch: `Throwable` init plus every field of the chain.
@@ -2192,54 +2103,25 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
     let ty = py_type(&p.java_ty, true, info, used)?;
     Ok(match &p.default {
         // A required cause is given as None for a null cause (CLAUDE.md,
-        // Errors).
+        // Errors); a required message takes Java's null as the stubs do.
         Dflt::Required if p.name == "cause" || p.evidenced => format!("{}: {ty} | None", p.name),
+        Dflt::Required if takes_null(p) && ty != "Any" => format!("{}: {ty} | None", p.name),
         Dflt::Required => format!("{}: {ty}", p.name),
-        Dflt::NoneDefault if ty == "Any" => format!("{}: Any = None", p.name),
-        Dflt::NoneDefault => format!("{}: {ty} | None = None", p.name),
-        Dflt::Unset if p.nullable && ty != "Any" => format!("{}: {ty} | None = UNSET", p.name),
-        Dflt::Unset => format!("{}: {ty} = UNSET", p.name),
-        Dflt::Const(c) => format!("{}: {ty} = {c}", p.name),
+        Dflt::Missing if takes_null(p) && ty != "Any" => format!("{}: {ty} | None = MISSING", p.name),
+        Dflt::Missing => format!("{}: {ty} = MISSING", p.name),
     })
 }
 
-/// A stub parameter: required in this form, or optional with Java's value.
-fn stub_param(
-    p: &PyParam,
-    optional: bool,
-    model: &PyModel,
-    info: &ClassInfo,
-    used: &mut BTreeSet<String>,
-) -> anyhow::Result<String> {
+/// A stub parameter: the stub is one Java constructor, so every parameter it
+/// lists is given, with no default (CLAUDE.md, Signatures); `T | None` where
+/// Java gives null a meaning for it (a `message` and a `cause` always: mypy
+/// would otherwise reject a call the runtime accepts).
+fn stub_param(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> anyhow::Result<String> {
     let ty = py_type(&p.java_ty, true, info, used)?;
-    if !optional {
-        // A required `message` or `cause` still takes Java's null (see the
-        // model's `nullable`), so its stub says so; mypy otherwise rejects a
-        // call the runtime accepts.
-        if (p.field_nullable || p.evidenced || p.name == "message" || p.name == "cause") && ty != "Any" {
-            return Ok(format!("{}: {ty} | None", p.name));
-        }
-        return Ok(format!("{}: {ty}", p.name));
+    if takes_null(p) && ty != "Any" {
+        return Ok(format!("{}: {ty} | None", p.name));
     }
-    // An optional cause: a shorter constructor of the stub's group omits it,
-    // so Java's value is a null cause.
-    if p.name == "cause" {
-        return Ok(format!("cause: {ty} | None = None"));
-    }
-    let java_value = model
-        .forms
-        .iter()
-        .find_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)).cloned());
-    Ok(match (&p.default, java_value) {
-        (Dflt::NoneDefault, _) => format!("{}: {ty} | None = None", p.name),
-        (_, Some(v)) if v == "None" => format!("{}: {ty} | None = None", p.name),
-        (_, Some(v)) => format!("{}: {ty} = {v}", p.name),
-        (Dflt::Const(c), None) => format!("{}: {ty} = {c}", p.name),
-        // An optional `message` with no Java value to show (`UNSET`): still
-        // nullable, as above.
-        _ if p.name == "message" && ty != "Any" => format!("{}: {ty} | None = ...", p.name),
-        _ => format!("{}: {ty} = ...", p.name),
-    })
+    Ok(format!("{}: {ty}", p.name))
 }
 
 /// Java's public static factories (`GroupAuthorizationException.forGroupId`) as
@@ -2395,6 +2277,15 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     // see the same elements, even for a generator.
     for p in &model.params {
         if py_type(&p.java_ty, true, info, &mut used)?.starts_with("Iterable[") {
+            // A collection of String refuses a str (CLAUDE.md, Signatures): read by
+            // character it would be the wrong topics. `reject_str` ignores every other
+            // value, MISSING and None included.
+            if matches!(
+                p.java_ty.as_str(),
+                "Set<String>" | "Collection<String>" | "List<String>" | "Iterable<String>"
+            ) {
+                body.push(format!("        reject_str(\"{0}\", {0})", p.name));
+            }
             body.push(format!("        {0} = _throwable.materialize({0})", p.name));
         }
     }
@@ -2465,20 +2356,19 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
             // defaults: a left-out parameter gets its value here.
             for (name, value) in &form.defaults {
                 let p = model.params.iter().find(|p| &p.name == name).unwrap();
-                if p.default.python() != *value {
-                    code.push(format!("            if {}:", not_given_expr(p)));
-                    code.push(format!("                {name} = {value}"));
-                }
+                code.push(format!("            if {}:", not_given_expr(p)));
+                code.push(format!("                {name} = {value}"));
             }
         }
         code.extend(branch_code(g, info, form, "            "));
         branches.push((conds, code));
     }
     if !model.decorated {
-        // A branch that differs from a longer one only by a None-default
-        // parameter being None merges into it (`(message)` into
-        // `(message, cause)`): the longer branch's code with that parameter
-        // None is the shorter branch's code.
+        // A branch that differs from a longer one only by a parameter being
+        // left out merges into it (`(message)` into `(message, cause)`) when
+        // the longer branch's code with that parameter None is the shorter
+        // branch's code: the merged code reads the parameter as None when it
+        // is MISSING.
         let mut k = 0;
         while k < branches.len() {
             let mut merged = false;
@@ -2494,11 +2384,13 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 let Some(p) = model.params.iter().find(|p| &p.name == name) else {
                     continue;
                 };
-                if p.default != Dflt::NoneDefault || cj[*i].1 != given_expr(p) {
+                if p.default != Dflt::Missing || cj[*i].1 != given_expr(p) {
                     continue;
                 }
                 let replaced: Vec<String> = codej.iter().map(|l| replace_word(l, name, "None")).collect();
                 if &replaced == codek {
+                    let read = format!("(None if {name} is MISSING else {name})");
+                    branches[j].1 = codej.iter().map(|l| replace_word(l, name, &read)).collect();
                     branches[j].0.remove(*i);
                     branches.remove(k);
                     merged = true;
@@ -2668,17 +2560,17 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     }
     let mut pkg_block: Vec<String> = vec!["from confluent_kafka import _throwable".into()];
     let mut args_names: Vec<&str> = Vec::new();
-    if class_text.contains("UNSET") {
-        args_names.push("UNSET");
+    if class_text.contains("MISSING") {
+        args_names.push("MISSING");
     }
     if model.decorated {
         args_names.push("Form");
     }
-    if class_text.contains("is_given(") {
-        args_names.push("is_given");
-    }
     if model.decorated {
         args_names.push("java_forms");
+    }
+    if class_text.contains("reject_str(") {
+        args_names.push("reject_str");
     }
     if !args_names.is_empty() {
         pkg_block.push(format!("from confluent_kafka._args import {}", args_names.join(", ")));
@@ -2730,12 +2622,12 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
             sbody.push(format!("        {c} = \"{c}\""));
         }
     }
-    if model.stubs.len() > 1 {
-        for (names, optional) in &model.stubs {
+    if !model.stubs.is_empty() {
+        for names in &model.stubs {
             let mut ps = Vec::new();
             for n in names {
                 let p = model.params.iter().find(|p| &p.name == n).unwrap();
-                ps.push(stub_param(p, optional.contains(n), &model, info, &mut stub_used)?);
+                ps.push(stub_param(p, info, &mut stub_used)?);
             }
             sbody.push("    @overload".into());
             if ps.is_empty() {
@@ -2745,24 +2637,10 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
             }
         }
     } else {
+        // One constructor: every parameter is required, so no default to show.
         let mut ps = Vec::new();
         for p in &model.params {
-            let decl = param_decl(p, info, &mut stub_used)?;
-            ps.push(if p.default == Dflt::Unset {
-                // The stub shows the Java value (CLAUDE.md, Signatures: "the
-                // stubs show the Java value") when the forms agree on one.
-                let values: BTreeSet<&String> = model
-                    .forms
-                    .iter()
-                    .filter_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)))
-                    .collect();
-                match values.iter().next() {
-                    Some(v) if values.len() == 1 => decl.replace("= UNSET", &format!("= {v}")),
-                    _ => decl.replace("= UNSET", "= ..."),
-                }
-            } else {
-                decl
-            });
+            ps.push(param_decl(p, info, &mut stub_used)?);
         }
         if ps.is_empty() {
             sbody.push("    def __init__(self) -> None: ...".into());
@@ -3431,7 +3309,9 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins.
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins
+        // (NoSuchElementException, ExecutionException, UnsupportedOperationException;
+        // NullPointerException is Python's TypeError).
         assert_eq!(classes.len(), 174);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
@@ -3455,6 +3335,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.TimeoutException"), "builtins.TimeoutError");
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
+        assert_eq!(base("java.lang.UnsupportedOperationException"), "RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"
@@ -3470,11 +3351,21 @@ mod tests {
         // (String message) passes Collections.emptySet() to (message, topics).
         assert_eq!(m.forms[0].defaults.get("unauthorized_topics").map(String::as_str), Some("()"));
         // Java's (String) null is a legal message, so the stubs type it `str |
-        // None`; dropping it from (String message) leaves (), which is no
-        // constructor, so it is UNSET and message=None selects (String message).
+        // None`; a constructor omits it, so it defaults to MISSING and
+        // message=None selects (String message).
         assert!(param(&m, "message").nullable);
-        assert_eq!(param(&m, "message").default, Dflt::Unset);
-        assert_eq!(param(&m, "unauthorized_topics").default, Dflt::Unset);
+        assert_eq!(param(&m, "message").default, Dflt::Missing);
+        assert_eq!(param(&m, "unauthorized_topics").default, Dflt::Missing);
+        // One stub per Java constructor, in Java's declaration order.
+        let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            m.stubs,
+            vec![
+                names(&["message", "unauthorized_topics"]),
+                names(&["unauthorized_topics"]),
+                names(&["message"])
+            ]
+        );
         assert_eq!(
             m.forms[1].effect.message,
             "\"Not authorized to access topics: \" + java_str(unauthorized_topics)"
@@ -3487,7 +3378,7 @@ mod tests {
         let m = model_of(&classes, "org.apache.kafka.common.config.ConfigException");
         let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["name", "value", "message"]);
-        assert_eq!(param(&m, "message").default, Dflt::Unset);
+        assert_eq!(param(&m, "message").default, Dflt::Missing);
         assert_eq!(m.forms[2].defaults.get("message").map(String::as_str), Some("None"));
     }
 
@@ -3496,12 +3387,13 @@ mod tests {
         let classes = build_graph(&repo_root()).unwrap();
         // (String message) assigns nothing and passes nothing to (int, String):
         // the field default 0 is no Java-given default for matching, so the
-        // two forms are matched strictly and throttle_time_ms is UNSET.
+        // two forms are matched strictly and throttle_time_ms is MISSING.
         let m = model_of(&classes, "org.apache.kafka.common.errors.ThrottlingQuotaExceededException");
-        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Unset);
-        // Both given sets are Java constructors: no decorator, no stubs.
+        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Missing);
+        // Both given sets are Java constructors: no decorator, but one stub per
+        // constructor.
         assert!(!m.decorated);
-        assert!(m.stubs.is_empty());
+        assert_eq!(m.stubs.len(), 2);
     }
 
     #[test]
@@ -3542,36 +3434,41 @@ mod tests {
     }
 
     #[test]
-    fn stubs_admit_only_constructors_and_cause_follows_the_unset_rule() {
+    fn a_required_message_takes_null_in_the_signature_too() {
+        // One constructor (String message): no stubs, and the signature, like
+        // every stub elsewhere, types the message `str | None`.
         let classes = build_graph(&repo_root()).unwrap();
-        // (message), (cause), (message, cause): dropping cause from (cause)
-        // leaves (), which is no constructor, so cause is UNSET; the (cause)
-        // stub requires it, and (message) shares (message, cause)'s stub.
-        let m = model_of(&classes, "org.apache.kafka.common.errors.AuthenticationException");
-        assert_eq!(param(&m, "cause").default, Dflt::Unset);
-        let opt = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let m = model_of(&classes, "org.apache.kafka.common.errors.ProducerFencedException");
+        assert!(m.stubs.is_empty());
+        let info = &classes["org.apache.kafka.common.errors.ProducerFencedException"];
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            param_decl(param(&m, "message"), info, &mut used).unwrap(),
+            "message: str | None"
+        );
+    }
+
+    #[test]
+    fn one_stub_per_constructor_and_cause_defaults_to_missing() {
+        let classes = build_graph(&repo_root()).unwrap();
         let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            m.stubs,
-            vec![
-                (names(&["message", "cause"]), opt(&["cause"])),
-                (names(&["cause"]), opt(&[]))
-            ]
-        );
-        // (message, cause), (message), (): one stub for all three would admit
-        // (cause), so () keeps a stub of its own; dropping cause from
-        // (message, cause) leaves (message), a constructor, so cause stays None.
+        // (message), (cause), (message, cause): cause is omitted by (message),
+        // so it defaults to MISSING; an optional cause is two stubs.
+        let m = model_of(&classes, "org.apache.kafka.common.errors.AuthenticationException");
+        assert_eq!(param(&m, "cause").default, Dflt::Missing);
+        assert_eq!(m.stubs.len(), 3);
+        assert!(m.stubs.contains(&names(&["message", "cause"])));
+        assert!(m.stubs.contains(&names(&["message"])));
+        assert!(m.stubs.contains(&names(&["cause"])));
+        // (message, cause), (message), (): three constructors, three stubs.
         let m = model_of(&classes, "org.apache.kafka.common.errors.TransactionAbortedException");
-        assert_eq!(param(&m, "cause").default, Dflt::NoneDefault);
-        assert_eq!(
-            m.stubs,
-            vec![(names(&["message", "cause"]), opt(&["cause"])), (names(&[]), opt(&[]))]
-        );
-        // Java has (message, cause) and (cause), so message=None is "not
-        // given" there: dropping message never leaves a set that is no
-        // constructor, and no constructor passes it a value.
+        assert_eq!(param(&m, "cause").default, Dflt::Missing);
+        assert_eq!(m.stubs.len(), 3);
+        assert!(m.stubs.contains(&names(&[])));
+        // A message some constructor omits is MISSING too: an explicit None is
+        // Java's (String) null.
         let m = model_of(&classes, "org.apache.kafka.common.errors.InvalidTopicException");
-        assert_eq!(param(&m, "message").default, Dflt::NoneDefault);
+        assert_eq!(param(&m, "message").default, Dflt::Missing);
     }
 
     #[test]

@@ -20,7 +20,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["MetricName"]
 
@@ -46,9 +45,10 @@ class MetricName:
     def __init__(self, *, name: str, group: str, description: str,
                  tags: Mapping[str, str]) -> None:
         # Java: Objects.requireNonNull on each argument, without a message.
-        for value in (name, group, description, tags):
+        for label, value in (("name", name), ("group", group), ("description", description),
+                             ("tags", tags)):
             if value is None:
-                raise NullPointerError()
+                raise TypeError(f"{label} must not be None")
         self._name = name
         self._group = group
         self._description = description

@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka.common.kafka_error import KafkaError
 
 __all__ = ["CommitFailedError"]
@@ -47,9 +48,9 @@ class CommitFailedError(KafkaError):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = MISSING,
     ) -> None:
-        if message is not None:
+        if message is not MISSING:
             _throwable.init(self, message, None)
         else:
             _throwable.init(self, "Commit cannot be completed since the group has already " + "rebalanced and assigned the partitions to another member. This means that the time " + "between subsequent calls to poll() was longer than the configured max.poll.interval.ms, " + "which typically implies that the poll loop is spending too much time message processing. " + "You can address this either by increasing max.poll.interval.ms or by reducing the maximum " + "size of batches returned in poll() with max.poll.records.", None)

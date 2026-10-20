@@ -66,7 +66,7 @@ class DescribeTopicsResult(Generic[KindT]):
                 message="topicIdFutures and nameFutures cannot both be specified.")
         if topic_id_futures is None and name_futures is None:
             raise IllegalArgumentError(
-                message="topicIdFutures and nameFutures cannot both be null.")
+                message="topicIdFutures and nameFutures cannot both be None.")
         result = cls.__new__(cls)
         result._topic_id_futures = None if topic_id_futures is None else dict(topic_id_futures)
         result._name_futures = None if name_futures is None else dict(name_futures)

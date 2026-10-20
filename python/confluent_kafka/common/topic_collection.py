@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from confluent_kafka._args import reject_str
 from confluent_kafka.common.uuid import Uuid
 
 if TYPE_CHECKING:
@@ -69,6 +70,7 @@ class TopicCollection:
     @staticmethod
     def of_topic_names(*, topics: Iterable[str]) -> TopicCollection.TopicNameCollection:
         """A collection of topics defined by topic name."""
+        reject_str("topics", topics)
         return _TopicNameCollection._new(topic_names=topics)
 
 
