@@ -20,14 +20,19 @@
 //! `AbstractConfig`. In Rust we define a typed struct holding the actual config
 //! values the client needs, plus the config key constants for compatibility.
 //!
-//! Java-specific settings that are not applicable to rustls are omitted:
+//! Java-specific settings that rustls does not use are defined, parsed and
+//! validated as in Java (`SslConfigs.addClientSslSupport`), but are not
+//! honoured:
 //! - `ssl.provider` — Java security provider
 //! - `ssl.secure.random.implementation` — Java SecureRandom PRNG
-//! - `ssl.engine.factory.class` — Java SSLEngine factory
 //! - `ssl.keymanager.algorithm` — Java JSSE key manager
 //! - `ssl.trustmanager.algorithm` — Java JSSE trust manager
-//! - `ssl.cipher.suites` — rustls has sensible defaults
+//! - `ssl.cipher.suites` — rustls's default cipher suites are used; a
+//!   non-empty value logs a warning
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
+//!
+//! Only `ssl.engine.factory.class`, the Java SSLEngine factory, is not
+//! defined: a configuration never takes a class (CLAUDE.md §2).
 
 use crate::common::Error;
 use crate::common::config::abstract_config::ValuesReader;
