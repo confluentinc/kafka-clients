@@ -478,7 +478,7 @@ fn share_acquire_mode_validator() -> LambdaValidator {
 // `AbstractConfig`'s `Debug` renders the properties as their key set only: the
 // map also holds keys this client does not define, and Java never prints a raw
 // original value.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     /// The originals, the parsed values and the keys used so far.
@@ -2784,6 +2784,5 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(hash(&a), hash(&b));
         assert_ne!(a, c);
-        assert_eq!(a, a.clone());
     }
 }

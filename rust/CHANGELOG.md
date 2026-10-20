@@ -119,6 +119,8 @@ breaking changes.
   either be 'batch_optimized' or 'record_limit'."; a blank value used to be
   accepted. `share.acquire.mode` defaults to Java's `BATCH_OPTIMIZED`, which
   `get_string` returns, instead of `batch_optimized`.
+- **Breaking:** `ConsumerConfig` is no longer `Clone`: build another one
+  from the same properties with `ConsumerConfig::new`.
 - `ConsumerConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
@@ -267,8 +269,8 @@ breaking changes.
   `kafka_consumer_ConsumerConfig_get_short`, `_get_int`, `_get_long`,
   `_get_double`, `_get_boolean`, `_get_list`, `_unused`,
   `_ignore`, `_log_unused` and `_config_names`, beside the existing
-  `_get_string`. A consumer created from the handle starts from a copy of its
-  record of the keys used.
+  `_get_string`. A consumer created from the handle keeps its own record of
+  the keys it used.
 - `kafka_producer_ProducerConfig_t` answers the same getters:
   `kafka_producer_ProducerConfig_get_short`, `_get_int`, `_get_long`,
   `_get_double`, `_get_boolean`, `_get_string`, `_get_list`, `_unused`,

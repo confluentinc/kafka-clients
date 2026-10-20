@@ -18,8 +18,14 @@
 //! Built from a `kafka_Map_t` of C strings, the way Rust's
 //! `ConsumerConfig::new` takes a `HashMap<String, String>`; validation
 //! happens here, so `kafka_consumer_KafkaConsumer_new` only sees a valid
-//! configuration, which it clones (one configuration can build several
-//! consumers, as Java's `Properties` can).
+//! configuration.
+//!
+//! `KafkaConsumer::new` takes a `ConsumerConfig` by value, which is not
+//! `Clone` (CLAUDE.md §3), while the C constructor borrows the handle; the
+//! handle therefore keeps the validated properties and rebuilds the Rust value
+//! for every consumer created from it, so one configuration can build several
+//! consumers (Java's `Properties` can be reused the same way), each with its
+//! own record of the keys it used.
 //!
 //! The map is the only input, as in Rust: a typed setter would skip the
 //! `ConfigDef` validators `new` runs. Values are read back by key through
@@ -30,6 +36,7 @@
 use std::collections::HashMap;
 use std::os::raw::c_char;
 
+use crate::common::Error;
 use crate::consumer::ConsumerConfig;
 use crate::ffi::common::config::config_getters::{self, LentStrings};
 use crate::ffi::common::fail_with;
@@ -47,6 +54,10 @@ pub struct kafka_consumer_ConsumerConfig_t {
 /// lent out, kept so the pointers they return live as long as the handle, as a
 /// Rust `&str` borrowed from the configuration does.
 struct ConsumerConfigHandle {
+    /// The validated properties, from which each consumer's configuration is
+    /// built ([`consumer_config_build`]).
+    props: HashMap<String, String>,
+    /// The configuration the getters read.
     config: ConsumerConfig,
     /// The values [`kafka_consumer_ConsumerConfig_get_string`] lent out.
     strings: LentStrings,
@@ -65,11 +76,31 @@ unsafe fn handle_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a 
     unsafe { &*(config as *const ConsumerConfigHandle) }
 }
 
+/// A fresh configuration built from the handle's properties, with its own
+/// record of the keys used, for a consumer created from the handle.
+///
+/// # Errors
+///
+/// Fails as [`ConsumerConfig::new`] does; the properties were validated when
+/// the handle was built, so it does not in practice.
+///
+/// # Safety
+///
+/// `config` must be a live handle, kept alive for this call.
+pub(crate) unsafe fn consumer_config_build(
+    config: *const kafka_consumer_ConsumerConfig_t,
+) -> Result<ConsumerConfig, Error> {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for this call,
+    // as `handle_ref` requires; the reference does not outlive it.
+    ConsumerConfig::new(&unsafe { handle_ref(config) }.props)
+}
+
 /// The configuration behind a handle.
 ///
 /// # Safety
 ///
 /// `config` must be a live handle, kept alive for `'a`.
+#[cfg(test)]
 pub(crate) unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfig {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, as
     // `handle_ref` requires.
@@ -95,8 +126,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
-        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle { config, strings: LentStrings::default() }))
-            as *mut kafka_consumer_ConsumerConfig_t,
+        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle {
+            props,
+            config,
+            strings: LentStrings::default(),
+        })) as *mut kafka_consumer_ConsumerConfig_t,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
     }
@@ -266,8 +300,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
 /// `unused()`: the keys of the properties never read through this handle's
 /// getters nor marked with [`kafka_consumer_ConsumerConfig_ignore`], as an
 /// owned, sorted list of `char *` the caller frees with `kafka_List_destroy`.
-/// A consumer created from the handle starts from a copy of this record and
-/// keeps its own afterwards.
+/// A consumer created from the handle keeps its own record, starting empty.
 ///
 /// # Safety
 ///

@@ -37,7 +37,7 @@ use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::serialization::deserializer::{
     DeserializerInner, kafka_common_serialization_Deserializer_t, take_deserializer,
 };
-use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_ConsumerConfig_t};
+use crate::ffi::consumer::consumer_config::{consumer_config_build, kafka_consumer_ConsumerConfig_t};
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
@@ -132,7 +132,9 @@ unsafe fn deserializer_from(
 /// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
 /// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
 /// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
-/// `*out_err` and returns `NULL`. The config is copied; each
+/// `*out_err` and returns `NULL`. The consumer gets its own configuration,
+/// built from the handle's properties, so the handle stays the caller's and can
+/// build further consumers; each
 /// deserializer handle is consumed (its `self` stays the caller's until the
 /// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
 /// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
@@ -154,8 +156,8 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_KafkaConsumer_t {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this
-    // statement, the only use of the reference, as `consumer_config_ref` requires.
-    let config = unsafe { consumer_config_ref(config) }.clone();
+    // statement, as `consumer_config_build` requires.
+    let config = unsafe { consumer_config_build(config) };
     // SAFETY: Per this function's `# Safety`, `key_deserializer` is null or a live handle not used
     // afterwards, as `deserializer_from` requires.
     let (key, owns_key) = unsafe { deserializer_from(key_deserializer) };
@@ -164,8 +166,12 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     let (value, owns_value) = unsafe { deserializer_from(value_deserializer) };
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
         // The boxes go in as they are: `new` would box them again (see
-        // `with_boxed_deserializers`).
-        KafkaConsumer::with_boxed_deserializers(config, key, value)
+        // `with_boxed_deserializers`). The properties were validated when the
+        // handle was built, so the configuration does not fail in practice; if
+        // it did, the deserializers would be dropped unclosed, as Java's
+        // constructor fails building its `ConsumerConfig` before it takes them.
+        config
+            .and_then(|config| KafkaConsumer::with_boxed_deserializers(config, key, value))
             .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires;
@@ -463,6 +469,52 @@ mod tests {
                     .unwrap()
                     .push(Some((kafka_common_Error_is_wakeup_error(error), message)));
                 kafka_common_Error_destroy(error);
+            }
+        }
+    }
+
+    /// One configuration handle builds several consumers: each gets its own
+    /// configuration built from the handle's properties, so building one
+    /// neither consumes the handle nor touches its record of the keys used.
+    #[test]
+    fn one_config_handle_builds_several_consumers() {
+        use crate::ffi::consumer::consumer_config::{
+            kafka_consumer_ConsumerConfig_destroy, kafka_consumer_ConsumerConfig_new,
+            kafka_consumer_ConsumerConfig_unused,
+        };
+        use crate::ffi::util::{kafka_List_destroy, kafka_Map_destroy, kafka_Map_new, kafka_Map_put, list_string_set};
+        // SAFETY: Test code: the map, the config, the lists and both consumer handles are live
+        // until they are destroyed once below; `err` is a valid slot pointing at null before each
+        // call.
+        unsafe {
+            let props = kafka_Map_new();
+            for (key, value) in [(c"bootstrap.servers", c"127.0.0.1:1"), (c"group.protocol", c"consumer")] {
+                kafka_Map_put(
+                    props,
+                    key.as_ptr() as *mut std::ffi::c_void,
+                    value.as_ptr() as *mut std::ffi::c_void,
+                );
+            }
+            let mut err = std::ptr::null_mut();
+            let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            // `postProcessParsedConfig` read `group.protocol`; nothing else yet.
+            let expected_unused = std::collections::HashSet::from(["bootstrap.servers".to_string()]);
+            let mut classes = Vec::new();
+            for _ in 0..2 {
+                let class =
+                    kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
+                assert!(err.is_null());
+                assert!(!class.is_null());
+                classes.push(class);
+                let unused = kafka_consumer_ConsumerConfig_unused(config);
+                assert_eq!(list_string_set(unused), expected_unused, "the consumer marks its own record");
+                kafka_List_destroy(unused);
+            }
+            kafka_consumer_ConsumerConfig_destroy(config);
+            for class in classes {
+                kafka_consumer_KafkaConsumer_destroy(class);
             }
         }
     }
