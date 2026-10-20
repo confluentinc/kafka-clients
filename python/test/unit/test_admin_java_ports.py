@@ -408,9 +408,6 @@ def test_valid_metadata_recovery_strategy(strategy: str) -> None:
     _admin(**{"metadata.recovery.strategy": strategy}).close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "product bug: Admin.create accepts metadata.recovery.strategy=abc; Java's "
-    "ConfigDef (ValidString) raises ConfigException naming the key"))
 def test_invalid_metadata_recovery_strategy() -> None:
     """``testInvalidMetadataRecoveryStrategy``: ``ConfigException`` whose message
     names the key."""
