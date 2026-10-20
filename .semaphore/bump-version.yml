@@ -12,7 +12,10 @@ name: Bump version
 #                      PEP 440 (0.3.0-rc.1 -> 0.3.0rc1).
 # Optional:
 #   PYTHON_VERSION  -- a PEP 440 version for the Python packages instead
-#                      (e.g. 0.3.0.post1 for a Python-only release).
+#                      (e.g. 4.4.0 or 4.4.0.post1). Python versions only
+#                      move up, so it is required whenever VERSION's PEP 440
+#                      form is below the current Python version
+#                      (python/pyproject.toml).
 #   BASE_BRANCH     -- the branch to bump and the PR's base; default master.
 #
 # The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION> when that is
@@ -35,6 +38,16 @@ blocks:
             - checkout
             - |
               : "${VERSION:?VERSION must be set as a Task parameter}"
+            # The parameters are free text: accept only version characters, and
+            # pass them to make in the environment (below), not on its command
+            # line, where make would expand a $(...) in them.
+            - |
+              for v in "${VERSION}" "${PYTHON_VERSION:-0}"; do
+                if ! printf '%s' "$v" | grep -Eq '^[0-9A-Za-z.+!-]+$'; then
+                  echo "Refusing to bump: '$v' is not a version" >&2
+                  exit 1
+                fi
+              done
             - export BASE_BRANCH="${BASE_BRANCH:-master}"
             - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}"
             - |
@@ -48,7 +61,8 @@ blocks:
             - git checkout -B "${BUMP_BRANCH}" FETCH_HEAD
             # Installs rustup, which installs the toolchain rust/rust-toolchain.toml pins.
             - ./.semaphore/dependencies.sh
-            - make bump-version VERSION="${VERSION}" PYTHON_VERSION="${PYTHON_VERSION:-}"
+            - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}"
+            - make bump-version
             - |
               if git diff --quiet; then
                 echo "Nothing to bump: ${BASE_BRANCH} already has these versions" >&2
