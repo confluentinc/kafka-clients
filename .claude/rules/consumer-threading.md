@@ -290,8 +290,14 @@ rebalance or commit.
 **Do NOT use `#[async_trait]` for:**
 
   - `Consumer<K, V>` itself (see above).
-  - `Deserializer<T>` / `Serializer<T>` — per-record, sync trait
-    (`fn deserialize(bytes: &[u8]) -> Result<T, Error>`).
+  - `Deserializer<T>` / `Serializer<T>` — per-record traits. They are async
+    traits whose methods return `impl Future + Send` (CLAUDE.md §3,
+    `check-send-future`), each with a sealed dyn-compatible companion
+    (`DynDeserializer<T>`, `DynSerializer<T>`) that returns an `InlineFuture`
+    (`rust/src/common/serialization/inline_future.rs`): the future is stored in
+    a fixed buffer inside the value, so a client holding its serdes as trait
+    objects pays no allocation per key and per value; only a future too large
+    or too strictly aligned for that buffer is boxed, once per call.
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing
     inside; keep generic dispatch (`<I: ConsumerInterceptor<K, V>>`) where
     feasible.
@@ -559,22 +565,38 @@ send path. The symmetric rule on the receive path:
     decoded output (`T` for key, `T` for value). That allocation is
     unavoidable; it is the user's choice of type.
 
-**`Deserializer<T>` trait shape:**
+**`Deserializer<T>` trait shape** (`rust/src/common/serialization/deserializer.rs`):
 
     pub trait Deserializer<T>: Send + Sync + 'static {
-        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
-        fn deserialize_headers(
-            &self,
-            topic: &str,
-            headers: &Headers,
-            data: &[u8],
-        ) -> Result<T, Error> {
-            self.deserialize(topic, data)
+        fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8])
+            -> impl Future<Output = Result<T, Error>> + Send + 'a;
+        fn deserialize_with_headers<'a>(
+            &'a self,
+            topic: &'a str,
+            headers: &'a RecordHeaders,
+            data: &'a [u8],
+        ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+            self.deserialize(topic, data) // Java default
         }
+        // KIP-863: the record's slice of the fetch buffer itself, so a
+        // deserializer can keep it without copying (`BytesDeserializer`).
+        fn deserialize_with_headers_bytes<'a>(
+            &'a self,
+            topic: &'a str,
+            headers: &'a RecordHeaders,
+            data: &'a Bytes,
+        ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+            self.deserialize_with_headers(topic, headers, &data[..]) // Java default
+        }
+        fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool)
+            -> impl Future<Output = ()> + Send + 'a { /* no-op */ }
+        fn close(&mut self) -> impl Future<Output = ()> + Send { /* no-op */ }
     }
 
-Sync `fn`. No `#[async_trait]`. `data: &[u8]` borrowed from the fetch
-buffer.
+Async methods returning `impl Future + Send`; no `#[async_trait]`. `data` is
+borrowed from the fetch buffer. The consumer calls its deserializers through
+`DynDeserializer<T>`, whose `InlineFuture` keeps the per-record call free of a
+boxed future (§2).
 
 **Compression handling:**
 
@@ -803,16 +825,14 @@ The mechanism mirrors Java's bidirectional event handshake
   - `OffsetCommitCallback` follows the same pattern: bg-side completion
     enqueues a callback-needed event; app-side drains and invokes.
   - **In-callback reentrancy:** a listener that calls back into the
-    consumer (`assign`/`seek`/`pause`/`resume`/`position`/`committed`/
+    consumer (`seek`/`pause`/`resume`/`position`/`committed`/
     `beginning_offsets`/`commit_*`) does so through a captured
     [`ConsumerHandle`] (§41 — the Rust equivalent of Java capturing the
     `consumer` variable; the listener trait signature stays Java-identical,
     taking only `&self` + partitions). This only works because the bg loop
     is not frozen during the callback (step 2 above) — for `on_partitions_lost`
     fired by fence/fatal/stale as well as for the reconcile callbacks.
-    (`ConsumerHandle::assign` with an EMPTY collection is rejected with a
-    clear error: on the owning consumer `assign([])` leaves the group, which
-    the handle does not expose — Phase 41, Issue 4.)
+    The handle has no `assign`, `subscribe` or `unsubscribe` (KIP-1306, §41).
 
 **`ConsumerRebalanceListener` trait shape:**
 
@@ -884,3 +904,27 @@ them:
      block the listener on a channel held by the test, observe that the
      membership state machine has not advanced, release the channel,
      observe advancement.
+
+## 41. `ConsumerHandle`: the KIP-1306 callback view, plus `wakeup`
+
+`ConsumerHandle` (`rust/src/consumer/internals/async_kafka_consumer.rs`, public
+through `#[doc(alias = "rust-only")]`) is the `Send + Sync` handle that
+`Consumer::handle()` hands out. A listener or commit callback runs inside the
+caller's `poll()`, which holds the consumer `&mut`, so it calls back into the
+consumer through this `&self` handle (§31).
+
+Its public methods are the `Consumer` methods of KIP-1306's (KAFKA-20385)
+`RebalanceConsumer`: the `Consumer` trait minus `poll`, `close`, every
+`subscribe`, `unsubscribe`, `assign`, `enforce_rebalance`, the
+metric-subscription methods, `subscription()` and `metrics()`, plus `wakeup`.
+Java has no need to put `wakeup()` on the callback view, since another thread
+calls it on the consumer object; in Rust the `&mut self` consumer cannot be
+shared, so the handle is the only cross-thread path for Java's `wakeup()`
+contract.
+
+**How to apply:** each handle method takes `&self` and the trait method's
+parameters and returns the trait method's type (`impl Future<Output = R> + Send`
+for an async one); none of the excluded methods, nor an overload of one, is a
+`pub fn` of the handle; and no handle-only name is added. `cargo xtask
+lint-custom` (`check-consumer-handle`) enforces all three. A `pub(crate)` method
+is not checked (the C binding reads `metrics()` through one).
