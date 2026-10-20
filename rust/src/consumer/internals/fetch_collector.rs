@@ -276,7 +276,7 @@ where
                     // Snapshot records size BEFORE moving cf into initialize.
                     let records_size_bytes = FetchResponse::records_size(&completed_fetch.partition_data);
 
-                    match self.initialize(completed_fetch) {
+                    match self.initialize(completed_fetch, &mut state.advanced) {
                         Ok(maybe_initialized) => {
                             fetch_buffer.set_next_in_line_fetch(maybe_initialized);
                         },
@@ -490,6 +490,34 @@ where
         true
     }
 
+    /// The position of `tp` as Java's `collectFetch` sees it at this point of
+    /// the call: `subscribed`, the position in `SubscriptionState`, moved to
+    /// where the call has read `tp` up to.
+    ///
+    /// Java moves the position as soon as it has read a fetch
+    /// (`FetchCollector.java:177-185`), so a later fetch for the same partition
+    /// in the same `collectFetch` is checked against the moved position, both
+    /// when it is initialized (`:258-263`, `:346-353`) and when its records are
+    /// read (`:170`). Here the call moves the positions only at its end
+    /// ([`Self::move_positions`]), so each of those checks reads the position
+    /// through this function. While `subscribed` is no longer the position
+    /// the call read from (the user or the background task moved it), it wins,
+    /// and `move_positions` then drops what the call read.
+    fn effective_position(
+        advanced: &[AdvancedPosition],
+        tp: &TopicPartition,
+        subscribed: FetchPosition,
+    ) -> FetchPosition {
+        match advanced.iter().find(|a| a.partition == *tp) {
+            Some(AdvancedPosition { original, read_to: Some((offset, offset_epoch)), .. })
+                if original.offset == subscribed.offset =>
+            {
+                FetchPosition::with_leader(*offset, *offset_epoch, subscribed.current_leader)
+            },
+            _ => subscribed,
+        }
+    }
+
     /// Moves the position of every partition in `advanced` the call has read
     /// past its position, under one `SubscriptionState` lock: the
     /// `subscriptions.position(tp, nextPosition)` Java's `fetchRecords` makes
@@ -520,6 +548,27 @@ where
         let mut position_advanced = false;
         for entry in advanced {
             let tp = &entry.partition;
+            if entry.reset_requested {
+                // A current `OFFSET_OUT_OF_RANGE` at the position the call had
+                // read up to, which this call answered by requesting a reset
+                // (`handle_offset_out_of_range`). Java had moved the position
+                // before the reset, which then cleared it
+                // (`TopicPartitionState.transitionState`, AWAIT_RESET requires
+                // no position), and returns the records it read: so are they
+                // here, while the partition is still assigned, and the position
+                // is left to the reset.
+                if guard.is_assigned(tp) {
+                    position_advanced |= entry.read_to.is_some();
+                } else {
+                    debug!(
+                        "Not returning fetched records for partition {} since it is no longer assigned",
+                        tp
+                    );
+                    collected.records_by_partition.shift_remove(tp);
+                    collected.next_offsets.remove(tp);
+                }
+                continue;
+            }
             let kept = if !guard.is_assigned(tp) {
                 debug!(
                     "Not returning fetched records for partition {} since it is no longer assigned",
@@ -710,14 +759,7 @@ where
                 // The call moves positions only once it has read everything
                 // (`move_positions`), so a partition it has already read from
                 // is next in line at the offset it read up to.
-                let position = match advanced.iter().find(|a| a.partition == tp) {
-                    Some(AdvancedPosition { original, read_to: Some((offset, offset_epoch)), .. })
-                        if original.offset == subscribed.offset =>
-                    {
-                        FetchPosition::with_leader(*offset, *offset_epoch, subscribed.current_leader.clone())
-                    },
-                    _ => subscribed,
-                };
+                let position = Self::effective_position(advanced, &tp, subscribed);
                 if cf.next_fetch_offset() != position.offset {
                     // Not next-in-line based on the consumed position;
                     // these must be from an obsolete request.
@@ -741,6 +783,7 @@ where
                         partition: tp.clone(),
                         original: position.clone(),
                         read_to: None,
+                        reset_requested: false,
                     });
                 }
 
@@ -800,9 +843,17 @@ where
     /// Returns `Err((cf, e))` so the caller can decide whether to
     /// push_front the entry on the queue.
     ///
+    /// `advanced` is how far the call has read each partition: the
+    /// position checks read the position as Java's would be at this point of
+    /// the call ([`Self::effective_position`]).
+    ///
     /// Translates Java's `CompletedFetch initialize(CompletedFetch)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#initialize")]
-    fn initialize(&self, completed_fetch: CompletedFetch) -> Result<Option<CompletedFetch>, FetchFail> {
+    fn initialize(
+        &self,
+        completed_fetch: CompletedFetch,
+        advanced: &mut [AdvancedPosition],
+    ) -> Result<Option<CompletedFetch>, FetchFail> {
         // Test-only injection: reproduce Java's testErrorInInitialize, where
         // the anonymous subclass overrides initialize() to throw. Compiled
         // out of release builds.
@@ -842,9 +893,9 @@ where
             debug!("Ignoring fetched records for partition {tp} since it no longer has valid position");
             Ok(None)
         } else if error == Errors::None {
-            self.handle_initialize_success(completed_fetch)
+            self.handle_initialize_success(completed_fetch, advanced)
         } else {
-            match self.handle_initialize_errors(completed_fetch, error) {
+            match self.handle_initialize_errors(completed_fetch, error, advanced) {
                 Ok(_cf) => Ok(None),
                 Err(boxed) => Err(boxed),
             }
@@ -881,14 +932,18 @@ where
     fn handle_initialize_success(
         &self,
         mut completed_fetch: CompletedFetch,
+        advanced: &[AdvancedPosition],
     ) -> Result<Option<CompletedFetch>, FetchFail> {
         let tp = completed_fetch.partition.clone();
         let fetch_offset = completed_fetch.next_fetch_offset();
 
+        // we are interested in this fetch only if the beginning offset matches the
+        // current consumed position
         let position_offset = {
             let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            guard.position_or_null(&tp).map(|p| p.offset)
-        };
+            guard.position_or_null(&tp).cloned()
+        }
+        .map(|p| Self::effective_position(advanced, &tp, p).offset);
         if position_offset.is_none_or(|o| o != fetch_offset) {
             debug!(
                 "Discarding stale fetch response for partition {tp} since its offset {fetch_offset} does not match \
@@ -1006,6 +1061,7 @@ where
         &self,
         completed_fetch: CompletedFetch,
         error: Errors,
+        advanced: &mut [AdvancedPosition],
     ) -> Result<CompletedFetch, FetchFail> {
         let tp = completed_fetch.partition.clone();
         let fetch_offset = completed_fetch.next_fetch_offset();
@@ -1035,7 +1091,7 @@ where
                 FetchUtils::request_metadata_update(&self.metadata, &self.subscriptions, &tp);
                 Ok(completed_fetch)
             },
-            Errors::OffsetOutOfRange => self.handle_offset_out_of_range(completed_fetch, fetch_offset),
+            Errors::OffsetOutOfRange => self.handle_offset_out_of_range(completed_fetch, fetch_offset, advanced),
             Errors::TopicAuthorizationFailed => {
                 warn!("Not authorized to read from partition {tp}.");
                 let mut set = std::collections::HashSet::new();
@@ -1072,10 +1128,17 @@ where
         }
     }
 
+    /// Java's `OFFSET_OUT_OF_RANGE` branch of `handleInitializeErrors`
+    /// (`FetchCollector.java:340-363`), with the position read through
+    /// [`Self::effective_position`]. A reset requested at a position the call
+    /// has read up to is marked in `advanced`, so that
+    /// [`Self::move_positions`] returns the records the call read, as Java
+    /// does.
     fn handle_offset_out_of_range(
         &self,
         completed_fetch: CompletedFetch,
         fetch_offset: i64,
+        advanced: &mut [AdvancedPosition],
     ) -> Result<CompletedFetch, FetchFail> {
         let tp = completed_fetch.partition.clone();
         let cleared_replica_id = {
@@ -1093,9 +1156,16 @@ where
         // so handle normally.
         let (position_opt, has_default_reset) = {
             let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            let p = guard.position_or_null(&tp).cloned();
-            (p, guard.has_default_offset_reset_policy())
+            (guard.position_or_null(&tp).cloned(), guard.has_default_offset_reset_policy())
         };
+        // The entry whose `read_to` the effective position is, if it is one:
+        // the call has read `tp` from its current position.
+        let read_to_entry = position_opt.as_ref().and_then(|subscribed| {
+            advanced
+                .iter()
+                .position(|a| a.partition == tp && a.read_to.is_some() && a.original.offset == subscribed.offset)
+        });
+        let position_opt = position_opt.map(|p| Self::effective_position(advanced, &tp, p));
         match position_opt {
             None => {
                 debug!(
@@ -1117,6 +1187,9 @@ where
                     info!("{error_message}, resetting offset");
                     let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
                     guard.request_offset_reset_if_assigned(&tp);
+                    if let Some(i) = read_to_entry {
+                        advanced[i].reset_requested = true;
+                    }
                     Ok(completed_fetch)
                 } else {
                     info!("{error_message}, raising error to the application since no reset policy is configured");
@@ -1229,6 +1302,9 @@ struct AdvancedPosition {
     original: FetchPosition,
     /// `(offset, offset_epoch)` past `original`, if the call has read past it.
     read_to: Option<(i64, Option<i32>)>,
+    /// Whether the call requested a reset of the partition for an
+    /// `OFFSET_OUT_OF_RANGE` at `read_to` (`handle_offset_out_of_range`).
+    reset_requested: bool,
 }
 
 /// The fetch [`FetchCollector::fetch_records_from_partition`] is decoding
@@ -2184,6 +2260,99 @@ mod tests {
         assert_eq!(0, fetch.next_offsets().len());
     }
 
+    /// In-collect variant of Java's `FetchRequestManagerTest.testStaleOutOfRangeError`
+    /// (`FetchRequestManagerTest.java:1866`): the stale `OFFSET_OUT_OF_RANGE`
+    /// is made stale not by a seek but by a fetch read earlier in the same
+    /// collect, as after a leader change with two fetches in flight. Java moves
+    /// the position to 10 while reading the first fetch
+    /// (`FetchCollector.java:177-185`), so the error at 0 is discarded as stale
+    /// (`:346-350`): the ten records are returned, the position is 10 and no
+    /// reset is pending, which with `latest` would lose them.
+    #[test]
+    fn test_stale_out_of_range_error_within_one_collect() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer.add(build_completed_fetch(&h, partition.clone(), 0, 10, None));
+        h.fetch_buffer.add(build_completed_fetch(
+            &h,
+            partition.clone(),
+            0,
+            0,
+            Some(Errors::OffsetOutOfRange),
+        ));
+
+        let fetch = h.collector.collect_fetch_now(&h.fetch_buffer).unwrap();
+
+        assert_eq!(10, fetch.records_with_partition(&partition).len());
+        let guard = h.subs.lock().unwrap();
+        assert!(!guard.is_offset_reset_needed(&partition).unwrap());
+        assert_eq!(10, guard.position_or_null(&partition).unwrap().offset);
+    }
+
+    /// The current counterpart of [`test_stale_out_of_range_error_within_one_collect`]:
+    /// the `OFFSET_OUT_OF_RANGE` is at 10, where the first fetch leaves the
+    /// position. Java has moved the position to 10, so the error is current
+    /// (`FetchCollector.java:351-356`): it requests a reset, which clears the
+    /// position (AWAIT_RESET has none), and still returns the ten records it
+    /// had read.
+    #[test]
+    fn test_current_out_of_range_error_after_records_within_one_collect() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer.add(build_completed_fetch(&h, partition.clone(), 0, 10, None));
+        h.fetch_buffer.add(build_completed_fetch(
+            &h,
+            partition.clone(),
+            10,
+            0,
+            Some(Errors::OffsetOutOfRange),
+        ));
+
+        let fetch = h.collector.collect_fetch_now(&h.fetch_buffer).unwrap();
+
+        assert_eq!(10, fetch.records_with_partition(&partition).len());
+        assert_eq!(10, fetch.next_offsets().get(&partition).unwrap().offset());
+        let guard = h.subs.lock().unwrap();
+        assert!(guard.is_offset_reset_needed(&partition).unwrap());
+        assert!(guard.position_or_null(&partition).is_none());
+    }
+
+    /// A duplicate data response at the offset a fetch read earlier in the
+    /// same collect is stale, as Java finds it against the position it has
+    /// already moved (`FetchCollector.java:258-263`): its high watermark,
+    /// last stable offset and log start offset are not applied
+    /// (`updatePartitionState` is never reached), and its records are not
+    /// returned.
+    #[test]
+    fn test_duplicate_fetch_within_one_collect_does_not_update_partition_state() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer.add(build_completed_fetch(&h, partition.clone(), 0, 10, None));
+        let mut duplicate = build_completed_fetch(&h, partition.clone(), 0, 10, None);
+        duplicate.partition_data.set_high_watermark(5);
+        duplicate.partition_data.set_last_stable_offset(3);
+        duplicate.partition_data.set_log_start_offset(2);
+        h.fetch_buffer.add(duplicate);
+
+        let fetch = h.collector.collect_fetch_now(&h.fetch_buffer).unwrap();
+
+        assert_eq!(10, fetch.records_with_partition(&partition).len());
+        let guard = h.subs.lock().unwrap();
+        assert_eq!(10, guard.position_or_null(&partition).unwrap().offset);
+        assert_eq!(
+            Some(1000),
+            guard.partition_end_offset(&partition, IsolationLevel::ReadUncommitted).unwrap()
+        );
+        assert_eq!(
+            None,
+            guard.partition_end_offset(&partition, IsolationLevel::ReadCommitted).unwrap()
+        );
+        assert_eq!(None, guard.partition_lead(&partition).unwrap());
+    }
+
     /// Translated from `FetchCollectorTest.testFetchWithTopicAuthorizationFailed`.
     #[test]
     #[doc(
@@ -2757,7 +2926,7 @@ mod tests {
 
         // The null-position arm discards the fetch (returns it unchanged) and
         // does NOT request a reset.
-        let result = h.collector.handle_offset_out_of_range(cf, 0);
+        let result = h.collector.handle_offset_out_of_range(cf, 0, &mut []);
         assert!(result.is_ok(), "null-position OOR must discard (not error)");
         // No reset was requested: the partition isn't even assigned.
         let guard = h.subs.lock().expect("lock");
