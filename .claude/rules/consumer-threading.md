@@ -59,8 +59,8 @@ consumer. The lint fails on any other `Consumer` / `DynConsumer` method taking
 in `ClassicKafkaConsumer`, so it takes `&mut self`.)
 
 On `KafkaConsumer`, misuse of the guarded sync getters is a programming bug,
-so it panics with Java's message instead of returning a `Result` (the
-precedent is "precondition throws stay panics"): a closed consumer panics with
+so it panics with Java's message instead of returning a `Result`, per
+CLAUDE.md §12.5 (Panics policy): a closed consumer panics with
 `"This consumer has already been closed."`, and `group_metadata()` without
 `group.id` with `InvalidGroupIdException`'s message. Each getter documents its
 panic under `# Panics`. `current_lag` is already async and fallible, so on a
