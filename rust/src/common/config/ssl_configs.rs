@@ -270,81 +270,19 @@ impl SslConfigs {
         Ok(ssl)
     }
 
-    /// Applies a single `ssl.*` configuration key/value pair to `ssl`.
-    ///
-    /// Shared by [`crate::producer::ProducerConfig`] and
-    /// [`crate::consumer::ConsumerConfig`] so the `ssl.*` parsing logic lives in
-    /// exactly one place. Unknown `ssl.*` keys are logged and ignored, matching
-    /// Java's `AbstractConfig` behavior (unknown keys are accepted silently).
-    ///
-    /// The caller is responsible for matching the `"ssl."` prefix before calling
-    /// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
-    ///
-    /// Values of the six keys Java defines as `Type.PASSWORD`
-    /// (`SslConfigs.java:133-137`, `:140`) are wrapped in a [`Password`].
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Config`] if `ssl.enabled.protocols` or `ssl.cipher.suites`
-    /// fails Java's `ValidList.anyNonDuplicateValues(true, false)`
-    /// (`SslConfigs.java:129-130`): an empty element (duplicates are removed).
-    pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfigs, key: &str, value: &str) -> Result<(), Error> {
-        match key {
-            SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
-                ssl.truststore_location = Some(value.to_string());
-            },
-            SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG => {
-                ssl.truststore_password = Some(Password::new(value));
-            },
-            SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG => {
-                ssl.truststore_certificates = Some(Password::new(value));
-            },
-            SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG => {
-                ssl.truststore_type = value.to_string();
-            },
-            SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG => {
-                ssl.keystore_location = Some(value.to_string());
-            },
-            SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG => {
-                ssl.keystore_password = Some(Password::new(value));
-            },
-            SslConfigs::SSL_KEYSTORE_KEY_CONFIG => {
-                ssl.keystore_key = Some(Password::new(value));
-            },
-            SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => {
-                ssl.keystore_certificate_chain = Some(Password::new(value));
-            },
-            SslConfigs::SSL_KEYSTORE_TYPE_CONFIG => {
-                ssl.keystore_type = value.to_string();
-            },
-            SslConfigs::SSL_KEY_PASSWORD_CONFIG => {
-                ssl.key_password = Some(Password::new(value));
-            },
-            SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
-                ssl.endpoint_identification_algorithm = value.to_string();
-            },
-            SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG => {
-                ssl.enabled_protocols = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-            },
-            SslConfigs::SSL_CIPHER_SUITES_CONFIG => {
-                // Not modelled (the TLS provider picks the suites), but Java
-                // still validates it with `ValidList.anyNonDuplicateValues(true,
-                // false)` (`SslConfigs.java:129`), so a value Java rejects is
-                // rejected here too before the key is ignored. An empty list
-                // is Java's default (`List.of()`, meaning the provider's
-                // defaults), so only a non-empty list is actually ignored.
-                if !ValidList::parse_any_non_duplicate_values(key, value, true)?.is_empty() {
-                    log::warn!(
-                        "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
-                        key
-                    );
-                }
-            },
-            _ => {
-                log::warn!("Unknown SSL configuration key: {}", key);
-            },
-        }
-        Ok(())
+    /// The `ssl.*` settings parsed from `props` with
+    /// [`Self::add_client_ssl_support`]'s definitions, for the crate's tests.
+    #[cfg(test)]
+    pub(crate) fn parse_for_test(props: &[(&str, &str)]) -> Result<SslConfigs, Error> {
+        use std::collections::HashMap;
+        use std::sync::LazyLock;
+
+        use crate::common::config::abstract_config::{AbstractConfig, string_originals};
+
+        static DEFINITION: LazyLock<ConfigDef> = LazyLock::new(|| ConfigDef::new().with_client_ssl_support());
+        let props: HashMap<String, String> = props.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect();
+        let config = AbstractConfig::new(&DEFINITION, string_originals(&props), false)?;
+        SslConfigs::from_values(&mut ValuesReader::new(&config))
     }
 }
 
@@ -666,33 +604,22 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_ssl_config_key_sets_each_field() {
-        let mut ssl = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass").unwrap();
-        SslConfigs::apply_ssl_config_key(
-            &mut ssl,
-            SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
-            "-----BEGIN CERTIFICATE-----",
-        )
+    fn test_from_values_sets_each_field() {
+        let ssl = SslConfigs::parse_for_test(&[
+            (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "/ts.pem"),
+            (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "ts-pass"),
+            (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, "-----BEGIN CERTIFICATE-----"),
+            (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12"),
+            (SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem"),
+            (SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass"),
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----"),
+            (SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG, "-----BEGIN CERTIFICATE-----"),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS"),
+            (SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass"),
+            (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
+            (SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3"),
+        ])
         .unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/ks.pem").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG, "ks-pass").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "-----BEGIN PRIVATE KEY-----")
-            .unwrap();
-        SslConfigs::apply_ssl_config_key(
-            &mut ssl,
-            SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
-            "-----BEGIN CERTIFICATE-----",
-        )
-        .unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key-pass").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "")
-            .unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3")
-            .unwrap();
 
         assert_eq!(ssl.truststore_location.as_deref(), Some("/ts.pem"));
         assert_eq!(ssl.truststore_password.as_ref().map(Password::value), Some("ts-pass"));
@@ -718,10 +645,10 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_ssl_config_key_unknown_key_is_ignored() {
-        let mut ssl = SslConfigs::default();
-        // Unknown key must not panic and must leave defaults untouched.
-        SslConfigs::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value").unwrap();
+    fn test_from_values_ignores_an_unknown_key() {
+        // An `ssl.*` key the definitions do not have is accepted, as Java's
+        // `AbstractConfig` accepts any key, and leaves the defaults untouched.
+        let ssl = SslConfigs::parse_for_test(&[("ssl.unknown.key", "value")]).unwrap();
         assert_eq!(ssl.truststore_type, "PEM");
         assert!(ssl.truststore_location.is_none());
     }
@@ -732,12 +659,10 @@ mod tests {
     #[test]
     fn test_enabled_protocols_list_parsing() {
         for value in ["TLSv1.2,TLSv1.3", "TLSv1.2, TLSv1.3", " TLSv1.2 ,TLSv1.3 "] {
-            let mut ssl = SslConfigs::default();
-            SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value).unwrap();
+            let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value)]).unwrap();
             assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"], "{value:?}");
         }
-        let mut ssl = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, " ").unwrap();
+        let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, " ")]).unwrap();
         assert!(ssl.enabled_protocols.is_empty());
     }
 
@@ -754,18 +679,16 @@ mod tests {
             ),
             (",,", "Configuration 'ssl.enabled.protocols' values must not be empty."),
         ] {
-            let mut ssl = SslConfigs::default();
-            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value) {
+            match SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value)]) {
                 Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
                 other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
             }
         }
-        let mut ssl = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "").unwrap();
+        let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "")]).unwrap();
         assert!(ssl.enabled_protocols.is_empty());
         // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")
-            .unwrap();
+        let ssl =
+            SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")]).unwrap();
         assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2".to_string()]);
     }
 
@@ -777,15 +700,13 @@ mod tests {
             ("A,,B", "Configuration 'ssl.cipher.suites' values must not be empty."),
             (",,", "Configuration 'ssl.cipher.suites' values must not be empty."),
         ] {
-            let mut ssl = SslConfigs::default();
-            match SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, value) {
+            match SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, value)]) {
                 Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
                 other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
             }
         }
-        let mut ssl = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
-        SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
+        SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B")]).unwrap();
+        SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A")]).unwrap();
     }
 
     /// `{:?}` hides the six `Type.PASSWORD` fields and keeps the others.

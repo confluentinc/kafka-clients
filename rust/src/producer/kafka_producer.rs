@@ -1003,6 +1003,9 @@ impl<K, V> KafkaProducer<K, V> {
         K: 'static,
         V: 'static,
     {
+        // Java's `ProducerConfig` is built with `doLog = true`, which logs
+        // every parsed value (`AbstractConfig.logAll`).
+        config.log_values();
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");
@@ -1029,11 +1032,7 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 3. Derive compression from config
         //    Translated from KafkaProducer.configureCompression().
-        // NOTE: Java also applies the per-codec level configs here
-        // (`compression.gzip.level` / `.lz4.level` / `.zstd.level`); those
-        // `ProducerConfig` keys are not translated yet, so every codec is built
-        // at its default level.
-        let compression = Compression::of(config.compression_type).build();
+        let compression = Self::configure_compression(&config)?;
 
         // 4. The system clock, Java's `Time.SYSTEM`
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -1156,7 +1155,7 @@ impl<K, V> KafkaProducer<K, V> {
         //     later is covered too.
         let mut partitioner = config.resolve_partitioner::<K, V>()?;
         if let Some(partitioner) = partitioner.as_mut() {
-            let mut configs = config.originals.clone();
+            let mut configs = config.originals();
             configs.insert(ProducerConfig::CLIENT_ID_CONFIG.to_string(), config.client_id.clone());
             partitioner.configure(&configs);
         }
@@ -1200,6 +1199,10 @@ impl<K, V> KafkaProducer<K, V> {
         // 12. Wire up the Sender and spawn the I/O background task. Every
         //     fallible step is behind us.
         let (key_serializer, value_serializer) = serializers.disarm();
+        // Java's `config.logUnused()` (`KafkaProducer.java:515`), once the
+        // producer has read its settings.
+        config.mark_read_keys_used();
+        config.log_unused();
         Ok(Self::with_client_options(
             KafkaProducerClientOptionsBuilder::new()
                 .set_config(&config)
@@ -1539,6 +1542,23 @@ impl<K, V> KafkaProducer<K, V> {
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
         (metrics, producer_metrics)
+    }
+
+    /// Builds the compression codec from `compression.type` and the level of
+    /// that codec: Java's `configureCompression`.
+    ///
+    /// # Errors
+    ///
+    /// The builder's error for a level outside the codec's range, which the
+    /// `ConfigDef` validators already rule out for a configuration built by
+    /// `ProducerConfig::new`.
+    fn configure_compression(config: &ProducerConfig) -> Result<Compression, Error> {
+        Ok(match config.compression_type {
+            CompressionType::Gzip => Compression::gzip().level(config.compression_gzip_level)?.build(),
+            CompressionType::Lz4 => Compression::lz4().level(config.compression_lz4_level)?.build(),
+            CompressionType::Zstd => Compression::zstd().level(config.compression_zstd_level)?.build(),
+            compression_type => Compression::of(compression_type).build(),
+        })
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against

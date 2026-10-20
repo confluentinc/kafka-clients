@@ -26,7 +26,8 @@
 //! [`ConfigDef::NO_DEFAULT_VALUE`], the `define` / `defineInternal` chains,
 //! `parse`, `parseType`, `names`, and the validators [`Range`], [`ValidList`],
 //! [`ValidString`], [`CaseInsensitiveValidString`], [`NonEmptyString`],
-//! [`NonNullValidator`], [`CompositeValidator`] and [`ListSize`].
+//! [`NonNullValidator`], [`CompositeValidator`], [`LambdaValidator`] and
+//! [`ListSize`].
 //!
 //! What is not:
 //!
@@ -36,8 +37,8 @@
 //!   `convertToString`, `niceMemoryUnits`, `niceTimeUnits`), which nothing in
 //!   the clients calls.
 //! - `validate` / `validateAll`, `ConfigValue`, `Recommender`, groups, widths,
-//!   display names, dependents and `LambdaValidator`: only `validate` uses
-//!   them, and it is a public API of the deferred public `ConfigDef`.
+//!   display names and dependents: only `validate` uses them, and it is a
+//!   public API of the deferred public `ConfigDef`.
 //! - `NonEmptyStringWithoutControlChars`, which no client key uses.
 //!
 //! Java's `define` overloads differ only in which of the optional arguments
@@ -45,17 +46,6 @@
 //! (no validator) and [`ConfigDef::define_with_validator`], each taking the
 //! default as a [`DefaultValue`] so [`ConfigDef::NO_DEFAULT_VALUE`] stands in
 //! for the overloads without a default.
-
-// Until the client configs are rebuilt on `AbstractConfig` (the commits that
-// follow this one), only `trim`, `parse_list` and `ValidList` are reached
-// outside the tests.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the client configs are moved onto ConfigDef by the following commits"
-    )
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -107,6 +97,10 @@ pub(crate) enum Type {
 impl Type {
     /// Whether this type contains sensitive data such as a password or key.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef$Type#isSensitive")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no client key is a PASSWORD read by Type; ConfigDefTest does")
+    )]
     pub(crate) fn is_sensitive(self) -> bool {
         matches!(self, Type::Password)
     }
@@ -441,6 +435,10 @@ impl ConfigKey {
 
     /// Java's `ConfigKey.hasDefault()`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ConfigKey#hasDefault")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the documentation renderers and ConfigDefTest")
+    )]
     pub(crate) fn has_default(&self) -> bool {
         !matches!(self.default_value, DefaultValue::NoDefault)
     }
@@ -586,7 +584,7 @@ impl ConfigDef {
     }
 
     /// Java's `defineInternal(name, type, defaultValue, validator,
-    /// importance)`.
+    /// importance, documentation)`.
     ///
     /// # Panics
     ///
@@ -598,6 +596,7 @@ impl ConfigDef {
         default_value: impl Into<DefaultValue>,
         validator: impl Validator + 'static,
         importance: Importance,
+        documentation: &str,
     ) -> Self {
         self.define_full(
             name,
@@ -605,7 +604,7 @@ impl ConfigDef {
             default_value.into(),
             Some(Box::new(validator)),
             importance,
-            "",
+            documentation,
             true,
         )
     }
@@ -631,6 +630,10 @@ impl ConfigDef {
     /// The configuration keys in definition order: Java's
     /// `configKeys().values()`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef#configKeys")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the documentation renderers and ConfigDefTest")
+    )]
     pub(crate) fn config_keys(&self) -> impl Iterator<Item = &ConfigKey> {
         self.config_keys.iter()
     }
@@ -1150,6 +1153,7 @@ impl ValidList {
     /// `is_empty_allowed` is false and `valid_strings` is empty, a
     /// programming error.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ValidList#in")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "no client key uses it; ConfigDefTest does"))]
     pub(crate) fn in_with_is_empty_allowed_valid_strings(is_empty_allowed: bool, valid_strings: &[&str]) -> Self {
         assert!(
             is_empty_allowed || !valid_strings.is_empty(),
@@ -1228,6 +1232,7 @@ impl ValidList {
     /// # Errors
     ///
     /// As [`Self::check_list`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "no client key uses it; ConfigDefTest does"))]
     pub(crate) fn parse_any_non_duplicate_values(
         name: &str,
         value: &str,
@@ -1355,6 +1360,7 @@ impl fmt::Display for CaseInsensitiveValidString {
 
 /// Java's `ConfigDef.NonNullValidator`.
 #[doc(alias = "org.apache.kafka.common.config.ConfigDef$NonNullValidator")]
+#[cfg_attr(not(test), expect(dead_code, reason = "no client key uses it; ConfigDefTest does"))]
 pub(crate) struct NonNullValidator;
 
 impl Validator for NonNullValidator {
@@ -1382,6 +1388,7 @@ pub(crate) struct CompositeValidator {
 impl CompositeValidator {
     /// Java's `CompositeValidator.of(Validator... validators)`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef$CompositeValidator#of")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "no client key uses it; ConfigDefTest does"))]
     pub(crate) fn of(validators: Vec<Box<dyn Validator>>) -> Self {
         Self { validators }
     }
@@ -1405,6 +1412,54 @@ impl fmt::Display for CompositeValidator {
             validator.fmt(f)?;
         }
         Ok(())
+    }
+}
+
+/// Java's `ConfigDef.LambdaValidator`: a validator made of a check and a
+/// description.
+///
+/// Java takes a `BiConsumer` and a `Supplier`; the client keys that use it
+/// (the compression levels) capture only constants, so plain function
+/// pointers stand in for them.
+#[doc(alias = "org.apache.kafka.common.config.ConfigDef$LambdaValidator")]
+pub(crate) struct LambdaValidator {
+    ensure_valid: fn(&str, Option<&ParsedValue>) -> Result<(), Error>,
+    to_string_function: fn() -> String,
+}
+
+impl LambdaValidator {
+    /// Java's `LambdaValidator.with(ensureValid, toStringFunction)`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$LambdaValidator#with")]
+    pub(crate) fn with(
+        ensure_valid: fn(&str, Option<&ParsedValue>) -> Result<(), Error>,
+        to_string_function: fn() -> String,
+    ) -> Self {
+        Self { ensure_valid, to_string_function }
+    }
+}
+
+impl Validator for LambdaValidator {
+    fn ensure_valid(&self, name: &str, value: Option<&ParsedValue>) -> Result<(), Error> {
+        (self.ensure_valid)(name, value)
+    }
+}
+
+impl fmt::Display for LambdaValidator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&(self.to_string_function)())
+    }
+}
+
+/// A boxed validator validates as the validator it holds, so a method
+/// returning one of several validator classes, as Java's
+/// `CompressionType.levelValidator()` does, can hand it to `define`.
+impl Validator for Box<dyn Validator> {
+    fn ensure_valid(&self, name: &str, value: Option<&ParsedValue>) -> Result<(), Error> {
+        (**self).ensure_valid(name, value)
+    }
+
+    fn is_valid_list(&self) -> bool {
+        (**self).is_valid_list()
     }
 }
 
@@ -1437,6 +1492,7 @@ pub(crate) struct ListSize {
 impl ListSize {
     /// Java's `ListSize.atMostOfSize(int maxSize)`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef$ListSize#atMostOfSize")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "no client key uses it; ConfigDefTest does"))]
     pub(crate) fn at_most_of_size(max_size: usize) -> Self {
         Self { max_size }
     }
@@ -2274,11 +2330,17 @@ mod tests {
     #[test]
     fn test_can_add_internal_config_with_validator() {
         let name = "internal.config";
-        let def =
-            ConfigDef::new().define_internal_with_validator(name, Type::Int, 1, Range::at_least(0), Importance::Low);
+        let def = ConfigDef::new().define_internal_with_validator(
+            name,
+            Type::Int,
+            1,
+            Range::at_least(0),
+            Importance::Low,
+            "docs",
+        );
         let key = def.config_key(name).unwrap();
         assert!(key.internal_config);
-        assert_eq!(key.documentation, "");
+        assert_eq!(key.documentation, "docs");
         assert_eq!(
             def.parse(&props(&[(name, "3".into())])).unwrap()[name],
             Some(ParsedValue::Int(3))
@@ -2295,6 +2357,7 @@ mod tests {
                     -1,
                     Range::at_least(0),
                     Importance::Low,
+                    "docs",
                 );
             }),
             "Invalid value -1 for configuration internal.config: Value must be at least 0"

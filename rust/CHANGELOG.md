@@ -30,6 +30,31 @@ breaking changes.
   closes the serializers it was given.
 - A closed `KafkaProducer` is freed: reference cycles in the metrics registry
   kept it alive after `close`.
+- **Breaking:** `ProducerConfig::new` parses and validates every key with
+  Java's `ConfigDef` (`ProducerConfig.java`), so a value Java rejects fails
+  with Java's `ConfigError` message, `Invalid value <v> for configuration
+  <key>: <reason>`, and a value of the wrong type with Java's `parseType`
+  message. `partitioner.type` keeps its message for an unsupported value, and
+  its value is now trimmed, as every `STRING` key is.
+- `compression.gzip.level`, `compression.lz4.level` and
+  `compression.zstd.level` are honoured, with Java's ranges and defaults: the
+  producer used to compress every codec at its default level.
+- `ProducerConfig` answers Java's `AbstractConfig` getters: `get_short`,
+  `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
+  `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
+  `unused`, `ignore`, `log_unused`, and the static `config_names`. Its
+  `PartialEq` / `Hash` compare the properties it was built from, as Java's
+  `equals` / `hashCode` do. `get_string("acks")` answers the number
+  `parseAcks` made of it (`-1` for `all`).
+- The producer logs its configuration values at INFO when it is built, as
+  Java's does, and then, in one INFO line, the supplied keys it did not use:
+  `These configurations '[a, b]' were supplied but are not used yet.` This
+  replaces the warning logged per unknown key and the `ssl.*` warnings logged
+  when `security.protocol` does not use them; the `ssl.*` / `sasl.*` keys are
+  listed in the line instead. `key.serializer`, `value.serializer`,
+  `partitioner.class`, `interceptor.classes`, `metric.reporters` and
+  `security.providers` are not producer configs here (the config takes no
+  class), so they are listed too.
 
 ### Consumer
 
@@ -234,6 +259,11 @@ breaking changes.
   `_ignore`, `_log_unused` and `_config_names`, beside the existing
   `_get_string`. A consumer created from the handle starts from a copy of its
   record of the keys used.
+- `kafka_producer_ProducerConfig_t` answers the same getters:
+  `kafka_producer_ProducerConfig_get_short`, `_get_int`, `_get_long`,
+  `_get_double`, `_get_boolean`, `_get_string`, `_get_list`, `_unused`,
+  `_ignore`, `_log_unused` and `_config_names`. A producer created from the
+  handle keeps its own record of the keys it used.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

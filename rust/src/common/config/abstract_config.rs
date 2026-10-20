@@ -41,16 +41,6 @@
 //!   class (CLAUDE.md §2).
 //! - `typeOf`: it returns `ConfigDef.Type`, not public.
 
-// Until the client configs are rebuilt on `AbstractConfig` (the commits that
-// follow this one), only the tests reach it.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the client configs are moved onto AbstractConfig by the following commits"
-    )
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -96,6 +86,13 @@ impl AbstractConfig {
     /// [`Error::Config`] if a value is missing, cannot be parsed or fails its
     /// validator.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#AbstractConfig")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the clients build through with_hooks; AbstractConfigTest uses it"
+        )
+    )]
     pub(crate) fn new(definition: &'static ConfigDef, originals: ConfigMap, do_log: bool) -> Result<Self, Error> {
         Self::with_hooks(
             definition,
@@ -150,6 +147,7 @@ impl AbstractConfig {
     }
 
     /// The configuration definition.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no caller outside AbstractConfigTest yet"))]
     pub(crate) fn definition(&self) -> &'static ConfigDef {
         self.definition
     }
@@ -269,6 +267,13 @@ impl AbstractConfig {
     ///
     /// As [`Self::get_short`], for a `PASSWORD`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getPassword")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the public getPassword is deferred (a public Password); AbstractConfigTest uses it"
+        )
+    )]
     pub(crate) fn get_password(&self, key: &str) -> Result<Option<&Password>, Error> {
         as_password(key, self.get(key)?)
     }

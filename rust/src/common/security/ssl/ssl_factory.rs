@@ -667,8 +667,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     fn test_empty_enabled_protocols_uses_provider_defaults() {
         assert_eq!(resolve_tls_versions(&[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
 
-        let mut config = SslConfigs::default();
-        SslConfigs::apply_ssl_config_key(&mut config, "ssl.enabled.protocols", "").unwrap();
+        let config = SslConfigs::parse_for_test(&[("ssl.enabled.protocols", "")]).unwrap();
         assert!(config.enabled_protocols.is_empty());
         assert!(SslFactory::new(&config).is_ok());
     }

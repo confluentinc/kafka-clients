@@ -174,6 +174,90 @@ void test_config_invalid_value(void) {
     kafka_common_Error_destroy(err);
 }
 
+void test_config_getters(void) {
+    /* `AbstractConfig`'s getters: a present value returns 1, Java's `null`
+     * returns 0 with no error, and a type mismatch or an unknown key fails
+     * through `out_err`. */
+    const char *const pairs[] = {
+        "bootstrap.servers", "localhost:9092",
+        "batch.size",        "7",
+        "acks",              "all",
+        "unknown.key",       "x",
+        NULL
+    };
+    kafka_producer_ProducerConfig_t *config = make_config(pairs);
+    kafka_common_Error_t *err = NULL;
+
+    int32_t batch_size = 0;
+    TEST_ASSERT_EQUAL_INT8(1, kafka_producer_ProducerConfig_get_int(config, "batch.size", &batch_size, &err));
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(7, batch_size);
+
+    int64_t linger_ms = -1;
+    TEST_ASSERT_EQUAL_INT8(1, kafka_producer_ProducerConfig_get_long(config, "linger.ms", &linger_ms, &err));
+    TEST_ASSERT_EQUAL_INT64(5, linger_ms);
+
+    int8_t idempotence = 0;
+    TEST_ASSERT_EQUAL_INT8(
+        1, kafka_producer_ProducerConfig_get_boolean(config, "enable.idempotence", &idempotence, &err));
+    TEST_ASSERT_EQUAL_INT8(1, idempotence);
+
+    /* `parseAcks` turned `all` into `-1`; the string is borrowed. */
+    TEST_ASSERT_EQUAL_STRING("-1", kafka_producer_ProducerConfig_get_string(config, "acks", &err));
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NULL(kafka_producer_ProducerConfig_get_string(config, "transactional.id", &err));
+    TEST_ASSERT_NULL(err);
+
+    kafka_List_t *servers = kafka_producer_ProducerConfig_get_list(config, "bootstrap.servers", &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(servers));
+    TEST_ASSERT_EQUAL_STRING("localhost:9092", (const char *)kafka_List_get(servers, 0));
+    kafka_List_destroy(servers);
+
+    int16_t short_value = 3;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_producer_ProducerConfig_get_short(config, "batch.size", &short_value, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Configuration 'batch.size' is of type INT, not SHORT", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = NULL;
+    TEST_ASSERT_EQUAL_INT16(3, short_value);
+
+    double double_value = 0.0;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_producer_ProducerConfig_get_double(config, "no.such.key", &double_value, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Unknown configuration 'no.such.key'", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = NULL;
+
+    /* `batch.size` was read above; `ignore` marks `unknown.key` used. */
+    kafka_producer_ProducerConfig_ignore(config, "unknown.key");
+    kafka_List_t *unused = kafka_producer_ProducerConfig_unused(config);
+    for (int32_t i = 0; i < kafka_List_size(unused); i++) {
+        const char *key = (const char *)kafka_List_get(unused, i);
+        TEST_ASSERT_TRUE(strcmp(key, "batch.size") != 0);
+        TEST_ASSERT_TRUE(strcmp(key, "unknown.key") != 0);
+    }
+    kafka_List_destroy(unused);
+    kafka_producer_ProducerConfig_log_unused(config);
+
+    kafka_List_t *names = kafka_producer_ProducerConfig_config_names();
+    int found = 0;
+    for (int32_t i = 0; i < kafka_List_size(names); i++) {
+        const char *name = (const char *)kafka_List_get(names, i);
+        if (strcmp(name, "partitioner.type") == 0) {
+            found = 1;
+        }
+        TEST_ASSERT_TRUE(strcmp(name, "partitioner.class") != 0);
+        if (i > 0) {
+            TEST_ASSERT_TRUE(strcmp((const char *)kafka_List_get(names, i - 1), name) < 0);
+        }
+    }
+    TEST_ASSERT_TRUE(found);
+    kafka_List_destroy(names);
+
+    kafka_producer_ProducerConfig_destroy(config);
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------
@@ -952,6 +1036,7 @@ int main(void) {
     RUN_TEST(test_config_new_and_producer);
     RUN_TEST(test_config_builds_several_producers);
     RUN_TEST(test_config_invalid_value);
+    RUN_TEST(test_config_getters);
 
     /* Lifecycle */
     RUN_TEST(test_create_close_destroy);
