@@ -33,9 +33,13 @@ pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
 pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
-pub use dyn_deserializer::DynDeserializer;
-pub use dyn_serializer::DynSerializer;
-pub use inline_future::InlineFuture;
+// The dyn-compatible companions and the future they return are the crate's own
+// dispatch mechanism: the clients take serdes as `impl Serializer<K>` /
+// `impl Deserializer<K>` and box them once, and never hand a serde out, so no
+// caller needs to name them (`check-dyn-compatible`).
+pub(crate) use dyn_deserializer::DynDeserializer;
+pub(crate) use dyn_serializer::DynSerializer;
+pub(crate) use inline_future::InlineFuture;
 pub use string_deserializer::StringDeserializer;
 pub use string_serializer::StringSerializer;
 
@@ -54,12 +58,12 @@ use crate::common::header::RecordHeaders;
 /// Every method returns a `Send` future, so a serializer can await I/O (a
 /// schema-registry lookup, for instance) without blocking the runtime.
 /// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible; [`DynSerializer`], which every `Serializer` implements, is
-/// its dyn-compatible companion, and the producer stores its serializers as
-/// `Box<dyn DynSerializer<K>>`. A call through `dyn` returns an
-/// [`InlineFuture`], which holds the future without allocating as long as it
-/// is small: a serializer that awaits a large operation only on a cache miss
-/// should `Box::pin` that operation alone.
+/// dyn-compatible, so a producer takes its serializers as `impl Serializer<K>`
+/// (`KafkaProducer::new`) and holds them behind a crate-private dyn-compatible
+/// companion, whose methods store the future inline rather than on the heap as
+/// long as it is small: a serializer that awaits a large operation only on a
+/// cache miss should `Box::pin` that operation alone, so the send path adds no
+/// heap allocation per record (CLAUDE.md §13).
 ///
 /// # Borrowed output
 ///

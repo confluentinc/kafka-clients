@@ -57,7 +57,7 @@ use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::DynSerializer;
+use crate::common::serialization::{DynSerializer, Serializer};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 
@@ -534,14 +534,17 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
         self.partitioner = partitioner;
         self
     }
-    /// Sets `MockProducerOptions::key_serializer`.
-    pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn DynSerializer<K>>>) -> Self {
-        self.key_serializer = key_serializer;
+    /// Sets `MockProducerOptions::key_serializer`, any [`Serializer<K>`];
+    /// unset is Java's `null`, which `MockProducer()` passes
+    /// (`MockProducer.java:149`).
+    pub fn set_key_serializer(mut self, key_serializer: impl Serializer<K> + 'static) -> Self {
+        self.key_serializer = Some(Box::new(key_serializer));
         self
     }
-    /// Sets `MockProducerOptions::value_serializer`.
-    pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn DynSerializer<V>>>) -> Self {
-        self.value_serializer = value_serializer;
+    /// Sets `MockProducerOptions::value_serializer`, any [`Serializer<V>`];
+    /// unset is Java's `null`.
+    pub fn set_value_serializer(mut self, value_serializer: impl Serializer<V> + 'static) -> Self {
+        self.value_serializer = Some(Box::new(value_serializer));
         self
     }
 
@@ -1536,8 +1539,8 @@ mod tests {
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
                 .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
-                .set_key_serializer(Some(Box::new(StringSerializer)))
-                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .set_key_serializer(StringSerializer)
+                .set_value_serializer(StringSerializer)
                 .build()
                 .expect("every mandatory parameter is set above"),
         );
@@ -1588,8 +1591,8 @@ mod tests {
             MockProducerOptionsBuilder::new()
                 .set_cluster(cluster)
                 .set_auto_complete(true)
-                .set_key_serializer(Some(Box::new(HeaderAddingSerializer { name: "key-header" })))
-                .set_value_serializer(Some(Box::new(HeaderAddingSerializer { name: "value-header" })))
+                .set_key_serializer(HeaderAddingSerializer { name: "key-header" })
+                .set_value_serializer(HeaderAddingSerializer { name: "value-header" })
                 .build()
                 .expect("every mandatory parameter is set above"),
         )
@@ -1676,8 +1679,8 @@ mod tests {
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
                 .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
-                .set_key_serializer(Some(Box::new(StringSerializer)))
-                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .set_key_serializer(StringSerializer)
+                .set_value_serializer(StringSerializer)
                 .build()
                 .expect("every mandatory parameter is set above"),
         );

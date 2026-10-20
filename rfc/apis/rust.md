@@ -119,7 +119,7 @@ let props = HashMap::from([
 ]);
 let config = ProducerConfig::new(&props)?;
 let producer = KafkaProducer::<String, String>::new(
-    config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()),
+    config, StringSerializer::new(), StringSerializer::new(),
 )?;
 let record = ProducerRecord::with_key("my-topic".to_string(), Some("key".to_string()), Some("value".to_string()));
 producer.send(record).await?.get().await?;
@@ -147,7 +147,7 @@ while (true) {
 
 ```rust
 let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-    config, Box::new(ByteArrayDeserializer::new()), Box::new(ByteArrayDeserializer::new()),
+    config, ByteArrayDeserializer::new(), ByteArrayDeserializer::new(),
 )?;
 consumer.subscribe_with_topics(vec!["foo".into(), "bar".into()]).await?;
 loop {
@@ -287,10 +287,12 @@ The application uses `KafkaProducer<K, V>`.
 
 ```rust
 impl<K, V> KafkaProducer<K, V> {
+    // Any `Serializer`; the producer boxes it once behind a crate-private
+    // dyn-compatible companion, so its type carries only `K` and `V`.
     pub fn new(
         config: ProducerConfig,
-        key_serializer: Box<dyn DynSerializer<K>>,
-        value_serializer: Box<dyn DynSerializer<V>>,
+        key_serializer: impl Serializer<K> + 'static,
+        value_serializer: impl Serializer<V> + 'static,
     ) -> Result<Self, Error>;
 }
 
@@ -485,10 +487,12 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
+    // Any `Deserializer`; the consumer boxes it once behind a crate-private
+    // dyn-compatible companion, so its type carries only `K` and `V`.
     pub fn new(
         config: ConsumerConfig,
-        key_deserializer: Box<dyn DynDeserializer<K>>,
-        value_deserializer: Box<dyn DynDeserializer<V>>,
+        key_deserializer: impl Deserializer<K>,
+        value_deserializer: impl Deserializer<V>,
     ) -> Result<Self, Error>;
 }
 
@@ -628,7 +632,7 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     println!("Kafka producer properties: {props:?}");
 
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
+    KafkaProducer::new(config, StringSerializer::new(), StringSerializer::new())
 }
 ```
 
@@ -724,7 +728,7 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     ]);
     println!("Kafka producer properties: {props:?}");
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
+    KafkaProducer::new(config, StringSerializer::new(), StringSerializer::new())
 }
 ```
 
@@ -860,6 +864,6 @@ fn create_kafka_consumer() -> Result<KafkaConsumer<String, String>, Error> {
     println!("Kafka consumer properties: {props:?}");
 
     let config = ConsumerConfig::new(&props)?;
-    KafkaConsumer::new(config, Box::new(StringDeserializer::new()), Box::new(StringDeserializer::new()))
+    KafkaConsumer::new(config, StringDeserializer::new(), StringDeserializer::new())
 }
 ```

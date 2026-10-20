@@ -32,14 +32,13 @@ use crate::common::header::RecordHeaders;
 /// Every method returns a `Send` future, so a deserializer can await I/O (a
 /// schema-registry lookup, for instance) without blocking the runtime.
 /// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible; [`DynDeserializer`], which every `Deserializer` implements,
-/// is its dyn-compatible companion, and the consumer stores its deserializers
-/// as `Box<dyn DynDeserializer<K>>`. A call through `dyn` returns an
-/// [`InlineFuture`], which holds the future without allocating as long as it
-/// is small: a deserializer that awaits a large operation only on a cache miss
-/// should `Box::pin` that operation alone. The receive path then adds no heap
-/// allocation per record beyond the deserialized `T` (`consumer-threading.md`
-/// §27).
+/// dyn-compatible, so a consumer takes its deserializers as
+/// `impl Deserializer<K>` (`KafkaConsumer::new`) and holds them behind a
+/// crate-private dyn-compatible companion, whose methods store the future
+/// inline rather than on the heap as long as it is small: a deserializer that
+/// awaits a large operation only on a cache miss should `Box::pin` that
+/// operation alone. The receive path then adds no heap allocation per record
+/// beyond the deserialized `T` (`consumer-threading.md` §27).
 ///
 /// A consumer's `poll()` may be cancelled while a record is being
 /// deserialized, for instance by `tokio::time::timeout`; the record is then
@@ -50,9 +49,6 @@ use crate::common::header::RecordHeaders;
 ///
 /// `Send + Sync + 'static` is required because the consumer's app side and its
 /// background task share the deserializers across tasks.
-///
-/// [`DynDeserializer`]: crate::common::serialization::DynDeserializer
-/// [`InlineFuture`]: crate::common::serialization::InlineFuture
 #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
 pub trait Deserializer<T>: Send + Sync + 'static {
     /// Deserialize a record value from a byte slice.

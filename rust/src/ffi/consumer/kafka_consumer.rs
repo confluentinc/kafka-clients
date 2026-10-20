@@ -163,7 +163,10 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     // used afterwards, as `deserializer_from` requires.
     let (value, owns_value) = unsafe { deserializer_from(value_deserializer) };
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
-        KafkaConsumer::new(config, key, value).map(|consumer| ConsumerKind::Async(Box::new(consumer)))
+        // The boxes go in as they are: `new` would box them again (see
+        // `with_boxed_deserializers`).
+        KafkaConsumer::with_boxed_deserializers(config, key, value)
+            .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires;
     // the handle written is the fresh box the caller owns, freed with
@@ -426,12 +429,8 @@ mod tests {
             return;
         };
         let result = ConsumerClassHandle::new(Owns { key: true, value: true }, || {
-            KafkaConsumer::new(
-                config,
-                Box::new(BytesPassthroughDeserializer),
-                Box::new(BytesPassthroughDeserializer),
-            )
-            .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
+            KafkaConsumer::new(config, BytesPassthroughDeserializer, BytesPassthroughDeserializer)
+                .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
         });
         assert!(result.is_err());
     }

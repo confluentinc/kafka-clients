@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::metrics::KafkaMetric;
-use crate::common::serialization::DynDeserializer;
+use crate::common::serialization::{Deserializer, DynDeserializer};
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AsyncKafkaConsumer;
 use crate::consumer::{
@@ -109,8 +109,7 @@ where
     V: Send + Sync + 'static,
 {
     /// Constructs a new consumer from a configuration and explicit key/value
-    /// deserializers, any [`Deserializer`](crate::common::serialization::Deserializer)
-    /// boxed as a [`DynDeserializer`].
+    /// deserializers, any [`Deserializer`] each.
     ///
     /// For `group.protocol=consumer` (KIP-848), the delegate is
     /// `AsyncKafkaConsumer::new(...)` — the production consumer built
@@ -123,10 +122,12 @@ where
     /// (`ClassicKafkaConsumer.java:544,550`).
     ///
     /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
-    /// them as explicit `Box<dyn DynDeserializer>` parameters (Phase 1
-    /// decision not to translate reflection machinery). The consumer hands
-    /// them to its `FetchCollector`, which calls them for every fetched
-    /// record, and closes them when the consumer closes.
+    /// them as explicit parameters (Phase 1 decision not to translate
+    /// reflection machinery) and boxes each once behind the crate-private
+    /// dyn-compatible `DynDeserializer`, so the consumer's type carries only
+    /// the record types `K` and `V`. The consumer hands them to its
+    /// `FetchCollector`, which calls them for every fetched record, and closes
+    /// them when the consumer closes.
     ///
     /// `MockConsumer` does NOT come through this constructor — it has its own.
     ///
@@ -136,6 +137,20 @@ where
     /// delegate cannot be constructed from `config`.
     #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new(
+        config: ConsumerConfig,
+        key_deserializer: impl Deserializer<K>,
+        value_deserializer: impl Deserializer<V>,
+    ) -> Result<Self, Error> {
+        Self::with_boxed_deserializers(config, Box::new(key_deserializer), Box::new(value_deserializer))
+    }
+
+    /// [`new`](Self::new) over deserializers already boxed as `dyn`.
+    ///
+    /// For the C binding, whose deserializers are trait objects before they
+    /// reach the consumer: boxing them as `dyn` a second time would nest one
+    /// `InlineFuture` in another, which no longer fits its buffer, so every
+    /// fetched record would allocate (`consumer-threading.md` §27).
+    pub(crate) fn with_boxed_deserializers(
         config: ConsumerConfig,
         key_deserializer: Box<dyn DynDeserializer<K>>,
         value_deserializer: Box<dyn DynDeserializer<V>>,
@@ -487,8 +502,8 @@ mod tests {
         ]);
         KafkaConsumer::new(
             ConsumerConfig::new(&props).expect("config validates"),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("constructs against the fake broker")
     }
@@ -796,8 +811,8 @@ mod tests {
         ]);
         let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
             ConsumerConfig::new(&props).expect("config validates"),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("constructs against the fake broker");
         let (metadata, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
@@ -861,8 +876,8 @@ mod tests {
         ]);
         let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
             ConsumerConfig::new(&props).expect("config validates"),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("constructs against the fake broker");
         let dropped = Arc::new(AtomicBool::new(false));

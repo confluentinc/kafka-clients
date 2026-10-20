@@ -9,11 +9,18 @@ breaking changes.
 
 ### Producer
 
-- **Breaking:** `Serializer::serialize_with_headers` (and its `DynSerializer`
-  counterpart) takes the record's headers as `&mut RecordHeaders`, so a
-  serializer can add or remove headers, as Java's can. The record carries what
-  the headers hold once the value serializer returns; they become read-only
-  after serialization. Update the parameter type in your implementations.
+- **Breaking:** `KafkaProducer::new` takes its serializers as
+  `impl Serializer<K> + 'static` / `impl Serializer<V> + 'static` and boxes
+  them itself: pass `StringSerializer::new()` where `Box::new(StringSerializer::new())`
+  was passed. `MockProducerOptionsBuilder::set_key_serializer` /
+  `set_value_serializer` likewise take `impl Serializer<K> + 'static` instead
+  of `Option<Box<dyn DynSerializer<K>>>`; leaving a setter uncalled is Java's
+  `null`, which the mock's no-argument constructor passes.
+- **Breaking:** `Serializer::serialize_with_headers` takes the record's headers
+  as `&mut RecordHeaders`, so a serializer can add or remove headers, as Java's
+  can. The record carries what the headers hold once the value serializer
+  returns; they become read-only after serialization. Update the parameter
+  type in your implementations.
 - `Serializer` gains Java's `configure(configs, is_key)` and `close()`, as
   async default methods that do nothing, so existing implementations compile
   unchanged.
@@ -26,6 +33,10 @@ breaking changes.
 
 ### Consumer
 
+- **Breaking:** `KafkaConsumer::new` takes its deserializers as
+  `impl Deserializer<K>` / `impl Deserializer<V>` and boxes them itself: pass
+  `StringDeserializer::new()` where `Box::new(StringDeserializer::new())` was
+  passed.
 - A `KafkaConsumer` whose constructor fails closes the deserializers it was
   given.
 - `poll` moves the consumed positions only after the last deserializer call of
@@ -140,9 +151,14 @@ breaking changes.
   and, in C, an `__as_AbstractConfig` view. The class-valued keys
   (`ssl.engine.factory.class`, the `sasl.*.class` keys) stay undefined, as
   configurations never take a class.
-- **Breaking:** `InlineFuture::new` is no longer public. `InlineFuture` stays
-  public as the future the sealed `DynSerializer` / `DynDeserializer` methods
-  return; only their blanket implementations build one.
+- **Breaking:** `DynSerializer`, `DynDeserializer` and `InlineFuture` are no
+  longer public. They are the crate's own way of holding a serde behind one
+  type without a heap allocation per record; since the clients now take serdes
+  as `impl Serializer<K>` / `impl Deserializer<K>` and never hand one out, no
+  caller needs to name them, and keeping them private leaves the dispatch free
+  to change. Code that held a `Box<dyn DynSerializer<K>>` passes the serializer
+  itself to the constructor; code that implemented `Serializer` or
+  `Deserializer` is unaffected.
 
 ### C API
 

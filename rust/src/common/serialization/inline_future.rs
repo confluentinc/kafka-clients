@@ -69,10 +69,12 @@ type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// [`Future::poll`]'s `Pin` contract requires. `.await` pins it for you.
 /// Dropping it before completion drops the stored future in place, which
 /// cancels it like dropping any future.
-// a dyn-compatible serde returns an unboxed future through this (CLAUDE.md §13)
-#[doc(alias = "rust-only")]
+///
+/// Crate-private, like the companions that return it: nothing public names
+/// it, so its buffer size, its layout and the boxing fallback can change in
+/// any release.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct InlineFuture<'a, T> {
+pub(crate) struct InlineFuture<'a, T> {
     /// The stored future: an `F`, or a [`BoxedFuture`] wrapping one.
     storage: Storage,
     /// Polls the future in `storage`, monomorphised for its type.

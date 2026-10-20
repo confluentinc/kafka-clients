@@ -2207,7 +2207,7 @@ mod tests {
                 MockProducerOptionsBuilder::new()
                     .set_cluster(cluster.clone())
                     .set_auto_complete(true)
-                    .set_value_serializer(Some(Box::new(serializer)))
+                    .set_value_serializer(serializer)
                     .build()
                     .unwrap(),
             );

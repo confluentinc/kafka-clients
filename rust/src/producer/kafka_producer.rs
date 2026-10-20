@@ -54,7 +54,7 @@ use crate::common::network::Selector;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::DynSerializer;
+use crate::common::serialization::{DynSerializer, Serializer};
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time, Utils};
 use crate::consumer::OffsetAndMetadata;
@@ -902,8 +902,12 @@ impl<K, V> KafkaProducer<K, V> {
     /// # Arguments
     ///
     /// * `config` - The producer configuration
-    /// * `key_serializer` - The key serializer
-    /// * `value_serializer` - The value serializer
+    /// * `key_serializer` - The key serializer, any [`Serializer<K>`]. It is
+    ///   `'static` because the producer's background task owns it for the
+    ///   producer's whole life; it is boxed once behind the crate-private
+    ///   dyn-compatible `DynSerializer`, so the producer's type carries only
+    ///   the record types `K` and `V`.
+    /// * `value_serializer` - The value serializer, likewise
     ///
     /// # Errors
     ///
@@ -927,12 +931,30 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// let producer = KafkaProducer::<String, String>::new(
     ///     config,
-    ///     Box::new(StringSerializer::default()),
-    ///     Box::new(StringSerializer::default()),
+    ///     StringSerializer::default(),
+    ///     StringSerializer::default(),
     /// ).expect("Failed to create producer");
     /// ```
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map,Serializer,Serializer)")]
     pub fn new(
+        config: ProducerConfig,
+        key_serializer: impl Serializer<K> + 'static,
+        value_serializer: impl Serializer<V> + 'static,
+    ) -> Result<Self, Error>
+    where
+        K: 'static,
+        V: 'static,
+    {
+        Self::with_boxed_serializers(config, Box::new(key_serializer), Box::new(value_serializer))
+    }
+
+    /// [`new`](Self::new) over serializers already boxed as `dyn`.
+    ///
+    /// For the C binding, whose serializers are trait objects before they reach
+    /// the producer: boxing them as `dyn` a second time would nest one
+    /// `InlineFuture` in another, which no longer fits its buffer, so every
+    /// record would allocate on the send path (CLAUDE.md §13).
+    pub(crate) fn with_boxed_serializers(
         config: ProducerConfig,
         key_serializer: Box<dyn DynSerializer<K>>,
         value_serializer: Box<dyn DynSerializer<V>>,
@@ -962,7 +984,7 @@ impl<K, V> KafkaProducer<K, V> {
             .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
 
-    /// The body of [`new`](Self::new).
+    /// The body of [`new`](Self::new) and [`with_boxed_serializers`](Self::with_boxed_serializers).
     ///
     /// The partitioner is resolved from `partitioner.type` (a built-in name, or
     /// the partitioner set with
@@ -4734,8 +4756,8 @@ mod tests {
 
         let error = KafkaProducer::<String, String>::new(
             config,
-            Box::new(MockSerializer::new(&init_count, &close_count)),
-            Box::new(MockSerializer::new(&init_count, &close_count)),
+            MockSerializer::new(&init_count, &close_count),
+            MockSerializer::new(&init_count, &close_count),
         )
         .err()
         .expect("delivery.timeout.ms below linger.ms + request.timeout.ms fails construction");
@@ -4759,13 +4781,9 @@ mod tests {
         props.insert("delivery.timeout.ms".to_string(), "1".to_string());
         let config = ProducerConfig::new(&props).expect("valid config");
 
-        let error = KafkaProducer::<String, String>::new(
-            config,
-            Box::new(key),
-            Box::new(MockSerializer::new(&init_count, &close_count)),
-        )
-        .err()
-        .expect("the construction fails");
+        let error = KafkaProducer::<String, String>::new(config, key, MockSerializer::new(&init_count, &close_count))
+            .err()
+            .expect("the construction fails");
 
         assert_eq!("Failed to construct kafka producer", error.message());
         assert_eq!(2, close_count.load(Ordering::SeqCst), "the value serializer is closed too");
@@ -4821,9 +4839,8 @@ mod tests {
             .set_partitioner::<String, String>(Box::new(PartitionerForClientId {
                 client_ids: Arc::clone(&client_ids),
             }));
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("constructs with a custom partitioner");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("constructs with a custom partitioner");
 
         assert!(!producer.client_id().is_empty(), "a client.id is generated when unset");
         let recorded = client_ids.lock().unwrap();
@@ -4852,9 +4869,8 @@ mod tests {
             let name = ProducerConfig::ROUND_ROBIN_PARTITIONER;
             let props = guard_props(&[("partitioner.type", name)]);
             let config = ProducerConfig::new(&props).expect("valid config");
-            let producer =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .expect("RoundRobinPartitioner resolves");
+            let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .expect("RoundRobinPartitioner resolves");
             assert!(
                 producer.partitioner.is_some(),
                 "partitioner.type={name} must resolve a partitioner"
@@ -4869,9 +4885,8 @@ mod tests {
         let props = guard_props(&[]);
         let config = ProducerConfig::new(&props).expect("valid config");
         let adaptive_default = config.partitioner_adaptive_partitioning_enable;
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("default config constructs");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("default config constructs");
         assert!(producer.partitioner.is_none(), "no partitioner.type -> no partitioner");
         assert_eq!(
             adaptive_default,
@@ -4989,9 +5004,8 @@ mod tests {
             .set_partitioner::<String, String>(Box::new(PartitionerForClientId {
                 client_ids: Arc::clone(&client_ids),
             }));
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("set_partitioner overrides partitioner.type");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("set_partitioner overrides partitioner.type");
 
         let recorded = client_ids.lock().unwrap();
         assert_eq!(1, recorded.len(), "PartitionerForClientId was configured, not RoundRobin");
@@ -5013,11 +5027,7 @@ mod tests {
         let config = ProducerConfig::new(&props)
             .expect("valid config")
             .set_partitioner::<Vec<u8>, Vec<u8>>(Box::new(RoundRobinPartitioner::new()));
-        let err = match KafkaProducer::<String, String>::new(
-            config,
-            Box::new(StringSerializer),
-            Box::new(StringSerializer),
-        ) {
+        let err = match KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer) {
             Ok(_) => panic!("a partitioner for other record types must be rejected"),
             Err(err) => err,
         };
@@ -8798,7 +8808,7 @@ mod tests {
 
     fn from_guard_props(props: &HashMap<String, String>) -> Result<(), Error> {
         let config = ProducerConfig::new(props)?;
-        KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer)).map(|_| ())
+        KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer).map(|_| ())
     }
 
     /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` and `client.rack` reach the
@@ -8811,16 +8821,14 @@ mod tests {
     async fn test_partitioner_rack_awareness_wiring() {
         let props = guard_props(&[("partitioner.rack.aware", "true"), ("client.rack", "rack0")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("a rack-aware producer with a rack constructs");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("a rack-aware producer with a rack constructs");
         assert_eq!((true, "rack0"), producer.accumulator.partitioner_rack_for_test());
 
         let props = guard_props(&[("client.rack", "rack0")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("default config constructs");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("default config constructs");
         assert_eq!((false, "rack0"), producer.accumulator.partitioner_rack_for_test());
 
         for partitioner_type in [None, Some(ProducerConfig::ROUND_ROBIN_PARTITIONER)] {
@@ -8829,10 +8837,9 @@ mod tests {
                 extra.push(("partitioner.type", name));
             }
             let config = ProducerConfig::new(&guard_props(&extra)).expect("valid config");
-            let error =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .err()
-                    .expect("rack-aware without client.rack must fail construction");
+            let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .err()
+                .expect("rack-aware without client.rack must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer", "{partitioner_type:?}");
             let cause: &Error = std::error::Error::source(&error)
                 .and_then(|e| e.downcast_ref::<Error>())
@@ -8864,8 +8871,8 @@ mod tests {
             let serializer_closes = Arc::new(AtomicUsize::new(0));
             let error = KafkaProducer::<String, String>::new(
                 config,
-                Box::new(MockSerializer::new(&init_count, &serializer_closes)),
-                Box::new(MockSerializer::new(&init_count, &serializer_closes)),
+                MockSerializer::new(&init_count, &serializer_closes),
+                MockSerializer::new(&init_count, &serializer_closes),
             )
             .err()
             .expect("rack-aware without client.rack must fail construction");
@@ -8920,9 +8927,8 @@ mod tests {
         ];
         for (extra, incremental, poolable_size) in cases {
             let config = ProducerConfig::new(&guard_props(extra)).expect("valid config");
-            let producer =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .expect("the producer constructs");
+            let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .expect("the producer constructs");
             assert_eq!(incremental, producer.chunked_accumulator.is_some(), "{extra:?}");
             let pool = producer.accumulator.buffer_pool_for_test();
             let mode = if incremental {
@@ -8950,10 +8956,9 @@ mod tests {
             ("compression.type", "gzip"),
         ]))
         .expect("valid config");
-        let error =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .err()
-                .expect("incremental with compression must fail construction");
+        let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .err()
+            .expect("incremental with compression must fail construction");
         assert_eq!(error.message(), "Failed to construct kafka producer");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
@@ -8971,9 +8976,8 @@ mod tests {
             ("batch.size", "1024"),
         ]))
         .expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("the full-strategy fallback supports compression");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("the full-strategy fallback supports compression");
         assert!(producer.chunked_accumulator.is_none());
     }
 
@@ -8994,10 +8998,9 @@ mod tests {
             ]))
             .expect("valid config")
             .set_partitioner(partitioner);
-            let error =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .err()
-                    .expect("incremental with compression must fail construction");
+            let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .err()
+                .expect("incremental with compression must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer");
 
             assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
@@ -9017,10 +9020,9 @@ mod tests {
     fn construction_failures_are_wrapped_as_a_kafka_error() {
         let props = HashMap::from([("bootstrap.servers".to_string(), "not-a-host-port".to_string())]);
         let config = ProducerConfig::new(&props).expect("the config itself parses");
-        let error =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .err()
-                .expect("an unparseable bootstrap.servers entry must fail construction");
+        let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .err()
+            .expect("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to construct kafka producer");
         // Java's replacement is a bare `KafkaException`.
@@ -9063,8 +9065,8 @@ mod tests {
         ]);
         let producer = KafkaProducer::<String, String>::new(
             ProducerConfig::new(&props).unwrap(),
-            Box::new(StringSerializer),
-            Box::new(StringSerializer),
+            StringSerializer,
+            StringSerializer,
         )
         .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -9121,8 +9123,8 @@ mod tests {
         ]);
         let producer = KafkaProducer::<String, String>::new(
             ProducerConfig::new(&props).unwrap(),
-            Box::new(StringSerializer),
-            Box::new(StringSerializer),
+            StringSerializer,
+            StringSerializer,
         )
         .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -9172,8 +9174,8 @@ mod tests {
         let producer = runtime.block_on(async {
             KafkaProducer::<String, String>::new(
                 ProducerConfig::new(&props).unwrap(),
-                Box::new(StringSerializer),
-                Box::new(StringSerializer),
+                StringSerializer,
+                StringSerializer,
             )
             .expect("a positive timeout defers resolution, so construction succeeds")
         });
@@ -9206,10 +9208,9 @@ mod tests {
         )]);
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_resolve_timeout_ms, 0);
-        let error =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .err()
-                .expect("construction must fail");
+        let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .err()
+            .expect("construction must fail");
         assert_eq!(error.message(), "Failed to construct kafka producer");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
@@ -9285,9 +9286,8 @@ mod tests {
     async fn test_explicit_enable_idempotence_builds_a_transaction_manager() {
         let props = guard_props(&[("enable.idempotence", "true")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("explicit idempotence is supported as of Phase 4");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("explicit idempotence is supported as of Phase 4");
         let transaction_manager = producer
             .transaction_manager
             .as_ref()
@@ -9306,9 +9306,8 @@ mod tests {
     async fn test_disabled_idempotence_builds_no_transaction_manager() {
         let props = guard_props(&[("enable.idempotence", "false")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("disabling idempotence is allowed");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("disabling idempotence is allowed");
         assert!(producer.transaction_manager.is_none());
     }
 
@@ -9322,9 +9321,8 @@ mod tests {
     async fn test_transactional_id_builds_a_transactional_manager() {
         let props = guard_props(&[("transactional.id", "my-txn")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("transactional.id is supported as of Phase 6");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("transactional.id is supported as of Phase 6");
         let transaction_manager = producer
             .transaction_manager
             .as_ref()
@@ -9344,9 +9342,8 @@ mod tests {
     async fn test_transactional_methods_without_a_manager() {
         let props = guard_props(&[("enable.idempotence", "false")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("disabling idempotence is allowed");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("disabling idempotence is allowed");
 
         const EXPECTED: &str = "Cannot use transactional methods without enabling transactions \
                                 by setting the transactional.id configuration property";
@@ -9387,9 +9384,8 @@ mod tests {
     async fn test_transactional_methods_on_an_idempotent_producer() {
         let props = guard_props(&[("enable.idempotence", "true")]);
         let config = ProducerConfig::new(&props).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("explicit idempotence is supported as of Phase 4");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("explicit idempotence is supported as of Phase 4");
 
         const EXPECTED: &str = "Transactional method invoked on a non-transactional producer.";
         assert_eq!(
@@ -9434,9 +9430,8 @@ mod tests {
                 props.insert("metadata.cluster.check.enable".to_string(), value.to_string());
             }
             let config = ProducerConfig::new(&props).expect("valid config");
-            let producer =
-                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                    .expect("constructs against the fake broker");
+            let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .expect("constructs against the fake broker");
             // The send waits for the topic's metadata, then the batch drains to
             // the leader, which opens the second connection. The Produce request
             // is never answered; only the ApiVersions requests matter.
@@ -9471,9 +9466,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_closed_producer_is_freed() {
         let config = ProducerConfig::new(&guard_props(&[])).expect("valid config");
-        let producer =
-            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-                .expect("the producer constructs");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("the producer constructs");
         let pool = Arc::downgrade(producer.accumulator.buffer_pool_for_test());
         let metadata = Arc::downgrade(&producer.metadata);
         let metrics = Arc::downgrade(&producer.metrics);

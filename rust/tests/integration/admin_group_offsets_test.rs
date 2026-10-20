@@ -94,8 +94,8 @@ fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             consumer_config(ctx, group_id),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -126,8 +126,8 @@ async fn produce_records(ctx: &TestContext, tp: &TopicPartition, num: usize) {
     ctx.configure(&mut props);
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("build producer");
     let mut last = None;

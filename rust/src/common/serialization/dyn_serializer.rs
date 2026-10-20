@@ -25,6 +25,16 @@
 //! per key and once per value of every record, so a box per call would be an
 //! allocation per record on the send path (CLAUDE.md §13).
 //!
+//! Unlike `DynProducer` it is crate-private: the crate only takes serializers
+//! in, through the `impl Serializer<K> + 'static` parameters of
+//! `KafkaProducer::new` and `MockProducerOptionsBuilder::set_key_serializer` /
+//! `set_value_serializer`, which box them once, and never hands one out, so no
+//! caller needs to name the companion, and keeping it private leaves the
+//! dispatch free to change (`check-dyn-compatible`). The C binding, whose
+//! serializers are trait objects already, passes its boxes to the
+//! crate-private `KafkaProducer::with_boxed_serializers` instead of boxing
+//! them again.
+//!
 //! A method added to [`Serializer`] goes in three places here: the trait, the
 //! blanket impl and the impl on `dyn DynSerializer`. `cargo xtask lint-custom`
 //! (`check-dyn-forwarding`) fails until all three forward it.
@@ -38,8 +48,9 @@ use crate::common::serialization::InlineFuture;
 use crate::common::serialization::Serializer;
 
 mod private {
-    // Deliberately unnameable: it seals `DynSerializer` to `Serializer` implementors.
-    #[expect(unnameable_types)]
+    // Seals `DynSerializer` to `Serializer` implementors. Nothing outside this
+    // module can name it, which `unnameable_types` would report if the
+    // companion were public; it is crate-private, so the lint stays quiet.
     pub trait Sealed<T: ?Sized> {}
 }
 
@@ -65,20 +76,7 @@ impl<T: ?Sized, S: super::Serializer<T>> private::Sealed<T> for S {}
 /// ambiguous, since both define it; call it as
 /// `DynSerializer::serialize(&*serializer, topic, data)`, or import only one of
 /// the two traits.
-///
-/// ```
-/// use confluent_kafka::common::serialization::{DynSerializer, StringSerializer};
-///
-/// # #[tokio::main(flavor = "current_thread")]
-/// # async fn main() {
-/// let serializer: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
-/// let bytes = DynSerializer::serialize(&*serializer, "topic", Some("value")).await.unwrap();
-/// assert_eq!(Some(&b"value"[..]), bytes.as_deref());
-/// # }
-/// ```
-// the dyn-compatible companion of the `Serializer` trait (CLAUDE.md §3)
-#[doc(alias = "rust-only")]
-pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
+pub(crate) trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
     /// See [`Serializer::serialize`].
     ///
     /// # Errors
@@ -201,6 +199,15 @@ mod tests {
     async fn test_dyn_serializer_is_a_serializer() {
         let boxed: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
         assert_eq!(b"value".to_vec(), through_generic(&*boxed, "value").await);
+    }
+
+    /// A direct call through the companion, named in full to avoid the
+    /// ambiguity with `Serializer::serialize`.
+    #[tokio::test]
+    async fn test_call_through_the_companion() {
+        let serializer: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        let bytes = DynSerializer::serialize(&*serializer, "topic", Some("value")).await.unwrap();
+        assert_eq!(Some(&b"value"[..]), bytes.as_deref());
     }
 
     #[test]

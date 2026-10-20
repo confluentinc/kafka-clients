@@ -94,12 +94,9 @@ fn make_smoke_config() -> ConsumerConfig {
 /// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let mut consumer = KafkaConsumer::<String, String>::new(
-        make_smoke_config(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
-    )
-    .expect("KafkaConsumer::new should succeed even without a reachable broker");
+    let mut consumer =
+        KafkaConsumer::<String, String>::new(make_smoke_config(), StringDeserializer, StringDeserializer)
+            .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
     // Static trait dispatch on the concrete type: a fresh consumer has no
     // assignment.
@@ -133,8 +130,7 @@ async fn new_consumer_rejects_classic_group_protocol() {
     ]);
     let config = ConsumerConfig::new(&props).expect("config should validate");
 
-    let result =
-        KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
+    let result = KafkaConsumer::<String, String>::new(config, StringDeserializer, StringDeserializer);
 
     let err = result.err().expect("classic protocol must be rejected");
     assert!(
@@ -161,12 +157,9 @@ async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_c
     use confluent_kafka::common::TopicPartition;
     use std::collections::HashSet;
 
-    let mut consumer = KafkaConsumer::<String, String>::new(
-        make_smoke_config(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
-    )
-    .expect("KafkaConsumer::new");
+    let mut consumer =
+        KafkaConsumer::<String, String>::new(make_smoke_config(), StringDeserializer, StringDeserializer)
+            .expect("KafkaConsumer::new");
     let tp0 = TopicPartition::new("test", 0);
     let tp1 = TopicPartition::new("test", 1);
 
@@ -252,8 +245,8 @@ async fn test_metrics_removed_on_close() {
     ]);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("config should validate"),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new");
 
@@ -294,8 +287,8 @@ async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
     ]);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).unwrap(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -368,8 +361,8 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
     let value_closes = Arc::new(AtomicUsize::new(0));
     let error = KafkaConsumer::<String, String>::new(
         config,
-        Box::new(CloseCountingDeserializer { closes: Arc::clone(&key_closes) }),
-        Box::new(CloseCountingDeserializer { closes: Arc::clone(&value_closes) }),
+        CloseCountingDeserializer { closes: Arc::clone(&key_closes) },
+        CloseCountingDeserializer { closes: Arc::clone(&value_closes) },
     )
     .err()
     .expect("construction must fail");

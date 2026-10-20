@@ -67,12 +67,7 @@ fn producer_with_security(bootstrap: &str, security: Vec<(&str, String)>) -> Kaf
     ]);
     props.extend(security.into_iter().map(|(key, value)| (key.to_string(), value)));
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new(
-        config,
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
-    )
-    .expect("build producer")
+    KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default()).expect("build producer")
 }
 
 /// Sends `values` to partition 0 of `topic` and waits for every ack.
@@ -112,8 +107,8 @@ async fn consume_all(bootstrap: &str, topic: &str, expected: usize) -> Vec<(i64,
     ]);
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("build consumer");
     consumer

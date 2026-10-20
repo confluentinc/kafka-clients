@@ -242,7 +242,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     };
     let tries_send_inline = !(key_is_c || value_is_c);
     match ProducerHandle::new(
-        || KafkaProducer::new(config, key_serializer, value_serializer),
+        // The boxes go in as they are: `new` would box them again (see
+        // `with_boxed_serializers`).
+        || KafkaProducer::with_boxed_serializers(config, key_serializer, value_serializer),
         true,
         tries_send_inline,
     ) {

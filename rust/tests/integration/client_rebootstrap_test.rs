@@ -86,12 +86,7 @@ fn producer(bootstrap: &str, overrides: &[(&str, &str)]) -> KafkaProducer<Vec<u8
     let mut props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
     props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new(
-        config,
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
-    )
-    .expect("build producer")
+    KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default()).expect("build producer")
 }
 
 /// Java `clusterInstance.consumer(overrides)` — byte-array deserializers,
@@ -106,8 +101,8 @@ fn consumer(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn DynConsumer<
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("valid consumer config"),
-            Box::new(ByteArrayDeserializer::default()),
-            Box::new(ByteArrayDeserializer::default()),
+            ByteArrayDeserializer::default(),
+            ByteArrayDeserializer::default(),
         )
         .expect("build consumer"),
     )

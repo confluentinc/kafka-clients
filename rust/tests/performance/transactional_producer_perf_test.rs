@@ -1465,12 +1465,9 @@ async fn seed_source_topic(
         ("linger.ms".to_string(), "100".to_string()),
     ]);
     let producer_config = ProducerConfig::new(&props).expect("Invalid seed producer config");
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
-        producer_config,
-        Box::new(ByteArraySerializer::new()),
-        Box::new(ByteArraySerializer::new()),
-    )
-    .expect("Failed to create seed producer");
+    let producer =
+        KafkaProducer::<Vec<u8>, Vec<u8>>::new(producer_config, ByteArraySerializer::new(), ByteArraySerializer::new())
+            .expect("Failed to create seed producer");
 
     let msg_count = messages.len();
     let mut calls = Vec::with_capacity(count as usize);
@@ -1752,8 +1749,8 @@ async fn transactional_producer_perf_test() {
         let producer_config = ProducerConfig::new(&props).expect("Invalid producer config");
         let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
             producer_config,
-            Box::new(ByteArraySerializer::new()),
-            Box::new(ByteArraySerializer::new()),
+            ByteArraySerializer::new(),
+            ByteArraySerializer::new(),
         )
         .expect("Failed to create producer");
         producer.init_transactions().await.expect("init_transactions failed");
@@ -1915,8 +1912,8 @@ async fn transactional_producer_perf_test() {
             let consumer_config = ConsumerConfig::new(&props).expect("Invalid consumer config");
             let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
                 consumer_config,
-                Box::new(ByteArrayDeserializer::new()),
-                Box::new(ByteArrayDeserializer::new()),
+                ByteArrayDeserializer::new(),
+                ByteArrayDeserializer::new(),
             )
             .expect("Failed to create consumer");
             consumer

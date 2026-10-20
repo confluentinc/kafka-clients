@@ -8533,8 +8533,8 @@ mod tests {
         ]);
         let mut consumer = KafkaConsumer::<String, String>::new(
             ConsumerConfig::new(&props).unwrap(),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("a positive timeout defers resolution, so construction succeeds");
 
