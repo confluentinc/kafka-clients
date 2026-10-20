@@ -85,11 +85,11 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// Corresponds to Java's
     /// `default T deserialize(String topic, Headers headers, byte[] data)`
-    /// (`Deserializer.java:84`). The default implementation ignores the headers
+    /// (`Deserializer.java:86`). The default implementation ignores the headers
     /// and delegates to [`deserialize`](Deserializer::deserialize).
     ///
     /// The translated Java overloads intersect on `{topic, data}`, which is
-    /// exactly `deserialize(String, byte[])` (`:64`) — so that one keeps the
+    /// exactly `deserialize(String, byte[])` (`:66`) — so that one keeps the
     /// plain name and this one is suffixed with the parameter that distinguishes
     /// it (CLAUDE.md §2).
     ///
@@ -164,7 +164,8 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Configure this deserializer. The default implementation is a no-op.
     ///
     /// Corresponds to Java's
-    /// `default void configure(Map<String, ?> configs, boolean isKey)`.
+    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
+    /// returns `()` as Java's returns `void`.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
     fn configure<'a>(
         &'a mut self,
@@ -180,6 +181,14 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// Corresponds to Java's `default void close()`. As in Java, the method
     /// must be idempotent, as it may be called multiple times.
+    ///
+    /// It returns `()` as Java's returns `void`: the consumer closes its
+    /// deserializers with `Utils.closeQuietly`, which logs a failure rather
+    /// than stopping. An implementation reports a failing close by panicking:
+    /// the consumer catches the panic, logs it and closes the other
+    /// deserializer; then the consumer's `close` returns `Failed to close kafka
+    /// consumer`, caused by `Failed to close deserializers` with the panic's
+    /// message as its source, while a failed constructor only logs it.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
     fn close(&mut self) -> impl Future<Output = ()> + Send {
         // intentionally left blank — Java default

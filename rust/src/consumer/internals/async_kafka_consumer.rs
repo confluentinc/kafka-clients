@@ -136,8 +136,8 @@ enum BgJoin {
 }
 
 /// A `Clone + Send + Sync` handle to a consumer that exposes
-/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) **and** the reentrant-safe consumer operations,
-/// callable from a task or thread other than the one owning the consumer.
+/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup), callable from any task or thread, **and** the
+/// reentrant-safe consumer operations, callable from inside a callback the consumer is running.
 ///
 /// **No Java class counterpart — it recovers a Java capability.** Java's
 /// `Consumer` reference is itself a freely-shareable, thread-safe
@@ -239,7 +239,7 @@ enum BgJoin {
 /// [`wakeup`](Self::wakeup) and the sync reads (`assignment`, `paused`,
 /// `group_metadata`) are not gated: Java's
 /// `wakeup()` is callable from any thread by contract, and the reads take
-/// the same short locks the owning consumer's `&self` getters do.
+/// the same short locks the owning consumer's getters do.
 ///
 /// A handle from a `MockConsumer` is not gated either: Java's `MockConsumer`
 /// has no `acquire()`, and the mock handle's commits commit into the mock

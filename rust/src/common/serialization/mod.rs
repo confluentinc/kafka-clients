@@ -119,7 +119,7 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     ///
     /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`
     /// (`Serializer.java:84`). The two Java overloads intersect on
-    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:62`) — so that
+    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:64`) — so that
     /// one keeps the plain name and this one is suffixed with the parameter that
     /// distinguishes it (CLAUDE.md §2).
     ///
@@ -155,7 +155,8 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// Declared after the `serialize` methods, as on [`Deserializer`], so the
     /// C constructor takes the methods in the same order for both. Corresponds
     /// to Java's
-    /// `default void configure(Map<String, ?> configs, boolean isKey)`.
+    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
+    /// returns `()` as Java's returns `void`.
     ///
     /// # Arguments
     ///
@@ -179,6 +180,14 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// calls it once: from its `close`, after its I/O task has stopped, or
     /// from a constructor that fails, as Java's catch does
     /// (`KafkaProducer.java:519-523`).
+    ///
+    /// It returns `()` as Java's returns `void`: the producer closes its
+    /// serializers with `Utils.closeQuietly`, which logs a failure rather than
+    /// stopping. An implementation reports a failing close by panicking: the
+    /// producer catches the panic, logs it and closes the other serializer;
+    /// then the producer's `close` returns `Failed to close kafka producer`,
+    /// with the panic's message as its source, while a failed constructor only
+    /// logs it.
     ///
     /// It takes `&self`, unlike [`Deserializer::close`]: the producer shares
     /// its serializers with every concurrent `send` and closes through a shared

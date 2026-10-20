@@ -158,7 +158,7 @@ impl std::fmt::Debug for TrySendOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrySendOutcome::Accepted(future) => f.debug_tuple("Accepted").field(future).finish(),
-            // `Callback` is a `Box<dyn FnOnce>`, so only its presence is printable.
+            // A `Box<dyn Callback>` is not `Debug`, so only its presence is printable.
             TrySendOutcome::WouldBlock(callback) => f
                 .debug_tuple("WouldBlock")
                 .field(&callback.as_ref().map(|_| "callback"))
