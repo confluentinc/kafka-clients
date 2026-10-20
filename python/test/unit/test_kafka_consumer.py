@@ -1090,6 +1090,17 @@ def test_current_lag_waits_for_the_background_task() -> None:
         assert str(e.value) == f"No current assignment for partition {unassigned}"
 
 
+def test_current_lag_reads_the_ffi_presence_flag() -> None:
+    # The FFI carries Java's OptionalLong as (present, lag): a present lag may
+    # be negative (a position past the log end) and is kept, and only the flag
+    # marks the empty one, whatever the lag beside it.
+    from confluent_kafka.consumer._base import _lag_or_none
+    assert _lag_or_none((1, -5)) == -5
+    assert _lag_or_none((1, 0)) == 0
+    assert _lag_or_none((1, 6)) == 6
+    assert _lag_or_none((0, 0)) is None
+
+
 def test_current_lag_inside_a_callback_goes_through_the_handle(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # Inside a callback the consumer is held by the call delivering it, so

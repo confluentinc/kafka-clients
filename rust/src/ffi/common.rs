@@ -213,6 +213,11 @@ pub(crate) type ErrorCompletion = unsafe extern "C" fn(error: *mut kafka_common_
 /// error.
 pub(crate) type I64Completion = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
+/// The completion of a `_cb` entry point that reports a Java `OptionalLong`
+/// (`present` 1 with its `value`, or 0 with a `value` of 0) or an error.
+pub(crate) type OptionalI64Completion =
+    unsafe extern "C" fn(present: i8, value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
 /// The completion of a `_cb` entry point that reports nothing but its `opaque`
 /// (a Java `void` method that cannot fail, such as `Admin.close`).
 pub(crate) type OpaqueCompletion = unsafe extern "C" fn(opaque: *mut c_void);
@@ -298,6 +303,30 @@ pub(crate) unsafe fn deliver_panic_i64(
         // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
         // is a `FnOnce`, so `cb` fires exactly once.
         unsafe { cb(-1, error.get() as *mut kafka_common_Error_t, opaque.get()) }
+    }));
+}
+
+/// [`deliver_panic`] for a completion that reports a Java `OptionalLong`: it is
+/// absent (`present` 0, `value` 0), as for every failure of such a completion.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_optional_i64(
+    complete: impl FnOnce(CallbackJob),
+    cb: OptionalI64Completion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(0, 0, error.get() as *mut kafka_common_Error_t, opaque.get()) }
     }));
 }
 

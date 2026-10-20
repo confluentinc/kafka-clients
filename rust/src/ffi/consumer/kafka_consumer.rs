@@ -533,4 +533,97 @@ mod tests {
             assert_eq!(*fired.lock().unwrap(), [Some((1, "WakeupTrigger fired".to_string()))]);
         }
     }
+
+    /// Records what a `current_lag_cb` completion delivered.
+    type LagFired = std::sync::Mutex<Vec<(i8, i64, bool)>>;
+
+    unsafe extern "C" fn record_lag(
+        present: i8,
+        lag: i64,
+        error: *mut kafka_common_Error_t,
+        opaque: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: Test code: `opaque` is the `LagFired` the test keeps alive until the completion
+        // fired; a completion owns the error handle it receives.
+        unsafe {
+            let fired = &*(opaque as *const LagFired);
+            fired.lock().unwrap().push((present, lag, !error.is_null()));
+            if !error.is_null() {
+                crate::ffi::common::kafka_common_Error_destroy(error);
+            }
+        }
+    }
+
+    /// Java's `currentLag` returns `OptionalLong.empty()` while the consumer
+    /// knows no log end for the partition (`AsyncKafkaConsumer.currentLag`, no
+    /// high watermark before a fetch). Across C that is the presence flag 0,
+    /// with no error and `*out_lag` unwritten; the `_cb` twin delivers
+    /// `present` 0 and a `lag` of 0.
+    #[test]
+    fn current_lag_is_empty_before_any_fetch() {
+        use crate::ffi::common::topic_partition::{
+            kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_new,
+        };
+        use crate::ffi::consumer::consumer_config::{
+            kafka_consumer_ConsumerConfig_destroy, kafka_consumer_ConsumerConfig_new,
+        };
+        use crate::ffi::consumer::{
+            kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer_assign,
+            kafka_consumer_Consumer_current_lag, kafka_consumer_Consumer_current_lag_cb,
+        };
+        use crate::ffi::util::{
+            kafka_List_add, kafka_List_destroy, kafka_List_new, kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
+        };
+        // SAFETY: Test code: every map, list, config, partition and consumer handle is live until
+        // it is destroyed once below; `err` is a valid slot pointing at null before each call;
+        // `out_lag` and `fired` outlive the calls that write them.
+        unsafe {
+            let props = kafka_Map_new();
+            for (key, value) in [(c"bootstrap.servers", c"127.0.0.1:1"), (c"group.protocol", c"consumer")] {
+                kafka_Map_put(
+                    props,
+                    key.as_ptr() as *mut std::ffi::c_void,
+                    value.as_ptr() as *mut std::ffi::c_void,
+                );
+            }
+            let mut err = std::ptr::null_mut();
+            let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let class = kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
+            assert!(err.is_null());
+            kafka_consumer_ConsumerConfig_destroy(config);
+            let consumer = kafka_consumer_KafkaConsumer__as_Consumer(class);
+
+            let partitions = kafka_List_new();
+            let tp = kafka_common_TopicPartition_new(c"t".as_ptr(), 0);
+            kafka_List_add(partitions, tp as *mut std::ffi::c_void);
+            kafka_consumer_Consumer_assign(consumer, partitions, &mut err);
+            assert!(err.is_null());
+            kafka_List_destroy(partitions);
+
+            let mut out_lag = 42;
+            let present = kafka_consumer_Consumer_current_lag(consumer, tp, &mut out_lag, &mut err);
+            assert!(err.is_null(), "an empty lag is no failure");
+            assert_eq!((present, out_lag), (0, 42), "empty: flag 0, *out_lag unwritten");
+
+            let fired = LagFired::default();
+            kafka_consumer_Consumer_current_lag_cb(
+                consumer,
+                tp,
+                record_lag,
+                &fired as *const LagFired as *mut std::ffi::c_void,
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while fired.lock().unwrap().is_empty() {
+                assert!(std::time::Instant::now() < deadline, "current_lag_cb never completed");
+                kafka_consumer_Consumer__execute_callbacks(consumer);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(*fired.lock().unwrap(), [(0i8, 0i64, false)]);
+
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_KafkaConsumer_destroy(class);
+        }
+    }
 }

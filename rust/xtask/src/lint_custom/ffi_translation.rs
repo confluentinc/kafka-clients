@@ -145,7 +145,9 @@
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
 //! consumer state reads the C handle's single-owner guard can refuse
-//! ([`C_GUARDED_READS`]) are fallible in C only; the factories of an error
+//! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
+//! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
+//! flag and an out-parameter instead of a `-1` sentinel; the factories of an error
 //! carrying a binding's opaque pointer ([`C_RELEASE_HOOKS`]) take a trailing
 //! nullable release hook in C only; a trait
 //! method with `where Self: Sized`
@@ -268,6 +270,20 @@ const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_group_metadata",
     "kafka_consumer_Consumer_paused",
     "kafka_consumer_Consumer_subscription",
+];
+
+/// Methods returning `Option<i64>` whose value domain includes `-1`, so the
+/// `-1`-for-`None` mapping of a scalar `Option` would lose a value: Java's
+/// `Consumer.currentLag` returns an `OptionalLong`, empty or any `long`,
+/// negatives included (a position past the end offset gives a negative lag,
+/// `SubscriptionState.partitionLag`). Their C form keeps both of Java's states:
+/// the blocking function takes `int64_t *<out>` (the named parameter, before
+/// `out_err`) and returns `int8_t`, 1 when the value is present and written to
+/// `*<out>`, 0 when it is empty or the call failed; the `_cb_t` typedef takes
+/// `(int8_t present, int64_t <value>, error, opaque)`.
+const C_PRESENCE_FLAG_OPTIONALS: &[(&str, &str)] = &[
+    ("kafka_consumer_Consumer_current_lag", "lag"),
+    ("kafka_consumer_ConsumerHandle_current_lag", "lag"),
 ];
 
 /// Factories taking a binding's opaque pointer whose C form adds a trailing
@@ -2205,16 +2221,34 @@ fn expect_method(
 
     let mut blocking = Sig { params: params.clone(), ret: None };
     let guarded_read = C_GUARDED_READS.contains(&name.as_str());
-    match (&output, &value) {
-        (Output::Value(_), Some(v)) if guarded_read => {
+    // A listed `Option<i64>` keeps its presence apart from its value
+    // ([`C_PRESENCE_FLAG_OPTIONALS`]).
+    let presence_flag = match &output {
+        Output::Value(t) | Output::Fallible(Some(t)) if is_option(t) => C_PRESENCE_FLAG_OPTIONALS
+            .iter()
+            .find(|(f, _)| *f == name)
+            .map(|(_, value_name)| *value_name),
+        _ => None,
+    };
+    match (&output, &value, presence_flag) {
+        (_, Some(v), Some(value_name)) => {
+            blocking
+                .params
+                .push(Param::new(&format!("out_{value_name}"), format!("*mut {}", v.render())));
+            if matches!(output, Output::Fallible(_)) || guarded_read {
+                blocking.params.push(Param::out_err());
+            }
+            blocking.ret = Some("i8".to_string());
+        },
+        (Output::Value(_), Some(v), _) if guarded_read => {
             blocking.params.push(Param::out_err());
             blocking.ret = Some(v.render());
         },
-        (Output::Fallible(_), v) => {
+        (Output::Fallible(_), v, _) => {
             blocking.params.push(Param::out_err());
             blocking.ret = v.as_ref().map(CType::render);
         },
-        (Output::Value(_), Some(v)) => blocking.ret = Some(v.render()),
+        (Output::Value(_), Some(v), _) => blocking.ret = Some(v.render()),
         _ => {},
     }
     if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
@@ -2231,7 +2265,10 @@ fn expect_method(
         cb_params.push(Param::new("opaque", "*mut c_void".to_string()));
         out.add(format!("{name}_cb"), Shape::Fn(Sig { params: cb_params, ret: None }), file);
         let mut typedef = Sig::default();
-        if let Some(v) = &value {
+        if let (Some(value_name), Some(v)) = (presence_flag, &value) {
+            typedef.params.push(Param::new("present", "i8".to_string()));
+            typedef.params.push(Param::new(value_name, v.render()));
+        } else if let Some(v) = &value {
             typedef.params.push(Param::new("value", v.render()));
         }
         if matches!(output, Output::Fallible(_)) {
@@ -2498,6 +2535,11 @@ fn render_type(ty: &syn::Type) -> String {
         syn::Type::BareFn(f) => render_bare_fn(f),
         other => compact(other),
     }
+}
+
+/// Whether `ty` is an `Option<_>`.
+fn is_option(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|last| last.ident == "Option"))
 }
 
 /// The function-pointer type a typedef declares, `unsafe extern "C" fn(..)`
@@ -4708,6 +4750,70 @@ mod tests {
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
              found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, \
              out_err: *mut *mut kafka_common_Error_t) -> i64`"
+        );
+    }
+
+    const PRESENCE_RUST: &str = r#"
+        pub mod common {
+            pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+            pub use error::Error;
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
+            pub trait Consumer: Send + Sync {
+                fn current_lag(&mut self, partition: i32)
+                    -> impl std::future::Future<Output = Result<Option<i64>, crate::common::Error>> + Send;
+                fn client_lag(&mut self, partition: i32)
+                    -> impl std::future::Future<Output = Result<Option<i64>, crate::common::Error>> + Send;
+            }
+        }
+    "#;
+
+    const PRESENCE_FFI: &str = r#"
+        #[doc(alias = "rust-only")]
+        #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
+        #[repr(C)] pub struct kafka_consumer_Consumer_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_lag: *mut i64, out_err: *mut *mut kafka_common_Error_t) -> i8 { 0 }
+        pub type kafka_consumer_Consumer_current_lag_cb_t = unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_current_lag_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
+        pub type kafka_consumer_Consumer_client_lag_cb_t = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_client_lag_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 { 0 }
+        pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(self_: *const kafka_consumer_Consumer_t, notify: kafka_consumer_Consumer_callbacks_notify_fn_t, opaque: *mut c_void) {}
+    "#;
+
+    /// A method listed in `C_PRESENCE_FLAG_OPTIONALS` is expected with an
+    /// `int8_t` presence flag and an `int64_t *out_<value>` parameter, and its
+    /// `_cb_t` with `(present, <value>, error, opaque)`; an `Option<i64>` not
+    /// listed keeps the `-1`-for-`None` scalar form.
+    #[test]
+    fn test_presence_flag_optional_crosses_as_flag_and_out_parameter() {
+        let findings = run("presence-ok", PRESENCE_RUST, PRESENCE_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let sentinel = PRESENCE_FFI
+            .replace(
+                "partition: i32, out_lag: *mut i64, out_err: *mut *mut kafka_common_Error_t) -> i8",
+                "partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64",
+            )
+            .replace("fn(present: i8, lag: i64, error:", "fn(value: i64, error:");
+        let findings = run("presence-sentinel", PRESENCE_RUST, &sentinel);
+        assert_eq!(
+            keys(&findings),
+            [
+                "shape kafka_consumer_Consumer_current_lag",
+                "shape kafka_consumer_Consumer_current_lag_cb_t"
+            ],
+            "{findings:?}"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_consumer_Consumer_current_lag"),
+            "expected `fn(self: *mut kafka_consumer_Consumer_t, partition: i32, out_lag: *mut i64, \
+             out_err: *mut *mut kafka_common_Error_t) -> i8`, found `fn(self_: *mut kafka_consumer_Consumer_t, \
+             partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64`"
         );
     }
 

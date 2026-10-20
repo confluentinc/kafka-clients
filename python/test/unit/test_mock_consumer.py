@@ -617,6 +617,9 @@ def test_current_lag() -> None:
     consumer.update_end_offsets(new_offsets={partition: 10})
     consumer.seek(partition=partition, offset=4)
     assert consumer.current_lag(topic_partition=partition) == 6
+    # Past the log end the lag is negative and still present (end - position).
+    consumer.seek(partition=partition, offset=13)
+    assert consumer.current_lag(topic_partition=partition) == -3
 
 
 def test_async_current_lag() -> None:
@@ -632,6 +635,8 @@ def test_async_current_lag() -> None:
         consumer.update_end_offsets(new_offsets={partition: 10})
         await consumer.seek(partition=partition, offset=4)
         assert await consumer.current_lag(topic_partition=partition) == 6
+        await consumer.seek(partition=partition, offset=13)
+        assert await consumer.current_lag(topic_partition=partition) == -3
 
     asyncio.run(main())
 

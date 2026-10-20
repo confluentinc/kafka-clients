@@ -455,8 +455,9 @@ static void test_mock_consumer_concurrency_guard(void) {
     err = NULL;
 
     /* The state reads take the guard too, as Java's acquireAndEnsureOpen():
-     * rejected, returning the failure value (NULL; -1 for current_lag, which
-     * is also the empty lag, so the error is what tells them apart). */
+     * rejected, returning the failure value (NULL; 0 for current_lag, which
+     * is also the empty lag, so the error is what tells them apart, and
+     * *out_lag is left unwritten). */
     kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer, &err);
     assert_concurrent_modification(err);
     err = NULL;
@@ -469,10 +470,12 @@ static void test_mock_consumer_concurrency_guard(void) {
     assert_concurrent_modification(err);
     err = NULL;
     TEST_ASSERT_NULL(paused);
-    int64_t lag = kafka_consumer_Consumer_current_lag(f.consumer, tp, &err);
+    int64_t lag = 7;
+    int8_t lag_present = kafka_consumer_Consumer_current_lag(f.consumer, tp, &lag, &err);
     assert_concurrent_modification(err);
     err = NULL;
-    TEST_ASSERT_EQUAL_INT64(-1, lag);
+    TEST_ASSERT_EQUAL_INT8(0, lag_present);
+    TEST_ASSERT_EQUAL_INT64(7, lag);
     kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(f.consumer, &err);
     assert_concurrent_modification(err);
     err = NULL;
@@ -1343,17 +1346,33 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     kafka_consumer_Consumer_current_lag_cb(f.consumer, tp, on_lag, &done);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
     TEST_ASSERT_NULL(done.error);
+    TEST_ASSERT_EQUAL_INT8(1, done.present);
     TEST_ASSERT_EQUAL_INT64(55, done.value);
+
+    /* A position past the log end gives a negative lag, still present: no
+     * value of the lag could stand for Java's empty OptionalLong. */
+    kafka_common_Error_t *seek_err = NULL;
+    kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 60, &seek_err);
+    assert_ok(seek_err, "seek");
+    TEST_ASSERT_EQUAL_INT64(-5, consumer_current_lag(f.consumer, tp));
+    lag_completion_init(&done);
+    kafka_consumer_Consumer_current_lag_cb(f.consumer, tp, on_lag, &done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
+    TEST_ASSERT_NULL(done.error);
+    TEST_ASSERT_EQUAL_INT8(1, done.present);
+    TEST_ASSERT_EQUAL_INT64(-5, done.value);
     kafka_common_TopicPartition_destroy(tp);
 
     /* An unassigned partition: caught up while no end offset is set; with one,
      * Java's position(tp) throws IllegalArgumentException, so the blocking
-     * form returns -1 beside the error and the twin delivers it. */
+     * form returns 0 beside the error and the twin delivers it. */
     kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("test", 9);
     TEST_ASSERT_EQUAL_INT64(0, consumer_current_lag(f.consumer, other));
     update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 9, 5);
     kafka_common_Error_t *err = NULL;
-    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_Consumer_current_lag(f.consumer, other, &err));
+    int64_t unwritten = 7;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_Consumer_current_lag(f.consumer, other, &unwritten, &err));
+    TEST_ASSERT_EQUAL_INT64(7, unwritten);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
@@ -1362,7 +1381,8 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     lag_completion_init(&done);
     kafka_consumer_Consumer_current_lag_cb(f.consumer, other, on_lag, &done);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
-    TEST_ASSERT_EQUAL_INT64(-1, done.value);
+    TEST_ASSERT_EQUAL_INT8(0, done.present);
+    TEST_ASSERT_EQUAL_INT64(0, done.value);
     TEST_ASSERT_NOT_NULL(done.error);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(done.error));
     kafka_common_Error_destroy(done.error);
