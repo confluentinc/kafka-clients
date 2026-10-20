@@ -195,7 +195,7 @@ with Admin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
 - Errors are classes: `isinstance(e.__cause__, RetriableError)`.
 - `MockAdminClient` (and `AsyncMockAdminClient`) is Java's `MockAdminClient`, for tests: no
   broker, in-memory state, `MockAdminClient.create()...build()` (`MockAdminClient()` has one `Node.no_node()` broker, as Java's, so topic calls need real brokers). Where Java's mock
-  throws "Not implemented yet", it raises `UnsupportedVersionError`.
+  throws "Not implemented yet", it raises `UnsupportedOperationError`.
 - Overloads whose entry point the core lacks (streams and share groups, metadata quorum, …)
   are not generated; they are listed in the docstring of `confluent_kafka.admin.admin`.
 

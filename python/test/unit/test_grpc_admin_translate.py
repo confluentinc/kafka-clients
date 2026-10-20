@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import grpc_server  # noqa: E402
 import grpc_server_async  # noqa: E402
 import grpc_translate as tr  # noqa: E402
-from confluent_kafka import ExecutionError  # noqa: E402
+from confluent_kafka import ExecutionError, UnsupportedOperationError  # noqa: E402
 from confluent_kafka import admin as ka  # noqa: E402
 from confluent_kafka.admin import DeleteAclsResult  # noqa: E402
 from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture  # noqa: E402
@@ -148,7 +148,7 @@ def test_whole_call_failure_is_the_top_level_error(service):
     resp = svc.DescribeAcls(apb.DescribeAclsRequest(
         admin_id=aid, filter=apb.AclBindingFilter(
             resource_type=1, pattern_type=1, operation=1, permission_type=1)), None)
-    assert resp.error.code == UnsupportedVersionError._ffi_id
+    assert resp.error.code == UnsupportedOperationError._ffi_id
     assert resp.error.message == "Not implemented yet"
     assert not resp.acls
 

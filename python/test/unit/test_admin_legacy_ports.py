@@ -208,7 +208,7 @@ from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
 from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
     UnknownTopicOrPartitionError,
 )
-from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
+from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
 from .admin_futures import failure
 
@@ -399,7 +399,7 @@ def test_describe_configs_entry_fields_and_logger_resource() -> None:
     assert config.get(name="no.such.config") is None
     # BROKER_LOGGER hits getResourceDescription's default branch.
     error = error_of(described[logger])
-    assert isinstance(error, UnsupportedVersionError)
+    assert isinstance(error, UnsupportedOperationError)
     assert str(error) == "Not implemented yet"
 
 
@@ -522,7 +522,7 @@ def test_scram_empty_password_reaches_the_mock() -> None:
     upsertion = UserScramCredentialUpsertion(
         user="u", credential_info=ScramCredentialInfo(
             mechanism=ScramMechanism.SCRAM_SHA_256, iterations=4096), password=b"")
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         admin(1).alter_user_scram_credentials(alterations=[upsertion])
     assert str(e.value) == "Not implemented yet"
 

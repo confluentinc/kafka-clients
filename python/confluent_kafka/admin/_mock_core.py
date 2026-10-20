@@ -38,8 +38,7 @@ behaviour the mock's bodies rely on is kept: ``List.get`` out of range raises
 checks its range as Java does, ``Integer.parseInt`` raises ``IllegalArgumentError``
 (``NumberFormatException``), and a ``null`` the mock itself looks up and dereferences
 raises ``NullPointerError()``. Java's ``UnsupportedOperationException``
-is ``UnsupportedVersionError`` (Types), with Java's messages, typo included
-.
+is ``UnsupportedOperationError`` (Types), with Java's messages, typo included.
 
 Left out with what they serve (Class family, Dropped): ``setMockMetrics`` (state of
 ``metrics()``), ``disableTelemetry``, ``injectTimeoutException``,
@@ -269,11 +268,10 @@ def _current_time_millis() -> int:
 
 
 def _unsupported(message: str) -> Exception:
-    from confluent_kafka.common.errors.unsupported_version_error import (
-        UnsupportedVersionError,
-    )
+    """Java's ``new UnsupportedOperationException(message)``."""
+    from confluent_kafka import UnsupportedOperationError
 
-    return UnsupportedVersionError(message=message)
+    return UnsupportedOperationError(message=message)
 
 
 def _timeout() -> Exception:
@@ -1082,7 +1080,10 @@ class MockAdminClientCore:
                     return new_map
                 stored[resource_name] = new_map
                 return None
-            return _unsupported("")
+            # Java's no-message `new UnsupportedOperationException()`.
+            from confluent_kafka import UnsupportedOperationError
+
+            return UnsupportedOperationError()
 
     def _alter_replica_log_dirs(
             self, replica_assignment: Mapping[TopicPartitionReplica, str]
@@ -1624,8 +1625,13 @@ class MockAdminClientCore:
         if self._using_raft_controller:
             return UnregisterControllerResult._new(
                 future=self._kind._FUTURE.completed_future(value=None), kind=self._kind)
-        return UnregisterControllerResult._new(future=self._failed(_unsupported("")),
-                                               kind=self._kind)
+        from confluent_kafka.common.errors.unsupported_version_error import (
+            UnsupportedVersionError,
+        )
+
+        # Java's `new UnsupportedVersionException("")` (MockAdminClient.java:1377).
+        return UnregisterControllerResult._new(
+            future=self._failed(UnsupportedVersionError(message="")), kind=self._kind)
 
     def _describe_producers(self, partitions: Iterable[TopicPartition]
                             ) -> DescribeProducersResult[Any]:
