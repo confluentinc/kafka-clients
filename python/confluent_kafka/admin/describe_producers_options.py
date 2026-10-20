@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
@@ -40,19 +40,21 @@ class DescribeProducersOptions(AbstractOptions):
 
     __slots__ = ("_broker_id",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, broker_id: int = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, broker_id: int = MISSING) -> None:
         super().__init__()
         self._broker_id: int | None = None  # OptionalInt.empty()
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if broker_id is not UNSET:
+        if broker_id is not MISSING:
             self.broker_id(broker_id=broker_id)
 
-    def broker_id(self, *, broker_id: int | None = None) -> Any:
+    def broker_id(self, *, broker_id: int = MISSING) -> Any:
         """With ``broker_id``: set the broker id and return this object. Without: the
         broker id, or ``None`` when not set."""
-        if broker_id is None:
+        if broker_id is MISSING:
             return self._broker_id
+        if broker_id is None:  # a int: Java cannot pass null
+            raise TypeError("broker_id must not be None")
         self._broker_id = broker_id  # OptionalInt.of(brokerId)
         self._record("broker_id", self._broker_id)
         return self

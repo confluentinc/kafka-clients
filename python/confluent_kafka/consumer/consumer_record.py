@@ -19,7 +19,7 @@ Java's three constructors are one keyword-only constructor matched by
 ``(topic, partition, offset, key, value)`` passes ``NO_TIMESTAMP``,
 ``NO_TIMESTAMP_TYPE``, ``NULL_SIZE``, empty headers and no leader epoch to the
 11-argument form, which passes no delivery count to the full form. Each of
-those parameters defaults to ``UNSET``, so an explicit value, ``None``
+those parameters defaults to ``MISSING``, so an explicit value, ``None``
 included, is given and selects a form that takes it. The record
 is covariant in ``K`` and ``V``; the stubs bind a ``None`` key or value to
 ``Never``. Java defines no ``equals`` / ``hashCode``, so neither does this.
@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, Union, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.common.headers import Headers, _hand_out, _headers_to_string, _read_headers
+from confluent_kafka.common.header import Header
+from confluent_kafka.common.headers import Headers, _kept
 from confluent_kafka.common.timestamp_type import TimestampType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -50,7 +51,9 @@ V_co = TypeVar("V_co", covariant=True)
 _K = TypeVar("_K")
 _V = TypeVar("_V")
 
-_WrittenHeaders = Iterable[tuple[str, "bytes | bytearray | memoryview | None"]]
+# Java's `Headers`: a `Headers`, kept as it is, or any iterable of `Header` s or
+# `(key, value)` pairs, made into a new `Headers`.
+_WrittenHeaders = Iterable[Union[Header, "tuple[str, bytes | bytearray | memoryview | None]"]]
 
 _NO_TIMESTAMP = -1  # RecordBatch.NO_TIMESTAMP
 _NULL_SIZE = -1
@@ -88,26 +91,46 @@ class ConsumerRecord(Generic[K_co, V_co]):
     def __init__(self: ConsumerRecord[Never, Never], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: None,
+                 value: None, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[_K, Never], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: _K,
+                 value: None, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[Never, _V], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: None,
+                 value: _V, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[_K, _V], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: _K,
+                 value: _V, headers: _WrittenHeaders, leader_epoch: int | None) -> None: ...
+    @overload
+    def __init__(self: ConsumerRecord[Never, Never], *, topic: str, partition: int,
+                 offset: int, timestamp: int, timestamp_type: TimestampType,
+                 serialized_key_size: int, serialized_value_size: int, key: None,
                  value: None, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[_K, Never], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: _K,
                  value: None, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[Never, _V], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: None,
                  value: _V, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
     @overload
     def __init__(self: ConsumerRecord[_K, _V], *, topic: str, partition: int,
                  offset: int, timestamp: int, timestamp_type: TimestampType,
                  serialized_key_size: int, serialized_value_size: int, key: _K,
                  value: _V, headers: _WrittenHeaders, leader_epoch: int | None,
-                 delivery_count: int | None = None) -> None: ...
+                 delivery_count: int | None) -> None: ...
 
     @java_forms(
         Form("topic", "partition", "offset", "key", "value"),
@@ -132,11 +155,11 @@ class ConsumerRecord(Generic[K_co, V_co]):
                        "headers": (), "leader_epoch": None, "delivery_count": None}),
     )
     def __init__(self, *, topic: str, partition: int, offset: int,
-                 timestamp: int = UNSET, timestamp_type: TimestampType = UNSET,
-                 serialized_key_size: int = UNSET, serialized_value_size: int = UNSET,
-                 key: Any, value: Any, headers: _WrittenHeaders = UNSET,
-                 leader_epoch: int | None = UNSET,
-                 delivery_count: int | None = UNSET) -> None:
+                 timestamp: int = MISSING, timestamp_type: TimestampType = MISSING,
+                 serialized_key_size: int = MISSING, serialized_value_size: int = MISSING,
+                 key: Any, value: Any, headers: _WrittenHeaders = MISSING,
+                 leader_epoch: int | None = MISSING,
+                 delivery_count: int | None = MISSING) -> None:
         """Creates a record to be received from a specified topic and
         partition: its offset, timestamp and timestamp type, the lengths of the
         serialized key and value, the key (``None`` is allowed) and value, the
@@ -144,9 +167,9 @@ class ConsumerRecord(Generic[K_co, V_co]):
         formats) and the optional delivery count (may be empty when deliveries
         are not counted)."""
         if topic is None:
-            raise IllegalArgumentError(message="Topic cannot be null")
+            raise IllegalArgumentError(message="Topic cannot be None")
         if headers is None:
-            raise IllegalArgumentError(message="Headers cannot be null")
+            raise IllegalArgumentError(message="Headers cannot be None")
         self._topic = topic
         self._partition = partition
         self._offset = offset
@@ -156,7 +179,7 @@ class ConsumerRecord(Generic[K_co, V_co]):
         self._serialized_value_size = serialized_value_size
         self._key: K_co | None = key
         self._value: V_co | None = value
-        self._headers = _read_headers(headers)
+        self._headers = _kept(headers)
         self._leader_epoch = leader_epoch
         self._delivery_count = delivery_count
 
@@ -169,8 +192,9 @@ class ConsumerRecord(Generic[K_co, V_co]):
         return self._partition
 
     def headers(self) -> Headers:
-        """The headers (never ``None``)."""
-        return _hand_out(self._headers)
+        """The headers (never ``None``): the record's own ``Headers``,
+        writable, as Java's ``CompletedFetch`` leaves them."""
+        return self._headers
 
     def key(self) -> K_co | None:
         """The key (or ``None`` if no key is specified)."""
@@ -223,6 +247,6 @@ class ConsumerRecord(Generic[K_co, V_co]):
                 + ", deliveryCount = " + java_str(self._delivery_count)
                 + ", serialized key size = " + str(self._serialized_key_size)
                 + ", serialized value size = " + str(self._serialized_value_size)
-                + ", headers = " + _headers_to_string(self._headers)
+                + ", headers = " + str(self._headers)
                 + ", key = " + java_str(self._key)
                 + ", value = " + java_str(self._value) + ")")

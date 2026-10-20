@@ -17,7 +17,7 @@
 The records and offset types, ``CloseOptions``, ``SubscriptionPattern``, the
 client family (``Consumer``, ``KafkaConsumer``, ``MockConsumer`` and their
 ``Async`` peers), ``ConsumerRebalanceListener``, the
-``OffsetCommitCallback`` alias, and the errors Java declares in this package
+``OffsetCommitCallback`` protocol, and the errors Java declares in this package
 (``CommitFailedException``, ``OffsetOutOfRangeException``, …) (CLAUDE.md,
 Python Binding Conventions, Modules).
 """

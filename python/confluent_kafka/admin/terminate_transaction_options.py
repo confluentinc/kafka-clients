@@ -23,7 +23,7 @@ Signatures). A keyword left out leaves its setter uncalled. Java's ``toString`` 
 
 from __future__ import annotations
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
@@ -38,9 +38,9 @@ class TerminateTransactionOptions(AbstractOptions):
 
     __slots__ = ()
 
-    def __init__(self, *, timeout_ms: int | None = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING) -> None:
         super().__init__()
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
 
     def __str__(self) -> str:

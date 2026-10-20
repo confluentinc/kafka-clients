@@ -263,6 +263,11 @@ message Node {
   string host = 2;
   int32 port = 3;
   optional string rack = 4;
+  // Java's `Node.isFenced()` (KIP-1073): true only for a broker a
+  // `describeCluster(includeFencedBrokers = true)` reports as fenced. Every
+  // other source of a node (partition metadata, coordinators, controllers)
+  // leaves it false, which is also what a server that does not set it sends.
+  bool is_fenced = 5;
 }
 
 // ---------------------------------------------------------------------------

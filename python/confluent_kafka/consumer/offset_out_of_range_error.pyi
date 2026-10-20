@@ -15,7 +15,7 @@
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.consumer.OffsetOutOfRangeError).
 
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.consumer.invalid_offset_error import InvalidOffsetError
@@ -24,6 +24,9 @@ __all__ = ["OffsetOutOfRangeError"]
 
 class OffsetOutOfRangeError(InvalidOffsetError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, offset_out_of_range_partitions: Mapping[TopicPartition, int]) -> None: ...
+    @overload
+    def __init__(self, *, offset_out_of_range_partitions: Mapping[TopicPartition, int]) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, offset_out_of_range_partitions: Mapping[TopicPartition, int]) -> None: ...
     def offset_out_of_range_partitions(self) -> dict[TopicPartition, int]: ...
     def partitions(self) -> set[TopicPartition]: ...

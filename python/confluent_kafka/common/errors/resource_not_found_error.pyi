@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.ResourceNotFoundError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.api_error import ApiError
 
@@ -22,5 +22,12 @@ __all__ = ["ResourceNotFoundError"]
 
 class ResourceNotFoundError(ApiError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, resource: str | None = None, message: str, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, resource: str | None, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, resource: str | None, message: str | None, cause: BaseException | None) -> None: ...
     def resource(self) -> str | None: ...

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Java overload matching for collapsed methods (``java_forms``, ``UNSET``).
+"""Java overload matching for collapsed methods (``java_forms``, ``MISSING``).
 
 Java resolves an overload at compile time. A Python method that collapses a
 Java overload set into one keyword-only signature (CLAUDE.md, Python Binding
@@ -22,25 +22,34 @@ overload. ``java_forms`` is the one mechanism for that: it lists the method's
 Java overloads, unfolded, each with its parameters in Java declaration order and
 the Java-given defaults a shorter overload passes to it.
 
+Every parameter some overload omits has ``MISSING`` as its implementation
+default: a private sentinel, Python's way of saying "no argument here", which
+Java does not need, since Java chooses the overload from the arguments written.
+It is internal only: never a valid value of any parameter, never ``None``,
+never exported by a public module; passing it explicitly is the same as leaving
+the parameter out. "Given" means "not left at ``MISSING``": a given value equal
+to what Java's shorter overload passes still counts as given
+(``acknowledge(type=AcknowledgeType.ACCEPT)``), and so does an explicit
+``None``, which is Java's ``null`` (``ProducerRecord(topic=…, partition=0,
+key=None, value=…)``).
+
 A set of given names matches an overload only when it is exactly that
 overload's parameter set; nothing is filled in to make a match, except that a
 serializer / deserializer the overload names in ``serdes`` may be left out on
 its own (then ``None``). The parameters a matched set leaves out are filled
 with the values Java's shorter overload passes for them: the Java-given
 defaults of the overload with the most parameters (the earliest-declared on a
-tie) that the set reaches by leaving out only defaulted parameters. When no
-overload matches, the call raises ``IllegalArgumentError`` naming every
-overload::
+tie) that the set reaches by leaving out only defaulted parameters; the others
+stay ``MISSING``, which the body tests with ``is not MISSING`` to learn which
+overload matched. When no overload matches, the call raises
+``IllegalArgumentError`` naming every overload::
 
     close() takes one of (), (timeout), (option); got (timeout, option)
 
-"Given" means "not left at its default": a keyword argument equal to its
-implementation-signature default counts as not given. ``UNSET`` is that default
-for a parameter one form requires and another defaults, so a given value equal
-to the Java default (``acknowledge(type=AcknowledgeType.ACCEPT)``) still counts
-as given, and for a nullable parameter whose omission leaves a set that is no
-Java overload, so a ``None`` for it counts as given
-(``ProducerRecord(topic=…, partition=0, key=None, value=…)``).
+A ``Form`` may declare rename aliases (CLAUDE.md, Stability): a former Java name
+of one of its parameters, accepted as that parameter with a
+``DeprecationWarning``; giving both names is rejected as two forms are, the
+alias form listed in the message as a form of its own.
 
 The check is built once, when the decorated function is defined (at class
 definition), not on every call.
@@ -51,38 +60,40 @@ from __future__ import annotations
 import functools
 import inspect
 import linecache
+import sys
 import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-__all__ = ["UNSET", "Form", "is_given", "java_forms"]
+__all__ = ["MISSING", "Form", "is_given", "java_forms", "reject_str"]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-class _Unset:
-    """The type of :data:`UNSET`; a private singleton."""
+class _Missing:
+    """The type of :data:`MISSING`; a private singleton."""
 
     __slots__ = ()
 
-    _instance: _Unset | None = None
+    _instance: _Missing | None = None
 
-    def __new__(cls) -> _Unset:
+    def __new__(cls) -> _Missing:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __repr__(self) -> str:
-        return "UNSET"
+        return "MISSING"
 
     def __reduce__(self) -> str:
-        return "UNSET"
+        return "MISSING"
 
 
-#: The "not given" default of a parameter one form requires and another
-#: defaults. Typed ``Any`` so it can be the implementation-signature default of
-#: a parameter of any type; the ``@overload`` stubs show the Java value.
-UNSET: Any = _Unset()
+#: The implementation-signature default of every parameter some Java overload
+#: omits: "no argument here". Internal only; passing it is leaving the
+#: parameter out. Typed ``Any`` so it can be the default of a parameter of any
+#: type; the ``@overload`` stubs, one per Java overload, show no default.
+MISSING: Any = _Missing()
 
 #: Keyword a decorated function may declare (keyword-only, private) to receive
 #: the index of the Java overload that matched. It is not part of the public
@@ -101,22 +112,35 @@ class Form:
     deserializer parameters of this overload, the one exception to exact
     matching: each may be left out on its own, and is then ``None``.
     ``deprecated`` is Java's ``@deprecated`` note when the overload is
-    ``@Deprecated``: calling it emits a ``DeprecationWarning``.
+    ``@Deprecated``: calling it emits a ``DeprecationWarning``. ``aliases``
+    maps a parameter of this overload to its former Java names (CLAUDE.md,
+    Stability: a Java parameter rename after the first major release), each
+    accepted as that parameter with a ``DeprecationWarning``; the names come
+    from the release baseline, so none is declared in the package yet.
     """
 
-    __slots__ = ("params", "defaults", "serdes", "deprecated")
+    __slots__ = ("params", "defaults", "serdes", "deprecated", "aliases")
 
     def __init__(self, *params: str, defaults: Mapping[str, object] | None = None,
-                 serdes: tuple[str, ...] = (), deprecated: str | None = None) -> None:
+                 serdes: tuple[str, ...] = (), deprecated: str | None = None,
+                 aliases: Mapping[str, tuple[str, ...]] | None = None) -> None:
         self.params: tuple[str, ...] = params
         self.defaults: dict[str, object] = dict(defaults or {})
         self.serdes: frozenset[str] = frozenset(serdes)
         self.deprecated = deprecated
-        unknown = (set(self.defaults) | self.serdes) - set(params)
+        self.aliases: dict[str, tuple[str, ...]] = {
+            current: tuple(former) for current, former in (aliases or {}).items()}
+        unknown = (set(self.defaults) | self.serdes | set(self.aliases)) - set(params)
         if unknown:
             raise TypeError(
-                f"Form{params}: defaults or serdes name parameters it does not have: "
-                f"{sorted(unknown)}")
+                f"Form{params}: defaults, serdes or aliases name parameters it does not "
+                f"have: {sorted(unknown)}")
+        for current, formers in self.aliases.items():
+            clash = [n for n in formers if n in params or n == current]
+            if clash or not formers:
+                raise TypeError(
+                    f"Form{params}: the aliases of {current!r} must be former names "
+                    f"it does not have: {list(formers)}")
 
 
 class _Required:
@@ -127,34 +151,43 @@ _REQUIRED = _Required()
 
 
 def _is_not_given(value: object, marker: object) -> bool:
-    """Whether ``value`` is left at its implementation default ``marker``."""
-    if value is marker:
-        return True
-    if marker is None or marker is UNSET or marker is _REQUIRED:
-        return False
-    # A constant default: equal and of the same type (``0`` is not ``False``).
-    try:
-        return type(value) is type(marker) and bool(value == marker)
-    except Exception:  # noqa: BLE001 - an exotic __eq__ never reads as "not given"
-        return False
+    """Whether ``value`` is left out: ``MISSING`` (left out, or passed
+    explicitly, which is the same), or the very object of its implementation
+    default ``marker``. A value merely equal to a default, ``None`` included,
+    is given."""
+    return value is MISSING or value is marker
 
 
-def is_given(value: object, default: object) -> bool:
-    """Whether ``value`` counts as given against its implementation default
-    ``default`` (the generated error constructors test given-ness with it)."""
+def reject_str(name: str, value: object, *, element: str = "str") -> None:
+    """Refuse a ``str``, ``bytes`` or ``bytearray`` given for ``name``, a parameter
+    whose Java type is a collection of ``String`` (CLAUDE.md, Python Binding
+    Conventions, Signatures). Java cannot receive one there; Python would iterate
+    it by character, so ``subscribe(topics="orders")`` would subscribe to "o", "r",
+    "d", "e", "s" and ``delete_topics(topics="orders")`` would delete them. Python's
+    own ``TypeError``, raised before any other check, like a positional call's. ``element``
+    names what the iterable holds when it is not ``str`` (``"lists of str"`` for a
+    ``List<List<String>>``)."""
+    if isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"{name} must be an iterable of {element}, not {type(value).__name__}")
+
+
+def is_given(value: object, default: object = MISSING) -> bool:
+    """Whether ``value`` counts as given: not left at ``MISSING`` (nor at the
+    very object ``default``, its implementation default). The generated error
+    constructors test given-ness with it."""
     return not _is_not_given(value, default)
 
 
-class _Missing:
+class _Absent:
     """A keyword a specialised wrapper's call left out (see ``_specialise``)."""
 
     __slots__ = ()
 
     def __repr__(self) -> str:
-        return "<missing>"
+        return "<absent>"
 
 
-_MISSING: Any = _Missing()
+_ABSENT: Any = _Absent()
 
 
 def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
@@ -188,7 +221,7 @@ def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
     ns: dict[str, Any] = {
         "_jf_fn": fn, "_jf_generic": generic,
         "_jf_illegal": illegal, "_jf_warn": warnings.warn, "_jf_dw": DeprecationWarning,
-        "_jf_missing": _MISSING, "_jf_is_not_given": _is_not_given,
+        "_jf_missing": _ABSENT, "_jf_is_not_given": _is_not_given, "_jf_M": MISSING,
     }
     signature: list[str] = []
     missing: list[str] = [f" or {p} is _jf_missing" for p in positional]
@@ -202,10 +235,10 @@ def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
             start |= bit[name]  # given whenever present
         else:
             # Left out, it is the method's default (not given); passed, it is
-            # given unless it reads as that default.
+            # given unless it is MISSING (or the very default object).
             ns[f"_jf_m{i}"] = m
             signature.append(f"{name}=_jf_missing")
-            test = (f"{name} is not _jf_m{i}" if m is None or m is UNSET
+            test = (f"{name} is not _jf_M" if m is MISSING
                     else f"not _jf_is_not_given({name}, _jf_m{i})")
             checks.append(f"    if {name} is _jf_missing:\n        {name} = _jf_m{i}\n"
                           f"    elif {test}:\n        _jf_g |= {bit[name]}")
@@ -297,6 +330,13 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
             p.name: (_REQUIRED if p.default is p.empty else p.default)
             for p in keyword
         }
+        # Every parameter some overload omits defaults to MISSING; what Java's
+        # shorter overload passes is a Form default, never a signature default
+        # (CLAUDE.md, Signatures).
+        constant = [n for n, m in marker.items() if m is not _REQUIRED and m is not MISSING]
+        if constant:
+            raise TypeError(
+                f"java_forms on {fn.__qualname__}: {constant} must default to MISSING")
         required = tuple(n for n in order if marker[n] is _REQUIRED)
 
         def mask_of(names: tuple[str, ...] | list[str]) -> int:
@@ -309,8 +349,27 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
                 m |= bit[n]
             return m
 
+        # Rename aliases (Form.aliases): a former name -> its parameter. Each
+        # alias has a bit of its own past the parameters' for the message, and
+        # is listed right after its parameter.
+        alias_of: dict[str, str] = {}
+        for form in forms:
+            for current, formers in form.aliases.items():
+                for former in formers:
+                    if former in bit or alias_of.setdefault(former, current) != current:
+                        raise TypeError(
+                            f"java_forms on {fn.__qualname__}: alias {former!r} names a "
+                            "parameter, or two parameters")
+        display: list[str] = []
+        for n in order:
+            display.append(n)
+            display.extend(a for a, c in alias_of.items() if c == n)
+        dbit = dict(bit)
+        for j, a in enumerate(a for a in display if a in alias_of):
+            dbit[a] = 1 << (len(order) + j)
+
         def in_order(m: int) -> str:
-            return "(" + ", ".join(n for n in order if m & bit[n]) + ")"
+            return "(" + ", ".join(n for n in display if m & dbit[n]) + ")"
 
         def size(m: int) -> int:
             return bin(m).count("1")
@@ -367,8 +426,45 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
             if note is not None:
                 table[given] = (
                     index, fills, f"{method}{in_order(given)} is deprecated. {note}")
+        # The alias forms are listed as forms of their own, after Java's.
+        listed = list(form_masks)
+        for f_index, form in enumerate(forms):
+            for current, formers in form.aliases.items():
+                for former in formers:
+                    listed.append(form_masks[f_index] & ~bit[current] | dbit[former])
         prefix = (f"{method}() takes one of "
-                  f"{', '.join(in_order(m) for m in form_masks)}; got ")
+                  f"{', '.join(in_order(m) for m in listed)}; got ")
+
+        def stacklevel() -> int:
+            # The caller's frame: past resolve and the generic wrapper, and past
+            # the specialised wrapper when the call came through it.
+            caller = sys._getframe(3)
+            return 4 if caller.f_code.co_filename.startswith("<java_forms ") else 3
+
+        def rename(kwargs: dict[str, Any], aliased: list[str]
+                   ) -> tuple[list[tuple[str, str]], int]:
+            """Move each alias keyword's value to its parameter, returning the
+            renames and the given names as shown in a message (aliases
+            included); both names given is rejected, listing the alias form."""
+            shown = always
+            for key, value in kwargs.items():
+                b = dbit.get(key)
+                if b is not None and not _is_not_given(
+                        value, marker[alias_of.get(key, key)]):
+                    shown |= b
+            renamed: list[tuple[str, str]] = []
+            for former in aliased:
+                current = alias_of[former]
+                value = kwargs.pop(former)
+                if _is_not_given(value, marker[current]):
+                    continue
+                if current in kwargs and not _is_not_given(kwargs[current], marker[current]):
+                    from .illegal_argument_error import IllegalArgumentError
+
+                    raise IllegalArgumentError(message=prefix + in_order(shown))
+                kwargs[current] = value
+                renamed.append((former, current))
+            return renamed, shown
 
         def resolve(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             """Match the given names, fill the Java-given defaults into
@@ -381,6 +477,12 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
                     f"'{_FORM_KEYWORD}'")
             if len(args) != n_positional:
                 return
+            renamed: list[tuple[str, str]] = []
+            shown = -1
+            if alias_of:
+                aliased = [k for k in kwargs if k in alias_of]
+                if aliased:
+                    renamed, shown = rename(kwargs, aliased)
             given = always
             for key, value in kwargs.items():
                 b = bit.get(key)
@@ -392,15 +494,21 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
                 if key not in kwargs:
                     return
             entry = table.get(given)
-            if entry is None:
+            if entry is None or any(former not in forms[entry[0]].aliases.get(current, ())
+                                    for former, current in renamed):
                 from .illegal_argument_error import IllegalArgumentError
 
-                raise IllegalArgumentError(message=prefix + in_order(given))
+                raise IllegalArgumentError(
+                    message=prefix + in_order(given if shown < 0 else shown))
             index, fills, note = entry
+            if renamed:
+                for former, current in renamed:
+                    warnings.warn(f"{method}(): the keyword {former!r} is deprecated; use "
+                                  f"{current!r}", DeprecationWarning, stacklevel=stacklevel())
             for key, value in fills:
                 kwargs[key] = value
             if note is not None:
-                warnings.warn(note, DeprecationWarning, stacklevel=3)
+                warnings.warn(note, DeprecationWarning, stacklevel=stacklevel())
             if pass_form:
                 kwargs[_FORM_KEYWORD] = index
 

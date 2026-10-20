@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.consumer.CommitFailedError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.kafka_error import KafkaError
 
@@ -22,4 +22,7 @@ __all__ = ["CommitFailedError"]
 
 class CommitFailedError(KafkaError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...

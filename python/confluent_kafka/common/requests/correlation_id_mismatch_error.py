@@ -43,7 +43,7 @@ class CorrelationIdMismatchError(IllegalStateError):
     def __init__(
         self,
         *,
-        message: str,
+        message: str | None,
         request_correlation_id: int,
         response_correlation_id: int,
     ) -> None:

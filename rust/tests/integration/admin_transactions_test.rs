@@ -81,9 +81,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AbortTransactionSpec, DescribeClusterOptions, DescribeProducersOptions, DescribeTransactionsOptions,
-    FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, TerminateTransactionOptions,
-    TransactionListing, TransactionState,
+    AbortTransactionOptions, AbortTransactionSpec, DescribeClusterOptions, DescribeProducersOptions,
+    DescribeTransactionsOptions, FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions,
+    TerminateTransactionOptions, TransactionListing, TransactionState,
 };
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
@@ -908,6 +908,162 @@ async fn abort_transaction_appends_a_marker<F: AdminBackendFactory>(ctx: &mut Te
     ctx.cleanup().await;
 }
 
+/// `fenceProducers` over two transactional ids, called twice, with an explicit
+/// timeout.
+///
+/// The second scenario for `fence_producers`, which
+/// [`fence_producers_allocates_producer_id_for_fresh_id`] drives with one fresh
+/// id. Java's `FenceProducersResult` keeps one future per id, each resolved
+/// from its own `InitProducerId` round trip (`FenceProducersHandler` batches
+/// nothing). Fencing an id that already exists bumps its epoch and keeps its
+/// producer id — that bump is what fences the old producer — so the second
+/// call must answer each id with the same producer id at epoch + 1.
+async fn fence_producers_twice_bumps_each_epoch<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+    let ids = vec![
+        transactional_id(ctx, "fence-twice-a"),
+        transactional_id(ctx, "fence-twice-b"),
+    ];
+    let options = || FenceProducersOptions::new().set_timeout_ms(Some(30_000));
+
+    let first = admin
+        .fence_producers(&ids, options())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: first fence: {e}"));
+    all_of_exactly(&admin, &first, &ids, "fenceProducers (first)");
+    let second = admin
+        .fence_producers(&ids, options())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: second fence: {e}"));
+    all_of_exactly(&admin, &second, &ids, "fenceProducers (second)");
+
+    for id in &ids {
+        let before = first[id].as_ref().expect("checked above");
+        let after = second[id].as_ref().expect("checked above");
+        assert_eq!(
+            after.producer_id(),
+            before.producer_id(),
+            "{backend} backend: re-fencing {id} keeps its producer id"
+        );
+        assert_eq!(
+            after.epoch(),
+            before.epoch() + 1,
+            "{backend} backend: re-fencing {id} bumps its epoch by one"
+        );
+    }
+    assert_ne!(
+        first[&ids[0]].as_ref().expect("checked above").producer_id(),
+        first[&ids[1]].as_ref().expect("checked above").producer_id(),
+        "{backend} backend: two transactional ids get two producer ids"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// `forceTerminateTransaction` on an id the coordinator already knows, with an
+/// explicit timeout.
+///
+/// The second scenario for `force_terminate_transaction`, which
+/// [`force_terminate_transaction_fresh_id`] drives on a fresh id. Java builds it
+/// on `fenceProducers` (`KafkaAdminClient.forceTerminateTransaction`), so on an
+/// existing id it is an `InitProducerId` that bumps the epoch: the coordinator
+/// must then describe the same producer id at the next epoch, still `Empty`.
+async fn force_terminate_transaction_on_a_known_id_bumps_the_epoch<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+    let transactional_id = transactional_id(ctx, "terminate-known");
+
+    let fenced = admin
+        .fence_producers(std::slice::from_ref(&transactional_id), FenceProducersOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));
+    let fenced = *fenced[&transactional_id]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: fence {transactional_id}: {e}"));
+
+    admin
+        .force_terminate_transaction(
+            &transactional_id,
+            TerminateTransactionOptions::new().set_timeout_ms(Some(30_000)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: force terminate {transactional_id}: {e}"));
+
+    let outcomes = admin
+        .describe_transactions(std::slice::from_ref(&transactional_id), DescribeTransactionsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe transactions: {e}"));
+    let description = outcomes
+        .get(&transactional_id)
+        .unwrap_or_else(|| panic!("{backend} backend: no entry for {transactional_id}"))
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: describe {transactional_id}: {e}"));
+    assert_eq!(
+        description.producer_id(),
+        fenced.producer_id(),
+        "{backend} backend: terminating keeps the producer id"
+    );
+    assert_eq!(
+        description.producer_epoch() as i16,
+        fenced.epoch() + 1,
+        "{backend} backend: terminating a known id bumps its epoch"
+    );
+    assert_eq!(
+        description.state(),
+        TransactionState::Empty,
+        "{backend} backend: a terminated transaction with no partitions is Empty"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// `abortTransaction` on a partition of a topic that does not exist, with a
+/// short timeout.
+///
+/// The second scenario for `abort_transaction`, whose other scenario takes the
+/// success arm. Java sends the marker through the `AdminApiDriver` with a
+/// `PartitionLeaderStrategy` lookup (`AbortTransactionHandler`), and a partition
+/// with no leader stays unmapped: `UNKNOWN_TOPIC_OR_PARTITION` from the
+/// metadata lookup is retriable, so the lookup is retried until the call's
+/// deadline and the future then fails with a `TimeoutException`. The error
+/// crosses as the single whole-value error of the void result.
+async fn abort_transaction_on_a_missing_partition_times_out<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let tp = TopicPartition::new(ctx.topic("admin_abort_missing"), 0);
+    let spec = AbortTransactionSpec::new(tp.clone(), 1000, 0, 0);
+    let err = admin
+        .abort_transaction(spec, AbortTransactionOptions::new().set_timeout_ms(Some(3_000)))
+        .await
+        .expect_err(&format!("{backend} backend: aborting on missing {tp} must fail"));
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{backend} backend: a partition with no leader times out the lookup, got {err:?}"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_list_transactions_returns_empty_when_none_active,
     list_transactions_returns_empty_when_none_active,
@@ -957,5 +1113,20 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_abort_transaction_appends_a_marker,
     abort_transaction_appends_a_marker,
+    txn_single_broker()
+);
+multilanguage_admin_test!(
+    test_fence_producers_twice_bumps_each_epoch,
+    fence_producers_twice_bumps_each_epoch,
+    txn_single_broker()
+);
+multilanguage_admin_test!(
+    test_force_terminate_transaction_on_a_known_id_bumps_the_epoch,
+    force_terminate_transaction_on_a_known_id_bumps_the_epoch,
+    txn_single_broker()
+);
+multilanguage_admin_test!(
+    test_abort_transaction_on_a_missing_partition_times_out,
+    abort_transaction_on_a_missing_partition_times_out,
     txn_single_broker()
 );

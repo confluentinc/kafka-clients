@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common import Uuid
 
@@ -63,8 +63,8 @@ class TopicDescription:
                 Form("name", "internal", "partitions", "authorized_operations", "topic_id",
                      defaults={"authorized_operations": (), "topic_id": Uuid.ZERO_UUID}))
     def __init__(self, *, name: str, internal: bool, partitions: Sequence[TopicPartitionInfo],
-                 authorized_operations: Iterable[AclOperation] | None = UNSET,
-                 topic_id: Uuid = UNSET) -> None:
+                 authorized_operations: Iterable[AclOperation] | None = MISSING,
+                 topic_id: Uuid = MISSING) -> None:
         """Create an instance with the specified parameters.
 
         ``name``: the topic name; ``internal``: whether the topic is internal to
@@ -76,7 +76,10 @@ class TopicDescription:
         """
         self._name = name
         self._internal = internal
-        self._partitions = tuple(partitions)
+        # Java stores the reference, null included: partitions() returns it,
+        # equals / hashCode take it, toString dereferences it.
+        self._partitions: tuple[TopicPartitionInfo, ...] | None = (
+            None if partitions is None else tuple(partitions))
         self._authorized_operations: frozenset[AclOperation] | None = (
             None if authorized_operations is None else frozenset(authorized_operations))
         self._topic_id = topic_id
@@ -110,7 +113,10 @@ class TopicDescription:
     def partitions(self) -> list[TopicPartitionInfo]:
         """A list of partitions where the index represents the partition id and
         the element contains leadership and replica information for that
-        partition."""
+        partition (``None`` when the constructor was given ``None``, as Java
+        returns its ``null``)."""
+        if self._partitions is None:
+            return None  # type: ignore[return-value]  # Java's stored null
         return list(self._partitions)
 
     def authorized_operations(self) -> set[AclOperation] | None:
@@ -119,7 +125,13 @@ class TopicDescription:
         ops = self._authorized_operations
         return None if ops is None else set(ops)
 
+    def _partitions_or_raise(self) -> tuple[TopicPartitionInfo, ...]:
+        """Java's ``partitions.stream()`` in ``toString``: a ``None`` raises."""
+        if self._partitions is None:
+            raise TypeError("partitions must not be None")
+        return self._partitions
+
     def __str__(self) -> str:
         return ("(name=" + java_str(self._name) + ", internal=" + java_str(self._internal)
-                + ", partitions=" + ",".join(java_str(p) for p in self._partitions)
+                + ", partitions=" + ",".join(java_str(p) for p in self._partitions_or_raise())
                 + ", authorizedOperations=" + java_str(self._authorized_operations) + ")")

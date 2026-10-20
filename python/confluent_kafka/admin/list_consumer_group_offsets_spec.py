@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 
 from ._values import frozen
@@ -47,9 +47,9 @@ class ListConsumerGroupOffsetsSpec:
 
     __slots__ = ("_topic_partitions",)
 
-    def __init__(self, *, topic_partitions: Iterable[TopicPartition] | None = UNSET) -> None:
+    def __init__(self, *, topic_partitions: Iterable[TopicPartition] | None = MISSING) -> None:
         self._topic_partitions: list[TopicPartition] | None = None
-        if topic_partitions is not UNSET:
+        if topic_partitions is not MISSING:
             self.topic_partitions(topic_partitions=topic_partitions)
 
     @overload
@@ -58,7 +58,7 @@ class ListConsumerGroupOffsetsSpec:
     def topic_partitions(self, *, topic_partitions: Iterable[TopicPartition] | None
                          ) -> ListConsumerGroupOffsetsSpec: ...
 
-    def topic_partitions(self, *, topic_partitions: Iterable[TopicPartition] | None = UNSET
+    def topic_partitions(self, *, topic_partitions: Iterable[TopicPartition] | None = MISSING
                          ) -> list[TopicPartition] | None | ListConsumerGroupOffsetsSpec:
         """With no argument: the topic partitions whose offsets are to be
         listed for a consumer group; ``None`` indicates that offsets of all
@@ -68,7 +68,7 @@ class ListConsumerGroupOffsetsSpec:
         be listed for a consumer group (``None`` includes all topic partitions)
         and return this ``ListConsumerGroupOffsetsSpec``.
         """
-        if topic_partitions is UNSET:
+        if topic_partitions is MISSING:
             return self._topic_partitions
         self._topic_partitions = None if topic_partitions is None else list(topic_partitions)
         return self

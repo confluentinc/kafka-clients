@@ -16,8 +16,12 @@
 
 *(deviation)* Java's interface, with its three ``deserialize`` overloads, is one
 callable shape whose headers are always passed (CLAUDE.md, Python Binding
-Conventions, Serialization). A deserializer is any callable of that shape; the
-protocol exists for the type checker. The consumer does not call a
+Conventions, Serialization). A deserializer is any callable of that shape: it
+is called with keyword arguments, ``deserializer(topic=..., data=...,
+headers=...)``, and must accept ``**kwargs``, so a parameter Java adds later
+reaches it as one more keyword; a client given one without ``**kwargs``
+raises ``IllegalArgumentError("<param> must accept **kwargs")``. The protocol
+exists for the type checker. The consumer does not call a
 deserializer for a null key or value: the record's field is ``None``, as in
 Java's ``CompletedFetch``. ``None`` data reaches a deserializer only when it is
 called directly, and then it decides what null maps to.
@@ -25,7 +29,7 @@ called directly, and then it decides what null maps to.
 
 from __future__ import annotations
 
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from confluent_kafka.common.headers import Headers
 
@@ -40,11 +44,13 @@ class Deserializer(Protocol[T_co]):
     Java: ``org.apache.kafka.common.serialization.Deserializer<T>``.
     """
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> T_co | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> T_co | None:
         """Deserialize a record value from a ``memoryview`` into a value or
         object: ``topic`` is the topic associated with the data, ``headers``
-        the headers associated with the record, and ``data`` the serialized
+        the headers associated with the record (its own ``Headers``, which
+        stay writable, as Java's ``CompletedFetch`` leaves them), and ``data``
+        the serialized
         bytes, a view into the fetch batch. Returns the deserialized typed
         data; may be ``None``."""
         ...

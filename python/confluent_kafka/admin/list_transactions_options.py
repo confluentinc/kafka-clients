@@ -18,8 +18,8 @@ Java builds it with setters, so the constructor also takes one keyword per sette
 field, named after the field (``filtered_states`` calls ``filter_states``, …) (CLAUDE.md,
 Python Binding Conventions, Signatures). Java's ``hashCode`` hashes the two set
 fields, so they are stored as ``frozenset``\\ s (hashable) and their getters return a new
-``set``. ``new HashSet<>(null)`` is an implicit dereference, not a check: a ``None``
-argument raises what ``frozenset(None)`` raises. Like Java, ``toString`` prints
+``set``. ``new HashSet<>(null)`` dereferences its argument: a ``None`` raises
+``TypeError`` naming it. Like Java, ``toString`` prints
 ``timeoutMs`` but ``equals`` / ``hashCode`` leave it out.
 """
 
@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
@@ -47,25 +47,25 @@ class ListTransactionsOptions(AbstractOptions):
     __slots__ = ("_filtered_states", "_filtered_producer_ids", "_filtered_duration",
                  "_filtered_transactional_id_pattern")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 filtered_states: Iterable[TransactionState] = UNSET,
-                 filtered_producer_ids: Iterable[int] = UNSET,
-                 filtered_duration: int = UNSET,
-                 filtered_transactional_id_pattern: str | None = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 filtered_states: Iterable[TransactionState] = MISSING,
+                 filtered_producer_ids: Iterable[int] = MISSING,
+                 filtered_duration: int = MISSING,
+                 filtered_transactional_id_pattern: str | None = MISSING) -> None:
         super().__init__()
         self._filtered_states: frozenset[TransactionState] = frozenset()
         self._filtered_producer_ids: frozenset[int] = frozenset()
         self._filtered_duration = -1
         self._filtered_transactional_id_pattern: str | None = None
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if filtered_states is not UNSET:
+        if filtered_states is not MISSING:
             self.filter_states(states=filtered_states)
-        if filtered_producer_ids is not UNSET:
+        if filtered_producer_ids is not MISSING:
             self.filter_producer_ids(producer_id_filters=filtered_producer_ids)
-        if filtered_duration is not UNSET:
+        if filtered_duration is not MISSING:
             self.filter_on_duration(duration_ms=filtered_duration)
-        if filtered_transactional_id_pattern is not UNSET:
+        if filtered_transactional_id_pattern is not MISSING:
             self.filter_on_transactional_id_pattern(pattern=filtered_transactional_id_pattern)
 
     def filter_states(self, *, states: Iterable[TransactionState]) -> ListTransactionsOptions:
@@ -76,6 +76,8 @@ class ListTransactionsOptions(AbstractOptions):
         :param states: the set of states to filter by
         :return: this object
         """
+        if states is None:  # new HashSet<>(states) on a null
+            raise TypeError("states must not be None")
         self._filtered_states = frozenset(states)
         self._record("filter_states", self._filtered_states)
         return self
@@ -88,6 +90,8 @@ class ListTransactionsOptions(AbstractOptions):
         :param producer_id_filters: the set of producerIds to filter by
         :return: this object
         """
+        if producer_id_filters is None:  # new HashSet<>(producerIdFilters) on a null
+            raise TypeError("producer_id_filters must not be None")
         self._filtered_producer_ids = frozenset(producer_id_filters)
         self._record("filter_producer_ids", self._filtered_producer_ids)
         return self
@@ -100,6 +104,8 @@ class ListTransactionsOptions(AbstractOptions):
         :param duration_ms: the duration in milliseconds to filter by
         :return: this object
         """
+        if duration_ms is None:  # a long: Java cannot pass null
+            raise TypeError("duration_ms must not be None")
         self._filtered_duration = duration_ms
         self._record("filter_on_duration", self._filtered_duration)
         return self

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["AlterPartitionReassignmentsOptions"]
@@ -41,16 +41,16 @@ class AlterPartitionReassignmentsOptions(AbstractOptions):
 
     __slots__ = ("_allow_replication_factor_change",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 allow_replication_factor_change: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 allow_replication_factor_change: bool = MISSING) -> None:
         super().__init__()
         self._allow_replication_factor_change = True
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if allow_replication_factor_change is not UNSET:
+        if allow_replication_factor_change is not MISSING:
             self.allow_replication_factor_change(allow=allow_replication_factor_change)
 
-    def allow_replication_factor_change(self, *, allow: bool | None = None) -> Any:
+    def allow_replication_factor_change(self, *, allow: bool = MISSING) -> Any:
         """With ``allow``: set the option indicating if the alter partition
         reassignments call should be allowed to alter the replication factor of a
         partition. In cases where it is not allowed, any replication factor change will
@@ -61,8 +61,10 @@ class AlterPartitionReassignmentsOptions(AbstractOptions):
         allowed, any replication factor change will result in an exception thrown by the
         API.
         """
-        if allow is None:
+        if allow is MISSING:
             return self._allow_replication_factor_change
+        if allow is None:  # a boolean: Java cannot pass null
+            raise TypeError("allow must not be None")
         self._allow_replication_factor_change = allow
         self._record("allow_replication_factor_change", self._allow_replication_factor_change)
         return self

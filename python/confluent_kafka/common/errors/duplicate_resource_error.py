@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka.common.errors.api_error import ApiError
 
 __all__ = ["DuplicateResourceError"]
@@ -44,11 +45,13 @@ class DuplicateResourceError(ApiError):
     def __init__(
         self,
         *,
-        resource: str | None = None,
-        message: str,
-        cause: BaseException | None = None,
+        resource: str | None = MISSING,
+        message: str | None,
+        cause: BaseException | None = MISSING,
     ) -> None:
-        _throwable.init(self, message, cause)
+        if resource is MISSING:
+            resource = None
+        _throwable.init(self, message, (None if cause is MISSING else cause))
         self._resource = resource
         self._java_kwargs = _throwable.kwargs(resource=resource, message=message, cause=cause)
 

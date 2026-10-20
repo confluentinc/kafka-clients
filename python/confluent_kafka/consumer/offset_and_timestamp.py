@@ -17,13 +17,15 @@
 Java's two constructors are one keyword-only constructor: ``(offset,
 timestamp)`` passes ``Optional.empty()`` as the leader epoch. Every combination
 is one of them, so there is no ``java_forms`` check; ``leader_epoch`` defaults
-to ``UNSET`` (CLAUDE.md, Python Binding Conventions, Signatures: one constructor
-requires it and the other defaults it), and the constructor fills it.
+to ``MISSING`` (CLAUDE.md, Python Binding Conventions, Signatures), and the
+constructor fills it; a ``None`` is ``Optional.empty()``.
 """
 
 from __future__ import annotations
 
-from confluent_kafka._args import UNSET
+from typing import overload
+
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -38,9 +40,13 @@ class OffsetAndTimestamp:
 
     __slots__ = ("_timestamp", "_offset", "_leader_epoch")
 
+    @overload
+    def __init__(self, *, offset: int, timestamp: int) -> None: ...
+    @overload
+    def __init__(self, *, offset: int, timestamp: int, leader_epoch: int | None) -> None: ...
     def __init__(self, *, offset: int, timestamp: int,
-                 leader_epoch: int | None = UNSET) -> None:
-        if leader_epoch is UNSET:
+                 leader_epoch: int | None = MISSING) -> None:
+        if leader_epoch is MISSING:
             leader_epoch = None  # (offset, timestamp) passes Optional.empty()
         if offset < 0:
             raise IllegalArgumentError(message="Invalid negative offset")
