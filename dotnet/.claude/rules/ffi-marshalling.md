@@ -448,11 +448,12 @@ awaits it (decision 9).
 2. **Flat transient** → read and freed in the call or callback that got it, never wrapped (a
    finalizable object per record is hot-path waste): the owned `KafkaFuture_t *` a send
    delivers, freed at once and never read (§A7; BH:3807-3811, BH:38166-38170;
-   `KafkaFuture_destroy_err`, BH:37992-38005); the per-send `ProducerRecord_t` and
-   `Callback_t`, freed right after the send call (`ProducerRecord_destroy_err`, BH:39731;
-   `Callback_destroy_err`, BH:38585; §A6); an owned error, freed once the error table has read
-   it (`Error_destroy_err`, BH:17957; §A5). `on_completion`'s `metadata` and `error` are
-   borrowed and never destroyed (§A6).
+   `KafkaFuture_destroy_err`, BH:37992-38005); the per-send `ProducerRecord_t`, freed right after
+   the send call (`ProducerRecord_destroy_err`, BH:39731); the per-send `Callback_t`, which the
+   send consumes on every path, its error and a closed producer included, so the binding never
+   destroys it (`rust/src/ffi/producer/callback.rs:185-202` at `3f8a5bc6`; §A6); an owned error,
+   freed once the error table has read it (`Error_destroy_err`, BH:17957; §A5).
+   `on_completion`'s `metadata` and `error` are borrowed and never destroyed (§A6).
 3. **Owned result (borrow-root)** → copy every value out into managed types, then free the root
    once, in a `finally`: `Metrics()`'s owned `kafka_Map_t` of owned `MetricName_t *` keys and
    `KafkaMetric_t *` values (BH:38342-38355), freed with `kafka_Map_destroy_err`, which frees
@@ -465,7 +466,8 @@ awaits it (decision 9).
 |---|---|---|---|
 | `KafkaProducer_t` / `MockProducer_t`, held as its `Producer` view | 1 | `KafkaProducer_new`; the `MockProducer_with_*_err` constructors (BH:38809-38840) | `ReleaseHandle` → `KafkaProducer_destroy_err` (BH:38787-38800) / `MockProducer_destroy_err` (BH:38855-38867), only after `CloseExplicitly` |
 | the config `kafka_Map_t`, `ProducerConfig_t` | 1, short-lived | the binding | the binding, after `KafkaProducer_new` |
-| `ProducerRecord_t`, `Callback_t` | 2 | the binding, per send | the binding, right after the send call |
+| `ProducerRecord_t` | 2 | the binding, per send | the binding, right after the send call |
+| `Callback_t` | 2 | the binding, per send, after the record is built | the send, which consumes it on every path |
 | `KafkaFuture_t` from a send | 2 | the blocking send's return; the handover `cb` | the binding, at once, unread |
 | an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
 | `kafka_Map_t` (metrics), `kafka_List_t` (partitions) | 3 | `Metrics`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
@@ -536,7 +538,8 @@ released on the drain thread, which could then run the destroy inside `__execute
     across a `_cb` completion, or released in a callback or a trampoline.
   - A `SafeHandle` around a per-send handle; reading the `KafkaFuture_t` a send delivers
     (`KafkaFuture_get` runs the queued callbacks on the caller, §A6); keeping a
-    `ProducerRecord_t` or `Callback_t` past the send call.
+    `ProducerRecord_t` past the send call; destroying a `Callback_t` once the send was reached
+    (the send consumed it: a double free).
   - Destroying `on_completion`'s `metadata` or `error`, or an element of an owned `kafka_List_t`
     / `kafka_Map_t` (a double free); leaking an owned root, or freeing it outside a `finally`.
   - Keeping the config `kafka_Map_t` or `ProducerConfig_t` past `KafkaProducer_new` (a leak).
@@ -782,11 +785,11 @@ end of this section).
     `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
     `opaque` the binding passed. No registration handle.
   - **The per-record `Callback_t`** (decision 10): `Callback_new_err(self_, on_completion)` for
-    every sent record, passed to `send_with_callback` / `send_with_callback_cb`. The core reads the
-    registration during the call. `on_completion(self_, metadata, error, callback_id)` fires once,
-    later, and the binding reports its end through `Producer__set_callback_result`. A plain
-    `Send(record)` passes one too: it is what completes the record's future; only the user
-    callback is absent.
+    every sent record, once its `ProducerRecord_t` is built, passed to `send_with_callback` /
+    `send_with_callback_cb`, which consume it. `on_completion(self_, metadata, error,
+    callback_id)` fires once, later, and the binding reports its end through
+    `Producer__set_callback_result`. A plain `Send(record)` passes one too: it is what completes
+    the record's future; only the user callback is absent.
 
 `RecordMetadata_copy` (the old form A) does not exist at `0035d9ff`, and the managed-only delivery
 callback of M14/P1 (the old form C) is replaced by `Callback_t`.
@@ -814,10 +817,17 @@ callback of M14/P1 (the old form C) is replaced by `Callback_t`.
 
 **Rule (`Callback_t`, the delivery callback):**
 
-  - **One `Callback_t` per record.** Destroy it (`Callback_destroy_err`) right after the send call
-    returns, success or error: the registration is read during the call (BH:38210-38211). Never
-    share one across records: `self_` is the only per-record identity, and `callback_id` appears
-    only when the callback fires.
+  - **One `Callback_t` per record, created after the record is built, and never destroyed by the
+    binding.** The send consumes it on every path, success, error or a closed producer
+    (`take_callback`, `rust/src/ffi/producer/callback.rs:185-194`, called first by
+    `delivery_callback`, `rust/src/ffi/producer/mod.rs:1800-1816`, both at `3f8a5bc6`). Build the
+    `ProducerRecord_t` first, then `Callback_new_err`, then send, as Python does
+    (`python/_confluentkafka.c:1680-1702`, `:1780-1830` at `3f8a5bc6`), so no path holds a
+    `Callback_t` that no send consumed. If the record cannot be built, no `Callback_t` exists and
+    the record's state was never registered: release it at once. If `Callback_new_err` fails, no
+    handle exists: release the state and destroy the record. Never share one across records:
+    `self_` is the only per-record identity, and `callback_id` appears only when the callback
+    fires.
   - **`self_` lifetime** (decision 10): a `GCHandle` over the record's state (the user callback,
     if any, and the record's `KafkaFutureImpl`). Keep it until `on_completion` fires, and free it
     there, after reporting. After a send error (`out_err` set, or a handover `cb` with an error)
@@ -868,7 +878,8 @@ foreign-thread rules are gone; the no-throw rule stays because the frame below i
     double free.
   - Freeing `self_` when the send call returned an error (the callback may still fire: a
     use-after-free), or never freeing it after destroy (a leak).
-  - Keeping the `Callback_t` past the send call, or one `Callback_t` for several records.
+  - Destroying a `Callback_t` after the send was reached (a double free: the send consumed it),
+    creating it before the record is built, or one `Callback_t` for several records.
   - Completing the future before the user callback runs (decision 36), or skipping the callback
     because no awaiter is left.
   - Reporting a throwing callback only to `Trace`, or only through `local_callback`
