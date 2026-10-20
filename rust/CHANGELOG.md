@@ -140,7 +140,8 @@ breaking changes.
   `request.timeout.ms`, `retries`, `default.api.timeout.ms`,
   `metrics.sample.window.ms` or `metadata.recovery.rebootstrap.trigger.ms`;
   `send.buffer.bytes` / `receive.buffer.bytes` below `-1`;
-  `metrics.num.samples` below `1`; and a `metrics.recording.level` or
+  `metrics.num.samples` below `1`; an empty element in `config.providers`,
+  which is now defined, as in Java; and a `metrics.recording.level` or
   `metadata.recovery.strategy` outside Java's values.
 - `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
