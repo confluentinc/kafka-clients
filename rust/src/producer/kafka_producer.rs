@@ -9461,4 +9461,36 @@ mod tests {
             producer.close_with_timeout(Duration::ZERO).await.expect("close");
         }
     }
+
+    /// A closed and dropped producer frees its buffer pool and metadata. The
+    /// accumulator's gauges capture the pool and the Sender's `metadata-age`
+    /// gauge the metadata; before the registry's "count" gauge and the
+    /// sensors' registry back-reference were weak, the registry kept both
+    /// alive (the pool with its cached free-list buffers) for the life of the
+    /// process. Java's garbage collector frees the same graph.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_closed_producer_is_freed() {
+        let config = ProducerConfig::new(&guard_props(&[])).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("the producer constructs");
+        let pool = Arc::downgrade(producer.accumulator.buffer_pool_for_test());
+        let metadata = Arc::downgrade(&producer.metadata);
+        let metrics = Arc::downgrade(&producer.metrics);
+        producer.close().await.expect("close");
+        drop(producer);
+
+        // Spawned tasks holding a clone end shortly after the close.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (pool.strong_count() > 0 || metadata.strong_count() > 0 || metrics.strong_count() > 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            (0, 0, 0),
+            (pool.strong_count(), metadata.strong_count(), metrics.strong_count()),
+            "BufferPool / ProducerMetadata / Metrics still referenced"
+        );
+    }
 }
