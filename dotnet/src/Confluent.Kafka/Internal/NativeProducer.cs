@@ -213,20 +213,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             AsyncDeliveryState state = new AsyncDeliveryState(
                 _reporter, callback, asyncCallback, record.Topic, record.Partition ?? -1, cancellationToken);
-            IntPtr registration = state.Register();
             KeepIfMock(state);
             IntPtr outErr = IntPtr.Zero;
-            bool sent;
-            try
-            {
-                sent = state.Send(_handle, in record, registration, ref outErr);
-            }
-            finally
-            {
-                DeliveryState.DestroyCallback(registration);
-            }
-
-            if (!sent)
+            if (!state.Send(_handle, in record, ref outErr))
             {
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 throw new InvalidOperationException(RecordNotBuilt);
@@ -246,23 +235,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         try
         {
             DeliveryState state = new DeliveryState(_reporter, callback, record.Topic, record.Partition ?? -1);
-            IntPtr registration = state.Register();
             KeepIfMock(state);
             IntPtr outErr = IntPtr.Zero;
             IntPtr future;
             bool sent;
             try
             {
-                future = ProducerSendMarshal.Send(_handle, in record, registration, ref outErr, out sent);
+                future = ProducerSendMarshal.Send(_handle, in record, state, ref outErr, out sent);
             }
             catch
             {
                 state.Release();
                 throw;
-            }
-            finally
-            {
-                DeliveryState.DestroyCallback(registration);
             }
 
             DeliveryState.DestroyFuture(future);

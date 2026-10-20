@@ -18,8 +18,9 @@ using System.Text;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Builds a send's <c>kafka_producer_ProducerRecord_t</c> over the record's own bytes and hands it to the producer:
-/// the blocking send borrows them for the call, the async send until its hand-over.
+/// Builds a send's <c>kafka_producer_ProducerRecord_t</c> over the record's own bytes, then its
+/// <c>kafka_producer_Callback_t</c>, which the send consumes, and hands both to the producer: the blocking send borrows
+/// the bytes for the call, the async send until its hand-over.
 /// </summary>
 internal static unsafe class ProducerSendMarshal
 {
@@ -28,7 +29,7 @@ internal static unsafe class ProducerSendMarshal
     internal static IntPtr Send(
         SafeProducerHandle producer,
         in SerializedProducerRecord record,
-        IntPtr callback,
+        DeliveryState state,
         ref IntPtr outErr,
         out bool sent)
     {
@@ -51,9 +52,10 @@ internal static unsafe class ProducerSendMarshal
                 return IntPtr.Zero;
             }
 
-            sent = true;
             try
             {
+                IntPtr callback = state.Register();
+                sent = true;
                 return NativeMethods.ProducerSendWithCallback(producer, nativeRecord, callback, ref outErr);
             }
             finally
@@ -67,7 +69,7 @@ internal static unsafe class ProducerSendMarshal
         SafeProducerHandle producer,
         in SerializedProducerRecord record,
         ref SendPins pins,
-        IntPtr callback,
+        DeliveryState state,
         NativeMethods.ProducerSendCallback handOver,
         IntPtr opaque,
         ref IntPtr outErr)
@@ -81,6 +83,7 @@ internal static unsafe class ProducerSendMarshal
 
         try
         {
+            IntPtr callback = state.Register();
             NativeMethods.ProducerSendWithCallbackCb(producer, nativeRecord, callback, handOver, opaque);
         }
         finally

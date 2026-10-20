@@ -53,14 +53,14 @@ internal sealed class AsyncDeliveryState : DeliveryState
         _cancellationToken = cancellationToken;
     }
 
-    internal bool Send(SafeProducerHandle producer, in SerializedProducerRecord record, IntPtr callback, ref IntPtr outErr)
+    internal bool Send(SafeProducerHandle producer, in SerializedProducerRecord record, ref IntPtr outErr)
     {
         _handOver = GCHandle.Alloc(this);
         bool sent;
         try
         {
             sent = ProducerSendMarshal.SendWithHandOver(
-                producer, in record, ref _pins, callback, s_handOver, GCHandle.ToIntPtr(_handOver), ref outErr);
+                producer, in record, ref _pins, this, s_handOver, GCHandle.ToIntPtr(_handOver), ref outErr);
         }
         catch
         {

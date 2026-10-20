@@ -74,13 +74,6 @@ internal class DeliveryState
 
     internal KafkaFutureImpl<RecordMetadata> Future { get; }
 
-    internal static void DestroyCallback(IntPtr callback)
-    {
-        IntPtr outErr = IntPtr.Zero;
-        NativeMethods.CallbackDestroy(callback, ref outErr);
-        FreeError(outErr);
-    }
-
     internal static void DestroyFuture(IntPtr future)
     {
         if (future == IntPtr.Zero)
@@ -133,7 +126,10 @@ internal class DeliveryState
                 _reporter.Forget(this);
             }
 
-            _self.Free();
+            if (_self.IsAllocated)
+            {
+                _self.Free();
+            }
         }
     }
 

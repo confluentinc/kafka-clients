@@ -2135,9 +2135,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_Callback_new_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr CallbackNew(IntPtr self, CallbackOnCompletion onCompletion, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_producer_Callback_destroy_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void CallbackDestroy(IntPtr self, ref IntPtr outErr);
-
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer__set_callback_result_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerSetCallbackResult(
         SafeProducerHandle self, long callbackId, IntPtr result, IntPtr error, ref IntPtr outErr);
