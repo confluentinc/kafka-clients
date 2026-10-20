@@ -147,7 +147,7 @@ breaking changes.
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
   `unused`, `ignore`, `log_unused`, and the static
-  `config_names`. It is `Clone`, and its `PartialEq` / `Hash` compare the
+  `config_names`. Its `PartialEq` / `Hash` compare the
   properties it was built from, as Java's `equals` / `hashCode` do.
 - The admin client logs its configuration values at INFO when it is built, as
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
