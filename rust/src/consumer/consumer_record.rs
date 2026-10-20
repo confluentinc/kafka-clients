@@ -37,19 +37,7 @@ use crate::common::record::TimestampType;
 /// Mirrors Java's behavior: this struct is not designed for concurrent
 /// mutation; `Headers` are mutable. Concurrent reads are safe by Rust's
 /// borrow rules.
-///
-/// # Equality
-///
-/// `PartialEq` / `Eq` are derived (gated on `K: PartialEq, V: PartialEq` /
-/// `K: Eq, V: Eq`) so that tests can compare two record batches for
-/// structural equality. This mirrors Java's behavior where
-/// `ConsumerRecord` equality is value-based; the Java class itself does
-/// not override `equals`, but its fields are all value types, so two
-/// records with identical fields compare equal via `Objects.equals`.
-/// The cost is paid only by callers that opt in to `PartialEq` types
-/// (e.g. tests using `i32` keys); users with non-`PartialEq` `K`/`V`
-/// continue to work because the bounds are gated by the derive.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct ConsumerRecord<K, V> {
     topic: Arc<str>,

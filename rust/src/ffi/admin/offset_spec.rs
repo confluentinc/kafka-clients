@@ -203,6 +203,7 @@ mod tests {
     use std::ptr;
 
     use super::*;
+    use crate::admin::offset_spec::spec_key;
 
     #[test]
     fn singletons_match_their_enumerator_and_survive_destroy() {
@@ -214,10 +215,10 @@ mod tests {
             // for `offset_spec_value_of` and `kafka_admin_OffsetSpec__enum` both before and after
             // `kafka_admin_OffsetSpec_destroy`, a no-op on a singleton.
             unsafe {
-                assert_eq!(offset_spec_value_of(handle), spec);
+                assert_eq!(spec_key(&offset_spec_value_of(handle)), spec_key(&spec));
                 assert_eq!(kafka_admin_OffsetSpec__enum(handle) as usize, index);
                 kafka_admin_OffsetSpec_destroy(handle);
-                assert_eq!(offset_spec_value_of(handle), spec);
+                assert_eq!(spec_key(&offset_spec_value_of(handle)), spec_key(&spec));
             }
         }
         assert_eq!(kafka_admin_OffsetSpec_earliest(), box_offset_spec(OffsetSpec::Earliest));
@@ -250,8 +251,11 @@ mod tests {
         // returned, used only on this thread and each destroyed once, last; destroying null is a
         // no-op.
         unsafe {
-            assert_eq!(offset_spec_value_of(handle), OffsetSpec::for_timestamp(42));
-            assert_eq!(offset_spec_value_of(other), offset_spec_value_of(handle));
+            assert_eq!(
+                spec_key(&offset_spec_value_of(handle)),
+                spec_key(&OffsetSpec::for_timestamp(42))
+            );
+            assert_eq!(spec_key(&offset_spec_value_of(other)), spec_key(&offset_spec_value_of(handle)));
             assert_eq!(
                 kafka_admin_OffsetSpec__enum(handle),
                 kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_TIMESTAMP

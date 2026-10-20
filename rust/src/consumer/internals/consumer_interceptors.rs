@@ -442,6 +442,25 @@ mod tests {
         }
     }
 
+    /// A record's `(offset, key, value)`.
+    type RecordFields = (i64, Option<i32>, Option<i32>);
+
+    /// Each partition's records as `(offset, key, value)`, in partition
+    /// order: what `ConsumerRecords` holds, read through its getters.
+    fn records_snapshot(records: &ConsumerRecords<i32, i32>) -> Vec<(TopicPartition, Vec<RecordFields>)> {
+        records
+            .partitions()
+            .map(|partition| {
+                let rows = records
+                    .records_with_partition(partition)
+                    .iter()
+                    .map(|record| (record.offset(), record.key().copied(), record.value().copied()))
+                    .collect();
+                (partition.clone(), rows)
+            })
+            .collect()
+    }
+
     /// Build the 3-partition input `ConsumerRecords` used by
     /// `test_on_consume_chain`. Helper rather than a single shared value
     /// because [`ConsumerRecords`] is no longer `Clone` (Phase 2 fixup) —
@@ -535,12 +554,13 @@ mod tests {
         let mut none_intercepted = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
         let baseline = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
         interceptors.on_consume(&mut none_intercepted);
-        // Matches Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
-        // (ConsumerInterceptorsTest.java:162-166): full structural equality
-        // over the entire batch — per-partition record lists AND the
-        // `next_offsets` map — guards against any future regression that
-        // would mutate downstream state on the all-panic path.
-        assert_eq!(none_intercepted, baseline);
+        // Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
+        // (ConsumerInterceptorsTest.java:162) holds because `onConsume` hands
+        // back its own argument: `ConsumerRecords` does not override
+        // `equals`. Rust's `on_consume` works in place, so the translation
+        // checks that the batch kept every record and its `next_offsets`.
+        assert_eq!(records_snapshot(&none_intercepted), records_snapshot(&baseline));
+        assert_eq!(none_intercepted.next_offsets(), baseline.next_offsets());
         assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 6);
         validate_next_offsets(
             none_intercepted.next_offsets(),

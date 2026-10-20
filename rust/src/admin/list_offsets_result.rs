@@ -65,7 +65,7 @@ impl ListOffsetsResult {
 /// Per-partition offset information returned by `Admin::list_offsets`.
 ///
 /// Corresponds to `ListOffsetsResult.ListOffsetsResultInfo`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo")]
 pub struct ListOffsetsResultInfo {
     offset: i64,

@@ -73,7 +73,7 @@ impl SaslConfigs {
 /// `sasl.*` properties of a client config, as a Java caller does.
 ///
 /// Currently supports PLAIN mechanism only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SaslConfigs")]
 pub struct SaslConfigs {

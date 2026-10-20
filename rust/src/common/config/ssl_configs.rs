@@ -136,7 +136,7 @@ impl SslConfigs {
 ///
 /// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
 /// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
 pub struct SslConfigs {
@@ -147,6 +147,13 @@ pub struct SslConfigs {
     /// Password for the trust store file.
     /// Corresponds to `ssl.truststore.password`, which Java defines as
     /// `Type.PASSWORD` (`SslConfigs.java:140`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "parsed as Java parses it, but only PEM stores, whose keys are not encrypted, are loaded (`SslFactory::new`)"
+        )
+    )]
     pub(crate) truststore_password: Option<Password>,
 
     /// Trusted certificates in PEM format (alternative to `truststore_location`).
@@ -166,6 +173,13 @@ pub struct SslConfigs {
     /// Password for the key store file.
     /// Corresponds to `ssl.keystore.password`, which Java defines as
     /// `Type.PASSWORD` (`SslConfigs.java:133`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "parsed as Java parses it, but only PEM stores, whose keys are not encrypted, are loaded (`SslFactory::new`)"
+        )
+    )]
     pub(crate) keystore_password: Option<Password>,
 
     /// Private key in PEM format (alternative to `keystore_location`).
@@ -186,6 +200,13 @@ pub struct SslConfigs {
     /// Password for the private key.
     /// Corresponds to `ssl.key.password`, which Java defines as
     /// `Type.PASSWORD` (`SslConfigs.java:134`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "parsed as Java parses it, but only PEM stores, whose keys are not encrypted, are loaded (`SslFactory::new`)"
+        )
+    )]
     pub(crate) key_password: Option<Password>,
 
     /// Endpoint identification algorithm for hostname verification.

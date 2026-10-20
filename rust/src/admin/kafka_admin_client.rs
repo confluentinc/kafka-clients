@@ -11064,7 +11064,11 @@ mod tests {
         let result = mock
             .describe_replica_log_dirs_with_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let info = result.values()[&tpr].get().await.unwrap();
-        assert_eq!(info, ReplicaLogDirInfo::default());
+        let empty = ReplicaLogDirInfo::default();
+        assert_eq!(info.current_replica_log_dir(), empty.current_replica_log_dir());
+        assert_eq!(info.current_replica_offset_lag(), empty.current_replica_offset_lag());
+        assert_eq!(info.future_replica_log_dir(), empty.future_replica_log_dir());
+        assert_eq!(info.future_replica_offset_lag(), empty.future_replica_offset_lag());
     }
 
     // --- electLeaders / (alter|list)PartitionReassignments / listOffsets -------

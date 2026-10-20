@@ -58,6 +58,11 @@ breaking changes.
 
 ### Consumer
 
+- **Breaking:** `ConsumerRecord`, `ConsumerRecords`, `CloseOptions` and
+  `ConsumerPartitionAssignor`'s `Subscription` and `Assignment` no longer
+  implement `PartialEq` and `Eq`: Java's classes do not override `equals`, so
+  a field added to them later cannot break a promise of equality. Compare the
+  getters instead.
 - **Breaking:** `KafkaConsumer::new` takes its deserializers as
   `impl Deserializer<K>` / `impl Deserializer<V>` and boxes them itself: pass
   `StringDeserializer::new()` where `Box::new(StringDeserializer::new())` was
@@ -137,6 +142,12 @@ breaking changes.
 
 ### Admin client
 
+- **Breaking:** the admin `*Options` types, `DeletedRecords`,
+  `ListOffsetsResultInfo`, `NewPartitionReassignment`, `NewPartitions`,
+  `OffsetSpec` and its `TimestampSpec`, `PartitionProducerState`,
+  `PartitionReassignment`, `ReplicaInfo`, `ReplicaLogDirInfo` and
+  `TopicListing` no longer implement `PartialEq` and `Eq`: Java's classes do
+  not override `equals`. Compare the getters instead.
 - **Breaking:** `AdminClientConfig::new` parses and validates every key with
   Java's `ConfigDef` (`AdminClientConfig.java`), so values Java rejects now
   fail with Java's `ConfigError` message, `Invalid value <v> for configuration
@@ -188,6 +199,11 @@ breaking changes.
 
 ### Common
 
+- **Breaking:** `TopicCollection` and its `TopicIdCollection` and
+  `TopicNameCollection`, `ClientQuotaAlteration`, `SslConfigs` and
+  `SaslConfigs` no longer implement `PartialEq` (and `Eq`): Java's classes do
+  not override `equals`. `ClientQuotaAlteration`'s `Op` keeps its equality,
+  as Java's `Op.equals`. Compare the getters instead.
 - **Breaking:** `ProducerConfig`, `ConsumerConfig` and `AdminClientConfig` no
   longer implement `Default`. Build them with `::new(&configs)` from a
   `HashMap<String, String>` (an empty map gives the defaults).

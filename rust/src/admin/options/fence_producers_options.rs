@@ -22,7 +22,7 @@
 /// Java this class only extends `AbstractOptions` (a `timeout_ms` field) with
 /// no additional fields; the timeout doubles as the transaction timeout the
 /// coordinator uses to append the new producer epoch to the transaction log.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersOptions")]
 pub struct FenceProducersOptions {
     timeout_ms: Option<i32>,

@@ -98,7 +98,7 @@ impl std::fmt::Display for Op {
 /// Describes a configuration alteration to be made to a client quota entity.
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaAlteration`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration")]
 pub struct ClientQuotaAlteration {
     entity: ClientQuotaEntity,

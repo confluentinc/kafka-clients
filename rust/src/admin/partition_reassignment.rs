@@ -21,7 +21,7 @@
 /// `Admin::list_partition_reassignments`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.PartitionReassignment`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment")]
 pub struct PartitionReassignment {
     replicas: Vec<i32>,

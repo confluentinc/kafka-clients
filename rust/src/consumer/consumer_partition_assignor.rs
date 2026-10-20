@@ -171,7 +171,7 @@ impl SubscriptionOptionsBuilder {
 /// data, and owned partitions.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Subscription`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription")]
 pub struct Subscription {
     topics: Vec<String>,
@@ -305,7 +305,7 @@ impl Subscription {
 /// Represents the partition assignment for a consumer.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Assignment`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment")]
 pub struct Assignment {
     partitions: Vec<TopicPartition>,

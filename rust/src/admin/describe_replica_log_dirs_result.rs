@@ -59,7 +59,7 @@ impl DescribeReplicaLogDirsResult {
 /// Log directory information for a replica of a partition on a given broker.
 ///
 /// Corresponds to `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo")]
 pub struct ReplicaLogDirInfo {
     current_replica_log_dir: Option<String>,

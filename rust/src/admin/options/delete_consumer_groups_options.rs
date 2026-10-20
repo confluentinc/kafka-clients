@@ -20,7 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsOptions`.
 /// Java's class adds no fields beyond `AbstractOptions` (only `timeoutMs`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsOptions")]
 pub struct DeleteConsumerGroupsOptions {
     timeout_ms: Option<i32>,

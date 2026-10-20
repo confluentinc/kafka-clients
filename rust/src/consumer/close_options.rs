@@ -58,7 +58,7 @@ impl std::fmt::Display for GroupMembershipOperation {
 /// operation when a consumer is being shut down.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.CloseOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions")]
 pub struct CloseOptions {
     operation: GroupMembershipOperation,
