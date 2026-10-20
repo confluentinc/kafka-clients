@@ -19,7 +19,7 @@
 /// Type of a [`ConfigResource`].
 ///
 /// Corresponds to `ConfigResource.Type`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type")]
 pub enum Type {

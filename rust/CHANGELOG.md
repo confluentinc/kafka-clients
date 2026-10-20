@@ -125,6 +125,9 @@ breaking changes.
 - `MockConsumer` is `Send` but not `Sync` by declaration, as `KafkaConsumer`
   is, rather than through one of its fields: a future field cannot make it
   `Sync` by accident.
+- `GroupProtocol` and `CloseOptions`' `GroupMembershipOperation` implement
+  `PartialOrd` and `Ord`, ordering their values as Java's `Enum.compareTo`,
+  by declaration.
 
 ### Admin client
 
@@ -163,6 +166,9 @@ breaking changes.
   equality), `TransactionDescription` and `UserScramCredentialsDescription`.
   A set or map field hashes independently of its order, as Java's
   `Set.hashCode()` and `Map.hashCode()` do.
+- The admin enums `OpType`, `ConfigSource`, `ConfigType`, `UpgradeType`,
+  `ScramMechanism` and `TransactionState` implement `PartialOrd` and `Ord`,
+  ordering their values as Java's `Enum.compareTo`, by declaration.
 
 ### Common
 
@@ -240,6 +246,11 @@ breaking changes.
   primitive `==`, under which `NaN` differs from itself, which an `Eq` cannot
   express. A `NaN` quota now equals itself, and an upper bound of `0.0` no
   longer equals one of `-0.0`; every other bound compares as before.
+- Every enum translating a Java enum implements `PartialOrd` and `Ord`,
+  ordering its values as Java's `Enum.compareTo`, by declaration. New here:
+  `ClassicGroupState`, `ConfigResource`'s `Type`, `SslClientAuth`,
+  `ElectionType`, `DeserializationErrorOrigin`, `GroupState`, `GroupType`,
+  `IsolationLevel`, `RecordingLevel`, `TimestampType` and `SecurityProtocol`.
 
 ### C API
 

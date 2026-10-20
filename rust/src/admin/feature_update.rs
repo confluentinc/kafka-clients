@@ -22,7 +22,7 @@ use crate::common::Error;
 /// [`FeatureUpdate`].
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType")]
 pub enum UpgradeType {

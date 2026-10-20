@@ -31,7 +31,7 @@ use crate::common::{Error, MetricName};
 ///
 /// Mirrors `Sensor.RecordingLevel`. The numeric ids are part of the protocol and
 /// must not change: INFO=0, DEBUG=1, TRACE=2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel")]
 pub enum RecordingLevel {

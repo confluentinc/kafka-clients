@@ -21,7 +21,7 @@ use std::time::Duration;
 /// Enum to specify the group membership operation upon leaving a group.
 ///
 /// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation")]
 pub enum GroupMembershipOperation {

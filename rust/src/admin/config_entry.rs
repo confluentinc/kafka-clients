@@ -21,7 +21,7 @@ use crate::common::Error;
 /// Data type of configuration entry.
 ///
 /// Corresponds to `ConfigEntry.ConfigType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigType")]
 pub enum ConfigType {
@@ -102,7 +102,7 @@ impl std::fmt::Display for ConfigType {
 /// Source of configuration entries.
 ///
 /// Corresponds to `ConfigEntry.ConfigSource`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSource")]
 pub enum ConfigSource {

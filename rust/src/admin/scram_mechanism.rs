@@ -25,7 +25,7 @@
 /// in both files must match and must not change. The type field is used both for
 /// passing `ScramCredentialUpsertion` and for the internal
 /// `UserScramCredentialRecord`. Do not change the type field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism")]
 pub enum ScramMechanism {

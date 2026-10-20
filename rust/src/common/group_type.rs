@@ -21,7 +21,7 @@ use std::fmt;
 /// The type of a group.
 ///
 /// Corresponds to `org.apache.kafka.common.GroupType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupType")]
 pub enum GroupType {

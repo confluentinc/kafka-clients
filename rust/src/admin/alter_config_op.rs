@@ -21,7 +21,7 @@ use super::ConfigEntry;
 /// The operation type of an [`AlterConfigOp`].
 ///
 /// Corresponds to `AlterConfigOp.OpType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
 pub enum OpType {

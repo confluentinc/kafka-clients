@@ -21,7 +21,7 @@ use crate::common::Error;
 /// Options for `Admin::elect_leaders`.
 ///
 /// Translated from `org.apache.kafka.common.ElectionType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ElectionType")]
 pub enum ElectionType {

@@ -25,7 +25,7 @@ use std::str::FromStr;
 /// compatibility with Java's `SslClientAuth`.
 ///
 /// Translated from `org.apache.kafka.common.config.SslClientAuth`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslClientAuth")]
 pub enum SslClientAuth {
