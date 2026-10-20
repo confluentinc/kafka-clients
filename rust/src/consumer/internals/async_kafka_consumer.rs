@@ -322,7 +322,7 @@ enum ConsumerHandleInner {
     /// ones without offsets commit the mock's consumed positions
     /// (`commitSync(subscriptions.allConsumed())`).
     /// The mock has no bg task / event pipeline, so the other async ops are
-    /// not wired (they return an `unsupported_version` error — the mock test
+    /// not wired (they return a `local_unsupported_operation` error — the mock test
     /// surface drives the concrete `MockConsumer` directly). `closed`,
     /// `should_rebalance` and `last_poll_timeout` are the mock's own, read by
     /// the C binding while an operation borrows the mock.
@@ -820,7 +820,7 @@ impl ConsumerHandle {
                 state.ensure_in_callback()?;
                 Ok(state)
             },
-            ConsumerHandleInner::Mock { .. } => Err(Error::unsupported_version(
+            ConsumerHandleInner::Mock { .. } => Err(Error::local_unsupported_operation(
                 "ConsumerHandle async operations are not supported on a MockConsumer handle; \
                  drive the MockConsumer directly.",
             )),

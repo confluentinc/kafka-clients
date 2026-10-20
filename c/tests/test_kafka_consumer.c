@@ -122,7 +122,7 @@ static void test_kafka_consumer_new_with_string_deserializers(void) {
 }
 
 // The classic group protocol is not supported by this client (see
-// consumer-threading.md §20): the constructor fails with UnsupportedVersion.
+// consumer-threading.md §20): the constructor fails with LocalUnsupportedOperation.
 static void test_kafka_consumer_classic_protocol_rejected(void) {
     kafka_consumer_ConsumerConfig_t *config = create_config("classic");
     kafka_common_Error_t *err = NULL;
@@ -130,8 +130,11 @@ static void test_kafka_consumer_classic_protocol_rejected(void) {
     kafka_consumer_ConsumerConfig_destroy(config);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(kc); /* the failure value */
-    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "Classic group protocol"));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_unsupported_operation_error(err));
+    TEST_ASSERT_EQUAL_INT(kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION, kafka_common_Error__enum(err));
+    TEST_ASSERT_EQUAL_STRING("Classic group protocol is not yet supported in this client; "
+                             "set group.protocol=consumer (KIP-848).",
+                             kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
     err = NULL;
 

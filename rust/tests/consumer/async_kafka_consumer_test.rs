@@ -122,7 +122,7 @@ async fn new_consumer_builds_and_closes_against_refused_broker() {
 }
 
 /// Smoke: `GroupProtocol::Classic` continues to return
-/// `Error::unsupported_version` after the Phase-12 factory swap.
+/// `Error::local_unsupported_operation` after the Phase-12 factory swap.
 /// Regression guard for the classic-protocol gate at
 /// `src/consumer/mod.rs`.
 #[tokio::test(flavor = "multi_thread")]
@@ -138,9 +138,12 @@ async fn new_consumer_rejects_classic_group_protocol() {
 
     let err = result.err().expect("classic protocol must be rejected");
     assert!(
-        matches!(err, Error::UnsupportedVersion(_)),
-        "expected UnsupportedVersion, got: {:?}",
-        err
+        err.is_local_unsupported_operation_error(),
+        "expected LocalUnsupportedOperation, got: {err:?}"
+    );
+    assert_eq!(
+        err.message(),
+        "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848)."
     );
 }
 

@@ -383,7 +383,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         Raises ``IllegalArgumentError`` if ``group_metadata`` is ``None`` or has
         a generation id above 0 with an unknown member id,
-        ``UnsupportedVersionError`` if ``group_metadata`` comes from a mock
+        ``UnsupportedOperationError`` if ``group_metadata`` comes from a mock
         consumer, ``IllegalStateError`` if no ``transactional.id`` has been
         configured or no transaction has been started, ``ProducerFencedError``,
         ``CommitFailedError`` if the commit failed and cannot be retried, and

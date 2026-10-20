@@ -156,11 +156,12 @@ import pytest
 
 from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
+    UnsupportedOperationError,
 )
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
-from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
+from confluent_kafka.common.errors import InvalidGroupIdError, WakeupError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
 from confluent_kafka.consumer import (
@@ -599,7 +600,7 @@ def test_should_ignore_group_instance_id_for_empty_group_id() -> None:
 
 
 def test_classic_protocol_is_not_supported() -> None:
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         KafkaConsumer(configs={"bootstrap.servers": "localhost:1", "group.id": GROUP_ID})
     assert str(e.value) == ("Classic group protocol is not yet supported in this client; set "
                             "group.protocol=consumer (KIP-848).")

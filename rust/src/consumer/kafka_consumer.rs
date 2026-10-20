@@ -117,8 +117,10 @@ where
     /// end-to-end with `SubscriptionState`, `ConsumerMetadata`,
     /// `NetworkClient`, every `RequestManager`, and a single bg task
     /// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
-    /// [`Error::unsupported_version`] per `consumer-threading.md` §20
-    /// (classic protocol deferred to a later milestone).
+    /// [`Error::local_unsupported_operation`] per `consumer-threading.md` §20
+    /// (classic protocol deferred to a later milestone), the class Java's
+    /// `ClassicKafkaConsumer` throws for a protocol feature it does not support
+    /// (`ClassicKafkaConsumer.java:544,550`).
     ///
     /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
     /// them as explicit `Box<dyn DynDeserializer>` parameters (Phase 1
@@ -148,7 +150,7 @@ where
         // `AsyncKafkaConsumer::with_components` so the Phase-11 test seam is
         // preserved.
         //
-        // `GroupProtocol::Classic` remains an `unsupported_version` error
+        // `GroupProtocol::Classic` remains a `local_unsupported_operation` error
         // per `consumer-threading.md` §20 (classic protocol deferred to a
         // later milestone).
         let protocol = GroupProtocol::of(config.group_protocol())?;
@@ -157,7 +159,7 @@ where
                 delegate: AsyncKafkaConsumer::<K, V>::new(config, key_deserializer, value_deserializer)?,
                 not_sync: PhantomData,
             }),
-            GroupProtocol::Classic => Err(Error::unsupported_version(
+            GroupProtocol::Classic => Err(Error::local_unsupported_operation(
                 "Classic group protocol is not yet supported in this client; \
                  set group.protocol=consumer (KIP-848).",
             )),

@@ -49,7 +49,12 @@ from typing import Any, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
-from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
+from confluent_kafka import (
+    ExecutionError,
+    IllegalArgumentError,
+    IllegalStateError,
+    UnsupportedOperationError,
+)
 from confluent_kafka._args import UNSET
 from confluent_kafka.common import (
     AsyncKafkaFuture,
@@ -61,7 +66,6 @@ from confluent_kafka.common import (
 )
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
-from confluent_kafka.common.errors import UnsupportedVersionError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
 from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import (
@@ -2628,14 +2632,14 @@ def test_send_offsets_to_transaction_needs_a_kafka_consumers_group_metadata() ->
     # The core takes the KafkaConsumer's own metadata handle, which a mock
     # consumer's metadata lacks; Java takes any ConsumerGroupMetadata.
     with KafkaProducer(configs=UNREACHABLE) as p:
-        with pytest.raises(UnsupportedVersionError) as err:
+        with pytest.raises(UnsupportedOperationError) as err:
             p.send_offsets_to_transaction(offsets={}, group_metadata=_group_metadata())
         assert str(err.value) == NO_GROUP_METADATA_HANDLE_MESSAGE
 
 
 async def test_async_send_offsets_to_transaction_needs_a_kafka_consumers_group_metadata() -> None:  # noqa: E501
     async with AsyncKafkaProducer(configs=UNREACHABLE) as p:
-        with pytest.raises(UnsupportedVersionError) as err:
+        with pytest.raises(UnsupportedOperationError) as err:
             await p.send_offsets_to_transaction(offsets={}, group_metadata=_group_metadata())
         assert str(err.value) == NO_GROUP_METADATA_HANDLE_MESSAGE
 

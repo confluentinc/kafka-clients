@@ -754,7 +754,7 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
 
 static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_unsupported_operation_error(err));
     TEST_ASSERT_EQUAL_STRING("ConsumerHandle async operations are not supported on a MockConsumer handle; "
                              "drive the MockConsumer directly.",
                              kafka_common_Error_message(err));
@@ -762,7 +762,7 @@ static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
 }
 
 // Every async handle operation but the commits fails on a mock handle with
-// UnsupportedVersion and returns its failure value.
+// LocalUnsupportedOperation and returns its failure value.
 static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;

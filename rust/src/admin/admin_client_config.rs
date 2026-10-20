@@ -128,8 +128,9 @@ impl AdminClientConfig {
     /// an error if a value fails to parse or validate. Following Java's
     /// `KafkaAdminClient.determineBootstrapType`, setting both `bootstrap.servers`
     /// and `bootstrap.controllers` is an [`Error::Config`]. Setting only
-    /// `bootstrap.controllers` returns an `UNSUPPORTED_VERSION` error
-    /// ([`Error::unsupported_version`]): Java
+    /// `bootstrap.controllers` returns a
+    /// [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
+    /// ([`Error::local_unsupported_operation`]): Java
     /// accepts it (KIP-919), but this client does not implement bootstrapping
     /// through controllers, and silently ignoring the key would leave the
     /// client with no bootstrap address at all.
@@ -214,7 +215,7 @@ impl AdminClientConfig {
             // Java bootstraps through the controllers here
             // (`usingBootstrapControllers = true`); that path is not
             // implemented, so fail explicitly rather than drop the key.
-            return Err(Error::unsupported_version(format!(
+            return Err(Error::local_unsupported_operation(format!(
                 "{} is not supported by this client; set {} instead",
                 Self::BOOTSTRAP_CONTROLLERS_CONFIG,
                 Self::BOOTSTRAP_SERVERS_CONFIG
@@ -475,7 +476,7 @@ mod tests {
     fn bootstrap_controllers() {
         let props = HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]);
         let error = AdminClientConfig::new(&props).unwrap_err();
-        assert_eq!(error.error(), crate::common::protocol::Errors::UnsupportedVersion, "{error:?}");
+        assert!(error.is_local_unsupported_operation_error(), "{error:?}");
         assert_eq!(
             error.message(),
             "bootstrap.controllers is not supported by this client; set bootstrap.servers instead"

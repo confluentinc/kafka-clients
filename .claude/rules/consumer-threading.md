@@ -184,7 +184,7 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
                         config, key_deserializer, value_deserializer)?,
                     not_sync: PhantomData,
                 }),
-                GroupProtocol::Classic => Err(Error::unsupported_version(
+                GroupProtocol::Classic => Err(Error::local_unsupported_operation(
                     "Classic group protocol is not yet supported in this client; \
                      set group.protocol=consumer (KIP-848).",
                 )),
@@ -546,6 +546,12 @@ Match Java behavior. Specifically:
   - `enforce_rebalance_with_reason(reason)`: match Java's `AsyncKafkaConsumer`
     behavior (Java javadoc says it is classic-only; the AsyncKafkaConsumer
     implementation is the source of truth for the exact exception type).
+  - `group.protocol=classic`: `KafkaConsumer::new` returns a
+    `LocalUnsupportedOperationError` (`Error::local_unsupported_operation`),
+    Java's `UnsupportedOperationException`, the class `ClassicKafkaConsumer`
+    throws for a protocol feature it does not support
+    (`ClassicKafkaConsumer.java:544,550`). Not an `UnsupportedVersionError`:
+    that is the broker-version API error.
 
 **Future compatibility:**
 

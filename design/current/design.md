@@ -466,7 +466,7 @@ A compile-time guard on this shape lives at
 `tests/consumer/trait_surface_check.rs`.
 
 Only the KIP-848 group protocol is translated. The factory rejects
-`group.protocol=classic` with an `unsupported_version` error rather than
+`group.protocol=classic` with a `local_unsupported_operation` error rather than
 silently degrading. The client-side assignors (`RangeAssignor`,
 `StickyAssignor`, …) have no Rust counterpart because KIP-848 assigns
 server-side (`consumer-threading.md` §20). Two pieces of the classic protocol
