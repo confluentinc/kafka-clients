@@ -23,8 +23,8 @@ MACOS_P99_LIMIT_MS ?= 150
 	devel-build devel-build-integration-tests devel-build-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
-	test-integration-grpc-python test-integration-grpc-c \
-	test-integration-grpc-python-native test-integration-grpc-c-native \
+	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
+	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
 	format-check check-generated lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
 
@@ -191,6 +191,84 @@ test-integration-grpc-python-native:
 test-integration-grpc-c-native:
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+
+# ── The .NET-backend arms ─────────────────────────────────────────────────
+#
+# The same pair for the .NET binding: the container arm, run by dotnet/'s
+# `test-integration` after it builds the two .NET gRPC images, and the native
+# arm, run by the root `test-integration-dotnet-native` after the root
+# `build-grpc-native-dotnet` builds the server under target/grpc-native/dotnet.
+#
+# The `__grpc_dotnet` filter matches both the sync (`__grpc_dotnet`) and async
+# (`__grpc_dotnet_async`) backends -- exactly as `__grpc_python` matches both
+# python arms -- so one target covers both dotnet gRPC images. To run only the
+# sync backend, add `--skip __grpc_dotnet_async`.
+#
+# SIX TESTS ARE SKIPPED FOR .NET ONLY -- three producer transaction arms and three
+# admin unregisterController arms.
+#
+# The producer transaction arms.
+# `multilanguage_test!` emits one arm per backend for every test it wraps, so the
+# three transaction tests in tests/integration/producer_transactions_test.rs
+# generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
+# .NET gRPC server cannot serve them: ProducerServiceImpl /
+# AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
+# transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
+# AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
+# so those arms return gRPC UNIMPLEMENTED. Nor do ConsumerServiceImpl /
+# AsyncConsumerServiceImpl implement the GroupMetadata / ReleaseGroupMetadata
+# RPCs that consumer_service.proto added, which
+# test_consume_transform_produce_with_offsets reaches through
+# Consumer::group_metadata(). The binding has no transaction surface at all yet
+# -- IAsyncProducer's own docs record it as deferred.
+#
+# The admin unregisterController arms. Apache Kafka 4.4 added
+# Admin.unregisterController (KAFKA-20395), and master's Milestone 17 (#232)
+# added the UnregisterController RPC to admin_service.proto and three
+# `multilanguage_admin_test!` tests in
+# tests/integration/admin_controllers_test.rs (all named
+# test_unregister_controller_*, so one --skip covers them). The .NET binding does
+# not have the method yet: neither AdminServiceImpl nor AsyncAdminServiceImpl
+# overrides the RPC, so those arms return gRPC UNIMPLEMENTED. This is a missing
+# Java 4.4 API, not a flaky test.
+#
+# The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
+# dotnet targets below (test-integration-grpc-dotnet, which the root
+# test-integration-dotnet and its -ssl / -sasl-ssl variants reach through dotnet/'s
+# test-integration, and test-integration-grpc-dotnet-native), which only ever run
+# __grpc_dotnet*, so no other backend loses coverage: python / c / rust still run
+# all six.
+#
+# REMOVE the test_unregister_controller skip when the .NET admin client gains
+# UnregisterController (the two P/Invokes, UnregisterControllerOptions /
+# UnregisterControllerResult, the method on IAdmin / IAsyncAdmin and the four admin
+# client types, MockAdminClient's usingRaftController setter, and the RPC in both
+# admin servicers).
+#
+# REMOVE the three transaction skips when the
+# .NET producer reaches transaction parity with Python (the 10 transaction
+# P/Invokes, the public surface on IProducer/IAsyncProducer and the four producer
+# types, the three MockProducer transaction controls, and the five RPCs in both
+# producer servicers, plus the GroupMetadata / ReleaseGroupMetadata
+# ConsumerService RPCs in both consumer servicers -- ConsumerServiceImpl and
+# AsyncConsumerServiceImpl -- which test_consume_transform_produce_with_offsets
+# reaches through Consumer::group_metadata()). Deleting them is the last step of
+# that phase, not a follow-up to it. With both gone, remove DOTNET_GRPC_SKIPS (the
+# definition below and its uses in test-integration-grpc-dotnet and
+# test-integration-grpc-dotnet-native).
+DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
+	--skip test_aborted_transaction_records_are_discarded \
+	--skip test_consume_transform_produce_with_offsets \
+	--skip test_unregister_controller
+
+test-integration-grpc-dotnet:
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+		$(DOTNET_GRPC_SKIPS)
+
+test-integration-grpc-dotnet-native:
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+		$(DOTNET_GRPC_SKIPS)
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
