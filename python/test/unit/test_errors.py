@@ -45,8 +45,14 @@ from confluent_kafka import (
 )
 from confluent_kafka import TimeoutError as RootTimeoutError
 from confluent_kafka import _errors as errmod
-from confluent_kafka._error_registry import ERRORS
-from confluent_kafka._errors import class_for_ffi_id, error_classes, from_ffi_error, to_ffi_id
+from confluent_kafka._error_registry import BUILTINS, ERRORS
+from confluent_kafka._errors import (
+    class_for_ffi_id,
+    error_classes,
+    from_borrowed_ffi_error,
+    from_ffi_error,
+    to_ffi_id,
+)
 from confluent_kafka.common import (
     InvalidRecordError,
     KafkaError,
@@ -326,6 +332,60 @@ def test_built_ins_the_core_does_not_model_have_no_id() -> None:
     assert not hasattr(ExecutionError, "_ffi_id")
     assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
     assert to_ffi_id(ValueError("not ours")) == -1
+
+
+def _xtask_ids(const: str) -> set[str]:
+    """The id constants of one of the generator's id tables, parsed from its source."""
+    text = (_REPO_ROOT / "rust/xtask/src/error_hierarchy.rs").read_text()
+    body = text[text.index(f"const {const}:"):]
+    body = body[:body.index("];")]
+    return set(re.findall(r'"([A-Z0-9_]+)"', body))
+
+
+def test_every_enum_id_has_a_class_or_a_python_builtin() -> None:
+    # Every FFI id is a generated class (a BRIDGE row) or a Python built-in (a
+    # registry BUILTINS row), except NONE and the Rust-only ids (LOCAL_CALLBACK,
+    # which carries the Python object itself).
+    enum = _ffi_enum()
+    rust_only = _xtask_ids("RUST_ONLY_IDS")
+    assert rust_only == {"LOCAL_CALLBACK"}
+    builtin_ids = {ffi_id for ffi_id, _name, _java in BUILTINS}
+    bridge = set(_bridge())
+    rest = {n: v for n, v in enum.items()
+            if n != "NONE" and n not in bridge and n not in rust_only}
+    assert set(rest.values()) == builtin_ids
+    assert bridge.isdisjoint(rest) and not builtin_ids & {enum[n] for n in bridge}
+
+
+def test_unsupported_operation_is_not_implemented_error() -> None:
+    # Java's UnsupportedOperationException has an FFI id and no class of its
+    # own: it is Python's NotImplementedError.
+    ffi_id = _ffi_enum()["LOCAL_UNSUPPORTED_OPERATION"]
+    assert BUILTINS == ((ffi_id, "NotImplementedError",
+                         "java.lang.UnsupportedOperationException"),)
+    assert class_for_ffi_id(ffi_id) is NotImplementedError
+    assert to_ffi_id(NotImplementedError("x")) == ffi_id
+
+    class _Sub(NotImplementedError):
+        pass
+
+    assert to_ffi_id(_Sub("x")) == ffi_id
+    assert all(not hasattr(cls, "_ffi_id") or cls._ffi_id != ffi_id  # type: ignore[attr-defined]
+               for cls in error_classes())
+
+
+def test_unsupported_operation_from_the_core_is_not_implemented_error() -> None:
+    ffi_id = _ffi_enum()["LOCAL_UNSUPPORTED_OPERATION"]
+    err = from_borrowed_ffi_error((ffi_id, "m", False, False, None, False, None))
+    assert type(err) is NotImplementedError and str(err) == "m"
+    # Java's no-message UnsupportedOperationException() (MockAdminClient's
+    # handleIncrementalResourceAlteration): an empty message, no argument.
+    empty = from_borrowed_ffi_error((ffi_id, "", False, False, None, False, None))
+    assert type(empty) is NotImplementedError and empty.args == ()
+    cause = (TopicAuthorizationError._ffi_id, "inner", False, False, None, True, None)
+    chained = from_borrowed_ffi_error((ffi_id, "outer", False, False, None, False, cause))
+    assert type(chained) is NotImplementedError
+    assert isinstance(chained.__cause__, TopicAuthorizationError)
 
 
 def test_abstract_bases_are_java_abstract_have_no_id_and_cannot_be_built() -> None:
@@ -853,6 +913,16 @@ def test_real_native_round_trip() -> None:
     err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
     assert type(err) is TopicAuthorizationError
     assert str(err) == "no access"
+
+
+def test_real_native_not_implemented_error_round_trip() -> None:
+    # Python -> core -> Python: the NotImplementedError's id builds the core's
+    # LOCAL_UNSUPPORTED_OPERATION error, which comes back as a NotImplementedError.
+    lib = pytest.importorskip("_confluentkafka")
+    injected = NotImplementedError("x")
+    err = from_ffi_error(lib.KafkaError_new(to_ffi_id(injected), "x"))
+    assert type(err) is NotImplementedError
+    assert str(err) == "x"
 
 
 def test_real_native_payload_is_read_through_the_sub_handle() -> None:

@@ -44,6 +44,7 @@ mod local_concurrent_modification_error;
 mod local_illegal_argument_error;
 mod local_illegal_state_error;
 mod local_timeout_error;
+mod local_unsupported_operation_error;
 pub(crate) mod memory;
 #[cfg(test)]
 mod message;
@@ -86,13 +87,14 @@ pub use isolation_level::IsolationLevel;
 pub use kafka_error::KafkaError;
 pub use kafka_future::KafkaFuture;
 pub(crate) use kafka_future::KafkaFutureOps;
-// The four JDK classes the client raises itself. Re-exported here rather than
+// The five JDK classes the client raises itself. Re-exported here rather than
 // from `common::errors`, which is Java's `org.apache.kafka.common.errors`
 // package and holds none of them.
 pub use local_concurrent_modification_error::LocalConcurrentModificationError;
 pub use local_illegal_argument_error::LocalIllegalArgumentError;
 pub use local_illegal_state_error::LocalIllegalStateError;
 pub use local_timeout_error::LocalTimeoutError;
+pub use local_unsupported_operation_error::LocalUnsupportedOperationError;
 // A binding's foreign callback error; no Java class (see its module doc).
 pub use local_callback_error::LocalCallbackError;
 pub use metric::{Metric, MetricValue};

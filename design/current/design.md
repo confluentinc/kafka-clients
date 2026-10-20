@@ -821,15 +821,16 @@ variant per Java exception. Java's intermediate classes survive as `is_*_error`
 predicates, and `KafkaException` is the `KafkaError` struct that every variant
 embeds.*
 
-- `Error` (`common/error.rs:2362`) is the single error type that every fallible
+- `Error` (`common/error.rs:2378`) is the single error type that every fallible
   API returns.
-  - It is a `#[non_exhaustive]` flat enum with **167 variants**, one per Java
+  - It is a `#[non_exhaustive]` flat enum with **168 variants**, one per Java
     exception class. Examples: `TopicAuthorization`,
     `ProducerBufferExhausted`, `ConsumerOffsetOutOfRange`,
     `CorrelationIdMismatch`.
   - It includes the `java.lang` / `java.util` runtime exceptions, under the
     `Local` prefix: `LocalIllegalArgument`, `LocalIllegalState`,
-    `LocalConcurrentModification`, `LocalTimeout` and others.
+    `LocalUnsupportedOperation`, `LocalConcurrentModification`, `LocalTimeout`
+    and others.
   - `KafkaError(KafkaError)` is the variant for a bare `KafkaException`.
 - Each variant's payload lives in its own file: 149 under `common/errors/`,
   plus `consumer/consumer_*_error.rs` and

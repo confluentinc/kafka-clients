@@ -25,16 +25,25 @@ CLAUDE.md, Python Binding Conventions, Errors:
   without an id (``NullPointerError``, a user's own exception) reports -1 too.
 
 The ``id -> class`` table is derived from the generated registry, every class
-with its own ``_ffi_id``.
+with its own ``_ffi_id``, plus the registry's ``BUILTINS``: the Java built-ins
+with an FFI id and no generated class, which are Python built-in classes
+(``LOCAL_UNSUPPORTED_OPERATION`` -> ``NotImplementedError``, Java's
+``UnsupportedOperationException``). Both directions read them:
+
+- core -> Python builds the built-in positionally, ``NotImplementedError(message)``
+  (``NotImplementedError()`` for an empty message), its cause as ``__cause__``;
+- Python -> core maps an instance of the built-in, or of a subclass, to its id,
+  found along ``type(error).__mro__``.
 """
 
 from __future__ import annotations
 
+import builtins
 import importlib
 from collections.abc import Callable
 from typing import Any, cast
 
-from ._error_registry import ERRORS
+from ._error_registry import BUILTINS, ERRORS
 from ._throwable import new
 
 try:  # pragma: no cover - import guard
@@ -50,6 +59,7 @@ UNKNOWN_SERVER_ERROR = -1
 
 _classes: list[type[BaseException]] | None = None
 _by_id: dict[int, type[BaseException]] | None = None
+_builtin_ids: dict[type[BaseException], int] | None = None
 
 
 def error_classes() -> list[type[BaseException]]:
@@ -75,8 +85,23 @@ def _table() -> dict[int, type[BaseException]]:
                 raise RuntimeError(
                     f"duplicate _ffi_id {ffi_id}: {table[ffi_id].__name__} and {cls.__name__}")
             table[ffi_id] = cls
+        for ffi_id, name, _java in BUILTINS:
+            builtin = cast(type[BaseException], getattr(builtins, name))
+            if ffi_id in table:
+                raise RuntimeError(
+                    f"duplicate _ffi_id {ffi_id}: {table[ffi_id].__name__} and {name}")
+            table[ffi_id] = builtin
         _by_id = table
     return _by_id
+
+
+def _builtin_table() -> dict[type[BaseException], int]:
+    """The registry's ``BUILTINS``, class -> FFI id."""
+    global _builtin_ids
+    if _builtin_ids is None:
+        _builtin_ids = {cast(type[BaseException], getattr(builtins, name)): ffi_id
+                        for ffi_id, name, _java in BUILTINS}
+    return _builtin_ids
 
 
 def class_for_ffi_id(ffi_id: int) -> type[BaseException]:
@@ -88,10 +113,17 @@ def class_for_ffi_id(ffi_id: int) -> type[BaseException]:
 
 def to_ffi_id(error: BaseException) -> int:
     """The FFI id the core reports for ``error`` (mock injection, a raising
-    listener): ``type(error)._ffi_id``, or ``UNKNOWN_SERVER_ERROR`` (-1) for a
-    class without one."""
-    ffi_id = getattr(type(error), "_ffi_id", UNKNOWN_SERVER_ERROR)
-    return int(ffi_id)
+    listener): ``type(error)._ffi_id``; for a class without one, the id of the
+    first registry ``BUILTINS`` class along its MRO (a ``NotImplementedError``
+    or a subclass), else ``UNKNOWN_SERVER_ERROR`` (-1)."""
+    ffi_id = getattr(type(error), "_ffi_id", None)
+    if ffi_id is not None:
+        return int(ffi_id)
+    builtin_ids = _builtin_table()
+    for base in type(error).__mro__:
+        if base in builtin_ids:
+            return builtin_ids[base]
+    return UNKNOWN_SERVER_ERROR
 
 
 def reported_ffi_id(error: BaseException) -> int:
@@ -179,7 +211,11 @@ def construct(cls: type[BaseException], message: str | None,
     """An instance of ``cls`` for an error the core reported, built through
     its Java constructor; a class whose constructors cannot take what the core
     reported (a ``RecordDeserializationError`` without its record) carries the
-    message only."""
+    message only. A registry ``BUILTINS`` class (``NotImplementedError``) has no
+    keyword constructor and is built positionally, ``cls(message)``, or ``cls()``
+    for an empty message."""
+    if cls in _builtin_table():
+        return cls(message) if message else cls()
     builder = _CORE_KWARGS.get(cls.__name__)
     make = cast(Any, cls)
     try:

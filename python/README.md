@@ -207,6 +207,8 @@ retriability is `except RetriableError`, and each Java exception class has a
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
 `NoSuchElementError`, `NullPointerError`, `ExecutionError`) live at the package root.
+Java's `UnsupportedOperationException` has no class of its own: it is Python's
+`NotImplementedError`.
 
 ## Directory Structure
 

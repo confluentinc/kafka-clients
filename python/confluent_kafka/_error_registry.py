@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Every generated error class: (defining module, class name, Java class), and
-Java's ``Errors`` default message per wire error code.
+"""Every generated error class: (defining module, class name, Java class), the
+Java built-ins Python translates to its own builtins, and Java's ``Errors`` default
+message per wire error code.
 
 GENERATED, DO NOT EDIT. Produced from the Java source by
 ``cargo xtask generate-error-codes`` (CLAUDE.md, Python Binding Conventions,
@@ -197,6 +198,14 @@ ERRORS: tuple[tuple[str, str, str], ...] = (
     ("confluent_kafka.null_pointer_error", "NullPointerError", "java.lang.NullPointerException"),
     ("confluent_kafka.producer.buffer_exhausted_error", "BufferExhaustedError", "org.apache.kafka.clients.producer.BufferExhaustedException"),
     ("confluent_kafka.timeout_error", "TimeoutError", "java.util.concurrent.TimeoutException"),
+)
+
+# The Java built-ins that are a Python builtin rather than a generated class
+# (CLAUDE.md, Python Binding Conventions, Types): (FFI id, builtin name, Java class).
+# The core's id becomes the builtin, and an instance of the builtin, or of a
+# subclass, crosses to the core as the id.
+BUILTINS: tuple[tuple[int, str, str], ...] = (
+    (-31, "NotImplementedError", "java.lang.UnsupportedOperationException"),
 )
 
 # Java's ``Errors`` default message by wire code (``NONE`` has none): what

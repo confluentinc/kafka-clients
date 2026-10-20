@@ -111,9 +111,63 @@ const EXCLUSIONS: &[&str] = &[
 ///   class for it.
 const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK"];
 
+/// `(ffi_id_constant, java_class_fqn, python_builtin)` — Java built-in exceptions
+/// that Python translates to one of its own builtins (CLAUDE.md, Python Binding
+/// Conventions, Types), so no Python class is generated for them.
+///
+/// The core has an FFI id for each; the id has no `BRIDGE` row and the class no
+/// `JDK_BUILTINS` row (either would generate a class). The generated registry
+/// (`_error_registry.BUILTINS`) maps the id to the builtin both ways: core ->
+/// Python builds the builtin with the error's message, and Python -> core maps
+/// an instance of the builtin, or of a subclass (Java's `instanceof`), to the id.
+///
+/// - `LOCAL_UNSUPPORTED_OPERATION` is `LocalUnsupportedOperationError`, Java's
+///   `java.lang.UnsupportedOperationException`: Python's `NotImplementedError`.
+const PY_BUILTINS: &[(&str, &str, &str)] = &[(
+    "LOCAL_UNSUPPORTED_OPERATION",
+    "java.lang.UnsupportedOperationException",
+    "NotImplementedError",
+)];
+
+/// Checks the `PY_BUILTINS` invariants against the FFI enum: each id is a real
+/// enum constant and appears neither in `BRIDGE` nor in `JDK_BUILTINS` (by id or
+/// by Java class), each Java class at most once.
+fn check_py_builtins(enum_id_values: &BTreeMap<String, i32>) -> anyhow::Result<()> {
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_fqns = BTreeSet::new();
+    for (id, fqn, builtin) in PY_BUILTINS {
+        if !enum_id_values.contains_key(*id) {
+            anyhow::bail!(
+                "error hierarchy: PY_BUILTINS names FFI id `{id}` (for `{fqn}` -> `{builtin}`) that is \
+                 not in kafka_common_Error_e ({FFI_ENUM_SOURCE})"
+            );
+        }
+        if !seen_ids.insert(*id) || !seen_fqns.insert(*fqn) {
+            anyhow::bail!("error hierarchy: PY_BUILTINS has a duplicate row for `{id}` / `{fqn}`");
+        }
+        if BRIDGE.iter().any(|(b_id, b_fqn)| b_id == id || b_fqn == fqn) {
+            anyhow::bail!(
+                "error hierarchy: `{id}` / `{fqn}` is in both PY_BUILTINS and BRIDGE — a Python \
+                 builtin has no generated class"
+            );
+        }
+        if JDK_BUILTINS.iter().any(|(j_fqn, _, j_id, _)| j_id == id || j_fqn == fqn) {
+            anyhow::bail!(
+                "error hierarchy: `{id}` / `{fqn}` is in both PY_BUILTINS and JDK_BUILTINS — a \
+                 Python builtin has no generated class"
+            );
+        }
+        if RUST_ONLY_IDS.contains(id) {
+            anyhow::bail!("error hierarchy: `{id}` is in both PY_BUILTINS and RUST_ONLY_IDS");
+        }
+    }
+    Ok(())
+}
+
 /// `(ffi_id_constant, java_class_fqn)` — one row per concrete (non-abstract) Java
-/// exception class, i.e. one row per FFI id (all 166 enum ids except `NONE`, which
-/// is the no-error sentinel; `UNKNOWN_SERVER_ERROR` is `UnknownServerException`).
+/// exception class, i.e. one row per FFI id (all 168 enum ids except `NONE`, which
+/// is the no-error sentinel, the `RUST_ONLY_IDS` and the `PY_BUILTINS`;
+/// `UNKNOWN_SERVER_ERROR` is `UnknownServerException`).
 /// This is the reviewed correspondence between the two vocabularies (see the
 /// module doc); everything else the generator derives from the Java source.
 const BRIDGE: &[(&str, &str)] = &[
@@ -854,11 +908,14 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
             );
         }
     }
+    check_py_builtins(&enum_id_values)?;
     for id in enum_id_values.keys() {
-        if id != "NONE" && !RUST_ONLY_IDS.contains(&id.as_str()) && !bridge_ids.contains(id.as_str()) {
+        let py_builtin = PY_BUILTINS.iter().any(|(b, _, _)| b == id);
+        if id != "NONE" && !RUST_ONLY_IDS.contains(&id.as_str()) && !py_builtin && !bridge_ids.contains(id.as_str()) {
             anyhow::bail!(
                 "error hierarchy: FFI id `{id}` has no class in the BRIDGE table — every \
-                 kafka_common_Error_e id except NONE must map to one Java class"
+                 kafka_common_Error_e id except NONE, the RUST_ONLY_IDS and the PY_BUILTINS must \
+                 map to one Java class"
             );
         }
     }
@@ -3068,10 +3125,17 @@ pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, Strin
         .into_iter()
         .map(|(code, text)| format!("    {code}: {},", py_str_literal(&text)))
         .collect();
+    let enum_id_values = parse_ffi_enum_ids(repo_root)?;
+    check_py_builtins(&enum_id_values)?;
+    let builtins: Vec<String> = PY_BUILTINS
+        .iter()
+        .map(|(id, fqn, builtin)| format!("    ({}, \"{builtin}\", \"{fqn}\"),", enum_id_values[*id]))
+        .collect();
     let registry = format!(
-        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class), and\nJava's ``Errors`` default message per wire error code.\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n\n# Java's ``Errors`` default message by wire code (``NONE`` has none): what\n# ``Errors.exception()`` and ``Errors.exception(null)`` carry. The FFI id of an API error\n# is its wire code.\nDEFAULT_MESSAGES: dict[int, str] = {{\n{}\n}}\n",
+        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class), the\nJava built-ins Python translates to its own builtins, and Java's ``Errors`` default\nmessage per wire error code.\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n\n# The Java built-ins that are a Python builtin rather than a generated class\n# (CLAUDE.md, Python Binding Conventions, Types): (FFI id, builtin name, Java class).\n# The core's id becomes the builtin, and an instance of the builtin, or of a\n# subclass, crosses to the core as the id.\nBUILTINS: tuple[tuple[int, str, str], ...] = (\n{}\n)\n\n# Java's ``Errors`` default message by wire code (``NONE`` has none): what\n# ``Errors.exception()`` and ``Errors.exception(null)`` carry. The FFI id of an API error\n# is its wire code.\nDEFAULT_MESSAGES: dict[int, str] = {{\n{}\n}}\n",
         PY_HEADER.trim_end(),
         rows.join("\n"),
+        builtins.join("\n"),
         messages.join("\n")
     );
     outputs.push((repo_root.join(PY_ROOT).join("confluent_kafka/_error_registry.py"), registry));
@@ -3426,6 +3490,36 @@ mod tests {
             "For requests intended only for the leader, this error indicates that the broker is not the \
              current leader. For requests intended for any replica,"
         ));
+    }
+
+    /// The `PY_BUILTINS` rows are real enum ids with no generated class: no
+    /// `BRIDGE` or `JDK_BUILTINS` row, so the graph has no class for the Java
+    /// class or the id.
+    #[test]
+    fn py_builtins_are_enum_ids_without_a_generated_class() {
+        let ids = parse_ffi_enum_ids(&repo_root()).unwrap();
+        check_py_builtins(&ids).expect("PY_BUILTINS must hold its invariants");
+        assert_eq!(
+            PY_BUILTINS,
+            &[(
+                "LOCAL_UNSUPPORTED_OPERATION",
+                "java.lang.UnsupportedOperationException",
+                "NotImplementedError",
+            )]
+        );
+        assert_eq!(ids["LOCAL_UNSUPPORTED_OPERATION"], -31);
+        let classes = build_graph(&repo_root()).unwrap();
+        for (id, fqn, _) in PY_BUILTINS {
+            assert!(!classes.contains_key(*fqn), "{fqn} must not be generated");
+            assert!(
+                classes.values().all(|c| c.ffi_id.as_ref().is_none_or(|(i, _)| i != id)),
+                "no generated class carries {id}"
+            );
+        }
+        // An id missing from the enum is rejected.
+        let mut missing = ids.clone();
+        missing.remove("LOCAL_UNSUPPORTED_OPERATION");
+        assert!(check_py_builtins(&missing).is_err());
     }
 
     #[test]

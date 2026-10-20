@@ -22,7 +22,9 @@ KafkaConsumer``). By rule 3 the root exports only ``Duration`` and the Java
 built-in exception classes the translated code throws (``IllegalStateError``,
 ``IllegalArgumentError``, ``ConcurrentModificationError``, ``TimeoutError``,
 ``NoSuchElementError``, ``NullPointerError``, ``ExecutionError``), generated with the rest of the
-error hierarchy by ``cargo xtask generate-error-codes``.
+error hierarchy by ``cargo xtask generate-error-codes``. Java's
+``UnsupportedOperationException`` has no class of its own: it is Python's
+``NotImplementedError``.
 """
 
 from __future__ import annotations

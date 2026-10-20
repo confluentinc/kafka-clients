@@ -2371,6 +2371,8 @@ static kafka_common_Error_t* mock_error_from_code(int code, const char* message)
             return ffi_built(kafka_common_Error_local_illegal_argument_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION:
             return ffi_built(kafka_common_Error_local_concurrent_modification_err(message, &ffi_err), &ffi_err);
+        case kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION:
+            return ffi_built(kafka_common_Error_local_unsupported_operation_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_REQUEST_TIMED_OUT:
             return ffi_built(kafka_common_Error_timeout_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_MESSAGE_TOO_LARGE:
