@@ -2753,8 +2753,10 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
 /// before every other component built after the wrap, so on an error those are
 /// dropped first and the guard's `Arc` is the only one left when it closes the
 /// deserializers. Nothing else of Java's `close(Duration.ZERO, ..)` applies:
-/// the background task is spawned by the infallible `with_components`, so no
-/// task or socket exists on any error path, and the rest is released on drop.
+/// `new_inner` disarms the guard when it hands the deserializers to the
+/// `FetchCollector`, after its last fallible step, and only then spawns the
+/// background task's `std::thread`. So no task or socket exists on any error
+/// path, and the rest is released on drop.
 ///
 /// `new` is synchronous and [`Deserializers::close`] is async, so the close
 /// runs through [`Utils::close_quietly_from_sync`], which the producer's
@@ -2866,9 +2868,9 @@ where
     /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
     /// release partially-built resources (KAFKA-2121) — closes the
     /// deserializers once they are wrapped (see `CloseDeserializersOnError`).
-    /// The `tokio::spawn` of the background task happens inside the
-    /// infallible `with_components`, so no task or socket needs shutting down
-    /// on any error path.
+    /// `new_inner` spawns the background task's `std::thread` only after
+    /// `deserializers.disarm()`, which follows its last fallible step, so no
+    /// task or socket needs shutting down on any error path.
     ///
     /// # Java's no-deserializer constructors are deliberately not translated
     ///
