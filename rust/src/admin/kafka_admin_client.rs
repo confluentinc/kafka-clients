@@ -2410,7 +2410,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 ///
 /// Mirrors `KafkaAdminClient.getOffsetFromSpec`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getOffsetFromSpec")]
-fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
+fn get_offset_from_spec(offset_spec: &OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
         OffsetSpec::Timestamp(spec) => spec.timestamp(),
@@ -4455,7 +4455,7 @@ impl Admin for KafkaAdminClient {
 
         let offset_queries_by_partition: HashMap<TopicPartition, i64> = topic_partition_offsets
             .iter()
-            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(*spec)))
+            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(spec)))
             .collect();
 
         let handler = ListOffsetsHandler::new(
@@ -5109,7 +5109,7 @@ impl Admin for KafkaAdminClient {
         // Snapshot the updates for the (possibly retried) request builder.
         let updates_for_request: Vec<(String, FeatureUpdate)> = feature_updates
             .iter()
-            .map(|(feature, update)| (feature.clone(), *update))
+            .map(|(feature, update)| (feature.clone(), update.clone()))
             .collect();
         let validate_only = options.validate_only();
         let create_request = Box::new(move |timeout_ms: i32| {

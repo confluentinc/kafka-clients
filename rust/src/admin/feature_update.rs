@@ -81,7 +81,7 @@ impl UpgradeType {
 /// Encapsulates details about an update to a finalized feature.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate")]
 pub struct FeatureUpdate {
     max_version_level: i16,

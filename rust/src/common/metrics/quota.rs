@@ -15,7 +15,7 @@
 //! An upper or lower bound for metrics (`org.apache.kafka.common.metrics.Quota`).
 
 /// An upper or lower bound for metrics.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.Quota")]
 pub struct Quota {
     upper: bool,

@@ -142,6 +142,11 @@ breaking changes.
 
 ### Admin client
 
+- **Breaking:** `DeletedRecords`, `RecordsToDelete`, `FeatureUpdate`,
+  `FinalizedVersionRange`, `SupportedVersionRange`, `OffsetSpec` and its
+  `TimestampSpec` are no longer `Copy`: a public struct is never `Copy`, so a
+  field added to it later (a `String`, a collection) cannot break the promise.
+  They stay `Clone`; write `.clone()` where a value was copied implicitly.
 - **Breaking:** the admin `*Options` types, `DeletedRecords`,
   `ListOffsetsResultInfo`, `NewPartitionReassignment`, `NewPartitions`,
   `OffsetSpec` and its `TimestampSpec`, `PartitionProducerState`,
@@ -199,6 +204,9 @@ breaking changes.
 
 ### Common
 
+- **Breaking:** `Quota` is no longer `Copy`, and `MetricConfig::quota()`
+  returns `Option<&Quota>` instead of a copy. `Quota` stays `Clone`; write
+  `config.quota().cloned()` where an owned quota is needed.
 - **Breaking:** `TopicCollection` and its `TopicIdCollection` and
   `TopicNameCollection`, `ClientQuotaAlteration`, `SslConfigs` and
   `SaslConfigs` no longer implement `PartialEq` (and `Eq`): Java's classes do
@@ -296,6 +304,10 @@ breaking changes.
 
 ### C API
 
+- **Breaking (C API):** `kafka_common_metrics_MetricConfig_quota` returns a
+  borrowed `const kafka_common_metrics_Quota_t *`, valid until the config
+  handle is destroyed or one of its setters runs, instead of an owned copy:
+  do not pass it to `kafka_common_metrics_Quota_destroy`.
 - **Breaking (C API):** serializers and deserializers are registered only
   through `kafka_common_serialization_Serializer_new_async` /
   `kafka_common_serialization_Deserializer_new_async`. The synchronous

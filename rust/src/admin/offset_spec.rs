@@ -26,7 +26,7 @@
 /// timestamp mapping (`getOffsetFromSpec`). The one subclass with data,
 /// `TimestampSpec`, stays behind its variant as a struct, so a field Java adds
 /// to it arrives without changing the variant's shape.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
 pub enum OffsetSpec {
@@ -68,7 +68,7 @@ pub enum OffsetSpec {
 /// Java keeps its constructor and `timestamp()` package-private: the value is
 /// built with [`OffsetSpec::for_timestamp`] and only `KafkaAdminClient`'s
 /// `getOffsetFromSpec` reads it, so outside the crate it is opaque.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec")]
 pub struct TimestampSpec {
     timestamp: i64,
