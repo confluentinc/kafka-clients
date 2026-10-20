@@ -33,7 +33,10 @@
 //! alone is not "compatible".
 //!
 //! The `_fn_t` / `_cb_t` function-pointer typedefs are compared in the C
-//! header instead, see [`function_pointer_typedefs`].
+//! header instead, see [`function_pointer_typedefs`], and so are the
+//! prototypes of the functions both headers declare, see
+//! [`function_prototypes`]: `abidiff` cannot see a parameter changed from one
+//! suppressed type to another.
 //!
 //! The baseline is `--baseline <tag>`, else `$API_COMPAT_BASELINE`, else the
 //! highest `vX.Y.Z` tag whose version does not exceed the current one; for a
@@ -246,8 +249,9 @@ fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> an
     let suppressions = PathBuf::from(API_COMPAT_DIR).join("opaque-handles.suppr");
     fs::write(&suppressions, suppression_file(&handles))?;
 
-    let typedef_changes = changed_function_pointer_typedefs(&old_header, &new_header);
-    for change in &typedef_changes {
+    let mut header_changes = changed_function_pointer_typedefs(&old_header, &new_header);
+    header_changes.extend(changed_function_prototypes(&old_header, &new_header));
+    for change in &header_changes {
         println!("   {change}");
     }
 
@@ -262,7 +266,7 @@ fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> an
     println!("   Report saved to {}", report_path.display());
 
     let code = output.status.code().context("abidiff was killed by a signal")?;
-    c_verdict(code, !typedef_changes.is_empty(), old.allows_breaking_change_to(current))
+    c_verdict(code, !header_changes.is_empty(), old.allows_breaking_change_to(current))
 }
 
 /// The `abidiff` command line. `--no-added-syms` leaves additions out of the
@@ -278,16 +282,17 @@ fn abidiff_args(suppressions: &Path, old_library: &Path, new_library: &Path) -> 
     ]
 }
 
-/// Reads an `abidiff` exit status and whether a function-pointer typedef
-/// changed in the header: a tool error fails the task; any change `abidiff`
-/// still reports with `--no-added-syms` ([`ABIDIFF_ABI_CHANGE`], with or
-/// without [`ABIDIFF_ABI_INCOMPATIBLE_CHANGE`]), or a changed typedef, is
+/// Reads an `abidiff` exit status and whether a function-pointer typedef or a
+/// function prototype changed in the header: a tool error fails the task; any
+/// change `abidiff` still reports with `--no-added-syms`
+/// ([`ABIDIFF_ABI_CHANGE`], with or without
+/// [`ABIDIFF_ABI_INCOMPATIBLE_CHANGE`]), or a changed declaration, is
 /// breaking; no change is compatible.
-fn c_verdict(code: i32, typedef_changed: bool, breaking_allowed: bool) -> anyhow::Result<Verdict> {
+fn c_verdict(code: i32, header_changed: bool, breaking_allowed: bool) -> anyhow::Result<Verdict> {
     if code & (ABIDIFF_ERROR | ABIDIFF_USAGE_ERROR) != 0 {
         anyhow::bail!("abidiff failed (exit status {code})");
     }
-    let changed = code & (ABIDIFF_ABI_CHANGE | ABIDIFF_ABI_INCOMPATIBLE_CHANGE) != 0 || typedef_changed;
+    let changed = code & (ABIDIFF_ABI_CHANGE | ABIDIFF_ABI_INCOMPATIBLE_CHANGE) != 0 || header_changed;
     Ok(if !changed {
         Verdict::Compatible
     } else if breaking_allowed {
@@ -355,7 +360,13 @@ fn opaque_handles(header: &str) -> BTreeSet<String> {
 /// taking a callback. The wrappers are suppressed whatever their kind
 /// (no `type_kind`), and [`changed_function_pointer_typedefs`] compares their
 /// C declarations in the headers instead, so a changed callback signature is
-/// still breaking. The regular expression spells the quotes and spaces of
+/// still breaking.
+///
+/// A suppression hides a parameter whose type changes from one suppressed type
+/// to another (one `_fn_t` for another, one opaque handle for another), since
+/// libabigail drops a sub-diff when either side matches and then a function
+/// whose only change it dropped. [`changed_function_prototypes`] compares the
+/// prototypes in the headers for that. The regular expression spells the quotes and spaces of
 /// `extern "C" ` as `.`, which libabigail's ini syntax leaves alone.
 fn suppression_file(handles: &BTreeSet<String>) -> String {
     let names: Vec<&str> = handles.iter().map(String::as_str).collect();
@@ -371,7 +382,8 @@ fn suppression_file(handles: &BTreeSet<String>) -> String {
 
 /// The function-pointer typedefs a header declares, which cbindgen writes as
 /// `typedef RET (*NAME)(PARAMS);`, possibly over several lines: each name
-/// with its declaration, whitespace collapsed.
+/// with its declaration, whitespace collapsed and parameter names stripped
+/// ([`without_parameter_names`]).
 fn function_pointer_typedefs(header: &str) -> BTreeMap<String, String> {
     let mut typedefs = BTreeMap::new();
     let mut statement: Option<String> = None;
@@ -399,7 +411,10 @@ fn function_pointer_typedefs(header: &str) -> BTreeMap<String, String> {
                 .and_then(|(_, rest)| rest.split_once(')'))
                 .map(|(name, _)| name.trim().to_string());
             if let Some(name) = name {
-                typedefs.insert(name, text.split_whitespace().collect::<Vec<_>>().join(" "));
+                typedefs.insert(
+                    name,
+                    without_parameter_names(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
+                );
             }
         }
     }
@@ -417,6 +432,119 @@ fn changed_function_pointer_typedefs(old_header: &str, new_header: &str) -> Vec<
             None => Some(format!("removed typedef {name}: {old}")),
             Some(new) if *new != old => Some(format!("changed typedef {name}: {old} → {new}")),
             Some(_) => None,
+        })
+        .collect()
+}
+
+/// The functions a header declares, which cbindgen writes at file scope as
+/// `RET NAME(PARAMS);`, possibly over several lines: each name with its
+/// prototype, whitespace collapsed and parameter names stripped
+/// ([`without_parameter_names`]). Comments, preprocessor lines, typedefs and
+/// the bodies of structs and enums are skipped.
+fn function_prototypes(header: &str) -> BTreeMap<String, String> {
+    let mut code = String::with_capacity(header.len());
+    let mut rest = header;
+    while let Some(start) = rest.find("/*") {
+        code.push_str(&rest[..start]);
+        rest = rest[start + 2..].split_once("*/").map_or("", |(_, after)| after);
+    }
+    code.push_str(rest);
+
+    let mut prototypes = BTreeMap::new();
+    let mut statement = String::new();
+    let mut depth = 0usize;
+    for line in code.lines() {
+        let line = line.split_once("//").map_or(line, |(code, _)| code).trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        for c in line.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => {
+                    let text = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+                    statement.clear();
+                    if text.starts_with("typedef ") {
+                        continue;
+                    }
+                    let Some(name) = text
+                        .split_once('(')
+                        .and_then(|(head, _)| head.rsplit([' ', '*']).next())
+                        .filter(|name| !name.is_empty())
+                    else {
+                        continue;
+                    };
+                    prototypes.insert(name.to_string(), without_parameter_names(&format!("{text};")));
+                    continue;
+                },
+                _ => {},
+            }
+            // A body is skipped; what follows its closing brace (a typedef's
+            // name) ends with the `;` of that typedef, skipped above.
+            if depth == 0 {
+                statement.push(c);
+            }
+        }
+        statement.push(' ');
+    }
+    prototypes
+}
+
+/// A declaration ending in `(PARAMS);` with the name of each parameter
+/// removed, so that renaming a parameter, which no caller sees, is no change:
+/// `void f(const kafka_a_t *self_, int32_t n);` becomes
+/// `void f(const kafka_a_t *, int32_t);`. A parameter that is a single word
+/// (`void`, an unnamed `int32_t`) is kept as it is.
+fn without_parameter_names(declaration: &str) -> String {
+    let Some(body) = declaration.strip_suffix(");") else {
+        return declaration.to_string();
+    };
+    // The `(` matching the final `)`.
+    let mut depth = 0usize;
+    let mut open = None;
+    for (i, c) in body.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 0 => {
+                open = Some(i);
+                break;
+            },
+            '(' => depth -= 1,
+            _ => {},
+        }
+    }
+    let Some(open) = open else {
+        return declaration.to_string();
+    };
+    let parameters: Vec<String> = body[open + 1..]
+        .split(',')
+        .map(|parameter| {
+            let parameter = parameter.trim();
+            let name_start = parameter
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            if name_start == 0 {
+                parameter.to_string()
+            } else {
+                parameter[..name_start].trim_end().to_string()
+            }
+        })
+        .collect();
+    format!("{}({});", &body[..open], parameters.join(", "))
+}
+
+/// The functions both headers declare whose prototype the new one changes,
+/// as lines for the report: one `abidiff` may not see (see
+/// [`suppression_file`]). A function the new header removes is left to
+/// `abidiff`, which reports the removed symbol; an added one is no change.
+fn changed_function_prototypes(old_header: &str, new_header: &str) -> Vec<String> {
+    let new = function_prototypes(new_header);
+    function_prototypes(old_header)
+        .into_iter()
+        .filter_map(|(name, old)| match new.get(&name) {
+            Some(new) if *new != old => Some(format!("changed function {name}: {old} → {new}")),
+            _ => None,
         })
         .collect()
 }
@@ -663,18 +791,14 @@ typedef enum {
         assert_eq!(
             typedefs.into_iter().collect::<Vec<_>>(),
             [
-                (
-                    "kafka_a_cb_t".to_string(),
-                    "typedef void (*kafka_a_cb_t)(void *opaque);".to_string()
-                ),
+                ("kafka_a_cb_t".to_string(), "typedef void (*kafka_a_cb_t)(void *);".to_string()),
                 (
                     "kafka_gone_fn_t".to_string(),
-                    "typedef int8_t (*kafka_gone_fn_t)(void *self_);".to_string()
+                    "typedef int8_t (*kafka_gone_fn_t)(void *);".to_string()
                 ),
                 (
                     "kafka_m_measure_fn_t".to_string(),
-                    "typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int64_t now);"
-                        .to_string()
+                    "typedef double (*kafka_m_measure_fn_t)(void *, const kafka_c_t *, int64_t);".to_string()
                 ),
             ]
         );
@@ -700,15 +824,101 @@ typedef enum {
         assert_eq!(
             changed_function_pointer_typedefs(HEADER_V1, &changed),
             [
-                "removed typedef kafka_gone_fn_t: typedef int8_t (*kafka_gone_fn_t)(void *self_);",
+                "removed typedef kafka_gone_fn_t: typedef int8_t (*kafka_gone_fn_t)(void *);",
                 "changed typedef kafka_m_measure_fn_t: \
-                 typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int64_t now); → \
-                 typedef double (*kafka_m_measure_fn_t)(void *self_, const kafka_c_t *config, int32_t now);",
+                 typedef double (*kafka_m_measure_fn_t)(void *, const kafka_c_t *, int64_t); → \
+                 typedef double (*kafka_m_measure_fn_t)(void *, const kafka_c_t *, int32_t);",
             ]
         );
+        // Renaming a typedef's parameter is no change: no caller sees the name.
+        let renamed = HEADER_V1.replace("int64_t now);", "int64_t now_ms);");
+        assert!(changed_function_pointer_typedefs(HEADER_V1, &renamed).is_empty());
         // A changed typedef alone, with `abidiff` seeing nothing, is breaking.
         assert_eq!(c_verdict(0, true, false).unwrap(), Verdict::Breaking);
         assert_eq!(c_verdict(0, true, true).unwrap(), Verdict::BreakingAllowed);
+    }
+
+    const PROTOTYPES_V1: &str = "\
+#include <stdint.h>
+
+typedef void (*kafka_a_fn_t)(void *self_);
+
+typedef void (*kafka_b_fn_t)(void *self_);
+
+typedef struct {
+  void (*field)(void *x);
+} kafka_v_t;
+
+/**
+ * Builds one (see `kafka_s_destroy(s)`).
+ */
+kafka_s_t *kafka_s_new(void *self_,
+                       kafka_a_fn_t configure,
+                       kafka_b_fn_t close);
+
+const char *kafka_s_name(const kafka_s_t *self_); // a trailing comment
+
+void kafka_s_destroy(kafka_s_t *self_);
+
+int32_t kafka_s_count(void);
+";
+
+    #[test]
+    fn function_prototypes_are_read_over_several_lines_without_parameter_names() {
+        assert_eq!(
+            function_prototypes(PROTOTYPES_V1).into_iter().collect::<Vec<_>>(),
+            [
+                ("kafka_s_count".to_string(), "int32_t kafka_s_count(void);".to_string()),
+                ("kafka_s_destroy".to_string(), "void kafka_s_destroy(kafka_s_t *);".to_string()),
+                (
+                    "kafka_s_name".to_string(),
+                    "const char *kafka_s_name(const kafka_s_t *);".to_string()
+                ),
+                (
+                    "kafka_s_new".to_string(),
+                    "kafka_s_t *kafka_s_new(void *, kafka_a_fn_t, kafka_b_fn_t);".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// `abidiff` suppresses the callback wrappers and the opaque handles, so
+    /// it cannot see a parameter changed from one of them to another: the
+    /// header comparison does. Renaming a parameter or reformatting is no
+    /// change, nor is an added or a removed function (left to `abidiff`).
+    #[test]
+    fn function_prototype_changes_are_breaking() {
+        let swapped = PROTOTYPES_V1.replace(
+            "kafka_a_fn_t configure,\n                       kafka_b_fn_t close",
+            "kafka_b_fn_t close,\n                       kafka_a_fn_t configure",
+        );
+        assert_eq!(
+            changed_function_prototypes(PROTOTYPES_V1, &swapped),
+            ["changed function kafka_s_new: \
+              kafka_s_t *kafka_s_new(void *, kafka_a_fn_t, kafka_b_fn_t); → \
+              kafka_s_t *kafka_s_new(void *, kafka_b_fn_t, kafka_a_fn_t);"]
+        );
+        let other_handle = PROTOTYPES_V1.replace(
+            "void kafka_s_destroy(kafka_s_t *self_);",
+            "void kafka_s_destroy(kafka_v_t *self_);",
+        );
+        assert_eq!(
+            changed_function_prototypes(PROTOTYPES_V1, &other_handle),
+            ["changed function kafka_s_destroy: void kafka_s_destroy(kafka_s_t *); → void kafka_s_destroy(kafka_v_t *);"]
+        );
+
+        let renamed = PROTOTYPES_V1.replace("kafka_b_fn_t close)", "kafka_b_fn_t on_close)");
+        let reformatted = PROTOTYPES_V1.replace(
+            "(void *self_,\n                       kafka_a_fn_t configure,\n                       kafka_b_fn_t close);",
+            "(void *self_, kafka_a_fn_t configure, kafka_b_fn_t close);",
+        );
+        let added = format!("{PROTOTYPES_V1}void kafka_s_more(kafka_s_t *self_);\n");
+        let removed = PROTOTYPES_V1.replace("void kafka_s_destroy(kafka_s_t *self_);\n", "");
+        for header in [PROTOTYPES_V1, &renamed, &reformatted, &added, &removed] {
+            assert!(changed_function_prototypes(PROTOTYPES_V1, header).is_empty(), "{header}");
+        }
+        assert_ne!(renamed, PROTOTYPES_V1);
+        assert_ne!(reformatted, PROTOTYPES_V1);
     }
 
     #[test]
