@@ -43,7 +43,8 @@ from confluent_kafka.common.serialization import (
 # package root:
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
-    TimeoutError, NoSuchElementError, NullPointerError, ExecutionError, Duration,
+    TimeoutError, NoSuchElementError, NullPointerError, ExecutionError,
+    UnsupportedOperationError, Duration,
 )
 ```
 
@@ -206,9 +207,9 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `NullPointerError`, `ExecutionError`) live at the package root.
-Java's `UnsupportedOperationException` has no class of its own: it is Python's
-`NotImplementedError`.
+`NoSuchElementError`, `NullPointerError`, `ExecutionError`, `UnsupportedOperationError`) live
+at the package root; `UnsupportedOperationError` subclasses `NotImplementedError`, as
+`TimeoutError` subclasses `builtins.TimeoutError`.
 
 ## Directory Structure
 

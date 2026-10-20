@@ -21,10 +21,10 @@ every type is imported from its module (``from confluent_kafka.consumer import
 KafkaConsumer``). By rule 3 the root exports only ``Duration`` and the Java
 built-in exception classes the translated code throws (``IllegalStateError``,
 ``IllegalArgumentError``, ``ConcurrentModificationError``, ``TimeoutError``,
-``NoSuchElementError``, ``NullPointerError``, ``ExecutionError``), generated with the rest of the
-error hierarchy by ``cargo xtask generate-error-codes``. Java's
-``UnsupportedOperationException`` has no class of its own: it is Python's
-``NotImplementedError``.
+``NoSuchElementError``, ``NullPointerError``, ``ExecutionError``, ``UnsupportedOperationError``),
+generated with the rest of the error hierarchy by ``cargo xtask generate-error-codes``.
+``UnsupportedOperationError`` subclasses ``NotImplementedError``, as ``TimeoutError`` subclasses
+``builtins.TimeoutError``.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from .illegal_state_error import IllegalStateError as IllegalStateError
 from .no_such_element_error import NoSuchElementError as NoSuchElementError
 from .null_pointer_error import NullPointerError as NullPointerError
 from .timeout_error import TimeoutError as TimeoutError
+from .unsupported_operation_error import UnsupportedOperationError as UnsupportedOperationError
 __all__ += [
     "ConcurrentModificationError",
     "ExecutionError",
@@ -54,5 +55,6 @@ __all__ += [
     "NoSuchElementError",
     "NullPointerError",
     "TimeoutError",
+    "UnsupportedOperationError",
 ]
 # END GENERATED ERRORS

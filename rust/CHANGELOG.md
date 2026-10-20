@@ -51,7 +51,8 @@ breaking changes.
   `UnsupportedOperationException`), with `Error::local_unsupported_operation`
   and the `is_local_unsupported_operation_error` predicate. In C it is
   `kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION` (-31), built with
-  `kafka_common_Error_local_unsupported_operation`.
+  `kafka_common_Error_local_unsupported_operation`. In Python it is the root
+  class `confluent_kafka.UnsupportedOperationError`, a `NotImplementedError`.
 - **Breaking:** `InlineFuture::new` is no longer public. `InlineFuture` stays
   public as the future the sealed `DynSerializer` / `DynDeserializer` methods
   return; only their blanket implementations build one.
