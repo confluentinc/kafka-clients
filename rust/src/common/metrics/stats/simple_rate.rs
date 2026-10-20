@@ -30,6 +30,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// no inheritance, so we compose a `Rate` and re-implement `measure` using the
 /// overridden `window_size` (Java's `measure` is on `Rate`, calling the virtual
 /// `windowSize`).
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate")]
 pub struct SimpleRate {
     rate: Rate,

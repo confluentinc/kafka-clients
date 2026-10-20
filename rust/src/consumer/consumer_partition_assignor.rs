@@ -79,6 +79,7 @@ pub struct SubscriptionOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`SubscriptionOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds SubscriptionOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SubscriptionOptionsBuilder {

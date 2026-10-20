@@ -118,6 +118,7 @@ pub struct Metrics {
 // a naming change. No `Copy` either: `config` is an `Option<Arc<..>>`.
 #[derive(Clone)]
 #[non_exhaustive]
+#[derive(Debug)]
 // the options of the Metrics.sensor overloads (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SensorOptions<'a> {
@@ -142,6 +143,7 @@ pub struct SensorOptions<'a> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`SensorOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds SensorOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SensorOptionsBuilder<'a> {
@@ -227,6 +229,18 @@ impl<'a> SensorOptionsBuilder<'a> {
         Error::local_illegal_argument(format!(
             "SensorOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
         ))
+    }
+}
+
+impl std::fmt::Debug for Metrics {
+    /// How many sensors and metrics the registry holds, not their state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sensors = self.sensors.lock().expect("sensors mutex poisoned").len();
+        let metrics = self.shared.metrics.lock().expect("metrics mutex poisoned").len();
+        f.debug_struct("Metrics")
+            .field("sensors", &sensors)
+            .field("metrics", &metrics)
+            .finish_non_exhaustive()
     }
 }
 

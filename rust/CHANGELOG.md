@@ -55,6 +55,12 @@ breaking changes.
   `partitioner.class`, `interceptor.classes`, `metric.reporters` and
   `security.providers` are not producer configs here (the config takes no
   class), so they are listed too.
+- `KafkaProducer`, `MockProducer`, `MockProducerOptions`,
+  `MockProducerOptionsBuilder`, `ProducerRecordOptionsBuilder` and
+  `RoundRobinPartitioner` implement `Debug`. `KafkaProducer` prints its client
+  id only, never its configuration; `MockProducer` its flags and how many
+  records it sent; the mock's options whether a partitioner and serializers
+  are set.
 
 ### Consumer
 
@@ -143,6 +149,10 @@ breaking changes.
   `Display` in the format of Java's `toString()`: lists print as `[a, b]`,
   an absent group instance id or rack id as `null`, and the user data, when
   set (even empty), only as its size.
+- `KafkaConsumer`, `MockConsumer`, `ConsumerHandle`, `ConsumerRecordOptions`,
+  `ConsumerRecordOptionsBuilder` and `SubscriptionOptionsBuilder` implement
+  `Debug`. `KafkaConsumer` prints its client id and group id only, never its
+  configuration; `MockConsumer` whether it is closed.
 
 ### Admin client
 
@@ -205,6 +215,11 @@ breaking changes.
   `Display` in the format of Java's `toString()`. An absent value prints as
   `null`, and a set as `[a, b]`. `ListTransactionsOptions` prints its states
   in declaration order and its producer ids in ascending order.
+- `KafkaAdminClient`, `AlterConfigsResult`, `AlterReplicaLogDirsResult`,
+  `DescribeClusterResult`, `DescribeConfigsResult`, `DescribeLogDirsResult`,
+  `DescribeReplicaLogDirsResult`, `ListConfigResourcesResult` and
+  `ConfigEntryOptionsBuilder` implement `Debug`. `KafkaAdminClient` prints its
+  client id only, never its configuration.
 
 ### Common
 
@@ -307,6 +322,11 @@ breaking changes.
   and `WindowedSum` print the `SampledStat` they inherit it from, as in
   Java. `CumulativeCount` prints as `CumulativeSum`, `SimpleRate` as `Rate`,
   and `Meter` prints its rate, total and the two metric names.
+- `Metrics`, `Sensor`, `KafkaMetric`, `NamedMeasurable`, `ClosureMeasurable`,
+  `SensorOptions`, `SensorOptionsBuilder` and the metric stats (`SampledStat`,
+  `Avg`, `Max`, `Min`, `WindowedCount`, `WindowedSum`, `Rate`, `SimpleRate`,
+  `Meter`) implement `Debug`. `Metrics` prints how many sensors and metrics it
+  holds, `Sensor` its name, and `KafkaMetric` what its `Display` prints.
 
 ### C API
 

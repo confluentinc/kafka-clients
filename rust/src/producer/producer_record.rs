@@ -100,6 +100,7 @@ pub struct ProducerRecordOptions<K, V> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ProducerRecordOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds ProducerRecordOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct ProducerRecordOptionsBuilder<K, V> {

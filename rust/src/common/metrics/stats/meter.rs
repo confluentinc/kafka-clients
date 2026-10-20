@@ -24,6 +24,7 @@ use crate::common::metrics::stats::{CumulativeSum, Rate, SampledStat};
 use crate::common::metrics::{CompoundStat, Measurable, MetricConfig, NamedMeasurable, Stat};
 
 /// A compound stat that includes a rate metric and a cumulative total metric.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter")]
 pub struct Meter {
     rate_metric_name: MetricName,

@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that gives the min over its samples.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Min")]
 pub struct Min {
     inner: SampledStat,

@@ -192,6 +192,18 @@ pub struct MockProducer<K, V> {
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
+impl<K, V> std::fmt::Debug for MockProducer<K, V> {
+    /// The mock's flags and how many records it holds, not the records.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().unwrap();
+        f.debug_struct("MockProducer")
+            .field("auto_complete", &inner.auto_complete)
+            .field("closed", &inner.closed)
+            .field("sent", &inner.sent.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The offsets one transaction contributed, grouped by consumer group id.
 ///
 /// Spells Java's `Map<String, Map<TopicPartition, OffsetAndMetadata>>`
@@ -482,6 +494,20 @@ pub struct MockProducerOptions<K, V> {
     pub(crate) value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
+impl<K, V> std::fmt::Debug for MockProducerOptions<K, V> {
+    /// The partitioner and the serializers are trait objects, so only whether
+    /// they are set is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockProducerOptions")
+            .field("cluster", &self.cluster)
+            .field("auto_complete", &self.auto_complete)
+            .field("has_partitioner", &self.partitioner.is_some())
+            .field("has_key_serializer", &self.key_serializer.is_some())
+            .field("has_value_serializer", &self.value_serializer.is_some())
+            .finish()
+    }
+}
+
 /// Fluent builder for [`MockProducerOptions`].
 ///
 /// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
@@ -497,6 +523,20 @@ pub struct MockProducerOptionsBuilder<K, V> {
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
     key_serializer: Option<Box<dyn DynSerializer<K>>>,
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
+}
+
+impl<K, V> std::fmt::Debug for MockProducerOptionsBuilder<K, V> {
+    /// The partitioner and the serializers are trait objects, so only whether
+    /// they are set is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockProducerOptionsBuilder")
+            .field("cluster", &self.cluster)
+            .field("auto_complete", &self.auto_complete)
+            .field("has_partitioner", &self.partitioner.is_some())
+            .field("has_key_serializer", &self.key_serializer.is_some())
+            .field("has_value_serializer", &self.value_serializer.is_some())
+            .finish()
+    }
 }
 
 impl<K, V> Default for MockProducerOptionsBuilder<K, V> {

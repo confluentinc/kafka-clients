@@ -131,6 +131,14 @@ impl Metric for KafkaMetric {
     }
 }
 
+impl std::fmt::Debug for KafkaMetric {
+    /// What [`Display`](std::fmt::Display) renders: the metric name and the
+    /// provider's type, never the provider's state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 impl std::fmt::Display for KafkaMetric {
     /// Returns a human-readable representation of this metric.
     ///

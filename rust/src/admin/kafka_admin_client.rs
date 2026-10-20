@@ -263,6 +263,15 @@ pub struct KafkaAdminClient {
     shared: Arc<Shared>,
 }
 
+impl std::fmt::Debug for KafkaAdminClient {
+    /// The client id only, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaAdminClient")
+            .field("client_id", &self.shared.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl KafkaAdminClient {
     /// `KafkaAdminClient.describeFeatures(DescribeFeaturesOptions)` with its
     /// concrete return type, `InternalDescribeFeaturesResult` (KAFKA-19663),
@@ -7592,7 +7601,7 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
 
-        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        let error = KafkaAdminClient::new(config).expect_err("creation must fail");
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
@@ -7795,9 +7804,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
         let config = AdminClientConfig::new(&props).expect("the config itself parses");
 
-        let error = KafkaAdminClient::new(config)
-            .err()
-            .expect("an unparseable bootstrap.servers entry must fail construction");
+        let error =
+            KafkaAdminClient::new(config).expect_err("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         // Java's replacement is a bare `KafkaException`.

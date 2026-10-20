@@ -25,6 +25,7 @@ use crate::common::TopicPartitionReplica;
 /// The result of the `Admin::describe_replica_log_dirs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult")]
 pub struct DescribeReplicaLogDirsResult {
     futures: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>,

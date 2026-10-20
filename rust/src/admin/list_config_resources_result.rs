@@ -22,6 +22,7 @@ use crate::common::config::ConfigResource;
 /// The result of the `Admin::list_config_resources` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConfigResourcesResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult")]
 pub struct ListConfigResourcesResult {
     future: KafkaFuture<Vec<ConfigResource>>,

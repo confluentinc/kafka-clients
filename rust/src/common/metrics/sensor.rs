@@ -186,6 +186,13 @@ struct SensorInner {
     metrics: indexmap::IndexMap<MetricName, Arc<KafkaMetric>>,
 }
 
+impl std::fmt::Debug for Sensor {
+    /// The sensor's name, its identifier in the registry.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sensor").field("name", &self.name).finish_non_exhaustive()
+    }
+}
+
 impl Sensor {
     /// Create a sensor.
     ///

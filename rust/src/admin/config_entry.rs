@@ -351,6 +351,7 @@ impl std::fmt::Debug for ConfigEntryOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds ConfigEntryOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct ConfigEntryOptionsBuilder {

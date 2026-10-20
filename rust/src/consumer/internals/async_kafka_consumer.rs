@@ -258,6 +258,13 @@ pub struct ConsumerHandle {
     inner: ConsumerHandleInner,
 }
 
+impl std::fmt::Debug for ConsumerHandle {
+    /// A view of a consumer; it has no identifier of its own.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsumerHandle").finish_non_exhaustive()
+    }
+}
+
 /// Shared state captured by a [`ConsumerHandle`] for an
 /// [`AsyncKafkaConsumer`]. Every field is already `Arc`-shared on the
 /// consumer; the handle holds cheap clones.
@@ -1960,6 +1967,20 @@ where
     /// `offset_commit_callback_invoker` and `interceptors` (see
     /// [`AsyncCommitState`]).
     commit_state: Arc<AsyncCommitState>,
+}
+
+impl<K, V> std::fmt::Debug for AsyncKafkaConsumer<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// The identifiers Java's log context prints, `clientId` and `groupId`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncKafkaConsumer")
+            .field("client_id", &self.client_id)
+            .field("group_id", &self.group_id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Tracks the state of the currently-inflight `AsyncPoll` event.
@@ -8493,8 +8514,7 @@ mod tests {
             Box::new(TestStringDeserializer),
             Box::new(TestStringDeserializer),
         )
-        .err()
-        .expect("an unparseable bootstrap address must fail construction");
+        .expect_err("an unparseable bootstrap address must fail construction");
 
         // Java's message, verbatim.
         assert_eq!("Failed to construct kafka consumer", err.message());
@@ -8751,8 +8771,7 @@ mod tests {
             Box::new(TestStringDeserializer),
             Box::new(TestStringDeserializer),
         )
-        .err()
-        .expect("an invalid group.instance.id must fail construction");
+        .expect_err("an invalid group.instance.id must fail construction");
 
         assert_eq!("Failed to construct kafka consumer", err.message());
         let source = std::error::Error::source(&err).expect("the validation failure must be the cause");

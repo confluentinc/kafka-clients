@@ -28,6 +28,7 @@ use crate::common::TopicPartitionReplica;
 /// [`all`](Self::all).
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterReplicaLogDirsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult")]
 pub struct AlterReplicaLogDirsResult {
     futures: HashMap<TopicPartitionReplica, KafkaFuture<()>>,

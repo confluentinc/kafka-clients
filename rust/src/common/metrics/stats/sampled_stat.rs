@@ -386,6 +386,18 @@ impl Sample {
     }
 }
 
+impl std::fmt::Debug for SampledStat {
+    /// The fields Java's `toString()` prints; the stat's kind is a trait object.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().expect("sampled stat mutex poisoned");
+        f.debug_struct("SampledStat")
+            .field("initial_value", &self.initial_value)
+            .field("current", &inner.current)
+            .field("samples", &inner.samples)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Display for SampledStat {
     /// Java's `SampledStat.toString()`, which `Avg`, `Max`, `Min`,
     /// `WindowedCount` and `WindowedSum` inherit: the samples print as Java's

@@ -28,6 +28,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// sample windows. Alternative [`SampledStat`] implementations can be provided,
 /// however, to record the rate of occurrences (e.g. the count of values measured
 /// over the time interval) or other such values.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate")]
 pub struct Rate {
     unit: TimeUnit,

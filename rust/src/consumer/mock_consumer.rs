@@ -142,6 +142,16 @@ pub struct MockConsumer<K, V> {
     not_sync: PhantomData<Cell<()>>,
 }
 
+impl<K, V> std::fmt::Debug for MockConsumer<K, V> {
+    /// Whether the mock is closed; the records and offsets it holds are not
+    /// printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockConsumer")
+            .field("closed", &self.closed())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<K, V> MockConsumer<K, V> {
     /// A mock consumer is instantiated by providing
     /// `ConsumerConfig::AUTO_OFFSET_RESET_CONFIG` value as the input.
