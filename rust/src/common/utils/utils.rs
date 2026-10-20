@@ -23,6 +23,31 @@
 pub struct Utils;
 
 impl Utils {
+    /// Feeds `state` one value that does not depend on the iteration order of
+    /// `items`: the wrapping sum of each item's own hash, as Java's
+    /// `AbstractSet.hashCode()` sums its elements' hashes and
+    /// `AbstractMap.hashCode()` its entries'. A map passes its `(key, value)`
+    /// pairs.
+    ///
+    /// Rust-only (DoD #7): `HashMap`, `HashSet` and `IndexSet` do not implement
+    /// `Hash`, because two equal ones may iterate in different orders, so a
+    /// public type holding one and translating a Java `hashCode()` hashes it
+    /// through this. Each item is hashed with a fresh `DefaultHasher`, whose
+    /// keys are fixed, so equal collections give equal sums.
+    pub(crate) fn hash_unordered<T: std::hash::Hash>(
+        items: impl IntoIterator<Item = T>,
+        state: &mut impl std::hash::Hasher,
+    ) {
+        use std::hash::Hasher as _;
+        let mut sum: u64 = 0;
+        for item in items {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            item.hash(&mut hasher);
+            sum = sum.wrapping_add(hasher.finish());
+        }
+        state.write_u64(sum);
+    }
+
     /// Converts a signed i32 to a non-negative value by clearing the sign bit.
     ///
     /// Translated from `org.apache.kafka.common.utils.Utils.toPositive`.

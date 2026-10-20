@@ -60,14 +60,40 @@ impl Quota {
     }
 }
 
+impl Quota {
+    /// The bound as Java's `Double.doubleToLongBits` reads it: its bits, with
+    /// every `NaN` folded into the canonical one.
+    fn bound_bits(&self) -> u64 {
+        if self.bound.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            self.bound.to_bits()
+        }
+    }
+}
+
+/// Java's `Quota.equals` compares `bound` with the primitive `==`, under which
+/// `NaN` differs from itself and `0.0` equals `-0.0`. A lawful `Eq` must be
+/// reflexive, so the bound is compared as Java's `Double.equals` compares it
+/// instead: every `NaN` is equal, and the two zeros differ. Any other bound
+/// compares as in Java.
 impl PartialEq for Quota {
     fn eq(&self, other: &Self) -> bool {
-        // Mirrors Java: equal if bound and upper match.
-        self.bound == other.bound && self.upper == other.upper
+        self.bound_bits() == other.bound_bits() && self.upper == other.upper
     }
 }
 
 impl Eq for Quota {}
+
+/// Hashes what [`PartialEq`] compares. Java hashes `(int) bound`, which would
+/// put `0.0` and `-0.0`, now unequal, under one hash; the Rust hash only has
+/// to agree with Rust's equality, so it takes the bits.
+impl std::hash::Hash for Quota {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bound_bits().hash(state);
+        self.upper.hash(state);
+    }
+}
 
 impl std::fmt::Display for Quota {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,6 +123,20 @@ mod tests {
             quota1, quota3,
             "Quota with same bound but different upper/lower should not be equal"
         );
+    }
+
+    // New test, no Java original: the NaN and signed-zero cases where a lawful
+    // `Eq` cannot follow Java's primitive `==` (see `PartialEq for Quota`).
+    #[test]
+    fn test_quota_equality_reads_the_bound_as_double_equals() {
+        use std::hash::BuildHasher;
+        let state = std::collections::hash_map::RandomState::new();
+        let nan = Quota::upper_bound(f64::NAN);
+        let other_nan = Quota::upper_bound(f64::from_bits(f64::NAN.to_bits() ^ 1));
+        assert_eq!(nan, Quota::upper_bound(f64::NAN));
+        assert_eq!(nan, other_nan);
+        assert_eq!(state.hash_one(nan), state.hash_one(other_nan));
+        assert_ne!(Quota::upper_bound(0.0), Quota::upper_bound(-0.0));
     }
 
     #[test]

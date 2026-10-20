@@ -22,7 +22,7 @@
 /// When [`broker_id`](Self::broker_id) is set, the request is sent directly to
 /// that broker (via `StaticBrokerStrategy`) rather than looking up each
 /// partition's leader.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions")]
 pub struct DescribeProducersOptions {
     timeout_ms: Option<i32>,

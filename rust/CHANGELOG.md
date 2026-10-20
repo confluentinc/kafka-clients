@@ -153,6 +153,16 @@ breaking changes.
   `ssl.*` / `sasl.*` keys when `security.protocol` does not use them.
 - `socket.connection.setup.timeout.max.ms` is honoured; the admin client used
   `socket.connection.setup.timeout.ms` for both bounds.
+- The admin types whose Java class overrides `hashCode()` implement `Hash`, so
+  they can key a `HashMap` or fill a `HashSet` as in Java:
+  `AbortTransactionSpec`, `AlterConfigOp`, `ClassicGroupDescription`, `Config`,
+  `ConfigEntry`, `ConfigSynonym`, `ConsumerGroupDescription`, `FeatureMetadata`,
+  `ListConsumerGroupOffsetsSpec`, `MemberAssignment`, `MemberDescription`,
+  `NewTopic`, `DescribeProducersOptions`, `ListTopicsOptions`,
+  `ListTransactionsOptions`, `TopicDescription` (without its topic id, as its
+  equality), `TransactionDescription` and `UserScramCredentialsDescription`.
+  A set or map field hashes independently of its order, as Java's
+  `Set.hashCode()` and `Map.hashCode()` do.
 
 ### Common
 
@@ -220,6 +230,16 @@ breaking changes.
   to change. Code that held a `Box<dyn DynSerializer<K>>` passes the serializer
   itself to the constructor; code that implemented `Serializer` or
   `Deserializer` is unaffected.
+- `TopicPartitionInfo`, `MetricNameTemplate`, `ClientQuotaFilter`, `Quota`,
+  `SslClientAuth`, `RecordingLevel` and `DeserializationErrorOrigin` implement
+  `Hash`, as their Java classes override `hashCode()`.
+- `ClientQuotaAlteration`'s `Op` implements `Eq` and `Hash`. Its value is
+  compared as Java's `Double.equals` compares it: every `NaN` equals every
+  other, and `0.0` differs from `-0.0`.
+- `Quota` compares its bound the same way. Java compares it with the
+  primitive `==`, under which `NaN` differs from itself, which an `Eq` cannot
+  express. A `NaN` quota now equals itself, and an upper bound of `0.0` no
+  longer equals one of `-0.0`; every other bound compares as before.
 
 ### C API
 

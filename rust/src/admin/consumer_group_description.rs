@@ -29,7 +29,7 @@ use crate::common::{GroupState, GroupType, Node};
 /// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
 /// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
 /// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct ConsumerGroupDescription {
     group_id: String,

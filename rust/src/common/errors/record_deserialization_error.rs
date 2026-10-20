@@ -25,7 +25,7 @@ use crate::common::record::TimestampType;
 ///
 /// Corresponds to Java's nested
 /// `RecordDeserializationException.DeserializationExceptionOrigin`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException$DeserializationExceptionOrigin")]
 pub enum DeserializationErrorOrigin {

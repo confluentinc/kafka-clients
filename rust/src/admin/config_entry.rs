@@ -182,7 +182,7 @@ impl std::fmt::Display for ConfigSource {
 /// A configuration synonym of a [`ConfigEntry`].
 ///
 /// Corresponds to `ConfigEntry.ConfigSynonym`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym")]
 pub struct ConfigSynonym {
     name: String,
@@ -244,7 +244,7 @@ const REDACTED: &str = "Redacted";
 ///
 /// `Debug` renders what `Display` renders: the value of a sensitive entry is
 /// shown as `Redacted`, as Java's `toString()` shows it.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry")]
 pub struct ConfigEntry {
     name: String,

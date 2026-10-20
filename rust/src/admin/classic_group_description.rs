@@ -25,7 +25,7 @@ use crate::common::{ClassicGroupState, Node};
 /// A detailed description of a single classic group in the cluster.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ClassicGroupDescription`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription")]
 pub struct ClassicGroupDescription {
     group_id: String,

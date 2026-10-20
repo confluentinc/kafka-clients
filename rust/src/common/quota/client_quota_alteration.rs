@@ -21,11 +21,41 @@ use crate::common::quota::ClientQuotaEntity;
 /// A single quota alteration operation.
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaAlteration.Op`.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Equality and hashing follow Java's `Objects.equals(value, that.value)` and
+/// `Objects.hash(key, value)`, which compare and hash a `Double` through
+/// `Double.doubleToLongBits`: every `NaN` is equal to every other, and `0.0`
+/// differs from `-0.0`.
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op")]
 pub struct Op {
     key: String,
     value: Option<f64>,
+}
+
+/// Java's `Double.doubleToLongBits`: the bits of `value`, with every `NaN`
+/// folded into the canonical one.
+fn double_to_long_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+impl PartialEq for Op {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.value.map(double_to_long_bits) == other.value.map(double_to_long_bits)
+    }
+}
+
+impl Eq for Op {}
+
+impl std::hash::Hash for Op {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.value.map(double_to_long_bits).hash(state);
+    }
 }
 
 impl Op {
@@ -136,6 +166,21 @@ mod tests {
     fn op_equality() {
         assert_eq!(Op::new("k", Some(1.0)), Op::new("k", Some(1.0)));
         assert_ne!(Op::new("k", Some(1.0)), Op::new("k", None));
+    }
+
+    // New test, no Java original: pins `Double.equals` on the value, under
+    // which every NaN is equal and the two zeros differ, and hashing agrees.
+    #[test]
+    fn op_compares_its_value_as_java_double_equals() {
+        use std::hash::BuildHasher;
+        let other_nan = f64::from_bits(f64::NAN.to_bits() ^ 1);
+        assert!(other_nan.is_nan());
+        let a = Op::new("k", Some(f64::NAN));
+        let b = Op::new("k", Some(other_nan));
+        assert_eq!(a, b);
+        let state = std::collections::hash_map::RandomState::new();
+        assert_eq!(state.hash_one(&a), state.hash_one(&b));
+        assert_ne!(Op::new("k", Some(0.0)), Op::new("k", Some(-0.0)));
     }
 
     // New test, no Java original.

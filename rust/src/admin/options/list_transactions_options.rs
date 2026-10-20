@@ -33,6 +33,18 @@ pub struct ListTransactionsOptions {
     filtered_transactional_id_pattern: Option<String>,
 }
 
+impl std::hash::Hash for ListTransactionsOptions {
+    /// Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of its
+    /// fields; the two filter sets hash independently of their order.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.timeout_ms.hash(state);
+        crate::common::utils::Utils::hash_unordered(&self.filtered_states, state);
+        crate::common::utils::Utils::hash_unordered(&self.filtered_producer_ids, state);
+        self.filtered_duration_ms.hash(state);
+        self.filtered_transactional_id_pattern.hash(state);
+    }
+}
+
 impl ListTransactionsOptions {
     /// Creates default options: no filters, and `filtered_duration_ms == -1`
     /// (no duration filtering), matching Java's defaults.
