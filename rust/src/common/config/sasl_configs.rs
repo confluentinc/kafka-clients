@@ -27,6 +27,8 @@
 //! - `SASL_CLIENT_CALLBACK_HANDLER_CLASS` — No pluggable callback handlers
 //! - `SASL_LOGIN_CLASS` — No pluggable login implementations
 
+use crate::common::Error;
+use crate::common::config::abstract_config::ValuesReader;
 use crate::common::config::config_def::{
     CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, Range, Type, ValidList,
 };
@@ -121,6 +123,27 @@ impl Default for SaslConfigs {
 }
 
 impl SaslConfigs {
+    /// The `sasl.*` settings of a configuration parsed with
+    /// [`Self::add_client_sasl_support`]'s definitions: `sasl.mechanism` and
+    /// `sasl.jaas.config`, the two the client's PLAIN authenticator reads. An
+    /// empty `sasl.jaas.config` counts as unset.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalState`] if a key's definition is missing or of
+    /// another type, a defect of the definition rather than of the input.
+    pub(crate) fn from_values(values: &mut ValuesReader<'_>) -> Result<SaslConfigs, Error> {
+        Ok(SaslConfigs {
+            mechanism: values.string(SaslConfigs::SASL_MECHANISM)?.to_string(),
+            jaas_config: values
+                .password_or_null(SaslConfigs::SASL_JAAS_CONFIG)?
+                .filter(|jaas| !jaas.value().is_empty())
+                .cloned(),
+            username: None,
+            password: None,
+        })
+    }
+
     /// Parses an option value from a JAAS configuration string.
     ///
     /// JAAS config format:

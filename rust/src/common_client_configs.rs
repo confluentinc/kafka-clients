@@ -162,13 +162,178 @@ impl CommonClientConfigs {
     pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the client configs are moved onto AbstractConfig by the following commits"
-    )
-)]
+/// The keys, defaults and documentation the client config definitions share
+/// (`AdminClientConfig`, and the producer and consumer configs as they move
+/// onto `ConfigDef`).
+impl CommonClientConfigs {
+    /// Config key: `send.buffer.bytes`
+    pub const SEND_BUFFER_CONFIG: &str = "send.buffer.bytes";
+    /// The lowest `send.buffer.bytes`: `-1`, the OS default.
+    pub const SEND_BUFFER_LOWER_BOUND: i32 = -1;
+    /// Config key: `receive.buffer.bytes`
+    pub const RECEIVE_BUFFER_CONFIG: &str = "receive.buffer.bytes";
+    /// The lowest `receive.buffer.bytes`: `-1`, the OS default.
+    pub const RECEIVE_BUFFER_LOWER_BOUND: i32 = -1;
+    /// The default `retry.backoff.ms`.
+    pub const DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
+    /// The default `retry.backoff.max.ms`.
+    pub const DEFAULT_RETRY_BACKOFF_MAX_MS: i64 = 1000;
+    /// Config key: `enable.metrics.push`
+    pub const ENABLE_METRICS_PUSH_CONFIG: &str = "enable.metrics.push";
+    /// Config key: `metrics.sample.window.ms`
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &str = "metrics.sample.window.ms";
+    /// Config key: `metrics.num.samples`
+    pub const METRICS_NUM_SAMPLES_CONFIG: &str = "metrics.num.samples";
+    /// Config key: `metrics.recording.level`
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &str = "metrics.recording.level";
+    /// The default `socket.connection.setup.timeout.ms`.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: i64 = 10 * 1000;
+    /// The default `socket.connection.setup.timeout.max.ms`.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: i64 = 30 * 1000;
+    /// The default `metadata.recovery.strategy`: Java's
+    /// `MetadataRecoveryStrategy.REBOOTSTRAP.name`.
+    pub const DEFAULT_METADATA_RECOVERY_STRATEGY: &str = "rebootstrap";
+    /// The default `metadata.recovery.rebootstrap.trigger.ms`.
+    pub const DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS: i64 = 300 * 1000;
+
+    /// Documentation of the `BOOTSTRAP_SERVERS` key: Java's `CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`.
+    pub const BOOTSTRAP_SERVERS_DOC: &str = "A list of host/port pairs used to establish the initial \
+        connection to the Kafka cluster. Clients use this list to bootstrap and discover the full set of \
+        Kafka brokers. While the order of servers in the list does not matter, we recommend including more \
+        than one server to ensure resilience if any servers are down. This list does not need to contain the \
+        entire set of brokers, as Kafka clients automatically manage and update connections to the cluster \
+        efficiently. This list must be in the form <code>host1:port1,host2:port2,...</code>.";
+    /// Documentation of the `CLIENT_DNS_LOOKUP` key: Java's `CommonClientConfigs.CLIENT_DNS_LOOKUP_DOC`.
+    pub const CLIENT_DNS_LOOKUP_DOC: &str = "Controls how the client uses DNS lookups. If set to \
+        <code>use_all_dns_ips</code>, connect to each returned IP address in sequence until a successful \
+        connection is established. After a disconnection, the next IP is used. Once all IPs have been used \
+        once, the client resolves the IP(s) from the hostname again (both the JVM and the OS cache DNS name \
+        lookups, however). If set to <code>resolve_canonical_bootstrap_servers_only</code>, resolve each \
+        bootstrap address into a list of canonical names. After the bootstrap phase, this behaves the same as \
+        <code>use_all_dns_ips</code>.";
+    /// Documentation of the `BOOTSTRAP_RESOLVE_TIMEOUT_MS` key: Java's `CommonClientConfigs.BOOTSTRAP_RESOLVE_TIMEOUT_MS_DOC`.
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_DOC: &str = "Selects the client's bootstrap DNS resolution mode. \
+        When set to <code>0</code> (the default), DNS is resolved synchronously during client construction; \
+        any failure surfaces as <code>ConfigException</code> and no client instance is created. When set to a \
+        positive value, DNS is resolved asynchronously and this is the maximum amount of time the client will \
+        spend retrying resolution before failing with an unrecoverable \
+        <code>BootstrapResolutionException</code> from subsequent API calls (the client must then be closed \
+        and re-created after fixing the underlying DNS or <code>bootstrap.servers</code> configuration \
+        issue). Setting this config to a positive value enables an evolving feature whose compatibility may \
+        be broken in a minor release.";
+    /// Documentation of the `METADATA_MAX_AGE` key: Java's `CommonClientConfigs.METADATA_MAX_AGE_DOC`.
+    pub const METADATA_MAX_AGE_DOC: &str = "The period of time in milliseconds after which we force a refresh \
+        of metadata even if we haven't seen any partition leadership changes to proactively discover any new \
+        brokers or partitions.";
+    /// Documentation of the `SEND_BUFFER` key: Java's `CommonClientConfigs.SEND_BUFFER_DOC`.
+    pub const SEND_BUFFER_DOC: &str = "The size of the TCP send buffer (SO_SNDBUF) to use when sending data. \
+        If the value is -1, the OS default will be used.";
+    /// Documentation of the `RECEIVE_BUFFER` key: Java's `CommonClientConfigs.RECEIVE_BUFFER_DOC`.
+    pub const RECEIVE_BUFFER_DOC: &str = "The size of the TCP receive buffer (SO_RCVBUF) to use when reading \
+        data. If the value is -1, the OS default will be used.";
+    /// Documentation of the `CLIENT_ID` key: Java's `CommonClientConfigs.CLIENT_ID_DOC`.
+    pub const CLIENT_ID_DOC: &str = "An id string to pass to the server when making requests. The purpose of \
+        this is to be able to track the source of requests beyond just ip/port by allowing a logical \
+        application name to be included in server-side request logging.";
+    /// Documentation of the `RECONNECT_BACKOFF_MS` key: Java's `CommonClientConfigs.RECONNECT_BACKOFF_MS_DOC`.
+    pub const RECONNECT_BACKOFF_MS_DOC: &str = "The base amount of time to wait before attempting to \
+        reconnect to a given host. This avoids repeatedly connecting to a host in a tight loop. This backoff \
+        applies to all connection attempts by the client to a broker. This value is the initial backoff value \
+        and will increase exponentially for each consecutive connection failure, up to the \
+        <code>reconnect.backoff.max.ms</code> value.";
+    /// Documentation of the `RECONNECT_BACKOFF_MAX_MS` key: Java's `CommonClientConfigs.RECONNECT_BACKOFF_MAX_MS_DOC`.
+    pub const RECONNECT_BACKOFF_MAX_MS_DOC: &str = "The maximum amount of time in milliseconds to wait when \
+        reconnecting to a broker that has repeatedly failed to connect. If provided, the backoff per host \
+        will increase exponentially for each consecutive connection failure, up to this maximum. After \
+        calculating the backoff increase, 20% random jitter is added to avoid connection storms.";
+    /// Documentation of the `RETRIES` key: Java's `CommonClientConfigs.RETRIES_DOC`.
+    pub const RETRIES_DOC: &str = "It is recommended to set the value to either <code>MAX_VALUE</code> or \
+        zero, and use corresponding timeout parameters to control how long a client should retry a request. \
+        Setting a value greater than zero will cause the client to resend any request that fails with a \
+        potentially transient error. Setting a value of zero will lead to transient errors not being retried, \
+        and they will be propagated to the application to be handled.";
+    /// Documentation of the `RETRY_BACKOFF_MS` key: Java's `CommonClientConfigs.RETRY_BACKOFF_MS_DOC`.
+    pub const RETRY_BACKOFF_MS_DOC: &str = "The amount of time to wait before attempting to retry a failed \
+        request to a given topic partition. This avoids repeatedly sending requests in a tight loop under \
+        some failure scenarios. This value is the initial backoff value and will increase exponentially for \
+        each failed request, up to the <code>retry.backoff.max.ms</code> value.";
+    /// Documentation of the `RETRY_BACKOFF_MAX_MS` key: Java's `CommonClientConfigs.RETRY_BACKOFF_MAX_MS_DOC`.
+    pub const RETRY_BACKOFF_MAX_MS_DOC: &str = "The maximum amount of time in milliseconds to wait when \
+        retrying a request to the broker that has repeatedly failed. If provided, the backoff per client will \
+        increase exponentially for each failed request, up to this maximum. To prevent all clients from being \
+        synchronized upon retry, a randomized jitter with a factor of 0.2 will be applied to the backoff, \
+        resulting in the backoff falling within a range between 20% below and 20% above the computed value. \
+        If <code>retry.backoff.ms</code> is set to be higher than <code>retry.backoff.max.ms</code>, then \
+        <code>retry.backoff.max.ms</code> will be used as a constant backoff from the beginning without any \
+        exponential increase";
+    /// Documentation of the `ENABLE_METRICS_PUSH` key: Java's `CommonClientConfigs.ENABLE_METRICS_PUSH_DOC`.
+    pub const ENABLE_METRICS_PUSH_DOC: &str = "Whether to enable pushing of client metrics to the cluster, if \
+        the cluster has a client metrics subscription which matches this client.";
+    /// Documentation of the `METRICS_SAMPLE_WINDOW_MS` key: Java's `CommonClientConfigs.METRICS_SAMPLE_WINDOW_MS_DOC`.
+    pub const METRICS_SAMPLE_WINDOW_MS_DOC: &str = "The window of time a metrics sample is computed over.";
+    /// Documentation of the `METRICS_NUM_SAMPLES` key: Java's `CommonClientConfigs.METRICS_NUM_SAMPLES_DOC`.
+    pub const METRICS_NUM_SAMPLES_DOC: &str = "The number of samples maintained to compute metrics.";
+    /// Documentation of the `METRICS_RECORDING_LEVEL` key: Java's `CommonClientConfigs.METRICS_RECORDING_LEVEL_DOC`.
+    pub const METRICS_RECORDING_LEVEL_DOC: &str = "The highest recording level for metrics. It has three \
+        levels for recording metrics - info, debug, and trace.\n \nINFO level records only essential metrics \
+        necessary for monitoring system performance and health. It collects vital data without gathering too \
+        much detail, making it suitable for production environments where minimal overhead is \
+        desired.\n\nDEBUG level records most metrics, providing more detailed information about the system's \
+        operation. It's useful for development and testing environments where you need deeper insights to \
+        debug and fine-tune the application.\n\nTRACE level records all possible metrics, capturing every \
+        detail about the system's performance and operation. It's best for controlled environments where \
+        in-depth analysis is required, though it can introduce significant overhead.";
+    /// Documentation of the `SECURITY_PROTOCOL` key: Java's `CommonClientConfigs.SECURITY_PROTOCOL_DOC`.
+    pub const SECURITY_PROTOCOL_DOC: &str = "Protocol used to communicate with brokers.";
+    /// Documentation of the `SOCKET_CONNECTION_SETUP_TIMEOUT_MS` key: Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC`.
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC: &str = "The amount of time the client will wait for the \
+        socket connection to be established. If the connection is not built before the timeout elapses, \
+        clients will close the socket channel. This value is the initial backoff value and will increase \
+        exponentially for each consecutive connection failure, up to the \
+        <code>socket.connection.setup.timeout.max.ms</code> value.";
+    /// Documentation of the `SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS` key: Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC`.
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC: &str = "The maximum amount of time the client will \
+        wait for the socket connection to be established. The connection setup timeout will increase \
+        exponentially for each consecutive connection failure up to this maximum. To avoid connection storms, \
+        a randomization factor of 0.2 will be applied to the timeout resulting in a random range between 20% \
+        below and 20% above the computed value.";
+    /// Documentation of the `CONNECTIONS_MAX_IDLE_MS` key: Java's `CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_DOC`.
+    pub const CONNECTIONS_MAX_IDLE_MS_DOC: &str = "Close idle connections after the number of milliseconds \
+        specified by this config.";
+    /// Documentation of the `REQUEST_TIMEOUT_MS` key: Java's `CommonClientConfigs.REQUEST_TIMEOUT_MS_DOC`.
+    pub const REQUEST_TIMEOUT_MS_DOC: &str = "The configuration controls the maximum amount of time the \
+        client will wait for the response of a request. If the response is not received before the timeout \
+        elapses the client will resend the request if necessary or fail the request if retries are exhausted.";
+    /// Documentation of the `DEFAULT_API_TIMEOUT_MS` key: Java's `CommonClientConfigs.DEFAULT_API_TIMEOUT_MS_DOC`.
+    pub const DEFAULT_API_TIMEOUT_MS_DOC: &str = "Specifies the timeout (in milliseconds) for client APIs. \
+        This configuration is used as the default timeout for all client operations that do not specify a \
+        <code>timeout</code> parameter.";
+    /// Documentation of the `METADATA_RECOVERY_STRATEGY` key: Java's `CommonClientConfigs.METADATA_RECOVERY_STRATEGY_DOC`.
+    pub const METADATA_RECOVERY_STRATEGY_DOC: &str = "Controls how the client recovers when none of the \
+        brokers known to it is available. If set to <code>none</code>, the client fails. If set to \
+        <code>rebootstrap</code>, the client repeats the bootstrap process using \
+        <code>bootstrap.servers</code>. Rebootstrapping is useful when a client communicates with brokers so \
+        infrequently that the set of brokers may change entirely before the client refreshes metadata. \
+        Metadata recovery is triggered when all last-known brokers appear unavailable simultaneously. Brokers \
+        appear unavailable when disconnected and no current retry attempt is in-progress. Consider increasing \
+        <code>reconnect.backoff.ms</code> and <code>reconnect.backoff.max.ms</code> and decreasing \
+        <code>socket.connection.setup.timeout.ms</code> and \
+        <code>socket.connection.setup.timeout.max.ms</code> for the client. Rebootstrap is also triggered if \
+        connection cannot be established to any of the brokers for \
+        <code>metadata.recovery.rebootstrap.trigger.ms</code> milliseconds or if server requests rebootstrap.";
+    /// Documentation of the `METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS` key: Java's `CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC`.
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC: &str = "If a client configured to rebootstrap \
+        using <code>metadata.recovery.strategy=rebootstrap</code> is unable to obtain metadata from any of \
+        the brokers in the last known metadata for this interval, client repeats the bootstrap process using \
+        <code>bootstrap.servers</code> configuration.";
+    /// Documentation of the `METADATA_CLUSTER_CHECK_ENABLE` key: Java's `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_DOC`.
+    pub const METADATA_CLUSTER_CHECK_ENABLE_DOC: &str = "Whether the client should send cluster and node \
+        information when connecting to a broker to enable it to check for a misrouted connection. This \
+        configuration is ignored if rebootstrapping is disabled by setting the configuration \
+        <code>metadata.recovery.strategy=none</code>. If the client is connecting to a broker older than \
+        Apache Kafka 4.4, no checking is performed and this configuration has no effect.";
+}
+
 impl CommonClientConfigs {
     /// Config key: `retry.backoff.ms`
     pub const RETRY_BACKOFF_MS_CONFIG: &str = "retry.backoff.ms";

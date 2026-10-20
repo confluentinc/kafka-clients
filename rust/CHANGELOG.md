@@ -54,6 +54,34 @@ breaking changes.
   have no counterpart here). Setting either now logs the unknown-key warning,
   and `get_string` on them returns a `ConfigError`.
 
+### Admin client
+
+- **Breaking:** `AdminClientConfig::new` parses and validates every key with
+  Java's `ConfigDef` (`AdminClientConfig.java`), so values Java rejects now
+  fail with Java's `ConfigError` message, `Invalid value <v> for configuration
+  <key>: <reason>`: a negative `metadata.max.age.ms`, `reconnect.backoff.ms`,
+  `reconnect.backoff.max.ms`, `retry.backoff.ms`, `retry.backoff.max.ms`,
+  `request.timeout.ms`, `retries`, `default.api.timeout.ms`,
+  `metrics.sample.window.ms` or `metadata.recovery.rebootstrap.trigger.ms`;
+  `send.buffer.bytes` / `receive.buffer.bytes` below `-1`;
+  `metrics.num.samples` below `1`; and a `metrics.recording.level` or
+  `metadata.recovery.strategy` outside Java's values.
+- `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
+  `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
+  `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
+  `documentation_of`, `unused`, `ignore`, `log_unused`, and the static
+  `config_names`. It is `Clone`, and its `PartialEq` / `Hash` compare the
+  properties it was built from, as Java's `equals` / `hashCode` do.
+- The admin client logs its configuration values at INFO when it is built, as
+  Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
+  did not use: `These configurations '[a, b]' were supplied but are not used
+  yet.` It used to log neither. The line also lists keys Java reads and this
+  client does not yet (`send.buffer.bytes`, `receive.buffer.bytes`, the
+  `metrics.*` keys, `enable.metrics.push`, `metadata.recovery.*`), and the
+  `ssl.*` / `sasl.*` keys when `security.protocol` does not use them.
+- `socket.connection.setup.timeout.max.ms` is honoured; the admin client used
+  `socket.connection.setup.timeout.ms` for both bounds.
+
 ### Common
 
 - **Breaking:** `ProducerConfig`, `ConsumerConfig` and `AdminClientConfig` no
@@ -144,6 +172,13 @@ breaking changes.
   gains a leading `int8_t present` argument.
 - `kafka_producer_Producer_send_with_callback` documents that the callback
   handle is consumed by the call.
+- `kafka_admin_AdminClientConfig_t` answers `AbstractConfig`'s getters:
+  `kafka_admin_AdminClientConfig_get_short`, `_get_int`, `_get_long`,
+  `_get_double` and `_get_boolean` return `1` with the value in `*out_value`
+  and `0` for Java's `null`; `_get_string` and `_documentation_of` return a
+  string borrowed from the handle; `_get_list`, `_unused` and `_config_names`
+  return an owned `kafka_List_t`; plus `_ignore` and `_log_unused`. A client
+  created from the handle keeps its own record of the keys it used.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

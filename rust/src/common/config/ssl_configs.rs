@@ -30,6 +30,7 @@
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
 
 use crate::common::Error;
+use crate::common::config::abstract_config::ValuesReader;
 use crate::common::config::config_def::{ConfigDef, DefaultValue, Importance, Type, ValidList};
 use crate::common::config::types::Password;
 
@@ -223,6 +224,52 @@ impl Default for SslConfigs {
 }
 
 impl SslConfigs {
+    /// The `ssl.*` settings of a configuration parsed with
+    /// [`Self::add_client_ssl_support`]'s definitions, the keys Java's
+    /// `SslFactory` reads through `DefaultSslEngineFactory.configure`.
+    ///
+    /// `ssl.cipher.suites` is read but not modelled: the TLS provider picks
+    /// the suites, so a non-empty list is logged and ignored. An empty list is
+    /// Java's default (`List.of()`, the provider's defaults).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalState`] if a key's definition is missing or of
+    /// another type, a defect of the definition rather than of the input.
+    pub(crate) fn from_values(values: &mut ValuesReader<'_>) -> Result<SslConfigs, Error> {
+        let ssl = SslConfigs {
+            truststore_location: values
+                .string_or_null(SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG)?
+                .map(str::to_string),
+            truststore_password: values.password_or_null(SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG)?.cloned(),
+            truststore_certificates: values
+                .password_or_null(SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG)?
+                .cloned(),
+            truststore_type: values.string(SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG)?.to_string(),
+            keystore_location: values
+                .string_or_null(SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG)?
+                .map(str::to_string),
+            keystore_password: values.password_or_null(SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG)?.cloned(),
+            keystore_key: values.password_or_null(SslConfigs::SSL_KEYSTORE_KEY_CONFIG)?.cloned(),
+            keystore_certificate_chain: values
+                .password_or_null(SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG)?
+                .cloned(),
+            keystore_type: values.string(SslConfigs::SSL_KEYSTORE_TYPE_CONFIG)?.to_string(),
+            key_password: values.password_or_null(SslConfigs::SSL_KEY_PASSWORD_CONFIG)?.cloned(),
+            endpoint_identification_algorithm: values
+                .string(SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG)?
+                .to_string(),
+            enabled_protocols: values.list(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG)?.to_vec(),
+        };
+        if !values.list(SslConfigs::SSL_CIPHER_SUITES_CONFIG)?.is_empty() {
+            log::warn!(
+                "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG
+            );
+        }
+        Ok(ssl)
+    }
+
     /// Applies a single `ssl.*` configuration key/value pair to `ssl`.
     ///
     /// Shared by [`crate::producer::ProducerConfig`] and

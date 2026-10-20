@@ -411,6 +411,10 @@ impl KafkaAdminClient {
     }
 
     fn new_inner(config: AdminClientConfig) -> Result<Self, Error> {
+        // `Admin.create` builds the configuration with `doLog = true`
+        // (`Admin.java:136`), which logs every value; a Rust caller builds the
+        // `AdminClientConfig` itself, so the client logs them here.
+        config.log_values();
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
@@ -474,7 +478,7 @@ impl KafkaAdminClient {
             USE_DEFAULT_BUFFER_SIZE,
             config.request_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
+            config.socket_connection_setup_timeout_max_ms(),
             true, // discover_broker_versions
             api_versions,
             DefaultHostResolver::new(),
@@ -499,6 +503,10 @@ impl KafkaAdminClient {
 
         crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
+        // Java's constructor reads its settings through the config's getters,
+        // then logs what it did not read (`KafkaAdminClient.java:702`).
+        config.mark_read_keys_used();
+        config.log_unused();
         admin.spawn(runnable);
         Ok(admin)
     }

@@ -191,11 +191,7 @@ impl AbstractConfig {
     /// a `SHORT`, where Java's cast throws a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getShort")]
     pub(crate) fn get_short(&self, key: &str) -> Result<Option<i16>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Short(v)) => Ok(Some(*v)),
-            Some(other) => Err(wrong_type(key, other, Type::Short)),
-        }
+        as_short(key, self.get(key)?)
     }
 
     /// Java's `getInt(key)`.
@@ -205,11 +201,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for an `INT`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getInt")]
     pub(crate) fn get_int(&self, key: &str) -> Result<Option<i32>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Int(v)) => Ok(Some(*v)),
-            Some(other) => Err(wrong_type(key, other, Type::Int)),
-        }
+        as_int(key, self.get(key)?)
     }
 
     /// Java's `getLong(key)`.
@@ -219,11 +211,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for a `LONG`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getLong")]
     pub(crate) fn get_long(&self, key: &str) -> Result<Option<i64>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Long(v)) => Ok(Some(*v)),
-            Some(other) => Err(wrong_type(key, other, Type::Long)),
-        }
+        as_long(key, self.get(key)?)
     }
 
     /// Java's `getDouble(key)`.
@@ -233,11 +221,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for a `DOUBLE`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getDouble")]
     pub(crate) fn get_double(&self, key: &str) -> Result<Option<f64>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Double(v)) => Ok(Some(*v)),
-            Some(other) => Err(wrong_type(key, other, Type::Double)),
-        }
+        as_double(key, self.get(key)?)
     }
 
     /// Java's `getList(key)`, borrowed from the parsed values.
@@ -247,11 +231,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for a `LIST`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getList")]
     pub(crate) fn get_list(&self, key: &str) -> Result<Option<&[String]>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::List(v)) => Ok(Some(v)),
-            Some(other) => Err(wrong_type(key, other, Type::List)),
-        }
+        as_list(key, self.get(key)?)
     }
 
     /// Java's `getBoolean(key)`.
@@ -261,11 +241,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for a `BOOLEAN`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getBoolean")]
     pub(crate) fn get_boolean(&self, key: &str) -> Result<Option<bool>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Boolean(v)) => Ok(Some(*v)),
-            Some(other) => Err(wrong_type(key, other, Type::Boolean)),
-        }
+        as_boolean(key, self.get(key)?)
     }
 
     /// Java's `getString(key)`: the value trimmed as Java's `String.trim()`
@@ -278,11 +254,7 @@ impl AbstractConfig {
     /// `null` succeeds.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub(crate) fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::String(v)) => Ok(Some(ConfigDef::trim(v))),
-            Some(other) => Err(wrong_type(key, other, Type::String)),
-        }
+        as_string(key, self.get(key)?)
     }
 
     /// Java's `getPassword(key)`.
@@ -292,11 +264,7 @@ impl AbstractConfig {
     /// As [`Self::get_short`], for a `PASSWORD`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getPassword")]
     pub(crate) fn get_password(&self, key: &str) -> Result<Option<&Password>, Error> {
-        match self.get(key)? {
-            None => Ok(None),
-            Some(ParsedValue::Password(v)) => Ok(Some(v)),
-            Some(other) => Err(wrong_type(key, other, Type::Password)),
-        }
+        as_password(key, self.get(key)?)
     }
 
     /// Java's `documentationOf(key)`: the documentation of `key`, `None` when
@@ -345,8 +313,9 @@ impl AbstractConfig {
 
     /// Java's private `logAll()`: logs every parsed value at INFO, sorted by
     /// key, `class_name` being Java's `getClass().getSimpleName()`. A
-    /// `PASSWORD` prints as `[hidden]`.
-    fn log_all(&self, class_name: &str) {
+    /// `PASSWORD` prints as `[hidden]`. A client calls it when it is built,
+    /// where Java's client builds its configuration with `doLog = true`.
+    pub(crate) fn log_all(&self, class_name: &str) {
         log::info!("{}", self.all_message(class_name));
     }
 
@@ -376,6 +345,176 @@ fn wrong_type(key: &str, value: &ParsedValue, expected: Type) -> Error {
         "Configuration '{key}' is of type {}, not {expected}",
         value.config_type()
     ))
+}
+
+/// The `SHORT` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_short(key: &str, value: Option<&ParsedValue>) -> Result<Option<i16>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Short(v)) => Ok(Some(*v)),
+        Some(other) => Err(wrong_type(key, other, Type::Short)),
+    }
+}
+
+/// The `INT` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_int(key: &str, value: Option<&ParsedValue>) -> Result<Option<i32>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Int(v)) => Ok(Some(*v)),
+        Some(other) => Err(wrong_type(key, other, Type::Int)),
+    }
+}
+
+/// The `LONG` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_long(key: &str, value: Option<&ParsedValue>) -> Result<Option<i64>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Long(v)) => Ok(Some(*v)),
+        Some(other) => Err(wrong_type(key, other, Type::Long)),
+    }
+}
+
+/// The `DOUBLE` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_double(key: &str, value: Option<&ParsedValue>) -> Result<Option<f64>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Double(v)) => Ok(Some(*v)),
+        Some(other) => Err(wrong_type(key, other, Type::Double)),
+    }
+}
+
+/// The `LIST` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_list<'a>(key: &str, value: Option<&'a ParsedValue>) -> Result<Option<&'a [String]>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::List(v)) => Ok(Some(v)),
+        Some(other) => Err(wrong_type(key, other, Type::List)),
+    }
+}
+
+/// The `BOOLEAN` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_boolean(key: &str, value: Option<&ParsedValue>) -> Result<Option<bool>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Boolean(v)) => Ok(Some(*v)),
+        Some(other) => Err(wrong_type(key, other, Type::Boolean)),
+    }
+}
+
+/// The `STRING` value, trimmed, of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_string<'a>(key: &str, value: Option<&'a ParsedValue>) -> Result<Option<&'a str>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::String(v)) => Ok(Some(ConfigDef::trim(v))),
+        Some(other) => Err(wrong_type(key, other, Type::String)),
+    }
+}
+
+/// The `PASSWORD` value of `key`, as Java's cast of `get(key)` to its boxed type.
+fn as_password<'a>(key: &str, value: Option<&'a ParsedValue>) -> Result<Option<&'a Password>, Error> {
+    match value {
+        None => Ok(None),
+        Some(ParsedValue::Password(v)) => Ok(Some(v)),
+        Some(other) => Err(wrong_type(key, other, Type::Password)),
+    }
+}
+/// Reads a client configuration's parsed values into its typed fields,
+/// recording each key it reads.
+///
+/// Not a Java class (DoD #7). Java's clients read their configuration through
+/// `AbstractConfig`'s getters while they build themselves, which marks each
+/// key used. The Rust configs read the parsed values once, into the typed
+/// fields the clients use, when the configuration is built; marking those keys
+/// then would make [`AbstractConfig::unused`] on a configuration the user
+/// holds answer as if a client had read it. So the reader records the keys
+/// instead, and the client marks them ([`AbstractConfig::ignore`]) when it is
+/// built from the configuration, where Java's would read them. The reads and
+/// the record are one call, so the fields and the marking cannot drift.
+pub(crate) struct ValuesReader<'a> {
+    config: &'a AbstractConfig,
+    read: Vec<&'static str>,
+}
+
+impl<'a> ValuesReader<'a> {
+    /// A reader over `config`'s parsed values, with no key read yet.
+    pub(crate) fn new(config: &'a AbstractConfig) -> Self {
+        Self { config, read: Vec::new() }
+    }
+
+    /// The value of `key`, recorded as read and not marked used.
+    fn value(&mut self, key: &'static str) -> Result<Option<&'a ParsedValue>, Error> {
+        let Some(value) = self.config.values.get(key) else {
+            return Err(Error::config_message(format!("Unknown configuration '{key}'")));
+        };
+        self.read.push(key);
+        Ok(value.as_ref())
+    }
+
+    /// The `INT` value of `key`, which its definition never leaves `null`.
+    pub(crate) fn int(&mut self, key: &'static str) -> Result<i32, Error> {
+        let value = self.value(key)?;
+        non_null(key, as_int(key, value)?)
+    }
+
+    /// The `LONG` value of `key`, which its definition never leaves `null`.
+    pub(crate) fn long(&mut self, key: &'static str) -> Result<i64, Error> {
+        let value = self.value(key)?;
+        non_null(key, as_long(key, value)?)
+    }
+
+    /// The `BOOLEAN` value of `key`, which its definition never leaves `null`.
+    pub(crate) fn boolean(&mut self, key: &'static str) -> Result<bool, Error> {
+        let value = self.value(key)?;
+        non_null(key, as_boolean(key, value)?)
+    }
+
+    /// The `STRING` value of `key`, trimmed, `None` for `null`.
+    pub(crate) fn string_or_null(&mut self, key: &'static str) -> Result<Option<&'a str>, Error> {
+        let value = self.value(key)?;
+        as_string(key, value)
+    }
+
+    /// The `STRING` value of `key`, trimmed, which its definition never leaves
+    /// `null`.
+    pub(crate) fn string(&mut self, key: &'static str) -> Result<&'a str, Error> {
+        let value = self.string_or_null(key)?;
+        non_null(key, value)
+    }
+
+    /// The `LIST` value of `key`, `None` for `null`.
+    pub(crate) fn list_or_null(&mut self, key: &'static str) -> Result<Option<&'a [String]>, Error> {
+        let value = self.value(key)?;
+        as_list(key, value)
+    }
+
+    /// The `LIST` value of `key`, which its definition never leaves `null`.
+    pub(crate) fn list(&mut self, key: &'static str) -> Result<&'a [String], Error> {
+        let value = self.list_or_null(key)?;
+        non_null(key, value)
+    }
+
+    /// The `PASSWORD` value of `key`, `None` for `null`.
+    pub(crate) fn password_or_null(&mut self, key: &'static str) -> Result<Option<&'a Password>, Error> {
+        let value = self.value(key)?;
+        as_password(key, value)
+    }
+
+    /// Moves the keys `other` read into this reader's record.
+    pub(crate) fn append(&mut self, other: ValuesReader<'_>) {
+        self.read.extend(other.read);
+    }
+
+    /// The keys read, in the order they were read.
+    pub(crate) fn into_read_keys(self) -> Vec<&'static str> {
+        self.read
+    }
+}
+
+/// A value its definition never leaves `null`: a non-null default and, for a
+/// value given, a parse that never yields `null`. `null` would be a defect of
+/// the definition, not of the user's input.
+fn non_null<T>(key: &str, value: Option<T>) -> Result<T, Error> {
+    value.ok_or_else(|| Error::local_illegal_state(format!("Configuration '{key}' has no value")))
 }
 
 impl Clone for AbstractConfig {

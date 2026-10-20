@@ -281,9 +281,19 @@ const C_GUARDED_READS: &[&str] = &[
 /// `out_err`) and returns `int8_t`, 1 when the value is present and written to
 /// `*<out>`, 0 when it is empty or the call failed; the `_cb_t` typedef takes
 /// `(int8_t present, int64_t <value>, error, opaque)`.
+///
+/// The client configurations' typed getters (Java's `AbstractConfig.getShort`,
+/// `getInt`, `getLong`, `getDouble`, `getBoolean`) are listed for the same
+/// reason: a configuration value is Java's `null` or any value of its type,
+/// `-1` included (`send.buffer.bytes=-1` is the OS default).
 const C_PRESENCE_FLAG_OPTIONALS: &[(&str, &str)] = &[
     ("kafka_consumer_Consumer_current_lag", "lag"),
     ("kafka_consumer_ConsumerHandle_current_lag", "lag"),
+    ("kafka_admin_AdminClientConfig_get_short", "value"),
+    ("kafka_admin_AdminClientConfig_get_int", "value"),
+    ("kafka_admin_AdminClientConfig_get_long", "value"),
+    ("kafka_admin_AdminClientConfig_get_double", "value"),
+    ("kafka_admin_AdminClientConfig_get_boolean", "value"),
 ];
 
 /// Factories taking a binding's opaque pointer whose C form adds a trailing
