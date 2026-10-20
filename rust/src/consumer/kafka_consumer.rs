@@ -816,6 +816,75 @@ mod tests {
         );
     }
 
+    /// A listener that captured `consumer.handle()` holds the handle state, and
+    /// through it the `SubscriptionState` that stores the listener. `close()`
+    /// releases the listener once its last callback has run, so a closed and
+    /// dropped consumer frees the listener and the subscription state. A
+    /// consumer dropped without `close()` keeps the cycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_closed_consumer_frees_a_listener_capturing_the_handle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use async_trait::async_trait;
+
+        use crate::consumer::{ConsumerHandle, ConsumerRebalanceListener};
+
+        struct Sentinel(Arc<AtomicBool>);
+        impl Drop for Sentinel {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct HandleListener {
+            _handle: ConsumerHandle,
+            _sentinel: Sentinel,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for HandleListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("group.id".to_string(), "listener-group".to_string()),
+        ]);
+        let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("constructs against the fake broker");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let listener = HandleListener { _handle: consumer.handle(), _sentinel: Sentinel(Arc::clone(&dropped)) };
+        consumer
+            .subscribe_with_topics_listener(vec![TOPIC.to_string()], Arc::new(listener))
+            .await
+            .expect("subscribe");
+        let (_, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(500)))
+            .await
+            .expect("close");
+        drop(consumer);
+
+        // Spawned tasks holding a clone end shortly after the close.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (!dropped.load(Ordering::SeqCst) || subscriptions.strong_count() > 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(dropped.load(Ordering::SeqCst), "listener still referenced");
+        assert_eq!(0, subscriptions.strong_count(), "SubscriptionState still referenced");
+    }
+
     /// `KafkaConsumer` can move to another task but not be shared between
     /// tasks, as Java's `KafkaConsumer` is single-threaded and enforces it at
     /// run time with `acquire()` (`consumer-threading.md` §2). The compiler

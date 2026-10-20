@@ -7010,6 +7010,23 @@ where
             record(&mut first_error, "Failed to close consumer deserializers", err);
         }
 
+        // Rust-only: release the rebalance listener. The last callback ran in
+        // step 4 or 5 and the background task has been joined, so nothing
+        // invokes it any more. A listener that captured `consumer.handle()`
+        // holds the handle state, and through it the `SubscriptionState` that
+        // stores the listener: without this the cycle would keep the listener,
+        // the subscription state and the metrics registry alive after the
+        // consumer is dropped. Java's garbage collector frees the same graph,
+        // so Java's `close()` has no counterpart step.
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_rebalance_listener(None);
+        *self
+            .rebalance_listener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 

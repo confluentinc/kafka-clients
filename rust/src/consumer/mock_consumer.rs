@@ -571,6 +571,19 @@ impl<K, V> MockConsumer<K, V> {
     }
 }
 
+/// Rust-only: releases the rebalance listener. A listener that captured
+/// [`Consumer::handle`] holds the shared `SubscriptionState` through the
+/// handle, and that state stores the listener, so without this the cycle would
+/// outlive the mock; Java's garbage collector frees the same graph. The
+/// release waits for the drop rather than `close()`, because Java's
+/// `rebalance` and `losePartitions` still run the listener on a closed mock
+/// (`MockConsumer.java:129-172` make no `ensureNotClosed()` check).
+impl<K, V> Drop for MockConsumer<K, V> {
+    fn drop(&mut self) {
+        self.subs().register_rebalance_listener(None);
+    }
+}
+
 // ─── Consumer<K, V> trait impl ──────────────────────────────────────────
 
 impl<K, V> Consumer<K, V> for MockConsumer<K, V>
@@ -1718,6 +1731,60 @@ mod tests {
         // The commit recorded the consumed position (read directly: the
         // mock's `committed()` answers 0 for a partition no longer assigned).
         assert_eq!(*c.lock_committed(), offsets(&tp, 2));
+    }
+
+    /// A listener that captured the mock's handle is freed with the mock, and
+    /// until the drop it still runs on a closed mock, as Java's `rebalance`
+    /// makes no `ensureNotClosed()` check (`MockConsumer.java:129-145`).
+    #[tokio::test]
+    async fn listener_capturing_the_handle_is_freed_with_the_mock() {
+        struct Sentinel(Arc<AtomicBool>);
+        impl Drop for Sentinel {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct HandleListener {
+            _handle: ConsumerHandle,
+            _sentinel: Sentinel,
+            assigned: Arc<Mutex<Vec<TopicPartition>>>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for HandleListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                self.assigned.lock().unwrap().extend_from_slice(partitions);
+                Ok(())
+            }
+        }
+
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let assigned = Arc::new(Mutex::new(Vec::new()));
+        let subscriptions = Arc::downgrade(&c.subscriptions);
+        c.subscribe_with_topics_listener(
+            vec!["test".to_string()],
+            Arc::new(HandleListener {
+                _handle: c.handle(),
+                _sentinel: Sentinel(Arc::clone(&dropped)),
+                assigned: Arc::clone(&assigned),
+            }),
+        )
+        .await
+        .expect("subscribe");
+        c.close().await.expect("close");
+
+        let tp = tp_of("test");
+        c.rebalance(std::slice::from_ref(&tp)).await.expect("rebalance");
+        assert_eq!(*assigned.lock().unwrap(), vec![tp]);
+        assert!(!dropped.load(Ordering::SeqCst), "the listener is released only by the drop");
+
+        drop(c);
+        assert!(dropped.load(Ordering::SeqCst), "listener still referenced");
+        assert_eq!(0, subscriptions.strong_count(), "SubscriptionState still referenced");
     }
 
     /// An error the callback returns (Java's `onComplete` throwing) propagates
