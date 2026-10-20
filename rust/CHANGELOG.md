@@ -62,8 +62,41 @@ breaking changes.
 - **Breaking:** `ConsumerConfig::SECURITY_PROVIDERS_CONFIG` is removed.
   `security.providers` and `partition.assignment.strategy` are no longer
   consumer configs: nothing read them (JSSE providers and client-side assignors
-  have no counterpart here). Setting either now logs the unknown-key warning,
-  and `get_string` on them returns a `ConfigError`.
+  have no counterpart here). Setting either now lists it in the unused-config
+  INFO line, and `get_string` on them returns a `ConfigError`.
+- **Breaking:** `ConsumerConfig::new` parses and validates every key with
+  Java's `ConfigDef` (`ConsumerConfig.java`), so values Java rejects now fail
+  with Java's `ConfigError` message, `Invalid value <v> for configuration
+  <key>: <reason>`: a negative `max.poll.interval.ms`,
+  `auto.commit.interval.ms`, `fetch.min.bytes`,
+  `fetch.max.bytes`, `fetch.max.wait.ms`, `max.partition.fetch.bytes`,
+  `metadata.max.age.ms`, `request.timeout.ms`, `default.api.timeout.ms`, the
+  `reconnect.backoff.*` / `retry.backoff.*` keys or `metrics.sample.window.ms`;
+  `max.poll.records` or `metrics.num.samples` below `1`;
+  `send.buffer.bytes` / `receive.buffer.bytes` below `-1`; and an
+  `isolation.level` other than `read_committed` / `read_uncommitted` (the check
+  is case-sensitive, as Java's), which used to be accepted as given.
+- **Breaking:** as in Java, `enable.auto.commit=true` without `group.id` fails
+  with an `InvalidConfigurationError` ("enable.auto.commit cannot be set to
+  true when default group id (null) is used."), and `enable.auto.commit`
+  defaults to `false` without a `group.id`.
+- **Breaking:** as in Java, the keys the chosen `group.protocol` does not
+  support are rejected with a `ConfigError`: `group.remote.assignor` with
+  `classic`, `session.timeout.ms` and `heartbeat.interval.ms` with `consumer`
+  (and `share.acknowledgement.mode` / `share.acquire.mode` with either), e.g.
+  "session.timeout.ms cannot be set when group.protocol=CONSUMER". An invalid
+  `group.protocol` reports Java's message, `String must be one of
+  (case insensitive): CONSUMER, CLASSIC`.
+- `ConsumerConfig` answers Java's `AbstractConfig` getters: `get_short`,
+  `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
+  `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
+  `documentation_of`, `unused`, `ignore`, `log_unused`, and the static
+  `config_names`. Its `PartialEq` / `Hash` compare the properties it was built
+  from, as Java's `equals` / `hashCode` do.
+- The consumer logs its configuration values at INFO when it is built, as
+  Java's does, and then, in one INFO line, the supplied keys it did not use:
+  `These configurations '[a, b]' were supplied but are not used yet.` This
+  replaces the warning logged per unknown key.
 
 ### Admin client
 
@@ -195,6 +228,12 @@ breaking changes.
   string borrowed from the handle; `_get_list`, `_unused` and `_config_names`
   return an owned `kafka_List_t`; plus `_ignore` and `_log_unused`. A client
   created from the handle keeps its own record of the keys it used.
+- `kafka_consumer_ConsumerConfig_t` answers the same getters:
+  `kafka_consumer_ConsumerConfig_get_short`, `_get_int`, `_get_long`,
+  `_get_double`, `_get_boolean`, `_get_list`, `_documentation_of`, `_unused`,
+  `_ignore`, `_log_unused` and `_config_names`, beside the existing
+  `_get_string`. A consumer created from the handle starts from a copy of its
+  record of the keys used.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

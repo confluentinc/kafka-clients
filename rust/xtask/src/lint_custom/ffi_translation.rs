@@ -294,6 +294,11 @@ const C_PRESENCE_FLAG_OPTIONALS: &[(&str, &str)] = &[
     ("kafka_admin_AdminClientConfig_get_long", "value"),
     ("kafka_admin_AdminClientConfig_get_double", "value"),
     ("kafka_admin_AdminClientConfig_get_boolean", "value"),
+    ("kafka_consumer_ConsumerConfig_get_short", "value"),
+    ("kafka_consumer_ConsumerConfig_get_int", "value"),
+    ("kafka_consumer_ConsumerConfig_get_long", "value"),
+    ("kafka_consumer_ConsumerConfig_get_double", "value"),
+    ("kafka_consumer_ConsumerConfig_get_boolean", "value"),
 ];
 
 /// Factories taking a binding's opaque pointer whose C form adds a trailing

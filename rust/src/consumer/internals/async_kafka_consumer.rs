@@ -2953,6 +2953,9 @@ where
         use crate::consumer::internals::RequestManagers;
         use crate::consumer::internals::TopicMetadataRequestManager;
 
+        // Java's `ConsumerConfig` is built with `doLog = true`, which logs
+        // every parsed value (`AbstractConfig.logAll`).
+        config.log_values();
         log::debug!("Initializing the Kafka consumer");
 
         // Java's `KafkaConsumer` passes `Time.SYSTEM`, and the constructor
@@ -3817,6 +3820,10 @@ where
         // struct are the SAME instance, mirroring Java's single
         // `memberStateListener`.
 
+        // `AsyncKafkaConsumer.java:593`: `config.logUnused()`, after every
+        // component has read its keys.
+        config.mark_read_keys_used();
+        config.log_unused();
         let components = AsyncKafkaConsumerComponents {
             config,
             client_id,

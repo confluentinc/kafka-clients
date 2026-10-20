@@ -332,6 +332,53 @@ impl CommonClientConfigs {
         configuration is ignored if rebootstrapping is disabled by setting the configuration \
         <code>metadata.recovery.strategy=none</code>. If the client is connecting to a broker older than \
         Apache Kafka 4.4, no checking is performed and this configuration has no effect.";
+    /// Documentation of the `CLIENT_RACK` key: Java's `CommonClientConfigs.CLIENT_RACK_DOC`.
+    pub const CLIENT_RACK_DOC: &str = "A rack identifier for this client. This can be any string value which \
+        indicates where this client is physically located. It corresponds with the broker config 'broker.rack'";
+    /// Documentation of the `GROUP_ID` key: Java's `CommonClientConfigs.GROUP_ID_DOC`.
+    pub const GROUP_ID_DOC: &str = "A unique string that identifies the consumer group this consumer belongs \
+        to. This property is required if the consumer uses either the group management functionality by using \
+        <code>subscribe(topic)</code> or the Kafka-based offset management strategy.";
+    /// Documentation of the `GROUP_INSTANCE_ID` key: Java's `CommonClientConfigs.GROUP_INSTANCE_ID_DOC`.
+    pub const GROUP_INSTANCE_ID_DOC: &str = "A unique identifier of the consumer instance provided by the end \
+        user. Only non-empty strings are permitted. If set, the consumer is treated as a static member, which \
+        means that only one instance with this ID is allowed in the consumer group at any time. This can be used \
+        in combination with a larger session timeout to avoid group rebalances caused by transient unavailability \
+        (e.g. process restarts). If not set, the consumer will join the group as a dynamic member, which is the \
+        traditional behavior.";
+    /// Documentation of the `MAX_POLL_INTERVAL_MS` key: Java's `CommonClientConfigs.MAX_POLL_INTERVAL_MS_DOC`.
+    pub const MAX_POLL_INTERVAL_MS_DOC: &str = "The maximum delay between invocations of poll() when using \
+        consumer group management. This places an upper bound on the amount of time that the consumer can be \
+        idle before fetching more records. If poll() is not called before expiration of this timeout, then the \
+        consumer is considered failed and the group will rebalance in order to reassign the partitions to \
+        another member. For consumers using a non-null <code>group.instance.id</code> which reach this timeout, \
+        partitions will not be immediately reassigned. Instead, the consumer will stop sending heartbeats and \
+        partitions will be reassigned after expiration of the session timeout (defined by the client config \
+        <code>session.timeout.ms</code> if using the Classic rebalance protocol, or by the broker config \
+        <code>group.consumer.session.timeout.ms</code> if using the Consumer protocol). This mirrors the \
+        behavior of a static consumer which has shutdown. In the Classic consumer, \
+        <code>connections.max.idle.ms</code> should be set to a value greater than or equal to this timeout to \
+        avoid closing the connection to the group coordinator during an ongoing rebalance. This is particularly \
+        important in large groups, where a rebalance may take longer to complete while the coordinator waits \
+        for all members to rejoin.";
+    /// Documentation of the `SESSION_TIMEOUT_MS` key: Java's `CommonClientConfigs.SESSION_TIMEOUT_MS_DOC`.
+    pub const SESSION_TIMEOUT_MS_DOC: &str = "The timeout used to detect client failures when using Kafka's \
+        group management facility. The client sends periodic heartbeats to indicate its liveness to the broker. \
+        If no heartbeats are received by the broker before the expiration of this session timeout, then the \
+        broker will remove this client from the group and initiate a rebalance. Note that the value must be in \
+        the allowable range as configured in the broker configuration by <code>group.min.session.timeout.ms</code> \
+        and <code>group.max.session.timeout.ms</code>. Note that this client configuration is not supported when \
+        <code>group.protocol</code> is set to \"consumer\". In that case, session timeout is controlled by the \
+        broker config <code>group.consumer.session.timeout.ms</code>.";
+    /// Documentation of the `HEARTBEAT_INTERVAL_MS` key: Java's `CommonClientConfigs.HEARTBEAT_INTERVAL_MS_DOC`.
+    pub const HEARTBEAT_INTERVAL_MS_DOC: &str = "The expected time between heartbeats to the consumer \
+        coordinator when using Kafka's group management facilities. Heartbeats are used to ensure that the \
+        consumer's session stays active and to facilitate rebalancing when new consumers join or leave the \
+        group. This config is only supported if <code>group.protocol</code> is set to \"classic\". In that \
+        case, the value must be set lower than <code>session.timeout.ms</code>, but typically should be set no \
+        higher than 1/3 of that value. It can be adjusted even lower to control the expected time for normal \
+        rebalances.If <code>group.protocol</code> is set to \"consumer\", this config is not supported, as the \
+        heartbeat interval is controlled by the broker with <code>group.consumer.heartbeat.interval.ms</code>.";
 }
 
 impl CommonClientConfigs {

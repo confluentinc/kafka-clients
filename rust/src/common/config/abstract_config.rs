@@ -63,6 +63,12 @@ use crate::common::config::types::Password;
 /// A configuration map as Java's `Map<String, ?>`: `None` is a `null` value.
 pub(crate) type ConfigMap = HashMap<String, Option<ParsedValue>>;
 
+/// Java's `AbstractConfig.CONFIG_PROVIDERS_DOC`.
+pub(crate) const CONFIG_PROVIDERS_DOC: &str = "Comma-separated alias names for classes implementing the \
+    <code>ConfigProvider</code> interface. This enables loading configuration data (such as passwords, API \
+    keys, and other credentials) from external sources. For example, see \
+    <a href=\"https://kafka.apache.org/documentation/#config_providers\">Configuration Providers</a>.";
+
 /// A convenient base class for configurations to extend, Java's
 /// `AbstractConfig`.
 ///

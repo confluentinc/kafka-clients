@@ -345,7 +345,7 @@ fn class_cast(value: &ParsedValue, target: &str) -> Error {
 }
 
 /// Java's `(String) o` in a validator: `None` stays `None`.
-fn as_string(value: Option<&ParsedValue>) -> Result<Option<&str>, Error> {
+pub(crate) fn as_string(value: Option<&ParsedValue>) -> Result<Option<&str>, Error> {
     match value {
         None => Ok(None),
         Some(ParsedValue::String(s)) => Ok(Some(s)),
@@ -364,7 +364,7 @@ fn as_list(value: Option<&ParsedValue>) -> Result<Option<&[String]>, Error> {
 
 /// Java's `ConfigException(name, value, message)` where `value` may be
 /// `null`, which prints as `null`.
-fn config_error(name: &str, value: Option<&ParsedValue>, message: impl fmt::Display) -> Error {
+pub(crate) fn config_error(name: &str, value: Option<&ParsedValue>, message: impl fmt::Display) -> Error {
     match value {
         Some(v) => Error::config_name_value_message(name, v, message),
         None => Error::config_name_value_message(name, "null", message),

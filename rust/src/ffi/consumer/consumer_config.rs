@@ -23,19 +23,19 @@
 //!
 //! The map is the only input, as in Rust: a typed setter would skip the
 //! `ConfigDef` validators `new` runs. Values are read back by key through
-//! `kafka_consumer_ConsumerConfig_get_string`, Java's `AbstractConfig.getString`,
-//! not through per-key getters, which would freeze a key's Java type.
+//! `AbstractConfig`'s getters (`kafka_consumer_ConsumerConfig_get_int`,
+//! `kafka_consumer_ConsumerConfig_get_string`, ...), not through per-key
+//! getters, which would freeze a key's Java type.
 
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::raw::c_char;
-use std::sync::{Mutex, PoisonError};
 
 use crate::consumer::ConsumerConfig;
+use crate::ffi::common::config::config_getters::{self, LentStrings};
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_Map_t, map_strings};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t, map_strings, sorted_string_list};
 
 /// Opaque handle to a validated [`ConsumerConfig`].
 #[repr(C)]
@@ -43,14 +43,16 @@ pub struct kafka_consumer_ConsumerConfig_t {
     _private: [u8; 0],
 }
 
-/// What a handle points at: the configuration, and the NUL-terminated copies
-/// of the values [`kafka_consumer_ConsumerConfig_get_string`] lent out, one
-/// per key, kept so the pointers it returns live as long as the handle, as a
-/// Rust `&str` borrowed from the configuration does. An entry is never
-/// replaced or removed, and a `CString`'s bytes stay put when the map grows.
+/// What a handle points at: the configuration, and the strings its getters
+/// lent out, kept so the pointers they return live as long as the handle, as a
+/// Rust `&str` borrowed from the configuration does.
 struct ConsumerConfigHandle {
     config: ConsumerConfig,
-    strings: Mutex<HashMap<String, CString>>,
+    /// The values [`kafka_consumer_ConsumerConfig_get_string`] lent out.
+    strings: LentStrings,
+    /// The documentation [`kafka_consumer_ConsumerConfig_documentation_of`]
+    /// lent out.
+    docs: LentStrings,
 }
 
 /// The handle's state.
@@ -61,8 +63,8 @@ struct ConsumerConfigHandle {
 unsafe fn handle_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfigHandle {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`: a
     // `Box<ConsumerConfigHandle>` from `Box::into_raw` in `kafka_consumer_ConsumerConfig_new`, the
-    // only constructor, never reached through a `&mut` afterwards (the string cache mutates behind
-    // its `Mutex`), so the shared reference is to a live value no `&mut` aliases.
+    // only constructor, never reached through a `&mut` afterwards (the lent strings and the used keys
+    // mutate behind their `Mutex`es), so the shared reference is to a live value no `&mut` aliases.
     unsafe { &*(config as *const ConsumerConfigHandle) }
 }
 
@@ -96,11 +98,253 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
-        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle { config, strings: Mutex::default() }))
-            as *mut kafka_consumer_ConsumerConfig_t,
+        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle {
+            config,
+            strings: LentStrings::default(),
+            docs: LentStrings::default(),
+        })) as *mut kafka_consumer_ConsumerConfig_t,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
     }
+}
+
+/// `getShort(String key)`: the `SHORT` configuration `key`. Returns `1` with the
+/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten. A key of another type fails with an
+/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
+/// does not define with Java's `ConfigException`
+/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
+/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_value` valid for a write; `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_short(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_value: *mut i16,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
+    // `get_scalar` requires.
+    unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_short(key)) }
+}
+
+/// `getInt(String key)`: the `INT` configuration `key`. Returns `1` with the
+/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten. A key of another type fails with an
+/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
+/// does not define with Java's `ConfigException`
+/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
+/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_value` valid for a write; `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_int(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_value: *mut i32,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
+    // `get_scalar` requires.
+    unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_int(key)) }
+}
+
+/// `getLong(String key)`: the `LONG` configuration `key`. Returns `1` with the
+/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten. A key of another type fails with an
+/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
+/// does not define with Java's `ConfigException`
+/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
+/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_value` valid for a write; `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_long(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_value: *mut i64,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
+    // `get_scalar` requires.
+    unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_long(key)) }
+}
+
+/// `getDouble(String key)`: the `DOUBLE` configuration `key`. Returns `1` with the
+/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten. A key of another type fails with an
+/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
+/// does not define with Java's `ConfigException`
+/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
+/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_value` valid for a write; `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_double(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_value: *mut f64,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
+    // `get_scalar` requires.
+    unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_double(key)) }
+}
+
+/// `getBoolean(String key)`: the `BOOLEAN` configuration `key`. Returns `1` with the
+/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten. A key of another type fails with an
+/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
+/// does not define with Java's `ConfigException`
+/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
+/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_value` valid for a write; `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_boolean(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_value: *mut i8,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
+    // `get_scalar` requires.
+    unsafe {
+        config_getters::get_scalar(key, out_value, out_err, |key| {
+            handle.config.get_boolean(key).map(|value| value.map(i8::from))
+        })
+    }
+}
+
+/// `getList(String key)`: the `LIST` configuration `key`, as an owned list of
+/// `char *` the caller frees with `kafka_List_destroy`, or `NULL` with
+/// `*out_err` still `NULL` when the key has no value (Java's `null`). Fails
+/// as [`kafka_consumer_ConsumerConfig_get_int`] does.
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
+    unsafe { config_getters::get_list(key, out_err, |key| handle.config.get_list(key)) }
+}
+
+/// `documentationOf(String key)`: the documentation of the configuration
+/// `key`, borrowed from the handle and valid until it is destroyed, or `NULL`
+/// when the configuration does not define `key`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_documentation_of(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key` is as `documentation_of` requires.
+    unsafe { config_getters::documentation_of(&handle.docs, key, |key| handle.config.documentation_of(key)) }
+}
+
+/// `unused()`: the keys of the properties never read through this handle's
+/// getters nor marked with [`kafka_consumer_ConsumerConfig_ignore`], as an
+/// owned, sorted list of `char *` the caller frees with `kafka_List_destroy`.
+/// A consumer created from the handle starts from a copy of this record and
+/// keeps its own afterwards.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_unused(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    sorted_string_list(unsafe { handle_ref(self_) }.config.unused())
+}
+
+/// `ignore(String key)`: marks the configuration `key` used without reading
+/// it.
+///
+/// # Safety
+///
+/// `self_` must be a live handle; `key` a valid NUL-terminated string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_ignore(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+    key: *const c_char,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    let handle = unsafe { handle_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `key` is as `ignore` requires.
+    unsafe { config_getters::ignore(key, |key| handle.config.ignore(key)) }
+}
+
+/// `logUnused()`: logs at INFO, in one line, the keys
+/// [`kafka_consumer_ConsumerConfig_unused`] answers, and nothing when there
+/// are none.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_log_unused(self_: *const kafka_consumer_ConsumerConfig_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
+    unsafe { handle_ref(self_) }.config.log_unused();
+}
+
+/// `configNames()`: the names of the configurations `ConsumerConfig`
+/// defines, as an owned, sorted list of `char *` the caller frees with
+/// `kafka_List_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_consumer_ConsumerConfig_config_names() -> *mut kafka_List_t {
+    sorted_string_list(ConsumerConfig::config_names())
 }
 
 /// `getString(String key)`: the value of the `STRING` key `key`, borrowed
@@ -124,29 +368,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_string(
     key: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let key = unsafe { c_str_to_string(key) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
     // `handle_ref` requires; the reference does not outlive the call.
     let handle = unsafe { handle_ref(self_) };
-    match handle.config.get_string(&key) {
-        // The pointer outlives the guard: the entry stays in the map, unchanged, until the handle
-        // is destroyed (`ConsumerConfigHandle`).
-        Ok(Some(value)) => handle
-            .strings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(key)
-            .or_insert_with(|| {
-                CString::new(value)
-                    .expect("a value parsed from NUL-terminated C strings, or a constant name, has no NUL")
-            })
-            .as_ptr(),
-        Ok(None) => std::ptr::null(),
-        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
-        Err(error) => unsafe { fail_with(out_err, error) },
-    }
+    // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_string` requires.
+    unsafe { config_getters::get_string(&handle.strings, key, out_err, |key| handle.config.get_string(key)) }
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -175,7 +401,11 @@ mod tests {
     use crate::ffi::error_predicates::{
         kafka_common_Error_is_config_error, kafka_common_Error_is_local_illegal_argument_error,
     };
-    use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
+    use crate::ffi::util::{
+        box_string_map, c_str_to_string, kafka_List_destroy, kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
+        list_strings,
+    };
+    use std::ffi::CString;
 
     /// A map of C string literals, which outlive it; the map does not own them.
     fn props(entries: &[(&'static CStr, &'static CStr)]) -> *mut kafka_Map_t {
@@ -294,5 +524,173 @@ mod tests {
             kafka_common_Error_destroy(err);
             kafka_Map_destroy(props);
         }
+    }
+
+    /// A handle over `bootstrap.servers` plus `extra`, destroyed by the caller.
+    fn config_with(extra: &[(&str, &str)]) -> *mut kafka_consumer_ConsumerConfig_t {
+        let mut entries = vec![("bootstrap.servers", "localhost:9092")];
+        entries.extend_from_slice(extra);
+        let props = box_string_map(entries);
+        let mut error = std::ptr::null_mut();
+        // SAFETY: Test code: `props` is the live map just built, destroyed once after `new` copied
+        // it; `error` is a valid slot pointing at null.
+        unsafe {
+            let config = kafka_consumer_ConsumerConfig_new(props, &mut error);
+            assert!(error.is_null());
+            kafka_Map_destroy(props);
+            config
+        }
+    }
+
+    /// Takes the owned list `list`, returning its strings.
+    fn take_list(list: *mut kafka_List_t) -> Vec<String> {
+        assert!(!list.is_null());
+        // SAFETY: Test code: `list` is an owned list of C strings just returned, read once and
+        // destroyed once.
+        unsafe {
+            let strings = list_strings(list);
+            kafka_List_destroy(list);
+            strings
+        }
+    }
+
+    /// Takes the owned error in `error`, returning its message.
+    fn take_error(error: &mut *mut kafka_common_Error_t) -> String {
+        assert!(!error.is_null());
+        // SAFETY: Test code: `*error` is the owned error just stored, read once and destroyed once.
+        unsafe {
+            let message = c_str_to_string(kafka_common_Error_message(*error));
+            kafka_common_Error_destroy(*error);
+            *error = std::ptr::null_mut();
+            message
+        }
+    }
+
+    /// The scalar getters answer `1` with the value, and `0` with the error in
+    /// `out_err` for a key of another type or one the configuration does not
+    /// define, leaving `*out_value` unwritten.
+    #[test]
+    fn scalar_getters_report_value_null_and_errors() {
+        let config = config_with(&[("group.id", "g"), ("max.poll.records", "123")]);
+        let mut error = std::ptr::null_mut();
+        let key = |k: &str| CString::new(k).unwrap();
+        // SAFETY: Test code: `config` is the live handle built above, destroyed once at the end;
+        // the keys are live C strings; the out values are valid locals; `error` is a valid slot,
+        // reset to null by `take_error` after each failure.
+        unsafe {
+            let mut int = 0_i32;
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_get_int(config, key("max.poll.records").as_ptr(), &mut int, &mut error),
+                1
+            );
+            assert!(error.is_null());
+            assert_eq!(int, 123);
+
+            let mut long = 0_i64;
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_get_long(
+                    config,
+                    key("metadata.max.age.ms").as_ptr(),
+                    &mut long,
+                    &mut error
+                ),
+                1
+            );
+            assert_eq!(long, 300_000);
+
+            let mut boolean = 0_i8;
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_get_boolean(
+                    config,
+                    key("enable.auto.commit").as_ptr(),
+                    &mut boolean,
+                    &mut error
+                ),
+                1
+            );
+            assert_eq!(boolean, 1);
+
+            let mut short = 7_i16;
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_get_short(
+                    config,
+                    key("max.poll.records").as_ptr(),
+                    &mut short,
+                    &mut error
+                ),
+                0
+            );
+            assert_eq!(
+                take_error(&mut error),
+                "Configuration 'max.poll.records' is of type INT, not SHORT"
+            );
+            assert_eq!(short, 7);
+            let mut double = 0.0_f64;
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_get_double(config, key("no.such.key").as_ptr(), &mut double, &mut error),
+                0
+            );
+            assert_eq!(take_error(&mut error), "Unknown configuration 'no.such.key'");
+
+            kafka_consumer_ConsumerConfig_destroy(config);
+        }
+    }
+
+    /// `getList` hands out an owned list, or fails a key of another type;
+    /// `documentationOf` lends the key's documentation, `NULL` for a key the
+    /// configuration does not define.
+    #[test]
+    fn list_and_documentation_getters() {
+        let config = config_with(&[("client.id", "c1")]);
+        let mut error = std::ptr::null_mut();
+        let key = |k: &str| CString::new(k).unwrap();
+        // SAFETY: Test code: `config` is the live handle built above, destroyed once at the end;
+        // the borrowed strings are read while it is alive; `error` is a valid slot.
+        unsafe {
+            let servers = kafka_consumer_ConsumerConfig_get_list(config, key("bootstrap.servers").as_ptr(), &mut error);
+            assert!(error.is_null());
+            assert_eq!(take_list(servers), ["localhost:9092"]);
+            assert!(kafka_consumer_ConsumerConfig_get_list(config, key("client.id").as_ptr(), &mut error).is_null());
+            assert_eq!(take_error(&mut error), "Configuration 'client.id' is of type STRING, not LIST");
+
+            let doc = kafka_consumer_ConsumerConfig_documentation_of(config, key("client.id").as_ptr());
+            assert_eq!(c_str_to_string(doc), crate::CommonClientConfigs::CLIENT_ID_DOC);
+            assert_eq!(
+                kafka_consumer_ConsumerConfig_documentation_of(config, key("client.id").as_ptr()),
+                doc
+            );
+            assert!(kafka_consumer_ConsumerConfig_documentation_of(config, key("no.such.key").as_ptr()).is_null());
+
+            kafka_consumer_ConsumerConfig_destroy(config);
+        }
+    }
+
+    /// `unused` lists, sorted, the keys neither read nor ignored; `configNames`
+    /// lists, sorted, every key `ConsumerConfig` defines.
+    #[test]
+    fn unused_ignore_log_unused_and_config_names() {
+        let config = config_with(&[("max.poll.records", "123"), ("some.unknown.key", "x")]);
+        let mut error = std::ptr::null_mut();
+        let key = |k: &str| CString::new(k).unwrap();
+        // SAFETY: Test code: `config` is the live handle built above, destroyed once at the end;
+        // `error` is a valid slot; the lists are owned and taken once.
+        unsafe {
+            assert_eq!(
+                take_list(kafka_consumer_ConsumerConfig_unused(config)),
+                ["bootstrap.servers", "max.poll.records", "some.unknown.key"]
+            );
+            let mut int = 0_i32;
+            kafka_consumer_ConsumerConfig_get_int(config, key("max.poll.records").as_ptr(), &mut int, &mut error);
+            assert!(error.is_null());
+            kafka_consumer_ConsumerConfig_ignore(config, key("some.unknown.key").as_ptr());
+            assert_eq!(take_list(kafka_consumer_ConsumerConfig_unused(config)), ["bootstrap.servers"]);
+            kafka_consumer_ConsumerConfig_log_unused(config);
+            kafka_consumer_ConsumerConfig_destroy(config);
+        }
+        let names = take_list(kafka_consumer_ConsumerConfig_config_names());
+        let mut expected: Vec<String> = ConsumerConfig::config_names().into_iter().collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        assert!(names.iter().any(|n| n == "group.protocol"));
     }
 }
