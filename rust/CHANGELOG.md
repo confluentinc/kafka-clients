@@ -55,6 +55,9 @@ breaking changes.
   longer implement `Default`. Build them with `::new(&configs)` from a
   `HashMap<String, String>` (an empty map gives the defaults).
 - New `CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL`.
+- `SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE` and `DEFAULT_SSL_TRUSTSTORE_TYPE`
+  are `"PEM"`, the default the clients already used, instead of Java's `"JKS"`,
+  which the SSL factory rejects.
 - New error class `LocalUnsupportedOperationError` (Java's
   `UnsupportedOperationException`), with `Error::local_unsupported_operation`
   and the `is_local_unsupported_operation_error` predicate. In C it is

@@ -59,8 +59,13 @@ impl SslConfigs {
     /// Config key: `ssl.keystore.type`.
     pub const SSL_KEYSTORE_TYPE_CONFIG: &str = "ssl.keystore.type";
 
-    /// Default keystore type in Java. Rust defaults to PEM (see [`SslConfigs::default`]).
-    pub const DEFAULT_SSL_KEYSTORE_TYPE: &str = "JKS";
+    /// Default for `ssl.keystore.type`: `PEM`.
+    ///
+    /// This deviates from Java, whose `DEFAULT_SSL_KEYSTORE_TYPE` is `JKS`
+    /// (`SslConfigs.java:63`): the rustls-based SSL factory reads only PEM and
+    /// rejects JKS and PKCS12, so Java's default would make every TLS client
+    /// fail to construct.
+    pub const DEFAULT_SSL_KEYSTORE_TYPE: &str = "PEM";
 
     /// Config key: `ssl.keystore.key`.
     pub const SSL_KEYSTORE_KEY_CONFIG: &str = "ssl.keystore.key";
@@ -83,8 +88,10 @@ impl SslConfigs {
     /// Config key: `ssl.truststore.type`.
     pub const SSL_TRUSTSTORE_TYPE_CONFIG: &str = "ssl.truststore.type";
 
-    /// Default truststore type in Java. Rust defaults to PEM (see [`SslConfigs::default`]).
-    pub const DEFAULT_SSL_TRUSTSTORE_TYPE: &str = "JKS";
+    /// Default for `ssl.truststore.type`: `PEM`, deviating from Java's `JKS`
+    /// (`SslConfigs.java:93`) for the reason given at
+    /// [`DEFAULT_SSL_KEYSTORE_TYPE`](Self::DEFAULT_SSL_KEYSTORE_TYPE).
+    pub const DEFAULT_SSL_TRUSTSTORE_TYPE: &str = "PEM";
 
     /// Config key: `ssl.truststore.location`.
     pub const SSL_TRUSTSTORE_LOCATION_CONFIG: &str = "ssl.truststore.location";
@@ -122,8 +129,9 @@ impl SslConfigs {
 /// properties. The fields are crate-private: callers set them through the
 /// `ssl.*` properties of a client config, as a Java caller does.
 ///
-/// Java defaults to JKS keystores; Rust/rustls works natively with PEM,
-/// so `truststore_type` and `keystore_type` default to `"PEM"`.
+/// `truststore_type` and `keystore_type` default to `"PEM"`
+/// ([`DEFAULT_SSL_KEYSTORE_TYPE`](Self::DEFAULT_SSL_KEYSTORE_TYPE)), where
+/// Java defaults to JKS.
 ///
 /// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
 /// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
@@ -201,12 +209,12 @@ impl Default for SslConfigs {
             truststore_location: None,
             truststore_password: None,
             truststore_certificates: None,
-            truststore_type: "PEM".to_owned(),
+            truststore_type: SslConfigs::DEFAULT_SSL_TRUSTSTORE_TYPE.to_owned(),
             keystore_location: None,
             keystore_password: None,
             keystore_key: None,
             keystore_certificate_chain: None,
-            keystore_type: "PEM".to_owned(),
+            keystore_type: SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE.to_owned(),
             key_password: None,
             endpoint_identification_algorithm: SslConfigs::DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM.to_owned(),
             enabled_protocols: vec!["TLSv1.2".to_owned(), "TLSv1.3".to_owned()],
@@ -404,8 +412,8 @@ mod tests {
     fn test_default_constants() {
         assert_eq!(SslConfigs::DEFAULT_SSL_PROTOCOL, "TLSv1.3");
         assert_eq!(SslConfigs::DEFAULT_SSL_ENABLED_PROTOCOLS, "TLSv1.2,TLSv1.3");
-        assert_eq!(SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE, "JKS");
-        assert_eq!(SslConfigs::DEFAULT_SSL_TRUSTSTORE_TYPE, "JKS");
+        assert_eq!(SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE, "PEM");
+        assert_eq!(SslConfigs::DEFAULT_SSL_TRUSTSTORE_TYPE, "PEM");
         assert_eq!(SslConfigs::DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM, "https");
     }
 
