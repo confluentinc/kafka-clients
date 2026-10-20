@@ -143,6 +143,9 @@ impl CommonClientConfigs {
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
+    /// The default `security.protocol`.
+    pub const DEFAULT_SECURITY_PROTOCOL: &str = "PLAINTEXT";
+
     /// The base for exponential retry backoff.
     pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 

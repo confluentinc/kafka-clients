@@ -105,9 +105,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
 
 /// `getString(String key)`: the value of the `STRING` key `key`, borrowed
 /// from the handle and valid until it is destroyed, or `NULL` with `*out_err` still
-/// `NULL` when the key has no value (Java's `null`). `client.id` is the
+/// `NULL` when the key has no value (Java's `null`, which is also what an unset
+/// `PASSWORD` key such as `ssl.truststore.password` answers). `client.id` is the
 /// resolved id, generated when the property is unset. A key of another type
-/// (`max.poll.records`) fails as Java's cast does, with an
+/// (`max.poll.records`, a set `PASSWORD` key) fails as Java's cast does, with an
 /// `IllegalArgumentError`, and a key the configuration does not hold is Java's
 /// `ConfigException` (`Unknown configuration '<key>'`), both delivered through
 /// `out_err`.
@@ -215,8 +216,8 @@ mod tests {
 
     /// `getString` lends a set value out of the handle, the same pointer on
     /// every call, answers `NULL` with no error for an unset nullable key,
-    /// reads a key the configuration holds as a parsed value
-    /// (`security.protocol`), fails a key of another type as Java's cast does,
+    /// and for an unset `PASSWORD` key, reads `security.protocol` as written,
+    /// fails a key of another type as Java's cast does,
     /// and delivers `Unknown configuration` for a key it does not hold.
     #[test]
     fn get_string_reads_a_string_key() {
@@ -245,7 +246,10 @@ mod tests {
             assert!(err.is_null());
             let protocol = kafka_consumer_ConsumerConfig_get_string(config, c"security.protocol".as_ptr(), &mut err);
             assert!(err.is_null());
-            assert_eq!(CStr::from_ptr(protocol).to_str().unwrap(), "SASL_SSL");
+            assert_eq!(CStr::from_ptr(protocol).to_str().unwrap(), "sasl_ssl");
+            let password = kafka_consumer_ConsumerConfig_get_string(config, c"ssl.key.password".as_ptr(), &mut err);
+            assert!(password.is_null());
+            assert!(err.is_null());
             let mechanism = kafka_consumer_ConsumerConfig_get_string(config, c"sasl.mechanism".as_ptr(), &mut err);
             assert!(err.is_null());
             assert_eq!(CStr::from_ptr(mechanism).to_str().unwrap(), "PLAIN");

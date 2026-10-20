@@ -203,6 +203,11 @@ pub struct ConsumerConfig {
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
     pub(crate) security_protocol: SecurityProtocol,
+    /// `security.protocol` as configured, trimmed: what Java's
+    /// `getString(SECURITY_PROTOCOL_CONFIG)` returns, since its validator only
+    /// ignores the case (`ConfigDef.CaseInsensitiveValidString`). Default:
+    /// `CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL`.
+    pub(crate) security_protocol_config: String,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
     pub(crate) sasl_config: SaslConfigs,
@@ -286,6 +291,7 @@ impl ConsumerConfig {
 
             security_providers: None,
             security_protocol: SecurityProtocol::Plaintext,
+            security_protocol_config: CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL.to_string(),
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
 
@@ -500,14 +506,16 @@ impl ConsumerConfig {
     /// `client.id` answers the resolved id: when the property is unset, `new`
     /// derives it the way Java's `maybeOverrideClientId` does, so this is the
     /// id the consumer reports to the brokers. `security.protocol` answers the
-    /// protocol's canonical upper-case name (`"SASL_SSL"`): Java accepts the
-    /// value case-insensitively and returns it as written, while this
-    /// configuration keeps only the parsed protocol.
+    /// value as written, trimmed (`"sasl_ssl"`), as Java's does: its validator
+    /// accepts it case-insensitively without changing it. A `PASSWORD`
+    /// configuration that is not set answers `None`, as Java's `null`
+    /// default casts to `String` (`SslConfigs.java:135-142`,
+    /// `SaslConfigs.java:398`).
     ///
     /// # Errors
     ///
     /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type (`max.poll.records`, `ssl.truststore.password`). Java's
+    ///   another type (`max.poll.records`, a set `ssl.truststore.password`). Java's
     ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
     ///   and fails with a `ClassCastException`, which, like
     ///   `IllegalArgumentException`, is not a `KafkaException`.
@@ -531,7 +539,7 @@ impl ConsumerConfig {
             Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
             Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
             Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
-            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => Some(self.security_protocol.name()),
+            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => Some(self.security_protocol_config.as_str()),
             SaslConfigs::SASL_MECHANISM => Some(self.sasl_config.mechanism.as_str()),
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => self.ssl_config.truststore_location.as_deref(),
             SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG => Some(self.ssl_config.truststore_type.as_str()),
@@ -540,6 +548,7 @@ impl ConsumerConfig {
             SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
                 Some(self.ssl_config.endpoint_identification_algorithm.as_str())
             },
+            _ if Self::non_string_config_type(key) == Some("PASSWORD") && !self.is_password_set(key) => None,
             _ => {
                 return Err(match Self::non_string_config_type(key) {
                     Some(config_type) => Error::local_illegal_argument(format!(
@@ -550,6 +559,22 @@ impl ConsumerConfig {
             },
         };
         Ok(value.map(str::trim))
+    }
+
+    /// Whether the `PASSWORD` configuration `key` is set: every one of them
+    /// defaults to `null` in Java.
+    fn is_password_set(&self, key: &str) -> bool {
+        let ssl = &self.ssl_config;
+        match key {
+            SaslConfigs::SASL_JAAS_CONFIG => self.sasl_config.jaas_config.is_some(),
+            SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG => ssl.truststore_password.is_some(),
+            SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG => ssl.truststore_certificates.is_some(),
+            SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG => ssl.keystore_password.is_some(),
+            SslConfigs::SSL_KEYSTORE_KEY_CONFIG => ssl.keystore_key.is_some(),
+            SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => ssl.keystore_certificate_chain.is_some(),
+            SslConfigs::SSL_KEY_PASSWORD_CONFIG => ssl.key_password.is_some(),
+            _ => false,
+        }
     }
 
     /// The `ConfigDef.Type` name of a configuration this client holds whose
@@ -986,6 +1011,10 @@ impl ConsumerConfig {
                     config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
+                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:731-733`)
+                    // before `CaseInsensitiveValidString.ensureValid` runs on it.
+                    let value = value.trim();
+                    config.security_protocol_config = value.to_string();
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
                         Error::config_name_value_message(
                             CommonClientConfigs::SECURITY_PROTOCOL_CONFIG,
@@ -1826,6 +1855,21 @@ mod tests {
             assert_eq!(*expected, config.get_string(key).unwrap(), "for {key}");
         }
 
+        // An unset `PASSWORD` key is Java's `null` default, which casts to
+        // `String`; only a set one fails the cast (below).
+        for key in [
+            SaslConfigs::SASL_JAAS_CONFIG,
+            SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG,
+            SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
+            SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG,
+            SslConfigs::SSL_KEYSTORE_KEY_CONFIG,
+            SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
+            SslConfigs::SSL_KEY_PASSWORD_CONFIG,
+        ] {
+            assert_eq!(Some("PASSWORD"), ConsumerConfig::non_string_config_type(key), "for {key}");
+            assert_eq!(None, config.get_string(key).unwrap(), "for {key}");
+        }
+
         // Every other `STRING` key, set (padded, as `getString` trims).
         let set: &[(&str, &str, &str)] = &[
             (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "consumer", "consumer"),
@@ -1843,7 +1887,7 @@ mod tests {
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, "explicit", "explicit"),
             (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, "record_limit", "record_limit"),
             (ConsumerConfig::SECURITY_PROVIDERS_CONFIG, "my.Provider", "my.Provider"),
-            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, "sasl_ssl", "SASL_SSL"),
+            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, " sasl_ssl ", "sasl_ssl"),
             (SaslConfigs::SASL_MECHANISM, " PLAIN ", "PLAIN"),
             (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, " /trust.pem ", "/trust.pem"),
             (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "JKS", "JKS"),
@@ -1866,7 +1910,17 @@ mod tests {
             (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "PASSWORD"),
             (SaslConfigs::SASL_JAAS_CONFIG, "PASSWORD"),
         ];
+        let passwords = ConsumerConfig::new(&props_with(&[
+            (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "secret"),
+            (SaslConfigs::SASL_JAAS_CONFIG, "x required;"),
+        ]))
+        .unwrap();
         for (key, config_type) in other_types {
+            let config = if *config_type == "PASSWORD" {
+                &passwords
+            } else {
+                &config
+            };
             match config.get_string(key) {
                 Err(e @ Error::LocalIllegalArgument(_)) => {
                     assert_eq!(
