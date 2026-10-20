@@ -112,6 +112,13 @@ breaking changes.
   "session.timeout.ms cannot be set when group.protocol=CONSUMER". An invalid
   `group.protocol` reports Java's message, `String must be one of
   (case insensitive): CONSUMER, CLASSIC`.
+- **Breaking:** as in Java, a blank or unknown `share.acquire.mode` /
+  `share.acknowledgement.mode` fails with the message of Java's
+  `ShareAcquireMode.Validator` / `ShareAcknowledgementMode.Validator`, e.g.
+  "Invalid value `` for configuration share.acquire.mode. The value must
+  either be 'batch_optimized' or 'record_limit'."; a blank value used to be
+  accepted. `share.acquire.mode` defaults to Java's `BATCH_OPTIMIZED`, which
+  `get_string` returns, instead of `batch_optimized`.
 - `ConsumerConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),

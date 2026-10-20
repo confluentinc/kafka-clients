@@ -51,8 +51,8 @@ use log::warn;
 use crate::common::Error;
 use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
-    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, NonEmptyString, ParsedValue, Range, Type,
-    ValidList, ValidString,
+    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, LambdaValidator, NonEmptyString, ParsedValue,
+    Range, Type, ValidList, ValidString, as_string, config_error,
 };
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::errors::InvalidConfigurationError;
@@ -377,19 +377,25 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Importance::Low,
         )
         // Java validates the two share keys with `ShareAcknowledgementMode.Validator`
-        // and `ShareAcquireMode.Validator`; the share consumer is out of scope
-        // (`consumer-threading.md` §20), and both keys are rejected under either
-        // group protocol by `checkUnsupportedConfigsPostProcess`.
-        .define(
+        // and `ShareAcquireMode.Validator`, translated below. The share consumer
+        // is out of scope (`consumer-threading.md` §20), so a valid non-blank
+        // value is then rejected under either group protocol by
+        // `checkUnsupportedConfigsPostProcess`, which skips a blank value: the
+        // validators are what reject a blank one, as in Java.
+        .define_with_validator(
             ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
             Type::String,
             "implicit",
+            share_acknowledgement_mode_validator(),
             Importance::Medium,
         )
-        .define(
+        // Java's `DEFAULT_SHARE_ACQUIRE_MODE` is `ShareAcquireMode.BATCH_OPTIMIZED.name()`,
+        // the enum constant's name, not its lower-case `toString()`.
+        .define_with_validator(
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
             Type::String,
-            "batch_optimized",
+            "BATCH_OPTIMIZED",
+            share_acquire_mode_validator(),
             Importance::Medium,
         )
         .define_with_validator(
@@ -400,6 +406,55 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Importance::Low,
         )
 });
+
+/// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
+/// `implicit` or `explicit`, matched exactly (`ShareAcknowledgementMode.fromString`
+/// checks it against `Utils.enumOptions`, the constants' lower-case
+/// `toString()`).
+fn share_acknowledgement_mode_validator() -> LambdaValidator {
+    LambdaValidator::with(
+        |name, value| {
+            let acknowledgement_mode = as_string(value)?;
+            if acknowledgement_mode.is_some_and(|mode| ["implicit", "explicit"].contains(&mode)) {
+                return Ok(());
+            }
+            Err(config_error(
+                name,
+                value,
+                format!(
+                    "Invalid value `{}` for configuration {name}. The value must either be 'implicit' or 'explicit'.",
+                    acknowledgement_mode.unwrap_or("null")
+                ),
+            ))
+        },
+        || "[implicit, explicit]".to_owned(),
+    )
+}
+
+/// Java's `ShareAcquireMode.Validator`: the value must name one of the
+/// `ShareAcquireMode` constants, case-insensitively (`ShareAcquireMode.of`
+/// upper-cases it before `valueOf`).
+fn share_acquire_mode_validator() -> LambdaValidator {
+    LambdaValidator::with(
+        |name, value| {
+            let acquire_mode = as_string(value)?;
+            if acquire_mode
+                .is_some_and(|mode| ["BATCH_OPTIMIZED", "RECORD_LIMIT"].contains(&mode.to_uppercase().as_str()))
+            {
+                return Ok(());
+            }
+            Err(config_error(
+                name,
+                value,
+                format!(
+                    "Invalid value `{}` for configuration {name}. The value must either be 'batch_optimized' or 'record_limit'.",
+                    acquire_mode.unwrap_or("null")
+                ),
+            ))
+        },
+        || "[batch_optimized, record_limit]".to_owned(),
+    )
+}
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -2055,7 +2110,7 @@ mod tests {
             ),
             (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, Some("INFO")),
             (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, Some("implicit")),
-            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("batch_optimized")),
+            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("BATCH_OPTIMIZED")),
             (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, Some("PLAINTEXT")),
             (SaslConfigs::SASL_MECHANISM, Some("GSSAPI")),
             (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, None),
@@ -2481,6 +2536,66 @@ mod tests {
         // The checked keys are read through Java's `RecordingMap`, so they are used.
         let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, " ")])).unwrap();
         assert!(!config.unused().contains(ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG));
+    }
+
+    /// Java's `ShareAcquireMode.Validator` and `ShareAcknowledgementMode.Validator`
+    /// reject a blank value at parse time, which the unsupported-config check
+    /// would skip, and an unknown one, with their messages; the acquire mode
+    /// is matched case-insensitively, the acknowledgement mode exactly.
+    #[test]
+    fn test_share_mode_validators() {
+        for group_protocol in ["classic", "consumer"] {
+            for (config_name, value, expected) in [
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "",
+                    "Invalid value  for configuration share.acquire.mode: Invalid value `` for configuration \
+                     share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "  ",
+                    "Invalid value  for configuration share.acquire.mode: Invalid value `` for configuration \
+                     share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "invalid",
+                    "Invalid value invalid for configuration share.acquire.mode: Invalid value `invalid` for \
+                     configuration share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+                    "",
+                    "Invalid value  for configuration share.acknowledgement.mode: Invalid value `` for \
+                     configuration share.acknowledgement.mode. The value must either be 'implicit' or 'explicit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+                    "IMPLICIT",
+                    "Invalid value IMPLICIT for configuration share.acknowledgement.mode: Invalid value `IMPLICIT` \
+                     for configuration share.acknowledgement.mode. The value must either be 'implicit' or \
+                     'explicit'.",
+                ),
+            ] {
+                let error = ConsumerConfig::new(&props_with(&[
+                    (ConsumerConfig::GROUP_PROTOCOL_CONFIG, group_protocol),
+                    (config_name, value),
+                ]))
+                .unwrap_err();
+                assert!(matches!(error, Error::Config(_)), "{error:?}");
+                assert_eq!(expected, error.message(), "{group_protocol} {config_name}={value:?}");
+            }
+        }
+        // A valid value passes the validator (and is then rejected as unsupported).
+        for value in ["record_limit", "Batch_Optimized", "BATCH_OPTIMIZED"] {
+            assert_eq!(
+                "share.acquire.mode cannot be set when group.protocol=CLASSIC",
+                ConsumerConfig::new(&props_with(&[(ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, value)]))
+                    .unwrap_err()
+                    .message()
+            );
+        }
     }
 
     /// The `group.protocol` validator is Java's
