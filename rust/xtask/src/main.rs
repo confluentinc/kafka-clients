@@ -2096,12 +2096,18 @@ fn print_help() {
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
+                    check-enum-translation                a public enum translates a Java enum or class hierarchy
+                    check-functional-interface-trait      a public functional interface is a trait with factories
                     check-no-public-field                 public structs have no `pub` field
                     check-no-fixed-size-array             no fixed-size array in a public signature
                     check-java-name                       every public item names the Java API it translates
                     check-no-deprecated-translation       no deprecated Java API is translated
                     check-public-audience                 public items are public in Java
                     check-dyn-compatible                  public traits are dyn-compatible
+                    check-dyn-forwarding                  a Dyn<Name> companion and its trait forward to each other
+                    check-consumer-handle                 ConsumerHandle has the KIP-1306 callback view plus wakeup
+                    check-consumer-receiver               Consumer methods take &mut self unless Java leaves them unguarded
+                    check-send-future                     no public method is a native async fn
                     check-error-predicate                 every Error class has its predicate
                     check-ffi-translation                 every public Rust item has its C counterpart
                   With a rule name only that rule runs; `--no-baseline` ignores
