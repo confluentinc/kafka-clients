@@ -40,6 +40,9 @@ breaking changes.
   `ssl.*` location and type keys. A known key of another type now returns an
   `IllegalArgumentError` ("Configuration '<key>' is of type <T>, not STRING")
   instead of a value; an unknown key is still a `ConfigError`.
+- **Breaking:** `ConsumerHandle::group_metadata` now panics like
+  `KafkaConsumer::group_metadata` on a consumer without `group.id` instead of
+  returning a group-less value.
 
 ### Common
 

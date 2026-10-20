@@ -383,9 +383,20 @@ impl ConsumerHandle {
     /// [`Consumer::group_metadata`](crate::consumer::Consumer::group_metadata)
     /// via the consumer's shared group-metadata slot; on a `MockConsumer`
     /// handle, Java's `MockConsumer.groupMetadata()` sentinel values.
+    ///
+    /// # Panics
+    ///
+    /// On a consumer without `group.id`, with Java's `InvalidGroupIdException`
+    /// message, as the consumer's own `group_metadata` does (Java's
+    /// `throwIfGroupIdNotDefined()`, `AsyncKafkaConsumer.java:1529-1537`). The
+    /// handle does not check for a closed consumer: the consumer's closed flag
+    /// is its own, not shared with the handle.
     pub fn group_metadata(&self) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
         match &self.inner {
-            ConsumerHandleInner::Async(state) => group_metadata_from(&state.group_metadata, state.group_id.as_deref()),
+            ConsumerHandleInner::Async(state) => {
+                panic_if_group_id_not_defined(state.group_id.as_deref());
+                group_metadata_from(&state.group_metadata)
+            },
             ConsumerHandleInner::Mock { .. } => crate::consumer::mock_consumer::mock_group_metadata(),
         }
     }
@@ -863,28 +874,18 @@ impl ConsumerHandle {
 
 /// Java's `groupMetadata()` body (`AsyncKafkaConsumer.java:1559-1562`) over
 /// the consumer's shared slot, shared by [`AsyncKafkaConsumer::group_metadata`]
-/// and [`ConsumerHandle::group_metadata`]: the seeded metadata, or, for a
-/// groupless consumer whose slot was never seeded, a groupless stub. Only the
-/// handle reaches the stub: [`AsyncKafkaConsumer::group_metadata`] first
-/// panics with Java's `InvalidGroupIdException` message when `group.id` is
-/// absent, as Java's `throwIfGroupIdNotDefined()` throws.
+/// and [`ConsumerHandle::group_metadata`]. Both first run
+/// [`panic_if_group_id_not_defined`], and the slot is seeded at construction
+/// whenever `group.id` is set (`initialize_group_metadata`, Java `:533`), so
+/// it is never empty here.
 fn group_metadata_from(
     slot: &Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>,
-    group_id: Option<&str>,
 ) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
     let guard = slot.lock().unwrap();
-    match guard.as_ref() {
-        Some(meta) => Arc::clone(meta) as Arc<dyn crate::consumer::ConsumerGroupMetadata>,
-        None => {
-            // Groupless (assignment-only) consumer: the slot was never
-            // seeded — `initialize_group_metadata` returns `None` when
-            // `group.id` is absent (Java `:849`). The consumer's own getter
-            // has already panicked with Java's `InvalidGroupIdException`
-            // message; only `ConsumerHandle::group_metadata` gets here, and
-            // it returns a groupless stub.
-            Arc::new(ConsumerGroupMetadataImpl::new(group_id.unwrap_or_default().to_string()))
-        },
-    }
+    let meta = guard
+        .as_ref()
+        .expect("the group-metadata slot is seeded at construction whenever group.id is set");
+    Arc::clone(meta) as Arc<dyn crate::consumer::ConsumerGroupMetadata>
 }
 
 /// Locks a `MockConsumer`'s shared state as the mock itself does, recovering
@@ -2048,6 +2049,16 @@ fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Er
         return Err(Error::invalid_group_id(GROUP_ID_NOT_DEFINED_MSG));
     }
     Ok(())
+}
+
+/// The panicking form of [`return_error_if_group_id_not_defined`] for the
+/// sync `group_metadata` getters of the consumer and its [`ConsumerHandle`],
+/// which have no error channel: a missing `group.id` is a programming error
+/// (CLAUDE.md §12.5), reported with Java's `InvalidGroupIdException` message.
+fn panic_if_group_id_not_defined(group_id: Option<&str>) {
+    if let Err(error) = return_error_if_group_id_not_defined(group_id) {
+        panic!("{}", error.message());
+    }
 }
 
 /// Takes an event's result if the background task has already delivered it,
@@ -4099,10 +4110,8 @@ where
     /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         self.panic_if_closed();
-        if let Err(error) = self.return_error_if_group_id_not_defined() {
-            panic!("{}", error.message());
-        }
-        group_metadata_from(&self.group_metadata, self.group_id.as_deref())
+        panic_if_group_id_not_defined(self.group_id.as_deref());
+        group_metadata_from(&self.group_metadata)
     }
 
     /// Returns the [`ConsumerStateNotifier`] this consumer expects to
@@ -9825,6 +9834,18 @@ mod tests {
     async fn group_metadata_panics_without_group_id() {
         let (mut consumer, _handles) = make_test_consumer_without_group_id();
         let _ = crate::consumer::Consumer::group_metadata(&mut consumer);
+    }
+
+    /// `ConsumerHandle::group_metadata` runs the consumer's own
+    /// `throwIfGroupIdNotDefined` check, so without a `group.id` it panics
+    /// with the same `InvalidGroupIdException` message.
+    #[tokio::test]
+    #[should_panic(
+        expected = "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer configuration."
+    )]
+    async fn consumer_handle_group_metadata_panics_without_group_id() {
+        let (consumer, _handles) = make_test_consumer_without_group_id();
+        let _ = consumer.handle().group_metadata();
     }
 
     /// Java: `testSubscribeGeneratesEvent` (Java line 1191-1200) —

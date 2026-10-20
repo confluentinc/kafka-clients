@@ -2543,6 +2543,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
 /// group-metadata slot, so it answers from inside a listener while the
 /// consumer's own call is in flight.
 ///
+/// On a consumer without `group.id` the Rust call panics with Java's
+/// `InvalidGroupIdException` message, as the consumer's own `group_metadata` does; the
+/// panic reaches the `_err` twin's `out_err` as an `IllegalStateError` whose message
+/// begins `Rust panic caught at the FFI boundary in`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
