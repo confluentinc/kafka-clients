@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["DescribeClusterOptions"]
@@ -41,53 +41,57 @@ class DescribeClusterOptions(AbstractOptions):
 
     __slots__ = ("_include_authorized_operations", "_include_fenced_brokers")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 include_authorized_operations: bool = UNSET,
-                 include_fenced_brokers: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 include_authorized_operations: bool = MISSING,
+                 include_fenced_brokers: bool = MISSING) -> None:
         super().__init__()
         self._include_authorized_operations = False
         self._include_fenced_brokers = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if include_authorized_operations is not UNSET:
+        if include_authorized_operations is not MISSING:
             self.include_authorized_operations(
                 include_authorized_operations=include_authorized_operations)
-        if include_fenced_brokers is not UNSET:
+        if include_fenced_brokers is not MISSING:
             self.include_fenced_brokers(include_fenced_brokers=include_fenced_brokers)
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object. Without: the timeout in milliseconds, or ``None``."""
         # This method is retained to keep binary compatibility with 0.11
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)
         return self
 
     def include_authorized_operations(self, *,
-                                      include_authorized_operations: bool | None = None) -> Any:
+                                      include_authorized_operations: bool = MISSING) -> Any:
         """With ``include_authorized_operations``: set it and return this object.
 
         Without: specify if authorized operations should be included in the response.
         Note that some older brokers cannot supply this information even if it is
         requested.
         """
-        if include_authorized_operations is None:
+        if include_authorized_operations is MISSING:
             return self._include_authorized_operations
+        if include_authorized_operations is None:  # a boolean: Java cannot pass null
+            raise TypeError("include_authorized_operations must not be None")
         self._include_authorized_operations = include_authorized_operations
         self._record("include_authorized_operations", self._include_authorized_operations)
         return self
 
-    def include_fenced_brokers(self, *, include_fenced_brokers: bool | None = None) -> Any:
+    def include_fenced_brokers(self, *, include_fenced_brokers: bool = MISSING) -> Any:
         """With ``include_fenced_brokers``: set it and return this object.
 
         Without: specify if fenced brokers should be included in the response. Note that
         some older brokers cannot supply this information even if it is requested.
         """
-        if include_fenced_brokers is None:
+        if include_fenced_brokers is MISSING:
             return self._include_fenced_brokers
+        if include_fenced_brokers is None:  # a boolean: Java cannot pass null
+            raise TypeError("include_fenced_brokers must not be None")
         self._include_fenced_brokers = include_fenced_brokers
         self._record("include_fenced_brokers", self._include_fenced_brokers)
         return self

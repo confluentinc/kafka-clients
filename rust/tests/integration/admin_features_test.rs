@@ -65,7 +65,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::admin::{DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions, UpgradeType};
+use confluent_kafka::admin::{
+    DescribeClusterOptions, DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions, UpgradeType,
+};
 use confluent_kafka::common::Error;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
@@ -337,6 +339,89 @@ async fn update_features_on_the_mock_client<F: AdminBackendFactory>(_ctx: &mut T
         .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
 }
 
+/// `describeFeatures` aimed at one broker through `nodeId`, with an explicit
+/// timeout.
+///
+/// The second scenario for `describe_features`, which
+/// [`describe_features_reports_metadata_version`] drives with default options
+/// (any broker, `LeastLoadedNodeProvider`). Java's
+/// `DescribeFeaturesOptions.nodeId` (KIP-1073) switches the call to a
+/// `ConstantNodeIdProvider` for that broker, so the request lands on the named
+/// node. Finalized features are cluster-wide metadata, so every broker must
+/// report the same finalized `metadata.version` the default call reports, and
+/// advertise it as supported. The finalized-features epoch is not compared
+/// across calls: the broker fills it with its latest metadata offset
+/// (`KRaftMetadataCache`, `image.highestOffsetAndEpoch().offset()`), which the
+/// controller's periodic `NoOpRecord` moves every 500 ms; each node must only
+/// report a real one.
+async fn describe_features_on_each_node<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let default_view = admin
+        .describe_features(DescribeFeaturesOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe features: {e}"));
+    let nodes = admin
+        .describe_cluster(DescribeClusterOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe cluster: {e}"))
+        .nodes;
+    assert!(!nodes.is_empty(), "{backend} backend: at least one broker");
+
+    for node in &nodes {
+        let on_node = admin
+            .describe_features(
+                DescribeFeaturesOptions::new()
+                    .set_node_id(node.id())
+                    .set_timeout_ms(Some(30_000)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: describe features on node {}: {e}", node.id()));
+        let finalized = on_node
+            .finalized_features
+            .get(METADATA_VERSION_FEATURE)
+            .unwrap_or_else(|| panic!("{backend} backend: node {} must finalize metadata.version", node.id()));
+        let expected = default_view
+            .finalized_features
+            .get(METADATA_VERSION_FEATURE)
+            .unwrap_or_else(|| panic!("{backend} backend: the cluster must finalize metadata.version"));
+        assert_eq!(
+            (finalized.min_version_level(), finalized.max_version_level()),
+            (expected.min_version_level(), expected.max_version_level()),
+            "{backend} backend: node {} must report the cluster-wide finalized metadata.version",
+            node.id()
+        );
+        let epoch = on_node
+            .finalized_features_epoch
+            .unwrap_or_else(|| panic!("{backend} backend: node {} must report a finalized-features epoch", node.id()));
+        assert!(
+            epoch > 0,
+            "{backend} backend: node {}'s finalized-features epoch is a real metadata offset, got {epoch}",
+            node.id()
+        );
+        let supported = on_node
+            .supported_features
+            .get(METADATA_VERSION_FEATURE)
+            .unwrap_or_else(|| panic!("{backend} backend: node {} must support metadata.version", node.id()));
+        assert!(
+            supported.min_version() <= finalized.max_version_level()
+                && finalized.max_version_level() <= supported.max_version(),
+            "{backend} backend: node {} supports [{}, {}], which must contain the finalized level {}",
+            node.id(),
+            supported.min_version(),
+            supported.max_version(),
+            finalized.max_version_level()
+        );
+    }
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_describe_features_reports_metadata_version,
     describe_features_reports_metadata_version
@@ -347,3 +432,4 @@ multilanguage_admin_test!(
 );
 multilanguage_admin_test!(test_update_features_rejects_an_empty_map, update_features_rejects_an_empty_map);
 multilanguage_admin_test!(test_update_features_on_the_mock_client, update_features_on_the_mock_client);
+multilanguage_admin_test!(test_describe_features_on_each_node, describe_features_on_each_node);

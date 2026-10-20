@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 
 from ._values import optional_str
@@ -72,10 +72,12 @@ class LogDirDescription:
                                "is_cordoned": False}))
     def __init__(self, *, error: ApiError | None,
                  replica_infos: Mapping[TopicPartition, ReplicaInfo],
-                 total_bytes: int = UNSET, usable_bytes: int = UNSET,
-                 is_cordoned: bool = UNSET) -> None:
+                 total_bytes: int = MISSING, usable_bytes: int = MISSING,
+                 is_cordoned: bool = MISSING) -> None:
         self._error = error
-        self._replica_infos = dict(replica_infos)
+        # Java stores the reference, null included; replicaInfos() dereferences it.
+        self._replica_infos: dict[TopicPartition, ReplicaInfo] | None = (
+            None if replica_infos is None else dict(replica_infos))
         self._total_bytes = None if total_bytes == _UNKNOWN_VOLUME_BYTES else total_bytes
         self._usable_bytes = None if usable_bytes == _UNKNOWN_VOLUME_BYTES else usable_bytes
         self._is_cordoned = is_cordoned
@@ -92,7 +94,10 @@ class LogDirDescription:
 
     def replica_infos(self) -> dict[TopicPartition, ReplicaInfo]:
         """A map from topic partition to replica information for that
-        partition in this log directory."""
+        partition in this log directory. A ``None`` given to the constructor
+        raises ``TypeError`` here (Java's ``unmodifiableMap(null)``)."""
+        if self._replica_infos is None:
+            raise TypeError("replica_infos must not be None")
         return dict(self._replica_infos)
 
     def total_bytes(self) -> int | None:

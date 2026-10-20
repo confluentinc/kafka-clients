@@ -18,32 +18,28 @@ Java's six constructors are one keyword-only constructor matched by
 ``java_forms`` (CLAUDE.md, Python Binding Conventions, Signatures): the given
 arguments must be one of them, and the shorter ones delegate to the longest,
 passing ``null`` for what they leave out. ``partition``, ``timestamp``, ``key``
-and ``headers`` default to ``UNSET``, so an explicit ``None`` (or ``()``) is
+and ``headers`` default to ``MISSING``, so an explicit ``None`` (or ``()``) is
 given: ``ProducerRecord(topic=…, partition=0, key=None, value=…)`` is Java's
 ``(topic, partition, key, value)`` with a null key, ``(topic, partition, value)``
 without the key is rejected, and so is ``(topic, timestamp=None, value)``.
 The record is covariant in ``K`` and ``V``; one stub per constructor and
 key / value binding binds an omitted or ``None`` key or value to ``Never``, so
 ``ProducerRecord(topic="t", value="v")`` is a ``ProducerRecord[Never, str]``
-and fits any producer with ``str`` values. Header values are viewed, not copied
-(CLAUDE.md §12).
+and fits any producer with ``str`` values. Headers are taken as ``Header`` s
+or ``(key, value)`` pairs and handed out as the record's ``Headers``; header
+values are viewed, not copied (CLAUDE.md §14).
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.common.headers import (
-    Headers,
-    _hand_out,
-    _headers_hash,
-    _headers_to_string,
-    _read_headers,
-)
+from confluent_kafka.common.header import Header
+from confluent_kafka.common.headers import Headers, _taken
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -59,7 +55,8 @@ V_co = TypeVar("V_co", covariant=True)
 _K = TypeVar("_K")
 _V = TypeVar("_V")
 
-_WrittenHeaders = Iterable[tuple[str, "bytes | bytearray | memoryview | None"]]
+# Java's `Iterable<Header>`: each element a `Header` or a `(key, value)` pair.
+_WrittenHeaders = Iterable[Union[Header, "tuple[str, bytes | bytearray | memoryview | None]"]]
 
 # Java's six constructors, in Java's order; the shorter ones pass null to the
 # first for what they leave out (a null header list is the empty ``()``).
@@ -163,36 +160,37 @@ class ProducerRecord(Generic[K_co, V_co]):
     def __init__(self: ProducerRecord[Never, _V], *, topic: str, value: _V) -> None: ...
 
     @java_forms(*_FORMS)
-    def __init__(self, *, topic: str, partition: int | None = UNSET,
-                 timestamp: int | None = UNSET, key: Any = UNSET, value: Any,
-                 headers: _WrittenHeaders = UNSET) -> None:
+    def __init__(self, *, topic: str, partition: int | None = MISSING,
+                 timestamp: int | None = MISSING, key: Any = MISSING, value: Any,
+                 headers: _WrittenHeaders = MISSING) -> None:
         """Creates a record to be sent to a topic, and optionally to a
         partition, with a timestamp in milliseconds since epoch (if ``None``,
         the producer assigns it), a key, the value and the headers."""
         if topic is None:
-            raise IllegalArgumentError(message="Topic cannot be null.")
+            raise IllegalArgumentError(message="Topic cannot be None.")
         if timestamp is not None and timestamp < 0:
             raise IllegalArgumentError(
                 message=f"Invalid timestamp: {timestamp}. Timestamp should always be "
-                "non-negative or null.")
+                "non-negative or None.")
         if partition is not None and partition < 0:
             raise IllegalArgumentError(
                 message=f"Invalid partition: {partition}. Partition number should always "
-                "be non-negative or null.")
+                "be non-negative or None.")
         self._topic = topic
         self._partition = partition
         self._key: K_co | None = key
         self._value: V_co | None = value
         self._timestamp = timestamp
-        self._headers = _read_headers(headers)
+        self._headers = _taken(headers)
 
     def topic(self) -> str:
         """The topic this record is being sent to."""
         return self._topic
 
     def headers(self) -> Headers:
-        """The headers."""
-        return _hand_out(self._headers)
+        """The headers: the record's own ``Headers``, which can be changed
+        until the record is sent (Java's ``RecordHeaders``)."""
+        return self._headers
 
     def key(self) -> K_co | None:
         """The key (or ``None`` if no key is specified)."""
@@ -213,7 +211,7 @@ class ProducerRecord(Generic[K_co, V_co]):
 
     def __str__(self) -> str:
         return ("ProducerRecord(topic=" + self._topic + ", partition="
-                + java_str(self._partition) + ", headers=" + _headers_to_string(self._headers)
+                + java_str(self._partition) + ", headers=" + str(self._headers)
                 + ", key=" + java_str(self._key) + ", value=" + java_str(self._value)
                 + ", timestamp=" + java_str(self._timestamp) + ")")
 
@@ -227,5 +225,5 @@ class ProducerRecord(Generic[K_co, V_co]):
                 and self._value == other._value and self._timestamp == other._timestamp)
 
     def __hash__(self) -> int:
-        return hash((self._topic, self._partition, _headers_hash(self._headers), self._key,
+        return hash((self._topic, self._partition, self._headers, self._key,
                      self._value, self._timestamp))

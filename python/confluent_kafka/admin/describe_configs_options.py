@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["DescribeConfigsOptions"]
@@ -41,49 +41,53 @@ class DescribeConfigsOptions(AbstractOptions):
 
     __slots__ = ("_include_synonyms", "_include_documentation")
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, include_synonyms: bool = UNSET,
-                 include_documentation: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, include_synonyms: bool = MISSING,
+                 include_documentation: bool = MISSING) -> None:
         super().__init__()
         self._include_synonyms = False
         self._include_documentation = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if include_synonyms is not UNSET:
+        if include_synonyms is not MISSING:
             self.include_synonyms(include_synonyms=include_synonyms)
-        if include_documentation is not UNSET:
+        if include_documentation is not MISSING:
             self.include_documentation(include_documentation=include_documentation)
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object. Without: the timeout in milliseconds, or ``None``."""
         # This method is retained to keep binary compatibility with 0.11
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)
         return self
 
-    def include_synonyms(self, *, include_synonyms: bool | None = None) -> Any:
+    def include_synonyms(self, *, include_synonyms: bool = MISSING) -> Any:
         """With ``include_synonyms``: set to true if synonym configs should be returned
         in the response, and return this object.
 
         Without: return true if synonym configs should be returned in the response.
         """
-        if include_synonyms is None:
+        if include_synonyms is MISSING:
             return self._include_synonyms
+        if include_synonyms is None:  # a boolean: Java cannot pass null
+            raise TypeError("include_synonyms must not be None")
         self._include_synonyms = include_synonyms
         self._record("include_synonyms", self._include_synonyms)
         return self
 
-    def include_documentation(self, *, include_documentation: bool | None = None) -> Any:
+    def include_documentation(self, *, include_documentation: bool = MISSING) -> Any:
         """With ``include_documentation``: set to true if config documentation should be
         returned in the response, and return this object.
 
         Without: return true if config documentation should be returned in the response.
         """
-        if include_documentation is None:
+        if include_documentation is MISSING:
             return self._include_documentation
+        if include_documentation is None:  # a boolean: Java cannot pass null
+            raise TypeError("include_documentation must not be None")
         self._include_documentation = include_documentation
         self._record("include_documentation", self._include_documentation)
         return self

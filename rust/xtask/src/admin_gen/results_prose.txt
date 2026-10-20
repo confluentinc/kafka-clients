@@ -22,7 +22,8 @@ core's own future of the topic, which fails with ``IllegalArgumentError`` for a 
 that was not part of the call, with no Python-side check. On a result built through
 ``_new`` (the mock's), they call ``then_apply`` on ``futures.get(topic)`` as Java's
 do, which throws ``NullPointerException`` for a topic that was not part of the call;
-they raise ``NullPointerError`` the same way.
+they raise ``IllegalArgumentError`` with the core's message instead (CLAUDE.md, Python
+Binding Conventions, Types: no ``NullPointerError`` class).
 """
 === DeleteConsumerGroupOffsetsResult module
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``

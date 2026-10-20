@@ -37,7 +37,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, NullPointerError
+from confluent_kafka import IllegalArgumentError
 from confluent_kafka.common import (
     AccessControlEntry,
     AccessControlEntryFilter,
@@ -215,9 +215,10 @@ def test_access_control_entry_checks() -> None:
         AccessControlEntry(principal="User:a", host="*", operation=AclOperation.READ,
                            permission_type=AclPermissionType.ANY)
     assert str(e.value) == "permissionType must not be ANY"
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         AccessControlEntry(principal=None, host="*", operation=AclOperation.READ,  # type: ignore[arg-type]
                            permission_type=AclPermissionType.ALLOW)
+    assert str(none.value) == "principal must not be None"
     entry = ACL3.entry()
     assert entry.to_filter().matches(other=entry)
     assert entry.to_filter().matches_at_most_one()
@@ -402,9 +403,9 @@ def test_resource_pattern_filter_indefinite_fields() -> None:
     assert _filter(TOPIC, "t", LITERAL).matches_at_most_one()
     assert str(_filter(TOPIC, None, LITERAL)) == (
         "ResourcePattern(resourceType=TOPIC, name=<any>, patternType=LITERAL)")
-    with pytest.raises(NullPointerError) as e:
+    with pytest.raises(TypeError) as e:
         ResourcePatternFilter(resource_type=None, name=None, pattern_type=LITERAL)  # type: ignore[arg-type]
-    assert str(e.value) == "resourceType"
+    assert str(e.value) == "resource_type must not be None"
 
 
 # --- ResourcePatternTest --------------------------------------------------
@@ -424,10 +425,10 @@ def test_resource_pattern_should_throw(resource_type: ResourceType, pattern_type
 
 def test_resource_pattern_should_throw_if_resource_name_is_null() -> None:
     """ResourcePatternTest.shouldThrowIfResourceNameIsNull."""
-    with pytest.raises(NullPointerError) as e:
+    with pytest.raises(TypeError) as e:
         ResourcePattern(resource_type=TOPIC, name=None,  # type: ignore[arg-type]
                         pattern_type=PatternType.ANY)
-    assert str(e.value) == "name"
+    assert str(e.value) == "name must not be None"
 
 
 def test_resource_pattern_value_semantics() -> None:
@@ -472,12 +473,12 @@ def test_config_resource_value_semantics() -> None:
     assert ConfigResource(type=ConfigResource.Type.BROKER, name="").is_default()
     assert [t.name for t in ConfigResource.Type] == [
         "GROUP", "CLIENT_METRICS", "BROKER_LOGGER", "BROKER", "TOPIC", "UNKNOWN"]
-    with pytest.raises(NullPointerError) as e:
+    with pytest.raises(TypeError) as e:
         ConfigResource(type=None, name="t")  # type: ignore[arg-type]
-    assert str(e.value) == "type should not be null"
-    with pytest.raises(NullPointerError) as e:
+    assert str(e.value) == "type must not be None"
+    with pytest.raises(TypeError) as e:
         ConfigResource(type=ConfigResource.Type.TOPIC, name=None)  # type: ignore[arg-type]
-    assert str(e.value) == "name should not be null"
+    assert str(e.value) == "name must not be None"
 
 
 # --- KafkaPrincipalTest ---------------------------------------------------
@@ -500,12 +501,12 @@ def test_kafka_principal_surface() -> None:
     assert p.token_authenticated() is True
     assert p == KafkaPrincipal(principal_type="User", name="alice", token_authenticated=False)
     assert str(KafkaPrincipal.ANONYMOUS) == "User:ANONYMOUS"
-    with pytest.raises(NullPointerError) as e:
+    with pytest.raises(TypeError) as e:
         KafkaPrincipal(principal_type=None, name="a")  # type: ignore[arg-type]
-    assert str(e.value) == "Principal type cannot be null"
-    with pytest.raises(NullPointerError) as e:
+    assert str(e.value) == "principal_type must not be None"
+    with pytest.raises(TypeError) as e:
         KafkaPrincipal(principal_type="User", name=None)  # type: ignore[arg-type]
-    assert str(e.value) == "Principal name cannot be null"
+    assert str(e.value) == "name must not be None"
 
 
 # --- Delegation tokens ----------------------------------------------------
@@ -549,7 +550,7 @@ def test_client_quota_types() -> None:
     entity = ClientQuotaEntity(entries={ClientQuotaEntity.USER: "alice",
                                         ClientQuotaEntity.CLIENT_ID: None})
     assert entity.entries() == {"user": "alice", "client-id": None}
-    assert str(entity) == "ClientQuotaEntity(entries={user=alice, client-id=null})"
+    assert str(entity) == "ClientQuotaEntity(entries={user=alice, client-id=None})"
     assert entity == ClientQuotaEntity(entries={"client-id": None, "user": "alice"})
     assert ClientQuotaEntity.is_valid_entity_type(entity_type="ip")
     assert not ClientQuotaEntity.is_valid_entity_type(entity_type="other")
@@ -559,7 +560,7 @@ def test_client_quota_types() -> None:
     assert str(op) == "ClientQuotaAlteration.Op(key=producer_byte_rate, value=1024.0)"
     assert op == ClientQuotaAlteration.Op(key="producer_byte_rate", value=1024.0)
     assert str(ClientQuotaAlteration.Op(key="k", value=None)) == (
-        "ClientQuotaAlteration.Op(key=k, value=null)")
+        "ClientQuotaAlteration.Op(key=k, value=None)")
     alteration = ClientQuotaAlteration(entity=entity, ops=[op])
     assert alteration.entity() is entity and alteration.ops() == [op]
     assert str(alteration) == ("ClientQuotaAlteration(entity=" + str(entity) + ", ops=["
@@ -572,9 +573,10 @@ def test_client_quota_types() -> None:
     assert default != any_name  # Optional.empty() vs null
     assert str(exact) == "ClientQuotaFilterComponent(entityType=user, match=Optional[alice])"
     assert str(default) == "ClientQuotaFilterComponent(entityType=user, match=Optional.empty)"
-    assert str(any_name) == "ClientQuotaFilterComponent(entityType=user, match=null)"
-    with pytest.raises(NullPointerError):
+    assert str(any_name) == "ClientQuotaFilterComponent(entityType=user, match=None)"
+    with pytest.raises(TypeError) as none:
         ClientQuotaFilterComponent.of_entity(entity_type="user", entity_name=None)  # type: ignore[arg-type]
+    assert str(none.value) == "entity_name must not be None"
     with pytest.raises(TypeError) as t:
         ClientQuotaFilterComponent()
     assert str(t.value) == (
@@ -587,7 +589,7 @@ def test_client_quota_types() -> None:
     assert not contains.strict() and contains.components() == [exact]
     assert ClientQuotaFilter.contains_only(components=[exact]).strict()
     assert ClientQuotaFilter.all() == ClientQuotaFilter.contains(components=[])
-    assert str(contains) == ("ClientQuotaFilter(components=[" + str(exact) + "], strict=false)")
+    assert str(contains) == ("ClientQuotaFilter(components=[" + str(exact) + "], strict=False)")
     with pytest.raises(TypeError) as t:
         ClientQuotaFilter()
     assert str(t.value) == (
@@ -641,7 +643,7 @@ def test_topic_partition_info() -> None:
     full = TopicPartitionInfo(partition=3, leader=None, replicas=[n0], isr=[], elr=[n1],
                               last_known_elr=[])
     assert full.leader() is None and full.elr() == [n1] and full.last_known_elr() == []
-    assert str(full) == ("(partition=3, leader=null, replicas=" + str(n0) + ", isr=, elr="
+    assert str(full) == ("(partition=3, leader=None, replicas=" + str(n0) + ", isr=, elr="
                          + str(n1) + ", lastKnownElr=)")
     assert info == TopicPartitionInfo(partition=3, leader=n0, replicas=(n0, n1), isr=[n0])
     assert hash(info) == hash(TopicPartitionInfo(partition=3, leader=n0, replicas=[n0, n1],
@@ -690,8 +692,9 @@ def test_topic_partition_replica() -> None:
     assert r == TopicPartitionReplica(topic="t", partition=1, broker_id=2)
     assert hash(r) == hash(TopicPartitionReplica(topic="t", partition=1, broker_id=2))
     assert r != TopicPartitionReplica(topic="t", partition=1, broker_id=3)
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         TopicPartitionReplica(topic=None, partition=1, broker_id=2)  # type: ignore[arg-type]
+    assert str(none.value) == "topic must not be None"
     with pytest.raises(TypeError):
         TopicPartitionReplica("t", 1, 2)  # type: ignore[call-arg]
 

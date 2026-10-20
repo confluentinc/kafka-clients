@@ -114,7 +114,7 @@ class _TopicPartitionState:
             if self.position is None and next_state.requires_position():
                 raise IllegalStateError(
                     message=f"Transitioned subscription state to {next_state.name}, "
-                            "but position is null")
+                            "but position is None")
             if not next_state.requires_position():
                 self.position = None
 

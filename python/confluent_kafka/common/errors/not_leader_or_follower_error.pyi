@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.NotLeaderOrFollowerError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.invalid_metadata_error import InvalidMetadataError
 
@@ -22,4 +22,11 @@ __all__ = ["NotLeaderOrFollowerError"]
 
 class NotLeaderOrFollowerError(InvalidMetadataError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...

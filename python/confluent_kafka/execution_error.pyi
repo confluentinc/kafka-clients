@@ -14,11 +14,14 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.ExecutionError).
 
-from typing import Any
+from typing import Any, overload
 
 __all__ = ["ExecutionError"]
 
 class ExecutionError(Exception):
-    def __init__(self, *, message: str | None = None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
     def __str__(self) -> str: ...
     def __reduce__(self) -> str | tuple[Any, ...]: ...

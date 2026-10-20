@@ -3350,6 +3350,237 @@ async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_delivery_callback_logs_metadata, delivery_callback_logs_metadata_inner);
 
+/// Java's guarantee on `send(record, callback)`: "callbacks for records being
+/// sent to the same partition are guaranteed to execute in order". Twenty
+/// records to one partition, each with a callback the backend's own binding
+/// registers, are sent **concurrently** — on the gRPC arms each `Send` RPC
+/// returns only once its record is acked, so sequential sends would put one
+/// record in flight at a time and could never reorder — and their deliveries
+/// must be logged exactly once each, in offset order (contiguous and
+/// increasing in log order), with the offsets the send futures report.
+async fn send_with_callback_keeps_per_partition_order_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    const RECORDS: usize = 20;
+    let topic = ctx.topic("callback_order");
+    let (producer, log) = factory
+        .create_with_callback_log(make_config_for(factory, ctx))
+        .await
+        .expect("create producer with callback log");
+
+    let sends = (0..RECORDS).map(|i| {
+        let record = ProducerRecord::with_partition_key(
+            topic.clone(),
+            Some(0),
+            Some(b(&format!("k{i}"))),
+            Some(b(&format!("v{i}"))),
+        )
+        .expect("valid record");
+        log.send_with_logging_callback(&producer, record)
+    });
+    let futures: Vec<_> = futures_util::future::join_all(sends)
+        .await
+        .into_iter()
+        .map(|sent| sent.expect("send with logging callback"))
+        .collect();
+    producer.flush().await.expect("flush should succeed");
+    let mut expected = Vec::with_capacity(RECORDS);
+    for future in &futures {
+        expected.push(
+            future
+                .get_with_timeout(Duration::from_secs(30))
+                .await
+                .expect("produce should succeed")
+                .offset(),
+        );
+    }
+    // Which call got which offset depends on how the concurrent sends were
+    // scheduled; the set must be one contiguous run.
+    expected.sort_unstable();
+    assert!(
+        expected.windows(2).all(|w| w[1] == w[0] + 1),
+        "{} backend: one partition, one producer: the offsets are contiguous, got {expected:?}",
+        factory.name()
+    );
+
+    let start = Instant::now();
+    let deliveries = loop {
+        let entries = log.entries().await.expect("read producer callback log");
+        let deliveries: Vec<_> = entries.into_iter().filter(|e| e.kind == KIND_DELIVERY).collect();
+        if deliveries.len() >= RECORDS || start.elapsed() >= Duration::from_secs(20) {
+            break deliveries;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    // The settle window of `wait_for_kind_settled`: a callback fired twice lands
+    // within milliseconds of the first.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    let settled: Vec<_> = log
+        .entries()
+        .await
+        .expect("read producer callback log")
+        .into_iter()
+        .filter(|e| e.kind == KIND_DELIVERY)
+        .collect();
+    assert_eq!(
+        settled.len(),
+        RECORDS,
+        "{} backend: one callback per record; log = {deliveries:?}",
+        factory.name()
+    );
+    let logged: Vec<i64> = settled
+        .iter()
+        .map(|e| {
+            assert!(e.error.is_empty(), "{} backend: delivery error {}", factory.name(), e.error);
+            e.offset_for(&topic, 0)
+                .unwrap_or_else(|| panic!("{} backend: delivery entry not for {topic}-0: {e:?}", factory.name()))
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        expected,
+        "{} backend: callbacks for one partition run in offset order",
+        factory.name()
+    );
+
+    producer.close().await.expect("close should succeed");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_with_callback_keeps_per_partition_order,
+    send_with_callback_keeps_per_partition_order_inner
+);
+
+/// `partitionsFor` on a topic created a moment ago with three partitions: the
+/// producer has never seen it, so the call fetches its metadata, and must
+/// report every partition with its real leader, replica and ISR — not only
+/// partition 0, which an auto-created topic (the other `partitions_for`
+/// scenario) has alone.
+async fn partitions_for_freshly_created_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("partitions_for_fresh");
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 3, 1).await;
+
+    let producer = factory.create(make_config_for(factory, ctx)).await.expect("create");
+    let mut infos = producer.partitions_for(&topic).await.expect("partitions_for should succeed");
+    infos.sort_by_key(|p| p.partition());
+    assert_eq!(
+        infos.iter().map(|p| p.partition()).collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "{} backend: every partition of the new topic",
+        factory.name()
+    );
+    for info in &infos {
+        assert_eq!(info.topic(), topic, "{} backend", factory.name());
+        let leader = info
+            .leader()
+            .unwrap_or_else(|| panic!("{} backend: partition {} has a leader", factory.name(), info.partition()));
+        assert!(
+            !leader.host().is_empty() && leader.port() > 0,
+            "{} backend: partition {}'s leader is a real broker, got {}:{}",
+            factory.name(),
+            info.partition(),
+            leader.host(),
+            leader.port()
+        );
+        assert_eq!(
+            info.replicas().iter().map(|n| n.id()).collect::<Vec<_>>(),
+            vec![leader.id()],
+            "{} backend: replication factor 1, on the leader",
+            factory.name()
+        );
+        assert_eq!(
+            info.in_sync_replicas().iter().map(|n| n.id()).collect::<Vec<_>>(),
+            vec![leader.id()],
+            "{} backend: the leader is the only in-sync replica",
+            factory.name()
+        );
+        assert!(info.offline_replicas().is_empty(), "{} backend", factory.name());
+    }
+
+    producer.close().await.expect("close");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_partitions_for_freshly_created_topic,
+    partitions_for_freshly_created_topic_inner
+);
+
+/// `metrics()` reports values that follow from the configuration and the
+/// traffic, not only plausible ones: `buffer-total-bytes` is the configured
+/// `buffer.memory` exactly, the per-topic `record-send-total` (group
+/// `producer-topic-metrics`, tagged with the topic) counts exactly the records
+/// sent to that topic, and `record-size-max` covers the largest record sent.
+async fn metrics_follow_configuration_and_traffic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    use confluent_kafka::common::{Metric, MetricValue};
+
+    const RECORDS: usize = 7;
+    const BUFFER_MEMORY: i64 = 16 * 1024 * 1024;
+    let topic = ctx.topic("producer_metrics_exact");
+    let mut config = make_config_for(factory, ctx);
+    config.insert("buffer.memory".to_string(), BUFFER_MEMORY.to_string());
+    let producer = factory.create(config).await.expect("create");
+
+    let value = vec![b'x'; 500];
+    for i in 0..RECORDS {
+        let record = ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(value.clone()));
+        producer
+            .send(record)
+            .await
+            .expect("send")
+            .get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("produce");
+    }
+
+    let snapshot = producer.metrics();
+    let number = |group: &str, name: &str, topic_tag: Option<&str>| -> f64 {
+        let (_, metric) = snapshot
+            .iter()
+            .find(|(n, _)| {
+                n.group() == group && n.name() == name && n.tags().get("topic").map(String::as_str) == topic_tag
+            })
+            .unwrap_or_else(|| panic!("{} backend: {group}/{name} (topic {topic_tag:?}) missing", factory.name()));
+        match metric.metric_value() {
+            MetricValue::Double(d) => d,
+            MetricValue::Long(l) => l as f64,
+            MetricValue::Int(i) => i as f64,
+            other => panic!("{} backend: {group}/{name} is not a number: {other:?}", factory.name()),
+        }
+    };
+    assert_eq!(
+        number("producer-metrics", "buffer-total-bytes", None),
+        BUFFER_MEMORY as f64,
+        "{} backend: buffer-total-bytes is the configured buffer.memory",
+        factory.name()
+    );
+    assert_eq!(
+        number("producer-topic-metrics", "record-send-total", Some(&topic)),
+        RECORDS as f64,
+        "{} backend: the topic's record-send-total counts exactly its records",
+        factory.name()
+    );
+    let size_max = number("producer-metrics", "record-size-max", None);
+    assert!(
+        size_max >= value.len() as f64,
+        "{} backend: record-size-max {size_max} covers a {}-byte value",
+        factory.name(),
+        value.len()
+    );
+
+    producer.close().await.expect("close");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_metrics_follow_configuration_and_traffic,
+    metrics_follow_configuration_and_traffic_inner
+);
+
 #[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
 mod rust_only_fallback {
     use super::*;
@@ -3528,6 +3759,18 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delivery_callback_logs_metadata() {
         delivery_callback_logs_metadata_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_with_callback_keeps_per_partition_order() {
+        send_with_callback_keeps_per_partition_order_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_partitions_for_freshly_created_topic() {
+        partitions_for_freshly_created_topic_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_metrics_follow_configuration_and_traffic() {
+        metrics_follow_configuration_and_traffic_inner(&mut ctx().await, &RustNativeFactory).await;
     }
 }
 

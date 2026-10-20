@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.consumer.invalid_offset_error import InvalidOffsetError
 
@@ -49,10 +50,10 @@ class OffsetOutOfRangeError(InvalidOffsetError):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = MISSING,
         offset_out_of_range_partitions: Mapping[TopicPartition, int],
     ) -> None:
-        if message is not None:
+        if message is not MISSING:
             _throwable.init(self, message, None)
             self._offset_out_of_range_partitions = _throwable.copy_dict(offset_out_of_range_partitions)
         else:

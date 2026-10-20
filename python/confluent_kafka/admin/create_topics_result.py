@@ -26,7 +26,8 @@ core's own future of the topic, which fails with ``IllegalArgumentError`` for a 
 that was not part of the call, with no Python-side check. On a result built through
 ``_new`` (the mock's), they call ``then_apply`` on ``futures.get(topic)`` as Java's
 do, which throws ``NullPointerException`` for a topic that was not part of the call;
-they raise ``NullPointerError`` the same way.
+they raise ``IllegalArgumentError`` with the core's message instead (CLAUDE.md, Python
+Binding Conventions, Types: no ``NullPointerError`` class).
 """
 
 from __future__ import annotations
@@ -34,9 +35,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka._args import Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka.admin._futures import Async, KindT, Sync
-from confluent_kafka.null_pointer_error import NullPointerError
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.config import Config
@@ -63,10 +64,10 @@ class _TopicMetadataAndConfig:
         Form("exception"),
         name="TopicMetadataAndConfig",
     )
-    def __init__(self, *, topic_id: Uuid | None = None, num_partitions: int | None = None,
-                 replication_factor: int | None = None, config: Config | None = None,
-                 exception: ApiError | None = None) -> None:
-        if exception is None:
+    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
+                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                 exception: ApiError | None = MISSING) -> None:
+        if exception is MISSING:
             self._exception: ApiError | None = None
             self._topic_id = topic_id
             self._num_partitions = num_partitions
@@ -189,6 +190,8 @@ class CreateTopicsResult(Generic[KindT]):
     def _future_of(self, topic: str) -> KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]:
         future = self._futures.get(topic)
         if future is None:
-            # ``futures.get(topic).thenApply(...)`` on a topic not in the call.
-            raise NullPointerError()
+            # ``futures.get(topic).thenApply(...)`` on a topic not in the call: Java's
+            # NullPointerException, with the core's message.
+            raise IllegalArgumentError(
+                message=f"Topic {topic} was not part of the createTopics request")
         return future

@@ -23,6 +23,8 @@ Python ``int`` outside the width raises ``OverflowError``, where Java's
 
 from __future__ import annotations
 
+from typing import Any
+
 from confluent_kafka.common.headers import Headers
 
 
@@ -34,8 +36,14 @@ class IntSerializer:
     def __init__(self, size: int = 4) -> None:
         self._size = size
 
-    def __call__(self, topic: str, value: int | None,
-                 headers: Headers | None = None) -> bytes | None:
-        if value is None:
+    def __call__(self, *, topic: str, data: int | None,
+                 headers: Headers | None = None, **kwargs: Any) -> bytes | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: int | None,
+              headers: Headers | None = None) -> bytes | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
+        if data is None:
             return None
-        return value.to_bytes(self._size, "big", signed=True)
+        return data.to_bytes(self._size, "big", signed=True)
