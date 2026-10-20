@@ -289,19 +289,19 @@ The application uses `KafkaProducer<K, V>`.
 impl<K, V> KafkaProducer<K, V> {
     pub fn new(
         config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
     ) -> Result<Self, Error>;
 }
 
 // Send a record with borrowed byte-slice key/value, bypassing serialization.
 // This is the zero-copy path for callers that already have `&[u8]` data.
 impl KafkaProducer<Vec<u8>, Vec<u8>> {
-    pub async fn send(
+    pub fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Box<dyn Callback>>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
 }
 ```
 
@@ -365,13 +365,14 @@ where
     K: Send + 'static,
     V: Send + 'static,
 {
-    // --- State reads: do not block in Java, so synchronous here. ---
-    fn assignment(&self) -> HashSet<TopicPartition>;
-    fn subscription(&self) -> HashSet<String>;
-    fn paused(&self) -> HashSet<TopicPartition>;
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-    fn client_id(&self) -> &str;
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>; // currently always returns None
+    // --- State reads: do not block in Java, so synchronous here. They take
+    // `&mut self` as Java guards them with `acquireAndEnsureOpen()`. ---
+    fn assignment(&mut self) -> HashSet<TopicPartition>;
+    fn subscription(&mut self) -> HashSet<String>;
+    fn paused(&mut self) -> HashSet<TopicPartition>;
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
+    // Java's `currentLag` waits on the background thread, so it is async.
+    fn current_lag(&mut self, topic_partition: &TopicPartition) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
     // --- Subscription and assignment ---
     fn subscribe_with_topics(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
@@ -486,8 +487,8 @@ where
 {
     pub fn new(
         config: ConsumerConfig,
-        key_deserializer: Box<dyn Deserializer<K>>,
-        value_deserializer: Box<dyn Deserializer<V>>,
+        key_deserializer: Box<dyn DynDeserializer<K>>,
+        value_deserializer: Box<dyn DynDeserializer<V>>,
     ) -> Result<Self, Error>;
 }
 
