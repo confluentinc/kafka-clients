@@ -17,33 +17,23 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a flat transient <c>kafka_producer_RecordMetadata_t</c> handle (ffi §A2 Category 2)
-/// into an owned managed <see cref="RecordMetadata"/> via the per-field accessors — the default
-/// over the <c>RecordMetadata_copy</c> callback (PLAN §6.1). The topic is a NUL-terminated
-/// <c>const char*</c> owned by the handle, copied out with <see cref="Utf8Marshal.PtrToString(IntPtr)"/>
-/// (NUL-scan form, §A3) <b>before</b> the caller destroys the handle; the result holds only
-/// copied values and never references native memory.
+/// Copies a borrowed <c>kafka_producer_RecordMetadata_t</c> into an owned <see cref="RecordMetadata"/> through its
+/// per-field readers; it never frees the handle.
 /// </summary>
 internal static class RecordMetadataMarshal
 {
-    /// <summary>
-    /// Reads offset / partition / topic / timestamp out of <paramref name="metadata"/> (a
-    /// non-null <c>RecordMetadata_t</c> handle) into an owned <see cref="RecordMetadata"/>. Does
-    /// <b>not</b> destroy the handle — the caller frees it with
-    /// <see cref="NativeMethods.RecordMetadataDestroy(IntPtr)"/> after this returns.
-    /// </summary>
     internal static RecordMetadata CopyOut(IntPtr metadata)
     {
-        long offset = NativeMethods.RecordMetadataOffset(metadata);
-        int partition = NativeMethods.RecordMetadataPartition(metadata);
+        IntPtr outErr = IntPtr.Zero;
+        long offset = NativeMethods.RecordMetadataOffset(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int partition = NativeMethods.RecordMetadataPartition(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr topic = NativeMethods.RecordMetadataTopic(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long timestamp = NativeMethods.RecordMetadataTimestamp(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        // Copy the topic out BEFORE the handle is destroyed (the borrowed const char* dies with
-        // the handle, ffi §A3). A defensive null → empty string keeps RecordMetadata.Topic
-        // non-null (the ABI returns a valid pointer for a non-null handle).
-        string topic = Utf8Marshal.PtrToString(NativeMethods.RecordMetadataTopic(metadata)) ?? string.Empty;
-
-        long timestamp = NativeMethods.RecordMetadataTimestamp(metadata);
-
-        return new RecordMetadata(topic, partition, offset, timestamp);
+        return new RecordMetadata(Utf8Marshal.PtrToString(topic) ?? string.Empty, partition, offset, timestamp);
     }
 }

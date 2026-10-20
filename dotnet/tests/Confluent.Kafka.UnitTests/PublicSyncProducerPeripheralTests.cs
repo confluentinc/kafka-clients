@@ -20,32 +20,21 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Public-surface tests for the M11/P4 <b>sync</b> producer peripherals —
-/// <see cref="IProducer.Flush"/> and <see cref="IProducer.PartitionsFor(string)"/> — over the sync C
-/// ABI (<c>Producer_flush</c> / <c>Producer_partitions_for</c>, ffi §A2 sync-op auto-ref), exercised
-/// through the public <see cref="MockProducer"/> / <see cref="IProducer"/> surface (PLAN §7).
+/// The sync producer's Flush and PartitionsFor on <see cref="MockProducer{TKey, TValue}"/>: the mock's cluster is
+/// empty, so PartitionsFor returns an empty list; an empty topic reaches the core, a null one is rejected first.
+/// Every blocking call is bounded.
 /// </summary>
-/// <remarks>
-/// <b>Honest mock reachability (PLAN §2).</b> On a <see cref="MockProducer"/>
-/// <see cref="IProducer.PartitionsFor(string)"/> succeeds broker-free but returns an <b>empty</b>
-/// list for every topic (the mock ctor builds an empty cluster) — a success with an empty result,
-/// not a fault; a populated list is integration-only. Every blocking op runs under a
-/// <see cref="TestTimeout"/> hang guard.
-/// </remarks>
 public sealed class PublicSyncProducerPeripheralTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string Topic = "sync-peripheral-topic";
 
-    // ---- Flush ----
-
     [Fact]
     public void Flush_OnMock_Succeeds()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // No pending sends → the flush resolves immediately (broker-free) without hanging.
         TestTimeout.Run(() => producer.Flush(), s_deadline);
     }
 
@@ -57,8 +46,6 @@ public sealed class PublicSyncProducerPeripheralTests
 
         Assert.Throws<ObjectDisposedException>(() => producer.Flush());
     }
-
-    // ---- PartitionsFor (empty on the mock; empty topic forwarded, null rejected) ----
 
     [Fact]
     public void PartitionsFor_OnMock_ReturnsEmptyList()
@@ -77,8 +64,7 @@ public sealed class PublicSyncProducerPeripheralTests
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Empty topic is FORWARDED (Java/Python-faithful — the binding guards only null); the mock
-        // returns an empty list, proving the empty topic reached the core rather than being rejected.
+        // An empty topic reaches the core, as in Java and Python; only null is rejected.
         IReadOnlyList<PartitionInfo> partitions = null!;
         TestTimeout.Run(() => partitions = producer.PartitionsFor(string.Empty), s_deadline);
 
@@ -91,7 +77,7 @@ public sealed class PublicSyncProducerPeripheralTests
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Default message (ArgumentNullException(nameof(topic))) → assert ParamName only.
+        // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.PartitionsFor(null!));
         Assert.Equal("topic", ex.ParamName);
     }
@@ -99,8 +85,8 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrownBeforeDisposedCheck_EvenWhenClosed()
     {
-        // The null-topic guard in PartitionsFor precedes ThrowIfClosed, so a disposed producer +
-        // null topic surfaces ArgumentNullException, NOT ObjectDisposedException (verified source).
+        // The null check precedes the closed check, so a closed producer with a null topic throws
+        // ArgumentNullException.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Dispose();
 
@@ -122,8 +108,7 @@ public sealed class PublicSyncProducerPeripheralTests
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Each call frees its owned PartitionInfoList root (ffi §B2) — repeated calls must not leak
-        // or fault; the copy-out returns a fresh empty list each time.
+        // Repeated calls free their owned list root once each and return a fresh empty list.
         for (int i = 0; i < 5; i++)
         {
             IReadOnlyList<PartitionInfo> partitions = null!;

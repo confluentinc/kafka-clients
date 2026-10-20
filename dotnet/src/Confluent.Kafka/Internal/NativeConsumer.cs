@@ -2032,7 +2032,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Returns the partition metadata for <paramref name="topic"/> (<b>sync</b>; Java
     /// <c>partitionsFor(String)</c>) — the sync mirror of <see cref="PartitionsForWithCallback"/>.
     /// Calls the sync ABI <c>Consumer_partitions_for</c> directly, then copies out the whole
-    /// borrowed tree via <see cref="PartitionInfoListMarshal.CopyOut"/> before destroying the root
+    /// borrowed tree via <see cref="PartitionInfoListMarshal.CopyOutPartitionInfoList"/> before destroying the root
     /// in a <c>finally</c> (§6.4/§B2). An <b>empty</b> list for a topic with no registered
     /// partitions (the mock returns empty for an unregistered topic).
     /// </summary>
@@ -2065,7 +2065,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return ThrowOrCopyOutAndDestroy(
-            error, list, PartitionInfoListMarshal.CopyOut, NativeMethods.PartitionInfoListDestroy);
+            error, list, PartitionInfoListMarshal.CopyOutPartitionInfoList, NativeMethods.PartitionInfoListDestroy);
     }
 
     /// <summary>

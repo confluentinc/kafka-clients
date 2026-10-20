@@ -18,53 +18,58 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a borrowed <c>kafka_common_PartitionInfo_t</c> view into an owned <see cref="PartitionInfo"/>, its leader
-/// and replicas through <see cref="NodeMarshal"/>; it frees nothing.
+/// Copies a <c>kafka_common_PartitionInfo_t</c> into an owned <see cref="PartitionInfo"/>, its nodes through
+/// <see cref="NodeMarshal"/>; it frees each replica list the accessors hand out, never the partition info.
 /// </summary>
 internal static class PartitionInfoMarshal
 {
+    private delegate IntPtr NodeListAccessor(IntPtr info, ref IntPtr outErr);
+
     internal static PartitionInfo CopyOut(IntPtr info)
     {
-        string topic = Utf8Marshal.PtrToString(NativeMethods.PartitionInfoTopic(info)) ?? string.Empty;
-        int partition = NativeMethods.PartitionInfoPartition(info);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr topic = NativeMethods.PartitionInfoTopic(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int partition = NativeMethods.PartitionInfoPartition(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr leader = NativeMethods.PartitionInfoLeader(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        Node? leader = NodeMarshal.CopyOut(NativeMethods.PartitionInfoLeader(info));
-
-        IReadOnlyList<Node> replicas = CopyNodes(
-            NativeMethods.PartitionInfoReplicaCount(info),
-            NativeMethods.PartitionInfoReplica,
-            info);
-        IReadOnlyList<Node> inSyncReplicas = CopyNodes(
-            NativeMethods.PartitionInfoInSyncReplicaCount(info),
-            NativeMethods.PartitionInfoInSyncReplica,
-            info);
-        IReadOnlyList<Node> offlineReplicas = CopyNodes(
-            NativeMethods.PartitionInfoOfflineReplicaCount(info),
-            NativeMethods.PartitionInfoOfflineReplica,
-            info);
-
-        return new PartitionInfo(topic, partition, leader, replicas, inSyncReplicas, offlineReplicas);
+        return new PartitionInfo(
+            Utf8Marshal.PtrToString(topic) ?? string.Empty,
+            partition,
+            NodeMarshal.CopyOut(leader),
+            CopyOutNodes(info, NativeMethods.PartitionInfoReplicas),
+            CopyOutNodes(info, NativeMethods.PartitionInfoInSyncReplicas),
+            CopyOutNodes(info, NativeMethods.PartitionInfoOfflineReplicas));
     }
 
-    private static IReadOnlyList<Node> CopyNodes(int count, Func<IntPtr, int, IntPtr> elementAt, IntPtr info)
+    private static IReadOnlyList<Node> CopyOutNodes(IntPtr info, NodeListAccessor accessor)
     {
-        if (count <= 0)
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr list = accessor(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
         {
-            return Array.Empty<Node>();
-        }
-
-        List<Node> nodes = new List<Node>(count);
-        for (int i = 0; i < count; i++)
-        {
-            IntPtr nodePtr = elementAt(info, i);
-            if (nodePtr == IntPtr.Zero)
+            int count = NativeMethods.ListSize(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            List<Node> nodes = new List<Node>(count);
+            for (int i = 0; i < count; i++)
             {
-                continue;
+                IntPtr node = NativeMethods.ListGet(list, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                if (node != IntPtr.Zero)
+                {
+                    nodes.Add(NodeMarshal.CopyOut(node)!);
+                }
             }
 
-            nodes.Add(NodeMarshal.CopyOut(nodePtr)!);
+            return nodes;
         }
-
-        return nodes;
+        finally
+        {
+            NativeMethods.ListDestroy(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
     }
 }

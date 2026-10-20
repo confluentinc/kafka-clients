@@ -60,7 +60,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
     /// <summary>
     /// M15/P13.3 D12 — every node crosses the ABI with <see cref="Node.IsFenced"/> read from
-    /// <c>kafka_common_Node_is_fenced</c>, and renders it in Java's <c>toString()</c>.
+    /// <c>kafka_common_Node_is_fenced_err</c>, and renders it in Java's <c>toString()</c>.
     /// Neither Java's mock nor the core's can report a fenced broker (the header: only
     /// <c>describeCluster</c> with <c>includeFencedBrokers</c> against a real cluster can), so
     /// this is the <see langword="false"/> polarity end to end, asked for both ways; the

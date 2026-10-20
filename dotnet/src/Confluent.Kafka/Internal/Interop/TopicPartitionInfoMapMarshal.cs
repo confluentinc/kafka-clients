@@ -90,7 +90,7 @@ internal static class TopicPartitionInfoMapMarshal
             IntPtr listPtr = NativeMethods.TopicPartitionInfoMapGetPartitions(map, i);
             IReadOnlyList<PartitionInfo> partitions = listPtr == IntPtr.Zero
                 ? Array.Empty<PartitionInfo>()
-                : PartitionInfoListMarshal.CopyOut(listPtr);
+                : PartitionInfoListMarshal.CopyOutPartitionInfoList(listPtr);
 
             result[topic] = partitions;
         }

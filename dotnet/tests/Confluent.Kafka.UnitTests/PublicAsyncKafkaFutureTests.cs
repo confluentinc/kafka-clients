@@ -32,9 +32,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicAsyncKafkaFutureTests
 {
-    private const string DefaultValueMessage =
-        "This AsyncKafkaFuture is a default value and is bound to no operation; only IAsyncProducer.Send and the "
-        + "IAsyncAdmin result types return a usable one.";
+    private const string DefaultValueMessage = "This AsyncKafkaFuture is a default value and is bound to no operation.";
 
     [Fact]
     public void Default_Get_ThrowsInvalidOperationException_WithItsMessage()
@@ -676,8 +674,7 @@ public sealed class PublicAsyncKafkaFutureTests
     {
         NotSupportedException thrown = Assert.Throws<NotSupportedException>(() => { _ = call(); });
         Assert.Equal(
-            "AsyncKafkaFuture." + member + " is not supported on a pending future returned by IAsyncProducer.Send or "
-                + "an IAsyncAdmin result.",
+            "AsyncKafkaFuture." + member + " is not supported on a pending future returned by an IAsyncAdmin result.",
             thrown.Message);
     }
 

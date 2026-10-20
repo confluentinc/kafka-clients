@@ -20,13 +20,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Unit tests for the public generic <see cref="ProducerRecord{TKey, TValue}"/> — the send-path
-/// preconditions it validates (Java-faithful, in the constructor: null topic →
-/// <see cref="ArgumentNullException"/>, negative partition → <see cref="ArgumentOutOfRangeException"/>),
-/// its field exposure, and its <see cref="object.ToString"/>. These fire entirely in managed code —
-/// before any native call — so a constructed record handed to
-/// <see cref="IAsyncProducer{TKey, TValue}.Send"/> is already valid (ffi §A5). Bytes cases use
-/// <c>ProducerRecord&lt;byte[], byte[]&gt;</c> (generic-only, M11/P5 — the former bytes surface).
+/// <see cref="ProducerRecord{TKey, TValue}"/>'s constructor preconditions (a null topic, a negative partition),
+/// its properties and its ToString.
 /// </summary>
 public sealed class PublicProducerRecordTests
 {
@@ -35,8 +30,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_NullTopic_ThrowsArgumentNull()
     {
-        // ArgumentNullException(nameof(topic)) sets no custom message → ParamName is the contract
-        // (DoD §3).
+        // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => new ProducerRecord<byte[], byte[]>(null!, Encoding.UTF8.GetBytes("v")));
         Assert.Equal("topic", ex.ParamName);
@@ -45,8 +39,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_NegativePartition_ThrowsArgumentOutOfRange()
     {
-        // The binding rejects an explicitly-negative partition (the ABI silently maps negative to
-        // "unset", ffi §A5). Pin ParamName + the custom message content (DoD §3).
+        // A negative partition is rejected, as the ABI would read it as unset; ParamName and the message are asserted.
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: -1));
         Assert.Equal("partition", ex.ParamName);
@@ -94,7 +87,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_EmptyValue_IsPresentButZeroLength()
     {
-        // Empty is distinct from absent (the §A4 sentinel distinction): non-null, Length 0.
+        // Empty is distinct from absent: non-null, length 0.
         ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, Array.Empty<byte>());
 
         Assert.NotNull(record.Value);
@@ -104,9 +97,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void ToString_SummarizesFields()
     {
-        // The generic record renders key/value via their own ToString (Java-faithful shape), so a
-        // string-typed record gives a readable, assertable line (a byte-length summary is impossible
-        // for a generic T — M11/P5). Uses the record ctor directly (no serializer needed).
+        // The record renders its key and value through their own ToString, as Java's does.
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
             Topic, "12345", "ab", partition: 1, timestamp: 7L);
 

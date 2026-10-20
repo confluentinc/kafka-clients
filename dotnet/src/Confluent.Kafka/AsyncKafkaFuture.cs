@@ -63,8 +63,7 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// Java's <c>thenApply</c>: a future completed with <paramref name="function"/> applied to this future's value, or
     /// failed with this future's failure or the function's exception. The function runs on the thread that completes
     /// this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IAsyncProducer.Send</c> or an
-    /// <c>IAsyncAdmin</c> result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
     /// </summary>
     public AsyncKafkaFuture<TR> ThenApply<TR>(KafkaFuture.BaseFunction<T, TR> function)
     {
@@ -81,8 +80,7 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// value (<c>default</c> when this future failed) and the failure (<see langword="null"/> when it succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IAsyncProducer.Send</c> or an
-    /// <c>IAsyncAdmin</c> result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
     /// </summary>
     public AsyncKafkaFuture<T> WhenComplete(KafkaFuture.BiConsumer<T?, Exception?> action)
     {
@@ -104,8 +102,7 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
 
     /// <summary>
     /// The result's task, the same one on every call, to await as Java's <c>future.get()</c>: it resolves with the
-    /// value, faults with the operation's exception, or is canceled when the future is cancelled or, for a producer
-    /// send, by the send's token. Never blocks.
+    /// value, faults with the operation's exception, or is canceled when the future is cancelled. Never blocks.
     /// </summary>
     public Task<T> Get() =>
         _impl is not null ? _impl.GetAsync() : _delivery ?? throw new InvalidOperationException(AsyncKafkaFuture.DefaultValueMessage);
@@ -219,9 +216,7 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
 /// </remarks>
 public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 {
-    internal const string DefaultValueMessage =
-        "This AsyncKafkaFuture is a default value and is bound to no operation; only IAsyncProducer.Send and the "
-        + "IAsyncAdmin result types return a usable one.";
+    internal const string DefaultValueMessage = "This AsyncKafkaFuture is a default value and is bound to no operation.";
 
     private readonly KafkaFutureImpl? _impl;
 
@@ -246,8 +241,8 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// <summary>
     /// Java's <c>allOf</c>: a future completed once every one of <paramref name="futures"/>, of any value types, has
     /// completed, failed with one of their failures when any of them failed; with no futures it is completed at once.
-    /// Throws <see cref="NotSupportedException"/> when one of them is pending and was returned by
-    /// <c>IAsyncProducer.Send</c> or an <c>IAsyncAdmin</c> result.
+    /// Throws <see cref="NotSupportedException"/> when one of them is pending and was returned by an
+    /// <c>IAsyncAdmin</c> result.
     /// </summary>
     public static AsyncKafkaFuture AllOf(params AsyncKafkaFuture[] futures)
     {
@@ -267,8 +262,8 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 
     /// <summary>
     /// Java's <c>allOf</c> for futures of one value type, such as an array of them. Throws
-    /// <see cref="NotSupportedException"/> when one of them is pending and was returned by <c>IAsyncProducer.Send</c>
-    /// or an <c>IAsyncAdmin</c> result.
+    /// <see cref="NotSupportedException"/> when one of them is pending and was returned by an <c>IAsyncAdmin</c>
+    /// result.
     /// </summary>
     public static AsyncKafkaFuture AllOf<T>(params AsyncKafkaFuture<T>[] futures)
     {
@@ -295,8 +290,8 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// Java's <c>thenApply</c> on a future of no value: a future completed with what <paramref name="function"/>
     /// returns once this future has succeeded, or failed with this future's failure or the function's exception. The
     /// function runs on the thread that completes this future, or inside this call if this future already holds its
-    /// outcome. Throws <see cref="NotSupportedException"/> on a pending future returned by <c>IAsyncProducer.Send</c>
-    /// or an <c>IAsyncAdmin</c> result.
+    /// outcome. Throws <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c>
+    /// result.
     /// </summary>
     public AsyncKafkaFuture<TR> ThenApply<TR>(Func<TR> function)
     {
@@ -313,8 +308,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// <paramref name="action"/> has run with the failure (<see langword="null"/> when this future succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IAsyncProducer.Send</c> or an
-    /// <c>IAsyncAdmin</c> result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
     /// </summary>
     public AsyncKafkaFuture WhenComplete(Action<Exception?> action)
     {
@@ -336,8 +330,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 
     /// <summary>
     /// The operation's task, the same one on every call, to await as Java's <c>future.get()</c>: it completes when the
-    /// operation succeeds, faults with its exception, or is canceled when the future is cancelled or, for a converted
-    /// producer send, by the send's token. Never blocks.
+    /// operation succeeds, faults with its exception, or is canceled when the future is cancelled. Never blocks.
     /// </summary>
     public Task Get() => _impl is not null ? _impl.WaitAsync() : _task ?? throw new InvalidOperationException(DefaultValueMessage);
 
@@ -397,8 +390,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     public override int GetHashCode() => ((object?)_impl ?? _task)?.GetHashCode() ?? 0;
 
     internal static string UnsupportedMessage(string member) =>
-        "AsyncKafkaFuture." + member + " is not supported on a pending future returned by IAsyncProducer.Send or an "
-        + "IAsyncAdmin result.";
+        "AsyncKafkaFuture." + member + " is not supported on a pending future returned by an IAsyncAdmin result.";
 
     private Task Operation => _task ?? throw new InvalidOperationException(DefaultValueMessage);
 

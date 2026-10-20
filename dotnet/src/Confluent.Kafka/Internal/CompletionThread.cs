@@ -49,6 +49,8 @@ internal sealed class CompletionThread : IDisposable
 
     private bool _stopped;
 
+    private bool _draining;
+
     private Action? _teardown;
 
     private int _opaqueReleased;
@@ -64,6 +66,8 @@ internal sealed class CompletionThread : IDisposable
     internal IntPtr NotifyOpaque => _opaque;
 
     internal bool IsCurrentThread => Thread.CurrentThread == _thread;
+
+    internal bool IsDraining => IsCurrentThread && _draining;
 
     internal void Post(Action action)
     {
@@ -186,6 +190,7 @@ internal sealed class CompletionThread : IDisposable
     // fired for it.
     private int Drain()
     {
+        _draining = true;
         try
         {
             return _drain();
@@ -194,6 +199,10 @@ internal sealed class CompletionThread : IDisposable
         {
             TraceSwallowed("the callbacks", exception);
             return 0;
+        }
+        finally
+        {
+            _draining = false;
         }
     }
 

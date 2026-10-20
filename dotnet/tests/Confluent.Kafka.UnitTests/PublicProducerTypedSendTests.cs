@@ -21,28 +21,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Unit tests for the M11/P5 typed generic producer — the send-side serialize skin above the
-/// bytes-based native producer, exercised through the public
-/// <see cref="MockProducer{TKey, TValue}"/> / <see cref="AsyncMockProducer{TKey, TValue}"/> surface.
-/// Covers the typed round-trip, the Java-faithful <b>invoke-on-null</b> three-state (PLAN §3.4 —
-/// the send-side inverse of the consumer's not-invoked short-circuit), the value-type tombstone
-/// guidance, and the mandatory synchronous <see cref="SerializationException"/> wrap (PLAN §3.5).
+/// The typed send on both producer mocks: a typed round-trip, the serializer invoked on a null key or value as
+/// Java's is, a nullable value type's tombstone, and a serializer throw wrapped in a synchronous
+/// <see cref="SerializationException"/> with nothing sent. The mock exposes only a history count, so the
+/// serialized bytes are not read back.
 /// </summary>
-/// <remarks>
-/// The mock exposes <b>no history-record value accessor</b> (only <see cref="HistoryCount"/> — the
-/// ABI gives a count), so the serialized bytes are not observable broker-free. These tests therefore
-/// assert the observable facts: the send resolves, <c>HistoryCount</c> reflects it, the serializer
-/// was invoked the expected number of times (including on a null datum), and a serializer throw
-/// surfaces synchronously as a <see cref="SerializationException"/> with nothing reaching the native
-/// mock (<c>HistoryCount() == 0</c>).
-/// </remarks>
 public sealed class PublicProducerTypedSendTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string Topic = "typed-send-topic";
-
-    // ---- Typed round-trip (String key / Int64 value) — sync + async ----
 
     [Fact]
     public void Sync_TypedRoundTrip_StringLong_Succeeds()
@@ -81,7 +69,7 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public void Sync_TypedRoundTrip_ByteArray_Succeeds()
     {
-        // <byte[],byte[]> + Serdes.ByteArray is the former bytes surface (generic-only, M11/P5).
+        // <byte[], byte[]> with Serdes.ByteArray is the bytes surface.
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
@@ -95,8 +83,6 @@ public sealed class PublicProducerTypedSendTests
         Assert.Equal(1, producer.HistoryCount());
     }
 
-    // ---- Invoke-on-null (PLAN §3.4): the serializer IS invoked, even on a null key/value ----
-
     [Fact]
     public void Sync_NullKeyAndValue_InvokesSerializer_ThenSends()
     {
@@ -105,8 +91,7 @@ public sealed class PublicProducerTypedSendTests
         using MockProducer<string, string> producer =
             new MockProducer<string, string>(keySer, valueSer);
 
-        // A null key and null value: the serializer is invoked on BOTH (Java-faithful — the send-side
-        // inverse of the consumer's not-invoked short-circuit), returns null → the absent sentinel.
+        // The serializer is invoked on a null key and value, as Java's KafkaProducer does; null bytes are absent.
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: null)).Get(),
@@ -142,8 +127,7 @@ public sealed class PublicProducerTypedSendTests
         using MockProducer<string, string> producer =
             new MockProducer<string, string>(Serdes.String, valueSer);
 
-        // An empty string serializes to a non-null empty byte[] → present-but-empty (distinct from
-        // the null → absent case above).
+        // An empty string serializes to a present, empty byte[], distinct from absent.
         TestTimeout.Run(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: string.Empty, key: "k")).Get(),
             s_deadline);
@@ -153,8 +137,6 @@ public sealed class PublicProducerTypedSendTests
         Assert.Equal(1, producer.HistoryCount());
     }
 
-    // ---- Value-type tombstone (PLAN §3.4): <string, long?> distinguishes null from a present 0L ----
-
     [Fact]
     public void Sync_ValueTypeTombstone_NullDistinctFromDefault()
     {
@@ -162,8 +144,7 @@ public sealed class PublicProducerTypedSendTests
         using MockProducer<string, long?> producer =
             new MockProducer<string, long?>(Serdes.String, valueSer);
 
-        // A null long? is a tombstone (serializer invoked → null bytes → absent); a present 0L is a
-        // value (serializer invoked → 8 bytes → present). Both invoke the serializer (invoke-on-null).
+        // A null long? is a tombstone and a present 0L a value; the serializer is invoked for both.
         TestTimeout.Run(
             () => producer.Send(new ProducerRecord<string, long?>(Topic, value: null, key: "k")).Get(),
             s_deadline);
@@ -175,8 +156,6 @@ public sealed class PublicProducerTypedSendTests
         Assert.Equal(2, producer.HistoryCount());
     }
 
-    // ---- Serialize throws → synchronous SerializationException; nothing reaches the native mock ----
-
     [Fact]
     public void Sync_ValueSerializerThrows_ThrowsSerializationExceptionSynchronously()
     {
@@ -187,12 +166,12 @@ public sealed class PublicProducerTypedSendTests
         SerializationException ex = Assert.Throws<SerializationException>(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")));
 
-        // Wrap carries the topic context + "value", and the original throw as the inner exception.
+        // The wrap carries the topic and "value", with the original throw as the inner exception.
         Assert.Contains(Topic, ex.Message, StringComparison.Ordinal);
         Assert.Contains("value", ex.Message, StringComparison.Ordinal);
         Assert.IsType<ThrowingSerializer<string>.BoomException>(ex.InnerException);
 
-        // Nothing was enqueued / no native send occurred — the throw is pre-native (PLAN §3.5).
+        // The throw is before the native send, so nothing was sent.
         Assert.Equal(0, producer.HistoryCount());
     }
 
@@ -218,9 +197,8 @@ public sealed class PublicProducerTypedSendTests
         using AsyncMockProducer<string, string> producer =
             new AsyncMockProducer<string, string>(Serdes.String, valueSer);
 
-        // The async Send serializes inline before enqueuing to the pump, so the wrap surfaces
-        // SYNCHRONOUSLY (Assert.Throws, not ThrowsAsync) — before the Task is returned. The statement
-        // lambda binds to Action (not the obsolete Func<Task>) and proves nothing was awaited.
+        // The async Send serializes before it returns, so the wrap leaves the call (Assert.Throws, not ThrowsAsync);
+        // the statement lambda binds Action, not the obsolete Func<Task>.
         SerializationException ex = Assert.Throws<SerializationException>(() =>
         {
             _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
@@ -229,19 +207,15 @@ public sealed class PublicProducerTypedSendTests
         Assert.Contains(Topic, ex.Message, StringComparison.Ordinal);
         Assert.IsType<ThrowingSerializer<string>.BoomException>(ex.InnerException);
 
-        // Nothing enqueued to the pump / no native send occurred.
+        // Nothing was sent.
         Assert.Equal(0, producer.HistoryCount());
     }
-
-    // ---- Built-in serde null-input dependency (PLAN §3.4) + Serdes.ByteArray zero-copy identity ----
 
     [Fact]
     public void BuiltInSerdes_NullInput_MapToTombstone()
     {
-        // The tombstone path relies on the reference-type built-in serdes returning null on null
-        // input (Java parity), and Serdes.Null always returning null. The value-type serdes
-        // (Int32/Int64/Double/Guid) cannot receive a null input (value types), so "null on null" is
-        // N/A for them — they always return present bytes.
+        // The tombstone path relies on the reference-type built-in serdes returning null for null, as Java's do, and
+        // on Serdes.Null always returning null; a value type cannot be null.
         Assert.Null(Serdes.String.Serialize(Topic, null!));
         Assert.Null(Serdes.ByteArray.Serialize(Topic, null!));
         Assert.Null(Serdes.Null.Serialize(Topic, null));
@@ -252,8 +226,7 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public void ByteArraySerde_IsZeroCopyIdentity()
     {
-        // Serdes.ByteArray returns the user's array with NO extra copy (identity), so the
-        // <byte[],byte[]> send path adds no value-sized allocation over the raw bytes (PLAN §3.6).
+        // Serdes.ByteArray returns the caller's array, so the bytes send path adds no value-sized copy.
         byte[] value = Encoding.UTF8.GetBytes("value");
         Assert.Same(value, Serdes.ByteArray.Serialize(Topic, value));
     }

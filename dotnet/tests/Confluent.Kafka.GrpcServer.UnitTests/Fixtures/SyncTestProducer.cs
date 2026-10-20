@@ -55,7 +55,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
             KafkaFuture<RecordMetadata> future = _inner.Send(record, new CountingCallback(callback, index, _probe));
             if (_behaviour.FailEach is (int code, string message))
             {
-                _inner.ErrorNext(code, message);
+                _inner.ErrorNext(new KafkaException(code, message, isRetriable: false));
             }
 
             return future;
@@ -86,6 +86,15 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     }
 
     /// <inheritdoc/>
+    public void Close(TimeSpan timeout)
+    {
+        _probe.CloseEntered.Set();
+        _behaviour.HoldClose?.Wait();
+        _inner.Close(timeout);
+        _probe.OnClosed();
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         _inner.Dispose();
@@ -106,7 +115,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
             _probe = probe;
         }
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             _probe.OnCallback(_index);
             _target.OnCompletion(metadata, exception);

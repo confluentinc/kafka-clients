@@ -25,40 +25,21 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The M11/P4 <b>sync</b> producer teardown (decision #6, ffi §A2): <see cref="IProducer.Close"/>
-/// (graceful sync <c>Producer_close</c>, <b>surfaces</b> a close error) and
-/// <see cref="IDisposable.Dispose"/> (<b>swallows</b> it), both idempotent under a single one-shot
-/// latch. Since M11/P4.2 (D4, superseding M11/P4 #2) a sync send starts the send pump, so after a
-/// send teardown stops and joins it; a producer that never sent takes the <b>pump-less</b> path —
-/// <c>StopPump</c> finds no pump and skips only the <em>join</em>. Since M11/P8 (Blocker 2) the
-/// teardown <b>flush</b> is NOT skipped on that path: it is hoisted above the <c>pump is null</c>
-/// return. A sender concurrently blocked in <see cref="KafkaFuture{T}.Get"/> is released instead of
-/// stranded. The regressions these tests guard are that teardown <b>returns without hanging</b>, that
-/// it releases a blocked sender, and that it stays idempotent / crash-free.
+/// The sync producer's teardown: Close and Dispose return without hanging and are idempotent under one latch;
+/// Dispose first flushes a manual mock's pending sends, while Close leaves them pending; a call after teardown
+/// throws ObjectDisposedException.
 /// </summary>
-/// <remarks>
-/// <b>Close-error-still-destroys is a documented reachability limit (matches the async teardown
-/// test).</b> The "a close error still proceeds to destroy" path (the <c>finally</c> in
-/// <c>NativeProducer.Close</c>) cannot be triggered broker-free: the mock's <c>Producer_close</c>
-/// always succeeds, and a real producer against no broker does not fault a close quickly. The
-/// mechanism (destroy in a <c>finally</c>, independent of the close outcome, mirroring
-/// <c>NativeConsumer.CloseSync</c> and the async producer teardown) is verified by inspection — a
-/// documented limit, not a silent gap.
-/// </remarks>
 public sealed class PublicSyncProducerTeardownTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string Topic = "sync-teardown-topic";
 
-    // ---- Close / Dispose round-trip (pump-less, returns without hanging) ----
-
     [Fact]
     public void Close_OnMock_Succeeds()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Graceful sync close → destroy, returns without hanging (pump-less teardown).
         TestTimeout.Run(producer.Close, s_deadline);
     }
 
@@ -75,8 +56,6 @@ public sealed class PublicSyncProducerTeardownTests
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // A sync Send starts the pump (M11/P4.2 D4, superseding M11/P4 #2: its Get is completed there),
-        // so close stops and joins it after a send.
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
@@ -86,15 +65,13 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Close, s_deadline);
     }
 
-    // ---- Idempotence / mixed teardown (one-shot latch) ----
-
     [Fact]
     public void Dispose_CalledTwice_IsSafe()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
-        // The second call is a no-op (one-shot latch) — no double close / double destroy / throw.
+        // The second call is a no-op: no double close or destroy.
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
 
@@ -103,8 +80,7 @@ public sealed class PublicSyncProducerTeardownTests
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Close wins the latch (close+destroy); the following Dispose loses it and no-ops — no
-        // double destroy.
+        // Close wins the latch; the following Dispose is a no-op.
         TestTimeout.Run(producer.Close, s_deadline);
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -114,8 +90,7 @@ public sealed class PublicSyncProducerTeardownTests
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Many threads race Dispose: exactly one wins the latch; the rest no-op. No double destroy,
-        // no crash, all return.
+        // Many threads race Dispose: one wins the latch, the rest are no-ops.
         Task[] disposers = Enumerable
             .Range(0, 8)
             .Select(_ => Task.Run(() => producer.Dispose()))
@@ -124,15 +99,13 @@ public sealed class PublicSyncProducerTeardownTests
         await TestTimeout.Run(() => Task.WhenAll(disposers), s_deadline);
     }
 
-    // ---- Use-after-teardown guard ----
-
     [Fact]
     public void Ops_AfterClose_ThrowObjectDisposed()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Close();
 
-        // Every op throws ObjectDisposedException post-teardown (type-only, the consumer norm).
+        // Every operation throws ObjectDisposedException after teardown; the type only, as for the consumer.
         Assert.Throws<ObjectDisposedException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
         Assert.Throws<ObjectDisposedException>(() => producer.Flush());
@@ -141,14 +114,10 @@ public sealed class PublicSyncProducerTeardownTests
         producer.Dispose();
     }
 
-    // ---- Real producer (config path) teardown round-trips broker-free ----
-
     [Fact]
     public void RealProducer_Dispose_Returns()
     {
-        // The real KafkaProducer (bootstrap.servers only, no broker) tears down without a broker:
-        // graceful sync close → destroy, returns without hanging. Proves the sync teardown on the
-        // real client, not just the mock.
+        // The real KafkaProducer with no broker tears down without hanging.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
@@ -157,56 +126,77 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
 
-    // ---- Blocker 2 (M11/P8): the sync teardown flush is NOT dead code ----
+    // A manual mock: Dispose flushes first, completing a pending send; Close leaves it pending, as Java's
+    // MockProducer.close() does.
 
     [Fact]
-    public void SyncClose_WithConcurrentBlockedSend_ReleasesSender()
+    public void SyncDispose_WithUncompletedManualSend_CompletesTheSend()
     {
-        // The regression guard for Blocker 2. Before the fix, StopPump's flush sat BELOW the
-        // `pump is null` early return, so a producer driven only through the SYNC surface (which
-        // never starts a pump) never flushed at teardown. A manual mock's MockProducer::close only
-        // sets a closed flag — it does NOT drive pending sends — so the thread blocked in Send hung
-        // forever and was unrecoverable (a later Flush() throws ObjectDisposedException). With the
-        // flush hoisted, teardown resolves the pending send and the sender is released.
-        //
-        // This is exactly the cross-thread pattern IProducer documents as intended and safe: one
-        // thread blocked in Send(...).Get(), another driving the mock.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
             Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        RecordingCallback callback = new RecordingCallback();
+        KafkaFuture<RecordMetadata> future =
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
 
-        // Thread A: blocks inside Get until something resolves the pending completion.
-        Task<RecordMetadata> blocked = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+        TestTimeout.Run(producer.Dispose, s_deadline);
 
-        // Wait until the send has actually registered, so Close cannot win the closed latch first
-        // (which would make Send throw ObjectDisposedException and prove nothing). HistoryCount is
-        // the non-consuming readiness probe — unlike CompleteNext it does not resolve the send.
-        WaitUntilSendRegistered(producer);
-
-        // Thread B: teardown. The hoisted flush resolves the pending send, then close -> destroy.
-        TestTimeout.Run(producer.Close, s_deadline);
-
-        // The blocked sender is released — with metadata or a KafkaException, but never stranded.
-        // Without the fix this times out (a real hang, not a slow path).
-        TestTimeout.Run(
-            () =>
-            {
-                try
-                {
-                    blocked.GetAwaiter().GetResult();
-                }
-                catch (KafkaException)
-                {
-                    // A teardown-resolved send may fault instead of succeeding; either outcome
-                    // proves the sender was released.
-                }
-            },
-            s_deadline);
+        Assert.True(future.IsDone, "the uncompleted send was still pending when Dispose returned");
+        Assert.Equal(1, callback.Count);
+        RecordMetadata metadata = future.Get(s_deadline);
+        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(0, metadata.Partition);
+        Thread.Sleep(200);
+        Assert.Equal(1, callback.Count);
     }
 
-    // Spins until the mock reports at least one record in its history, i.e. the worker thread's
-    // Producer_send has landed and it is now blocked in the future's Get. Bounded by the same
-    // deadline every other wait in this file uses.
+    [Fact]
+    public void SyncDispose_AfterClose_DoesNotFlush_AndDoesNotThrow()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
+            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        RecordingCallback callback = new RecordingCallback();
+        KafkaFuture<RecordMetadata> future =
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
+
+        TestTimeout.Run(producer.Close, s_deadline);
+        TestTimeout.Run(producer.Dispose, s_deadline);
+
+        Thread.Sleep(200);
+        Assert.False(future.IsDone, "Dispose after Close completed the send");
+        Assert.Equal(0, callback.Count);
+    }
+
+    [Fact]
+    public async Task SyncClose_WithConcurrentBlockedGet_Returns_AndTheSendStaysPending()
+    {
+        // Java's MockProducer.close() only marks the mock closed: a send it never completed stays pending, so a
+        // Get blocked on it ends only by its own timeout.
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
+            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        KafkaFuture<RecordMetadata> future =
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        Task<bool> timedOut = Task.Run(() =>
+        {
+            try
+            {
+                future.Get(TimeSpan.FromSeconds(2));
+                return false;
+            }
+            catch (TimeoutException)
+            {
+                return true;
+            }
+        });
+
+        WaitUntilSendRegistered(producer);
+        TestTimeout.Run(producer.Close, s_deadline);
+
+        Assert.True(await TestTimeout.Run(() => timedOut, s_deadline), "the blocked Get returned a result");
+        Assert.False(future.IsDone);
+    }
+
+    // Spins until the mock's history holds a record, i.e. the worker's send has landed and it is blocked in
+    // Get; bounded by the file's deadline.
     private static void WaitUntilSendRegistered(MockProducer<byte[], byte[]> producer)
     {
         Stopwatch sw = Stopwatch.StartNew();
@@ -220,5 +210,15 @@ public sealed class PublicSyncProducerTeardownTests
 
             Thread.Sleep(2);
         }
+    }
+
+    /// <summary>A delivery callback that counts its calls.</summary>
+    private sealed class RecordingCallback : IDeliveryCallback
+    {
+        private int _count;
+
+        internal int Count => Volatile.Read(ref _count);
+
+        public void OnCompletion(RecordMetadata metadata, Exception? exception) => Interlocked.Increment(ref _count);
     }
 }

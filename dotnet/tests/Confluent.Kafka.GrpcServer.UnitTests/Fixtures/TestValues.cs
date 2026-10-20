@@ -46,22 +46,23 @@ internal static class TestValues
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
         CapturingCallback callback = new CapturingCallback();
         producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), callback);
-        Assert.True(producer.ErrorNext(code, message));
-        KafkaException? error = callback.Outcome.Wait(RecordingStreamWriter.DefaultTimeout)
+        Assert.True(producer.ErrorNext(new KafkaException(code, message, isRetriable: false)));
+        Exception? error = callback.Outcome.Wait(RecordingStreamWriter.DefaultTimeout)
             ? callback.Outcome.Result
             : throw new TimeoutException("the mock's delivery callback never fired");
         producer.Close();
-        return error ?? throw new InvalidOperationException("ErrorNext delivered a success");
+        return error as KafkaException
+            ?? throw new InvalidOperationException($"ErrorNext delivered {error?.GetType().Name ?? "a success"}");
     }
 
     private sealed class CapturingCallback : IDeliveryCallback
     {
-        private readonly TaskCompletionSource<KafkaException?> _outcome =
-            new TaskCompletionSource<KafkaException?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<Exception?> _outcome =
+            new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        internal Task<KafkaException?> Outcome => _outcome.Task;
+        internal Task<Exception?> Outcome => _outcome.Task;
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception) => _outcome.TrySetResult(exception);
+        public void OnCompletion(RecordMetadata metadata, Exception? exception) => _outcome.TrySetResult(exception);
     }
 }
 

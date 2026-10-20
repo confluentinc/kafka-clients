@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 
 using Proto = Confluent.Kafka.Test;
@@ -40,9 +41,8 @@ namespace Confluent.Kafka.GrpcServer;
 /// <b>The lock is mandatory, not defensive</b> — and each service reaches it from a different
 /// set of threads. Rebalance-listener and offset-commit callbacks are invoked on the Rust core's
 /// <em>callback-dispatcher thread</em> (ffi-marshalling.md §B6 — a foreign thread). The
-/// delivery callback is <em>managed-only</em> (ffi-marshalling.md §A6 form C) and fires on
-/// whichever thread reads the send's completion: the producer's <b>send-completion pump
-/// thread</b>, on both the async and the sync servicer (M11/P4.2) — one per producer, and the
+/// delivery callback fires on the producer's <b>completion thread</b>, on both the async and the
+/// sync servicer — one per producer, and the
 /// servicer hosts several producers, each logging here. Meanwhile <c>GetCallbackLog</c> is served on
 /// a gRPC worker thread, and the thread driving the triggering op is a further context. None of
 /// those are reliably the same thread, so the log needs real synchronization. What the lock covers
@@ -374,7 +374,7 @@ internal sealed class LoggingDeliveryCallback : IDeliveryCallback
     }
 
     /// <inheritdoc/>
-    public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+    public void OnCompletion(RecordMetadata metadata, Exception? exception)
     {
         List<TopicPartition>? partitions = null;
         Dictionary<string, long>? offsets = null;

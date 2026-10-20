@@ -408,7 +408,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The <c>partitionsFor</c> completion trampoline — an <see cref="TypedPollCallbacks{TKey, TValue}"/> clone for
     /// the owned <c>PartitionInfoList_t</c>. Copies out the whole borrowed tree on this
-    /// (dispatcher) thread via <see cref="PartitionInfoListMarshal.CopyOut"/>, then the
+    /// (dispatcher) thread via <see cref="PartitionInfoListMarshal.CopyOutPartitionInfoList"/>, then the
     /// <c>finally</c> destroys the list root via the null-safe
     /// <see cref="NativeMethods.PartitionInfoListDestroy"/>. Every <c>PartitionInfo</c> /
     /// <c>Node</c> / nested string is <b>borrowed</b> (Category 4) and never freed — only the
@@ -429,7 +429,7 @@ internal static class ConsumerCallbacks
             {
                 // Success (list is a non-null owned borrow-root). Copy out the whole tree on
                 // THIS (dispatcher) thread; the finally then destroys the root.
-                IReadOnlyList<PartitionInfo> marshalled = PartitionInfoListMarshal.CopyOut(list);
+                IReadOnlyList<PartitionInfo> marshalled = PartitionInfoListMarshal.CopyOutPartitionInfoList(list);
                 context.CompleteWithResult(marshalled);
             }
         }

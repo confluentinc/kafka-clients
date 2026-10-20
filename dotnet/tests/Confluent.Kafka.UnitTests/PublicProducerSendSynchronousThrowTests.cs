@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,34 +26,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The async <c>Send</c>'s precondition throws stay <b>synchronous</b> under the two-stage
-/// <c>ValueTask&lt;Task&lt;RecordMetadata&gt;&gt;</c> return (M11/P3.5, test T8).
+/// The async <c>Send</c>'s precondition throws (a cancelled token, a null record, a closed producer, a serializer
+/// throw) leave the call itself, not the returned <see cref="ValueTask{TResult}"/>, on both overloads and both
+/// clients. Each guard discards the returned value unawaited, so it fails if the send path becomes <c>async</c>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Every guard here calls <c>Send</c> through a statement lambda bound to <see cref="Action"/> and
-/// <b>discards</b> the returned value without awaiting it, so <see cref="Assert.Throws{T}(Action)"/>
-/// passes only when the exception leaves the call itself. That is the property an <c>async</c> send
-/// path would break: an <c>async</c> method captures each of these throws into the returned
-/// <see cref="ValueTask{TResult}"/>, and a caller that never awaits it would never see them.
-/// </para>
-/// <para>
-/// The matrix is {already-canceled token, null record, disposed producer, serializer throw} ×
-/// {plain, callback-taking overload} × {mock, real async client}. Only the cells not already pinned
-/// by a strict (non-awaiting) guard elsewhere are added here; the others are:
-/// disposed × plain × mock / real — <c>PublicProducerSendClosedCheckTests.AsyncMockSend_AfterDispose_DoesNotInvokeSerializers</c>
-/// and <c>…AsyncRealSend_AfterDispose_DoesNotInvokeSerializers</c>;
-/// disposed / serializer throw / null record × callback × mock — the <c>Async</c> rows of
-/// <c>PublicProducerDeliveryCallbackTests.NoCallback_OnSynchronousThrow_*</c>;
-/// serializer throw × plain × mock — <c>PublicProducerTypedSendTests.Async_ValueSerializerThrows_ThrowsSynchronouslyBeforeReturningTask</c>.
-/// </para>
-/// <para>
-/// The already-canceled-token cells are the ones that discriminate the internal entry point: the
-/// token is checked inside <see cref="NativeProducer.SendViaPump"/>, below both client skins, so they
-/// are what turns red if that method becomes <c>async</c>. The two
-/// <see cref="NativeProducer"/>-level guards at the end pin it directly.
-/// </para>
-/// </remarks>
 public sealed class PublicProducerSendSynchronousThrowTests
 {
     private const string Topic = "sync-throw-topic";
@@ -61,8 +38,6 @@ public sealed class PublicProducerSendSynchronousThrowTests
     private const string Real = "real";
     private const string Plain = "plain";
     private const string WithCallback = "callback";
-
-    // ---- Already-canceled token: thrown before anything is appended (every cell is new) ----
 
     [Theory]
     [InlineData(Mock, Plain)]
@@ -76,16 +51,16 @@ public sealed class PublicProducerSendSynchronousThrowTests
         cts.Cancel();
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        OperationCanceledException error = Assert.Throws<OperationCanceledException>(
-            () => { _ = Send(producer, overload, Record(), callback, cts.Token); });
+        (OperationCanceledException error, WeakReference value) = SendCanceled(producer, overload, callback, cts.Token);
 
-        // The caller's token, so `catch (OperationCanceledException e) when (e.CancellationToken == ct)`
-        // matches (M11/P8 Minor 9).
+        // The caller's token, so a `when (e.CancellationToken == ct)` filter matches.
         Assert.Equal(cts.Token, error.CancellationToken);
         await AssertNothingSent(producer, callback);
+        if (client == Real)
+        {
+            AssertCollected(value);
+        }
     }
-
-    // ---- Null record ----
 
     [Theory]
     [InlineData(Mock, Plain)]
@@ -96,15 +71,13 @@ public sealed class PublicProducerSendSynchronousThrowTests
         using IAsyncProducer<byte[], byte[]> producer = Create(client);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        // ArgumentNullException(nameof(record)) sets no custom message → ParamName is the contract.
+        // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(
             () => { _ = Send(producer, overload, null!, callback, CancellationToken.None); });
 
         Assert.Equal("record", error.ParamName);
         await AssertNothingSent(producer, callback);
     }
-
-    // ---- Disposed producer ----
 
     [Fact]
     public void Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
@@ -119,8 +92,6 @@ public sealed class PublicProducerSendSynchronousThrowTests
 
         Assert.Equal(0, callback.Count);
     }
-
-    // ---- Serializer throw ----
 
     [Theory]
     [InlineData(Plain)]
@@ -141,8 +112,6 @@ public sealed class PublicProducerSendSynchronousThrowTests
         Assert.Equal(0, callback.Count);
     }
 
-    // ---- The internal entry point itself (below both client skins) ----
-
     [Fact]
     public void SendViaPump_AlreadyCanceledToken_ThrowsSynchronously()
     {
@@ -153,7 +122,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
             cts.Cancel();
 
             OperationCanceledException error = Assert.Throws<OperationCanceledException>(
-                () => { _ = producer.SendViaPump(SerializedRecord(), delivery: null, cts.Token); });
+                () => { _ = producer.SendViaPump(SerializedRecord(), callback: null, cts.Token); });
 
             Assert.Equal(cts.Token, error.CancellationToken);
         }
@@ -166,16 +135,14 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [Fact]
     public void SendViaPump_DisposedProducer_ThrowsSynchronously()
     {
-        // Unreachable through a public skin (each checks the latch before calling down), so this is
-        // the only guard on SendViaPump's own re-check staying synchronous.
+        // Unreachable through a public client (each checks the closed state first), so this is the only guard on
+        // SendViaPump's own check staying synchronous.
         NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
         producer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(
-            () => { _ = producer.SendViaPump(SerializedRecord(), delivery: null); });
+            () => { _ = producer.SendViaPump(SerializedRecord(), callback: null); });
     }
-
-    // ---- Helpers ----
 
     private static ProducerRecord<byte[], byte[]> Record() =>
         new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
@@ -187,9 +154,35 @@ public sealed class PublicProducerSendSynchronousThrowTests
         client == Mock
             ? new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, valueSerializer ?? Serdes.ByteArray)
             : new AsyncKafkaProducer<byte[], byte[]>(
-                new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+                new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1" },
                 Serdes.ByteArray,
                 valueSerializer ?? Serdes.ByteArray);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (OperationCanceledException Error, WeakReference Value) SendCanceled(
+        IAsyncProducer<byte[], byte[]> producer,
+        string overload,
+        CountingDeliveryCallback callback,
+        CancellationToken cancellationToken)
+    {
+        byte[] value = Encoding.UTF8.GetBytes("canceled");
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, value, partition: 0);
+        OperationCanceledException error = Assert.Throws<OperationCanceledException>(
+            () => { _ = Send(producer, overload, record, callback, cancellationToken); });
+        return (error, new WeakReference(value));
+    }
+
+    private static void AssertCollected(WeakReference reference)
+    {
+        for (int i = 0; i < 5 && reference.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        Assert.False(reference.IsAlive, "the canceled send's value is still pinned: the record reached the producer");
+    }
 
     private static ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         IAsyncProducer<byte[], byte[]> producer,
@@ -201,10 +194,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
             ? producer.Send(record, cancellationToken)
             : producer.Send(record, callback, cancellationToken);
 
-    /// <summary>
-    /// Nothing reached the producer: no callback, and — on the mock, after a flush has drained the
-    /// accumulator, so a deferred append cannot hide behind the count — an empty history.
-    /// </summary>
+    // Nothing reached the producer: no callback and, on the mock after a flush, an empty history.
     private static async Task AssertNothingSent(IAsyncProducer<byte[], byte[]> producer, CountingDeliveryCallback callback)
     {
         if (producer is AsyncMockProducer<byte[], byte[]> mock)
@@ -216,13 +206,14 @@ public sealed class PublicProducerSendSynchronousThrowTests
         Assert.Equal(0, callback.Count);
     }
 
+    /// <summary>A delivery callback that counts its calls.</summary>
     private sealed class CountingDeliveryCallback : IDeliveryCallback
     {
         private int _count;
 
         internal int Count => Volatile.Read(ref _count);
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception) =>
+        public void OnCompletion(RecordMetadata metadata, Exception? exception) =>
             Interlocked.Increment(ref _count);
     }
 }

@@ -21,12 +21,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The TFM-matrix smoke test for the M11/P3 producer send path (PLAN §7): the public
-/// <see cref="AsyncMockProducer"/> / <see cref="IAsyncProducer"/> create → send → resolve
-/// round-trip, plus the auto-complete and manual (<c>completeNext</c> / <c>errorNext</c>) mock
-/// paths. Uses only APIs available on the netstandard2.0 floor so it <b>compiles on net462</b>
-/// (via ns2.0) as well as net8.0 / net10.0 — the net462 leg's <em>build</em> must pass locally
-/// even though its <em>run</em> is Windows/CI-only; net10.0 runs locally.
+/// The TFM-matrix smoke test for the async send path: the mock's auto-complete and manual send round-trips and a
+/// real <see cref="AsyncKafkaProducer{TKey, TValue}"/> created and disposed, with netstandard2.0-safe APIs only
+/// so it compiles on net462.
 /// </summary>
 public sealed class PublicProducerSendTfmSmokeTests
 {
@@ -57,9 +54,6 @@ public sealed class PublicProducerSendTfmSmokeTests
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
-        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
-        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
-        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.CompleteNext());
 
         RecordMetadata metadata = default!;
@@ -75,10 +69,7 @@ public sealed class PublicProducerSendTfmSmokeTests
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
-        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
-        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
-        producer.WaitForSendsToReachCore(s_deadline);
-        Assert.True(producer.ErrorNext(2, "tfm-error"));
+        Assert.True(producer.ErrorNext(new KafkaException(2, "tfm-error", isRetriable: true)));
 
         await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
     }
@@ -86,11 +77,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task RealProducer_CreateDisposeAsync_RoundTrips()
     {
-        // The real AsyncKafkaProducer (bootstrap.servers only, no broker): create → graceful async
-        // close → destroy on the TFM matrix, with the send path present. Proves the send-path types
-        // + the pump-integrated teardown compile-and-run on every target with ns2.0-safe APIs. (A
-        // real send is not fired here — it would not deliver without a broker; the mock tests cover
-        // the send round-trip and the pump-join teardown deterministically.)
+        // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             new System.Collections.Generic.Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,

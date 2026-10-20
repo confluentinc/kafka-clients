@@ -133,10 +133,8 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
                 break;
 
             case AdminFlavour.Sync:
-                // No owner, as for every admin latch (PLAN §3.4, D10).
                 _byBrokerIdSync =
-                    new SyncCompletion<IReadOnlyDictionary<int, SyncFutureSource<IReadOnlyCollection<TransactionListing>>>>(
-                        owner: null);
+                    new SyncCompletion<IReadOnlyDictionary<int, SyncFutureSource<IReadOnlyCollection<TransactionListing>>>>();
                 _group = new BrokerGroup();
                 break;
 
@@ -249,7 +247,7 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
             }
 
             SyncCompletion<IReadOnlyCollection<TransactionListing>> completion =
-                new SyncCompletion<IReadOnlyCollection<TransactionListing>>(owner: null);
+                new SyncCompletion<IReadOnlyCollection<TransactionListing>>();
             completions.Add(brokerId, completion);
             latches.Add(brokerId, completion);
             discovered.Add(brokerId);

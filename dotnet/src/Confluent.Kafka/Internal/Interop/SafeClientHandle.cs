@@ -36,6 +36,8 @@ internal abstract class SafeClientHandle : SafeHandleZeroIsInvalid
         SetHandle(view);
     }
 
+    // Exists because the class-only calls need the class pointer back: DangerousAddRef returns nothing, and
+    // DangerousGetHandle returns the view.
     internal IntPtr DangerousAddRefClass(ref bool success)
     {
         DangerousAddRef(ref success);

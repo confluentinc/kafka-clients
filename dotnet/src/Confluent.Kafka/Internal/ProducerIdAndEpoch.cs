@@ -15,17 +15,9 @@
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The per-id value <c>fenceProducers</c> carries — Java's
-/// <c>org.apache.kafka.common.utils.ProducerIdAndEpoch</c> (<c>:21</c>), whose two fields are
-/// public and accessor-less, which is why Java writes <c>p -&gt; p.producerId</c>.
+/// The producer id and epoch that <c>fenceProducers</c> returns for one transactional id, Java's
+/// <c>ProducerIdAndEpoch</c>.
 /// </summary>
-/// <remarks>
-/// ⚠ <b>Deliberately internal</b> (M15/P8 D50). No Java accessor publishes this type —
-/// <c>FenceProducersResult</c> erases or projects it at every one of its four views — so a
-/// public C# type would be surface Java's own API does not have
-/// (<c>definition-of-done.md</c> §7). It exists only to carry the pair from the result walk
-/// to those views.
-/// </remarks>
 internal readonly struct ProducerIdAndEpoch
 {
     internal ProducerIdAndEpoch(long producerId, short epoch)
@@ -34,9 +26,7 @@ internal readonly struct ProducerIdAndEpoch
         Epoch = epoch;
     }
 
-    /// <summary>Java's public <c>producerId</c> field (<c>:24</c>).</summary>
     internal long ProducerId { get; }
 
-    /// <summary>Java's public <c>epoch</c> field (<c>:25</c>), a <see langword="short"/>.</summary>
     internal short Epoch { get; }
 }

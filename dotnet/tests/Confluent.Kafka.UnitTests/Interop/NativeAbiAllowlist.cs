@@ -26,65 +26,12 @@ namespace Confluent.Kafka.UnitTests.Interop;
 internal static class NativeAbiAllowlist
 {
     internal static IReadOnlyDictionary<string, string> Missing { get; } = Build(
-        ("P1.2", new[]
-        {
-            "kafka_common_KafkaFuture_RecordMetadata_destroy",
-            "kafka_common_KafkaFuture_RecordMetadata_destroy_all",
-            "kafka_common_KafkaFuture_RecordMetadata_get",
-            "kafka_common_KafkaFuture_RecordMetadata_get_all",
-            "kafka_common_Node_host",
-            "kafka_common_Node_id",
-            "kafka_common_Node_is_fenced",
-            "kafka_common_Node_port",
-            "kafka_common_Node_rack",
-            "kafka_common_PartitionInfoList_count",
-            "kafka_common_PartitionInfoList_destroy",
-            "kafka_common_PartitionInfoList_get",
-            "kafka_common_PartitionInfo_in_sync_replica",
-            "kafka_common_PartitionInfo_in_sync_replica_count",
-            "kafka_common_PartitionInfo_leader",
-            "kafka_common_PartitionInfo_offline_replica",
-            "kafka_common_PartitionInfo_offline_replica_count",
-            "kafka_common_PartitionInfo_partition",
-            "kafka_common_PartitionInfo_replica",
-            "kafka_common_PartitionInfo_replica_count",
-            "kafka_common_PartitionInfo_topic",
-            "kafka_producer_MetricMap_count",
-            "kafka_producer_MetricMap_destroy",
-            "kafka_producer_MetricMap_get_description",
-            "kafka_producer_MetricMap_get_group",
-            "kafka_producer_MetricMap_get_name",
-            "kafka_producer_MetricMap_get_tag_count",
-            "kafka_producer_MetricMap_get_tag_key",
-            "kafka_producer_MetricMap_get_tag_value",
-            "kafka_producer_MetricMap_get_value_double",
-            "kafka_producer_MetricMap_get_value_int",
-            "kafka_producer_MetricMap_get_value_kind",
-            "kafka_producer_MetricMap_get_value_long",
-            "kafka_producer_MetricMap_get_value_string",
-            "kafka_producer_MockProducer_clear",
-            "kafka_producer_MockProducer_complete_next",
-            "kafka_producer_MockProducer_error_next",
-            "kafka_producer_MockProducer_history_count",
-            "kafka_producer_MockProducer_new",
-            "kafka_producer_ProducerProperties_destroy",
-            "kafka_producer_ProducerProperties_new",
-            "kafka_producer_ProducerProperties_put",
-            "kafka_producer_Producer_close_async",
-            "kafka_producer_Producer_destroy",
-            "kafka_producer_Producer_flush_async",
-            "kafka_producer_Producer_metrics",
-            "kafka_producer_Producer_partitions_for_async",
-            "kafka_producer_Producer_send_batch",
-            "kafka_producer_RecordMetadata_destroy",
-            "kafka_producer_RecordMetadata_offset",
-            "kafka_producer_RecordMetadata_partition",
-            "kafka_producer_RecordMetadata_timestamp",
-            "kafka_producer_RecordMetadata_topic",
-        }),
         ("P1.3", new[]
         {
             "kafka_common_Error_new",
+            "kafka_common_PartitionInfoList_count",
+            "kafka_common_PartitionInfoList_destroy",
+            "kafka_common_PartitionInfoList_get",
             "kafka_common_TopicPartitionInfoMap_count",
             "kafka_common_TopicPartitionInfoMap_destroy",
             "kafka_common_TopicPartitionInfoMap_get_partitions",
@@ -561,14 +508,6 @@ internal static class NativeAbiAllowlist
         }));
 
     internal static IReadOnlyDictionary<string, string> Differing { get; } = Build(
-        ("P1.2", new[]
-        {
-            "kafka_producer_KafkaProducer_new",
-            "kafka_producer_Producer_close",
-            "kafka_producer_Producer_flush",
-            "kafka_producer_Producer_partitions_for",
-            "kafka_producer_Producer_send",
-        }),
         ("P1.3", new[]
         {
             "kafka_consumer_ConsumerHandle_assign",

@@ -17,8 +17,7 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a borrowed <c>kafka_common_Node_t</c> view into an owned <see cref="Node"/>, reading its host and rack by
-/// their length; it frees nothing.
+/// Copies a <c>kafka_common_Node_t</c> into an owned <see cref="Node"/>; it frees nothing.
 /// </summary>
 internal static class NodeMarshal
 {
@@ -29,18 +28,18 @@ internal static class NodeMarshal
             return null;
         }
 
-        int id = NativeMethods.NodeId(node);
+        IntPtr outErr = IntPtr.Zero;
+        int id = NativeMethods.NodeId(node, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr host = NativeMethods.NodeHost(node, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int port = NativeMethods.NodePort(node, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr rack = NativeMethods.NodeRack(node, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        bool isFenced = NativeMethods.NodeIsFenced(node, ref outErr) != 0;
+        KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        IntPtr hostPtr = NativeMethods.NodeHost(node, out int hostLen);
-        string host = Utf8Marshal.PtrToString(hostPtr, hostLen) ?? string.Empty;
-
-        int port = NativeMethods.NodePort(node);
-
-        IntPtr rackPtr = NativeMethods.NodeRack(node, out int rackLen);
-        string? rack = Utf8Marshal.PtrToString(rackPtr, rackLen);
-
-        bool isFenced = NativeMethods.NodeIsFenced(node);
-
-        return new Node(id, host, port, rack, isFenced);
+        return new Node(id, Utf8Marshal.PtrToString(host) ?? string.Empty, port, Utf8Marshal.PtrToString(rack), isFenced);
     }
 }

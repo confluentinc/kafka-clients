@@ -23,20 +23,14 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The <see cref="MockProducer"/> send-control helpers (M11/P4, inherent on the concrete sync mock,
-/// not on <see cref="IProducer"/>): <see cref="MockProducer.CompleteNext"/> /
-/// <see cref="MockProducer.ErrorNext"/> / <see cref="MockProducer.HistoryCount()"/> /
-/// <see cref="MockProducer.Clear"/> — Java <c>MockProducer</c> / Python <c>_MockProducerMixin</c>
-/// parity, mirroring <c>PublicProducerMockControlTests</c> for the async mock (PLAN §7). Because the sync
-/// <see cref="KafkaFuture{T}.Get"/> blocks, the pending-send helpers are driven from a second thread.
+/// The sync mock's control helpers, Java's MockProducer completeNext, errorNext, history and clear; Get blocks, so
+/// a pending send is resolved from a second thread.
 /// </summary>
 public sealed class PublicSyncProducerMockControlTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string Topic = "sync-mock-control-topic";
-
-    // ---- CompleteNext / ErrorNext (cross-thread: Get blocks, helper resolves) ----
 
     [Fact]
     public async Task CompleteNext_ResolvesPendingSend()
@@ -60,8 +54,7 @@ public sealed class PublicSyncProducerMockControlTests
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        // No pending send → false (Java's MockProducer.completeNext() returns false when the
-        // completion queue is empty).
+        // No pending send: false, as Java's MockProducer.completeNext() returns.
         Assert.False(producer.CompleteNext());
     }
 
@@ -73,9 +66,8 @@ public sealed class PublicSyncProducerMockControlTests
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
-        DriveUntilResolved(() => producer.ErrorNext(2, "sync-mock-error"));
+        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "sync-mock-error", isRetriable: true)));
 
-        // Assert the code AND the message content (DoD §3 / ffi §A5).
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
@@ -87,10 +79,8 @@ public sealed class PublicSyncProducerMockControlTests
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        Assert.False(producer.ErrorNext(2, "nope"));
+        Assert.False(producer.ErrorNext(new KafkaException(2, "nope", isRetriable: true)));
     }
-
-    // ---- HistoryCount / Clear (auto-complete sends resolve without blocking) ----
 
     [Fact]
     public void HistoryCount_IncrementsPerSend()
@@ -107,7 +97,7 @@ public sealed class PublicSyncProducerMockControlTests
                 s_deadline);
         }
 
-        // History tracks every sent record (independent of completion), so 3 sends → 3.
+        // The history counts every sent record, completed or not.
         Assert.Equal(3, producer.HistoryCount());
     }
 
@@ -125,8 +115,6 @@ public sealed class PublicSyncProducerMockControlTests
         Assert.Equal(0, producer.HistoryCount());
     }
 
-    // ---- Use-after-dispose guard (before any native call) ----
-
     [Fact]
     public void Helpers_AfterDispose_ThrowObjectDisposed()
     {
@@ -134,17 +122,13 @@ public sealed class PublicSyncProducerMockControlTests
         producer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => producer.CompleteNext());
-        Assert.Throws<ObjectDisposedException>(() => producer.ErrorNext(2, "x"));
+        Assert.Throws<ObjectDisposedException>(() => producer.ErrorNext(new KafkaException(2, "x", isRetriable: true)));
         Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount());
         Assert.Throws<ObjectDisposedException>(() => producer.Clear());
     }
 
-    /// <summary>
-    /// Retries <paramref name="drive"/> from the test thread until it resolves the worker thread's
-    /// pending send, blocked in <see cref="KafkaFuture{T}.Get"/> (returns <see langword="true"/>), or the
-    /// deadline elapses (a fail-fast hang guard). See
-    /// <c>PublicSyncProducerSendTests.DriveUntilResolved</c> for why the spin is needed.
-    /// </summary>
+    // Retries drive until it resolves the worker's pending send or the deadline passes: an early call returns
+    // false until the worker's send has landed.
     private static void DriveUntilResolved(Func<bool> drive)
     {
         Stopwatch sw = Stopwatch.StartNew();

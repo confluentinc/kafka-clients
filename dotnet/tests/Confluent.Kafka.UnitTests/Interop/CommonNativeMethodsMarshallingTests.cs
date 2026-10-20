@@ -25,19 +25,21 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Pins the declarations of <c>kafka_common_Error_source_err</c>, the <c>int8_t</c> error predicates,
-/// <c>kafka_common_Node_is_fenced</c> and the <c>kafka_admin_TopicMetadataAndConfig_config</c> getter.
+/// <c>kafka_common_Node_is_fenced_err</c> and the <c>kafka_admin_TopicMetadataAndConfig_config</c> getter.
 /// </summary>
 public sealed class CommonNativeMethodsMarshallingTests
 {
     [Fact]
-    public void NodeIsFenced_IsDeclaredAgainstItsAbiSymbol_AndReturnsAnI1()
+    public void NodeIsFenced_IsDeclaredAgainstItsErrTwin_AndReturnsAnSByte()
     {
-        MethodInfo method = Import("kafka_common_Node_is_fenced");
+        MethodInfo method = Import("kafka_common_Node_is_fenced_err");
 
         Assert.Equal(nameof(NativeMethods.NodeIsFenced), method.Name);
-        Assert.Equal(typeof(bool), method.ReturnType);
-        Assert.Equal(UnmanagedType.I1, method.ReturnParameter.GetCustomAttribute<MarshalAsAttribute>()?.Value);
-        Assert.Equal(new[] { typeof(IntPtr) }, method.GetParameters().Select(p => p.ParameterType));
+        Assert.Equal(typeof(sbyte), method.ReturnType);
+        Assert.Null(method.ReturnParameter.GetCustomAttribute<MarshalAsAttribute>());
+        Assert.Equal(
+            new[] { typeof(IntPtr), typeof(IntPtr).MakeByRefType() },
+            method.GetParameters().Select(p => p.ParameterType));
     }
 
     [Fact]

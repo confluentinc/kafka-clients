@@ -36,7 +36,7 @@ internal sealed class V3Delivery : IDeliveryCallback
         _sendStartMs = sendStartMs;
     }
 
-    public void OnCompletion(RecordMetadata metadata, KafkaException? exception) =>
+    public void OnCompletion(RecordMetadata metadata, Exception? exception) =>
         _callback.OnCompletion(
             _sendStartMs,
             new PerfRecordMetadata(metadata.Topic, metadata.Partition, metadata.Offset, metadata.Timestamp),

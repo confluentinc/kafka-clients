@@ -17,19 +17,12 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Adapts the two-stage async <c>Send</c> (M11/P3.5: accepted, then delivered) to the delivery
-/// <see cref="Task{TResult}"/> the producer tests were written against. A send whose first stage is
-/// already complete yields its <see cref="AsyncKafkaFuture{T}"/>'s delivery task
-/// (<see cref="AsyncKafkaFuture{T}.Get"/>) as-is — no wrapper, no state machine — so the
-/// allocation-budget tests keep measuring the send itself; a still-pending first stage is unwrapped
-/// into one task that completes with the delivery.
+/// Adapts the two-stage async <c>Send</c> to its delivery <see cref="Task{TResult}"/>: a completed first stage
+/// yields the future's <see cref="AsyncKafkaFuture{T}.Get"/> task as-is, so the allocation tests measure the
+/// send itself; a pending one is unwrapped into one task.
 /// </summary>
 internal static class ProducerSendStages
 {
-    /// <summary>
-    /// The record's delivery: the accepted stage, then the <see cref="AsyncKafkaFuture{T}.Get"/> task
-    /// of the future it yields.
-    /// </summary>
     internal static Task<RecordMetadata> Delivery(this ValueTask<AsyncKafkaFuture<RecordMetadata>> send) =>
         send.IsCompletedSuccessfully ? send.Result.Get() : Unwrap(send);
 

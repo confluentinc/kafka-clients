@@ -902,14 +902,10 @@ internal sealed class SoakClient : IDisposable
             }
             catch (Exception ex)
             {
-                // txcnt counts SEND ATTEMPTS: the loop only re-runs when Send itself
-                // throws a retriable error. Note this is rarer here than in Python: the
-                // async Send throws synchronously only for preconditions and serialization
-                // failures, and surfaces operational failures — such as the core's buffer
-                // exhaustion (max.block.ms) inside send_batch — through the delivery Task
-                // instead (ffi-marshalling.md §A1). The loop is kept because the contract it
-                // encodes ("a retriable throw is one attempt, not a lost record") still
-                // holds for whatever does throw.
+                // txcnt counts SEND ATTEMPTS: the loop only re-runs when Send, or its
+                // awaited first stage, throws a retriable error; the core's buffer exhaustion
+                // after max.block.ms fails the first stage, so it lands here too. A retriable
+                // throw is one attempt, not a lost record.
                 Interlocked.Decrement(ref _outstanding);
                 if (!ErrorIsRetriable(ex) || txCnt >= _options.MaxSendAttempts)
                 {

@@ -129,10 +129,9 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_NonAsciiLeaderHost_RoundTripsThroughLengthDelimitedMarshalling()
     {
-        // Node_host is LENGTH-DELIMITED ((ptr, out_len), NOT NUL-terminated, §B3). A non-ASCII
-        // host (multi-byte chars) guards against a NUL-scan over-read on the length-delimited
-        // slice — the one shape difference from E1 (PLAN §3). Both the multi-byte width and the
-        // exact round-trip are asserted.
+        // kafka_common_Node_host_err returns a NUL-terminated string; a non-ASCII host (multi-byte
+        // chars) guards the UTF-8 decode. Both the multi-byte width and the exact round-trip are
+        // asserted.
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
@@ -141,7 +140,7 @@ public sealed class PublicConsumerPartitionMetadataTests
 
         PartitionInfo info = Assert.Single(partitions);
         Assert.Equal(nonAsciiHost, info.Leader!.Host);
-        // The replica copy of the node marshals identically (same length-delimited host).
+        // The replica copy of the node marshals identically.
         Assert.Equal(nonAsciiHost, info.Replicas[0].Host);
     }
 

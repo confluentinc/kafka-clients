@@ -21,39 +21,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The M11/P8 producer <c>Metrics()</c> surface — Java
-/// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c> — through the <b>public</b> producer
-/// types (sync + async, real + mock), broker-free. The producer twin of
-/// <see cref="PublicConsumerMetricsTests"/>.
+/// The producer's <c>Metrics()</c>, Java's <c>metrics()</c>, on the four producer types: the mocks' map is empty, as
+/// Java's MockProducer's is, and a real producer's is populated with well-formed, value-keyed entries; both
+/// interfaces declare it.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <c>Metrics()</c> is declared identically on <c>IProducer</c> and <c>IAsyncProducer</c> (no
-/// <c>IProducerCommon</c> — decision D-6), so both interface legs are exercised.
-/// </para>
-/// <para>
-/// The mock's <c>metrics()</c> is an <b>empty</b> map (Java <c>MockProducer</c> parity — its
-/// <c>mockMetrics</c> is empty unless seeded, and the ABI exposes no seeding entry point), so the
-/// mock legs prove the <c>count == 0</c> marshal path. The real producer registers its sensor set
-/// at construction, so a broker-free real producer's map is <b>non-empty</b> — the real legs prove
-/// the populated copy-out and the <see cref="MetricName"/>-key value identity end to end.
-/// </para>
-/// <para>
-/// <b>No concurrent-access mapping is asserted (decision D-5).</b> Unlike the consumer, the
-/// producer ABI documents no concurrent-access null: it takes the core producer <c>Mutex</c> and
-/// blocks. So there is no <c>InvalidOperationException("… not safe for multi-threaded access.")</c>
-/// contract to pin here — the binding's null guard is unreachable by construction and deliberately
-/// carries a producer-accurate message instead.
-/// </para>
-/// </remarks>
 public sealed class PublicProducerMetricsTests
 {
     private static Dictionary<string, string> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };
-
-    // ---- Mock: empty map (Java MockProducer parity), sync + async ----
 
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
@@ -70,8 +47,6 @@ public sealed class PublicProducerMetricsTests
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Empty(producer.Metrics());
     }
-
-    // ---- Real producer: populated map, well-formed entries (sync + async) ----
 
     [Fact]
     public void Metrics_SyncRealProducer_IsPopulatedAndWellFormed()
@@ -94,9 +69,8 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_RealProducer_KeyHasValueIdentity_DescriptionExcluded()
     {
-        // Round-trip the MetricName-key value identity end to end: pick a real key, rebuild it
-        // with the SAME name/group/tags but a DIFFERENT description, and index the same entry —
-        // proving the dictionary keys on value identity and excludes description.
+        // Rebuild a real key with the same name, group and tags but another description: the dictionary keys on value
+        // identity, which excludes the description.
         using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
 
@@ -121,9 +95,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_CalledTwice_ReturnsIndependentSnapshots()
     {
-        // Each call marshals a FRESH owned map and destroys the native root before returning
-        // (ffi §A2 Category-3 read-all-then-destroy-once). So the two results are distinct
-        // dictionary instances that both stay readable — proving nothing borrows the freed root.
+        // Each call copies out a fresh map and destroys its native root, so both results stay readable.
         using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
 
@@ -137,8 +109,6 @@ public sealed class PublicProducerMetricsTests
         AssertPopulatedAndWellFormed(first);
         AssertPopulatedAndWellFormed(second);
     }
-
-    // ---- Post-dispose → ObjectDisposedException, all four client types ----
 
     [Fact]
     public void Metrics_SyncMockAfterDispose_ThrowsObjectDisposed()
@@ -174,7 +144,7 @@ public sealed class PublicProducerMetricsTests
         Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
     }
 
-    // ---- Reachable through BOTH interfaces (decision D-6: declared on each, no shared base) ----
+    // Declared on each interface, with no shared base.
 
     [Fact]
     public void Metrics_ReachableViaIProducer()

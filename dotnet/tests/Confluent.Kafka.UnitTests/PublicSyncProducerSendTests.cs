@@ -23,34 +23,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Public-surface tests for the M11/P4 <b>sync</b> producer SEND path —
-/// <see cref="IProducer.Send(ProducerRecord)"/>, which returns a <see cref="KafkaFuture{T}"/> whose
-/// <c>Get()</c> <b>blocks</b> and returns the <see cref="RecordMetadata"/> (= Java <c>send(record).get()</c>) — exercised
-/// through the public <see cref="MockProducer"/> / <see cref="IProducer"/> surface (PLAN §7). Covers:
-/// the auto-complete send returning the correct metadata; the manual (<c>autoComplete: false</c>)
-/// send driven to success / failure <b>from another thread</b> (the single-owner "another thread
-/// completes" pattern — the sync <c>Get()</c> blocks, so a helper thread resolves it); a non-ASCII
-/// topic round-trip (UTF-8 guard, ffi §A3); and preconditions (before any native call).
+/// The sync send path on <see cref="MockProducer{TKey, TValue}"/>: Send returns the future and Get returns the
+/// metadata; on a manual mock Get blocks on a worker thread until the test thread resolves the send; a non-ASCII
+/// topic round-trips; preconditions throw before any native call. Every blocking wait is bounded.
 /// </summary>
-/// <remarks>
-/// <b>Manual-mock completion is cross-thread by necessity (PLAN §7 note).</b> Because sync
-/// <see cref="IProducer.Send"/> blocks until the send resolves, the manual-mock tests fire
-/// <see cref="IProducer.Send"/> on a worker thread (via <see cref="Task.Run(Action)"/>) and drive
-/// completion (<see cref="MockProducer.CompleteNext"/> / <see cref="MockProducer.ErrorNext"/>) from
-/// the test thread, retrying until the pending send registers (the send's
-/// <c>Producer_send</c> enqueues the pending completion just before it blocks on the get, so an
-/// early <c>CompleteNext</c> returns <see langword="false"/> until it lands). Every blocking wait
-/// runs under a <see cref="TestTimeout"/> hang guard so a lost wakeup / deadlock fails the run fast.
-/// The mock's timestamp is not populated from the record (integration-only), so these assert
-/// topic / partition / offset only.
-/// </remarks>
 public sealed class PublicSyncProducerSendTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string Topic = "sync-send-topic";
-
-    // ---- Auto-complete: Send returns the future at once; Get returns the metadata ----
 
     [Fact]
     public void Send_OnAutoCompleteMock_ReturnsMetadata()
@@ -89,14 +70,12 @@ public sealed class PublicSyncProducerSendTests
         }
     }
 
-    // ---- Manual mock: Get blocks until another thread resolves it ----
-
     [Fact]
     public async Task Send_ManualComplete_UnblocksAndReturnsMetadata()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        // Send(...).Get() BLOCKS on a worker thread until CompleteNext resolves it from THIS thread.
+        // Get blocks on a worker thread until CompleteNext resolves it from this thread.
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
@@ -118,25 +97,19 @@ public sealed class PublicSyncProducerSendTests
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
-        // Drive the pending send to a failure from this thread (code + custom message).
-        DriveUntilResolved(() => producer.ErrorNext(2, "sync-mock-error"));
+        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "sync-mock-error", isRetriable: true)));
 
-        // The blocking Get faults with a flat KafkaException carrying the code AND message (DoD §3,
-        // ffi §A5 — assert content, not just the type).
+        // Get throws the injected KafkaException, code and message included.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
         Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);
     }
 
-    // ---- UTF-8 round-trip (topic in → out) ----
-
     [Fact]
     public void Send_NonAsciiTopic_RoundTrips()
     {
-        // A non-ASCII topic guards the manual UTF-8 marshalling both ways (pinned in via
-        // Utf8Marshal.Pin, copied out of RecordMetadata via Utf8Marshal.PtrToString) — an LPStr
-        // mistake would corrupt this silently (ffi §A3).
+        // A non-ASCII topic guards the hand-written UTF-8 marshalling both ways.
         const string topic = "sync-主题-ünîcödé";
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
@@ -149,14 +122,12 @@ public sealed class PublicSyncProducerSendTests
         Assert.Equal(topic, metadata.Topic);
     }
 
-    // ---- Preconditions (before any native call, ffi §A5) ----
-
     [Fact]
     public void Send_NullRecord_ThrowsArgumentNull()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        // Default message (ArgumentNullException(nameof(record))) → assert ParamName only.
+        // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.Send(null!));
         Assert.Equal("record", ex.ParamName);
     }
@@ -164,8 +135,8 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public void Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed()
     {
-        // The null-record guard in Send precedes ThrowIfClosed, so a disposed producer + null
-        // record surfaces ArgumentNullException, NOT ObjectDisposedException (verified in the source).
+        // The null check precedes the closed check, so a closed producer with a null record throws
+        // ArgumentNullException.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Dispose();
 
@@ -196,13 +167,8 @@ public sealed class PublicSyncProducerSendTests
         producer.Dispose();
     }
 
-    /// <summary>
-    /// Retries <paramref name="drive"/> (a mock <c>CompleteNext</c> / <c>ErrorNext</c>) from the test
-    /// thread until it resolves a pending send (returns <see langword="true"/>), or the deadline
-    /// elapses. The worker thread's blocking <see cref="IProducer.Send"/> registers the pending
-    /// completion just before it parks on the get, so an early call returns <see langword="false"/>
-    /// until the send lands — hence the spin (a fail-fast hang guard, not a busy-wait forever).
-    /// </summary>
+    // Retries drive (CompleteNext or ErrorNext) until it resolves a pending send or the deadline passes: an early
+    // call returns false until the worker's send has landed.
     private static void DriveUntilResolved(Func<bool> drive)
     {
         Stopwatch sw = Stopwatch.StartNew();

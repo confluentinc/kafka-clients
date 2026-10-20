@@ -30,7 +30,7 @@ namespace Confluent.Kafka.UnitTests;
 /// amortized and fine. A LIGHT sanity bound (not zero-alloc): the marginal per-op cost does NOT
 /// scale beyond the fixed one-entry result — an unbounded or per-something copy (e.g. a stored
 /// native-backed view or a second copy pass) would show here. The sync query copy-out runs the
-/// shared query marshallers (<c>OffsetMapMarshal.CopyOut</c> / <c>PartitionInfoListMarshal.CopyOut</c>)
+/// shared query marshallers (<c>OffsetMapMarshal.CopyOut</c> / <c>PartitionInfoListMarshal.CopyOutPartitionInfoList</c>)
 /// on the caller's thread, so measuring them on-thread fully covers the async per-op query budget
 /// too (M7/P1).
 /// </summary>

@@ -33,9 +33,9 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// </para>
 /// <para>
 /// <b>The absorb branch is unreachable in .NET</b>, and kept for parity (§3.5 item 5). The
-/// delivery callback is managed-only (ffi §A6 form C): it fires only where the binding reads a
-/// core completion, and a <c>Send</c> that throws hands the completion pump no future, so a
-/// throw means no callback, ever (<c>IDeliveryCallback</c>'s remarks). The one "throws, yet the
+/// delivery callback fires on the producer's completion thread, and a <c>Send</c> that throws
+/// runs no callback, except a transactional producer's send outside a transaction
+/// (<c>IDeliveryCallback</c>'s remarks), which this harness never makes. The one "throws, yet the
 /// record is sent" case — the async stage-1 <see cref="OperationCanceledException"/> from the
 /// caller's token — is ruled out by never passing a token (D6). So if the branch is ever taken
 /// it logs that the D5 contract was violated, and a binding regression shows up in the server
@@ -89,7 +89,7 @@ internal sealed class ChaosRecordOutcomes
         }
     }
 
-    private void OnCompletion(RecordCallback record, RecordMetadata? metadata, KafkaException? exception)
+    private void OnCompletion(RecordCallback record, RecordMetadata? metadata, Exception? exception)
     {
         bool absorbed;
         lock (_lock)
@@ -144,7 +144,7 @@ internal sealed class ChaosRecordOutcomes
     }
 
     /// <summary>
-    /// One record's <see cref="IDeliveryCallback"/>: it fires on the producer's completion pump
+    /// One record's <see cref="IDeliveryCallback"/>: it fires on the producer's completion
     /// thread, so it only builds the event and queues it (PLAN §5.7) — anything slower would
     /// delay every other completion of the producer (ffi §A1).
     /// </summary>
@@ -168,7 +168,7 @@ internal sealed class ChaosRecordOutcomes
         internal bool SendFailureReported { get; set; }
 
         /// <inheritdoc/>
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             try
             {

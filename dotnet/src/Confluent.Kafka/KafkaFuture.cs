@@ -55,8 +55,7 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// Java's <c>thenApply</c>: a future completed with <paramref name="function"/> applied to this future's value, or
     /// failed with this future's failure or the function's exception. The function runs on the thread that completes
     /// this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public KafkaFuture<TR> ThenApply<TR>(KafkaFuture.BaseFunction<T, TR> function)
     {
@@ -73,8 +72,7 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// value (<c>default</c> when this future failed) and the failure (<see langword="null"/> when it succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public KafkaFuture<T> WhenComplete(KafkaFuture.BiConsumer<T?, Exception?> action)
     {
@@ -96,8 +94,7 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
 
     /// <summary>
     /// Java's <c>Future.get()</c>: blocks until the operation completes, then returns its result or rethrows its
-    /// exception, unwrapped. Inside a delivery callback it throws <see cref="InvalidOperationException"/> for a send of
-    /// the same producer that has not completed, instead of deadlocking.
+    /// exception, unwrapped. Inside a delivery callback, on the record's own future, it never returns, as in Java.
     /// </summary>
     public T Get() => _impl is null ? Source.Get() : _impl.Get();
 
@@ -105,16 +102,14 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing <see cref="TimeoutException"/> when the future
     /// has not completed within <paramref name="timeout"/>; a zero or negative timeout checks once, and
     /// <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public T Get(TimeSpan timeout) => Impl(nameof(Get)).Get(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public T Get(CancellationToken cancellationToken) => Impl(nameof(Get)).Get(cancellationToken);
 
@@ -222,9 +217,7 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
 /// </remarks>
 public readonly struct KafkaFuture : IEquatable<KafkaFuture>
 {
-    internal const string DefaultValueMessage =
-        "This KafkaFuture is a default value and is bound to no operation; only IProducer.Send and the IAdmin result "
-        + "types return a usable one.";
+    internal const string DefaultValueMessage = "This KafkaFuture is a default value and is bound to no operation.";
 
     private readonly KafkaFutureImpl? _impl;
 
@@ -261,8 +254,8 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// <summary>
     /// Java's <c>allOf</c>: a future completed once every one of <paramref name="futures"/>, of any value types, has
     /// completed, failed with one of their failures when any of them failed; with no futures it is completed at once.
-    /// Throws <see cref="NotSupportedException"/> when one of them is pending and was returned by
-    /// <c>IProducer.Send</c> or an <c>IAdmin</c> result.
+    /// Throws <see cref="NotSupportedException"/> when one of them is pending and was returned by an
+    /// <c>IAdmin</c> result.
     /// </summary>
     public static KafkaFuture AllOf(params KafkaFuture[] futures)
     {
@@ -282,8 +275,7 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
 
     /// <summary>
     /// Java's <c>allOf</c> for futures of one value type, such as an array of them. Throws
-    /// <see cref="NotSupportedException"/> when one of them is pending and was returned by <c>IProducer.Send</c> or an
-    /// <c>IAdmin</c> result.
+    /// <see cref="NotSupportedException"/> when one of them is pending and was returned by an <c>IAdmin</c> result.
     /// </summary>
     public static KafkaFuture AllOf<T>(params KafkaFuture<T>[] futures)
     {
@@ -305,8 +297,7 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// Java's <c>thenApply</c> on a future of no value: a future completed with what <paramref name="function"/>
     /// returns once this future has succeeded, or failed with this future's failure or the function's exception. The
     /// function runs on the thread that completes this future, or inside this call if this future already holds its
-    /// outcome. Throws <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an
-    /// <c>IAdmin</c> result.
+    /// outcome. Throws <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public KafkaFuture<TR> ThenApply<TR>(Func<TR> function)
     {
@@ -323,8 +314,7 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// <paramref name="action"/> has run with the failure (<see langword="null"/> when this future succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public KafkaFuture WhenComplete(Action<Exception?> action)
     {
@@ -364,16 +354,14 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing <see cref="TimeoutException"/> when the future
     /// has not completed within <paramref name="timeout"/>; a zero or negative timeout checks once, and
     /// <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public void Get(TimeSpan timeout) => Impl(nameof(Get)).Wait(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by <c>IProducer.Send</c> or an <c>IAdmin</c>
-    /// result.
+    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAdmin</c> result.
     /// </summary>
     public void Get(CancellationToken cancellationToken) => Impl(nameof(Get)).Wait(cancellationToken);
 
@@ -431,8 +419,7 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     internal SyncFutureSource Source => _source ?? throw new InvalidOperationException(DefaultValueMessage);
 
     internal static string UnsupportedMessage(string member) =>
-        "KafkaFuture." + member + " is not supported on a pending future returned by IProducer.Send or an IAdmin "
-        + "result.";
+        "KafkaFuture." + member + " is not supported on a pending future returned by an IAdmin result.";
 
     private KafkaFutureImpl Impl(string? member = null)
     {

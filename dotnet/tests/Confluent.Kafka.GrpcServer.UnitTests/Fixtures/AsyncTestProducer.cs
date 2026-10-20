@@ -81,7 +81,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
             ValueTask<AsyncKafkaFuture<RecordMetadata>> admission =
                 _inner.Send(record, new CountingCallback(callback, index, _probe), cancellationToken);
             if (_behaviour.FailEach is (int code, string message)
-                && !SpinWait.SpinUntil(() => _inner.ErrorNext(code, message), s_mockTimeout))
+                && !SpinWait.SpinUntil(() => _inner.ErrorNext(new KafkaException(code, message, isRetriable: false)), s_mockTimeout))
             {
                 throw new InvalidOperationException($"record {index} never reached the mock to be failed");
             }
@@ -95,6 +95,16 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
             _probe.SendThrew[index] = e;
             throw;
         }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
+        ProducerRecord<byte[], byte[]> record,
+        IAsyncDeliveryCallback callback,
+        CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(Send), cancellationToken);
+        return _inner.Send(record, callback, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -125,6 +135,16 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         // loop inline, the stopping call itself would be held here (T6b).
         _behaviour.HoldClose?.Wait();
         await _inner.Close(cancellationToken).ConfigureAwait(false);
+        _probe.OnClosed();
+    }
+
+    /// <inheritdoc/>
+    public async Task Close(TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(Close), cancellationToken);
+        _probe.CloseEntered.Set();
+        _behaviour.HoldClose?.Wait();
+        await _inner.Close(timeout, cancellationToken).ConfigureAwait(false);
         _probe.OnClosed();
     }
 
@@ -172,7 +192,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
             _probe = probe;
         }
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             _probe.OnCallback(_index);
             _target.OnCompletion(metadata, exception);

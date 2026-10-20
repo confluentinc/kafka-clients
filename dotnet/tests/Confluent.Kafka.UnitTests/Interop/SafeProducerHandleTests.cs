@@ -14,6 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
@@ -24,164 +27,236 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Category-1 owned-handle lifecycle over <c>SafeProducerHandle</c> (ffi §A2):
-/// create → assert valid → <c>Dispose</c> (the pinned M11/P1 <c>Producer_destroy</c>-only
-/// teardown) → no crash. Double-dispose is safe; use-after-dispose throws
-/// <see cref="ObjectDisposedException"/>. A <c>Producer_destroy</c> that blocks
-/// (it joins the background Sender, ffi §A2) fails fast via <see cref="TestTimeout"/>
-/// rather than hanging the run.
-///
-/// Also pins the M2/P2 SafeHandle-return failure path: a null native return from
-/// <c>KafkaProducer_new</c> (here forced by an unparseable config value) yields an
-/// <b>IsInvalid</b> <see cref="SafeProducerHandle"/> whose <c>Dispose</c> skips
-/// <c>ReleaseHandle</c> (no spurious <c>Producer_destroy</c>), while the accompanying
-/// <c>out_error</c> still round-trips through <c>KafkaException.FromHandle</c>.
+/// Tests the producer handle's lifetime: create and dispose, the teardown order (close, join the completion thread,
+/// wait for the calls in flight, destroy on the closing thread, then release the notify opaque), the close from the
+/// completion thread, and the leak warning of a producer never closed.
 /// </summary>
 public sealed class SafeProducerHandleTests
 {
-    // A blocked broker-less destroy must surface as a test failure quickly, not hang.
-    private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
-
-    private static Dictionary<string, string> ValidProducerConfig() => new()
-    {
-        ["bootstrap.servers"] = "localhost:9092",
-    };
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public void MockProducer_CreateThenDispose_HandleValidThenReleased()
+    public void Create_ThenDispose_ReleasesTheHandle()
     {
-        NativeProducer producer = NativeProducer.CreateMock();
+        NativeProducer producer = NativeProducer.Create(Config());
+        SafeProducerHandle handle = producer.Handle;
+        Assert.IsType<SafeKafkaProducerHandle>(handle);
+        Assert.False(handle.IsInvalid);
 
-        Assert.False(producer.Handle.IsInvalid);
+        TestTimeout.Run(producer.Dispose, s_deadline);
 
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
-    }
-
-    [Fact]
-    public void KafkaProducer_CreateThenDispose_HandleValidThenReleased()
-    {
-        // A real producer is constructed broker-free (Java-faithful: the ctor sets up
-        // the accumulator / Sender but does not connect). The teardown routes straight
-        // through Producer_destroy (which blocks joining the Sender) and must return
-        // without a broker present.
-        NativeProducer producer = NativeProducer.Create(ValidProducerConfig());
-
-        Assert.False(producer.Handle.IsInvalid);
-
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
+        Assert.True(handle.IsClosed);
     }
 
     [Fact]
     public void Dispose_CalledTwice_IsSafe()
     {
-        NativeProducer producer = NativeProducer.CreateMock();
+        NativeProducer producer = NativeProducer.Create(Config());
 
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
-
-        // The second dispose is a no-op (guarded by the atomic disposed latch) — no
-        // double destroy, no throw.
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
+        TestTimeout.Run(producer.Dispose, s_deadline);
+        TestTimeout.Run(producer.Dispose, s_deadline);
     }
 
     [Fact]
     public async Task DisposeAsync_ThenDispose_IsSafe()
     {
-        // DisposeAsync delegates to Dispose in M11/P1 (no async teardown work yet), so
-        // the two teardown paths share the one-shot latch: DisposeAsync tears down, and
-        // a following Dispose no-ops.
-        NativeProducer producer = NativeProducer.CreateMock();
+        NativeProducer producer = NativeProducer.Create(Config());
 
-        await producer.DisposeAsync();
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
+        await TestTimeout.Run(() => producer.DisposeAsync().AsTask(), s_deadline);
+        TestTimeout.Run(producer.Dispose, s_deadline);
 
         Assert.Throws<ObjectDisposedException>(() => producer.Handle);
     }
 
     [Fact]
-    public void Handle_AccessedAfterDispose_ThrowsObjectDisposedException()
+    public void Handle_AfterDispose_ThrowsObjectDisposedException()
     {
-        NativeProducer producer = NativeProducer.CreateMock();
-        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
+        NativeProducer producer = NativeProducer.Create(Config());
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        TestTimeout.Run(producer.Dispose, s_deadline);
+
+        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        Assert.Equal(nameof(NativeProducer), failure.ObjectName);
     }
 
     [Fact]
-    public void CreateAndDisposeMany_MockProducers_NoLeakOrCrash()
+    public void Flush_AfterDispose_ThrowsObjectDisposedException()
     {
-        // Baseline churn: repeated create/dispose must not crash or leak handles.
-        for (int i = 0; i < 100; i++)
+        NativeProducer producer = NativeProducer.Create(Config());
+
+        TestTimeout.Run(producer.Dispose, s_deadline);
+
+        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
+    }
+
+    [Fact]
+    public void CreateAndDisposeMany_NoLeakOrCrash()
+    {
+        for (int i = 0; i < 20; i++)
         {
-            NativeProducer producer = NativeProducer.CreateMock();
+            NativeProducer producer = NativeProducer.Create(Config());
             Assert.False(producer.Handle.IsInvalid);
-            producer.Dispose();
+            TestTimeout.Run(producer.Dispose, s_deadline);
         }
     }
 
     [Fact]
-    public void KafkaProducerNew_InvalidConfigValue_ReturnsInvalidHandleAndError_DisposeSkipsRelease()
+    public void Dispose_DestroysOnTheClosingThread_AfterTheCompletionThreadStops_ThenReleasesTheOpaque()
     {
-        // M2/P2 KEY REGRESSION (producer analog). An unparseable config value
-        // (batch.size = "not-a-number") makes ProducerConfig::from_properties fail, so
-        // kafka_producer_KafkaProducer_new returns a null native pointer. The
-        // SafeHandle-return marshaller then hands back an IsInvalid SafeProducerHandle
-        // AND writes a non-null out_error — the fallible contract is preserved.
-        //
-        // Disposing an IsInvalid SafeHandle must SKIP ReleaseHandle (so no spurious
-        // Producer_destroy on a null pointer), and the out_error must still round-trip
-        // through the flat KafkaException. Driven in a loop so a double free / leak /
-        // crash on this path would corrupt the allocator and fail. Cheap: the failure
-        // occurs during config parse, before any tokio runtime / Sender is created.
-        var config = new Dictionary<string, string>
+        NativeProducer producer = NativeProducer.Create(Config());
+        CompletionThread completion = CompletionOf(producer);
+        Thread completionThread = ThreadOf(completion);
+        DestroyProbe probe = DestroyProbe.Attach(producer, completion, completionThread);
+
+        Thread closer = new Thread(producer.Dispose);
+        closer.Start();
+        Assert.True(closer.Join(s_deadline));
+
+        Assert.True(probe.Ran);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
+        Assert.False(probe.CompletionThreadAlive);
+        Assert.False(probe.OpaqueReleasedAtDestroy);
+        Assert.True(OpaqueReleased(completion));
+    }
+
+    [Fact]
+    public void Close_OnTheCompletionThread_TearsDownOnThatThread_AfterItsDrain()
+    {
+        NativeProducer producer = NativeProducer.Create(Config());
+        CompletionThread completion = CompletionOf(producer);
+        Thread completionThread = ThreadOf(completion);
+        DestroyProbe probe = DestroyProbe.Attach(producer, completion, completionThread);
+
+        completion.Post(producer.Close);
+
+        Assert.True(probe.Destroyed.Wait(s_deadline));
+        Assert.Equal(completionThread.ManagedThreadId, probe.ThreadId);
+        Assert.True(completionThread.Join(s_deadline));
+        Assert.True(OpaqueReleased(completion));
+        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+    }
+
+    [Fact]
+    public void Dispose_WaitsForACallInFlight_BeforeTheDestroy()
+    {
+        NativeProducer producer = NativeProducer.Create(Config());
+        CompletionThread completion = CompletionOf(producer);
+        Thread completionThread = ThreadOf(completion);
+        DestroyProbe probe = DestroyProbe.Attach(producer, completion, completionThread);
+        Invoke(producer, "EnterUse");
+
+        Thread closer = new Thread(producer.Dispose);
+        closer.Start();
+        Assert.True(completionThread.Join(s_deadline));
+        Assert.True(SpinWait.SpinUntil(() => (closer.ThreadState & ThreadState.WaitSleepJoin) != 0, s_deadline));
+
+        Assert.False(probe.Destroyed.Wait(TimeSpan.FromMilliseconds(200)));
+        Assert.False(probe.Ran);
+
+        Invoke(producer, "ExitUse");
+
+        Assert.True(closer.Join(s_deadline));
+        Assert.True(probe.Ran);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
+    }
+
+    [Fact]
+    public void Finalization_LeaksWithOneWarning_AndKeepsTheNotifyOpaque()
+    {
+        using TraceCapture trace = TraceCapture.Start();
+
+        (WeakReference handle, CompletionThread completion, string marker) = Abandon();
+        for (int attempt = 0; attempt < 10 && trace.LinesContaining(marker).Count == 0; attempt++)
         {
-            ["bootstrap.servers"] = "localhost:9092",
-            ["batch.size"] = "not-a-number",
-        };
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
 
-        for (int i = 0; i < 50; i++)
+        Assert.False(handle.IsAlive);
+        string line = Assert.Single(trace.LinesContaining(marker));
+        Assert.Contains(
+            "Confluent.Kafka: " + marker + " was released without Close or Dispose; the native client is leaked.",
+            line,
+            StringComparison.Ordinal);
+        Assert.False(OpaqueReleased(completion));
+    }
+
+    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    {
+        ["bootstrap.servers"] = "localhost:9092",
+    };
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Handle, CompletionThread Completion, string Marker) Abandon()
+    {
+        NativeProducer producer = NativeProducer.Create(Config());
+        SafeProducerHandle handle = producer.Handle;
+        bool added = false;
+        IntPtr classPointer = handle.DangerousAddRefClass(ref added);
+        handle.DangerousRelease();
+        string marker = nameof(SafeKafkaProducerHandle) + " 0x" + classPointer.ToInt64().ToString("X");
+        return (new WeakReference(handle), CompletionOf(producer), marker);
+    }
+
+    private static CompletionThread CompletionOf(NativeProducer producer) =>
+        (CompletionThread)Field(typeof(NativeProducer), "_completion").GetValue(producer)!;
+
+    private static Thread ThreadOf(CompletionThread completion) =>
+        (Thread)Field(typeof(CompletionThread), "_thread").GetValue(completion)!;
+
+    private static bool OpaqueReleased(CompletionThread completion) =>
+        (int)Field(typeof(CompletionThread), "_opaqueReleased").GetValue(completion)! != 0;
+
+    private static void Invoke(NativeProducer producer, string method) =>
+        (typeof(NativeProducer).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException(nameof(NativeProducer) + " has no method " + method + "."))
+        .Invoke(producer, null);
+
+    private static FieldInfo Field(Type type, string name) =>
+        type.GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)
+        ?? throw new InvalidOperationException(type.Name + " has no field " + name + ".");
+
+    /// <summary>Wraps the action the handle runs after its destroy, to record where and when the destroy ran.</summary>
+    private sealed class DestroyProbe
+    {
+        private readonly CompletionThread _completion;
+        private readonly Thread _completionThread;
+        private readonly Action _release;
+
+        private DestroyProbe(CompletionThread completion, Thread completionThread, Action release)
         {
-            SafeProducerHandle handle;
-            IntPtr outError;
+            _completion = completion;
+            _completionThread = completionThread;
+            _release = release;
+        }
 
-            SafeProducerPropertiesHandle props = SafeProducerPropertiesHandle.Create();
-            try
-            {
-                foreach (KeyValuePair<string, string> entry in config)
-                {
-                    using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                    using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                    NativeMethods.ProducerPropertiesPut(props.DangerousGetHandle(), key.Pointer, value.Pointer);
-                }
+        internal ManualResetEventSlim Destroyed { get; } = new ManualResetEventSlim();
 
-                // Return type is SafeProducerHandle: the marshaller created-and-set it
-                // atomically, so a null native return arrives as an IsInvalid handle.
-                handle = NativeMethods.KafkaProducerNew(props, out outError);
-            }
-            finally
-            {
-                props.Dispose();
-            }
+        internal bool Ran { get; private set; }
 
-            Assert.True(handle.IsInvalid);
-            Assert.NotEqual(IntPtr.Zero, outError);
+        internal int ThreadId { get; private set; }
 
-            // Disposing an IsInvalid handle is a no-op for ReleaseHandle → no
-            // Producer_destroy on a null pointer. No crash, no double-free.
-            handle.Dispose();
+        internal bool CompletionThreadAlive { get; private set; }
 
-            // The fallible contract's error still round-trips (the parse message /
-            // flags), freed exactly once by FromHandle. IllegalArgument is not
-            // retriable. The exact message is the behavioral contract (DoD §3); the
-            // format mirrors Java's `ConfigException(String name, Object value)`:
-            // "Invalid value {value} for configuration {name}". This failure occurs
-            // while parsing properties, before `KafkaProducer::from_config`'s
-            // relabeling try/catch, so it surfaces unwrapped (unlike the
-            // "Failed to construct kafka producer" wrapper on later construction
-            // failures, such as an unparseable bootstrap.servers entry).
-            KafkaException? failure = KafkaException.FromHandle(outError);
-            Assert.NotNull(failure);
-            Assert.Contains("Invalid value not-a-number for configuration batch.size", failure!.Message, StringComparison.Ordinal);
-            Assert.False(failure.IsRetriable);
+        internal bool OpaqueReleasedAtDestroy { get; private set; }
+
+        internal static DestroyProbe Attach(NativeProducer producer, CompletionThread completion, Thread completionThread)
+        {
+            SafeProducerHandle handle = producer.Handle;
+            Action release = (Action)Field(typeof(SafeProducerHandle), "_afterDestroy").GetValue(handle)!;
+            var probe = new DestroyProbe(completion, completionThread, release);
+            handle.ReleaseAfterDestroy(probe.AfterDestroy);
+            return probe;
+        }
+
+        private void AfterDestroy()
+        {
+            Ran = true;
+            ThreadId = Environment.CurrentManagedThreadId;
+            CompletionThreadAlive = _completionThread.IsAlive && Thread.CurrentThread != _completionThread;
+            OpaqueReleasedAtDestroy = OpaqueReleased(_completion);
+            _release();
+            Destroyed.Set();
         }
     }
 }

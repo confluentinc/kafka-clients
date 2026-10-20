@@ -372,9 +372,7 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
                 _syncSources = new Dictionary<TKey, SyncFutureSource<TValue>>(keys.Count, keyComparer);
                 foreach (TKey key in keys)
                 {
-                    // No owner: no user code runs on an admin completion thread, so the
-                    // producer's D9 guard has no pump thread to guard (PLAN §3.4, D10).
-                    SyncCompletion<TValue> completion = new SyncCompletion<TValue>(owner: null);
+                    SyncCompletion<TValue> completion = new SyncCompletion<TValue>();
                     _perKey[key] = completion;
                     _syncSources[key] = completion;
                 }
@@ -563,9 +561,7 @@ internal sealed class SingleAdminOperation<TValue> : AdminOperation
         _completion = flavour switch
         {
             AdminFlavour.Async => new TaskAdminCompletion<TValue>(),
-
-            // No owner, as for the per-key latches (PLAN §3.4, D10).
-            AdminFlavour.Sync => new SyncCompletion<TValue>(owner: null),
+            AdminFlavour.Sync => new SyncCompletion<TValue>(),
             _ => throw AdminFlavourViews.UnknownFlavour(flavour),
         };
     }

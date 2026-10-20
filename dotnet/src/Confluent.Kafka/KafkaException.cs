@@ -59,6 +59,16 @@ public class KafkaException : Exception
     {
     }
 
+    /// <summary>
+    /// Initializes an exception with a cause, whose type's full name and message, Java's <c>cause.toString()</c>,
+    /// become the message, or the default message for a <see langword="null"/> cause; <see cref="Code"/> is 0 and
+    /// <see cref="IsRetriable"/> is <see langword="false"/>.
+    /// </summary>
+    public KafkaException(Exception? cause)
+        : base(CauseMessage(cause), cause)
+    {
+    }
+
     internal KafkaException(int code, string? message, bool isRetriable)
         : this(code, message, isRetriable, innerException: null)
     {
@@ -76,6 +86,9 @@ public class KafkaException : Exception
 
     /// <summary>Whether the failed operation may succeed if retried.</summary>
     public bool IsRetriable { get; }
+
+    private static string? CauseMessage(Exception? cause) =>
+        cause is null ? null : cause.GetType().FullName + ": " + cause.Message;
 
     internal static KafkaException? FromHandle(IntPtr error)
     {

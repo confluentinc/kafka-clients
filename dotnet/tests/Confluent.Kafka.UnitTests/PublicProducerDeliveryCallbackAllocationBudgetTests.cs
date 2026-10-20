@@ -20,40 +20,14 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
-// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
-// TFM smoke leg compiling. Same gate as PublicProducerSendAllocationBudgetTests.
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, so the class is net8.0+ only.
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// M14/P1 — the DoD §10 hot-path allocation audit for the delivery-callback overload (decision
-/// D11). Two obligations, one per direction:
-/// <list type="bullet">
-/// <item>the <b>plain</b> <c>Send(record)</c> path must not regress — carrying the delivery
-/// registration alongside each queued send must cost nothing when there is none. (M11/P3.2 S3
-/// replaced the pump's per-record <c>PendingSend</c> struct with a per-<c>send_batch</c>
-/// <c>PendingSendBatch</c> carrying a parallel <c>DeliveryRegistration?[]</c>; the obligation is
-/// unchanged, and so is every number below — the pump allocates on its own threads, which this
-/// per-thread counter excludes.)</item>
-/// <item>the <b>callback</b> path must add only the one <c>DeliveryRegistration</c> — no captured
-/// closure, no captured <c>ProducerRecord</c>, and no eagerly-built placeholder
-/// <see cref="RecordMetadata"/> (which is failure-path-only).</item>
-/// </list>
+/// The send-path allocation audit for the delivery-callback overload: the plain Send must not regress, and the
+/// callback Send must add no per-send closure, record capture, eager placeholder metadata or value-sized copy.
+/// Measured with the per-thread allocation counter around the synchronous part of Send, best of N attempts.
 /// </summary>
-/// <remarks>
-/// Uses the <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> counter (M7/P1),
-/// measured around the synchronous <c>Send</c> calls on this thread — so the completion pump's own
-/// allocations are excluded and the measurement is immune to concurrently-running tests
-/// (the assembly runs in parallel). The measured region never <c>await</c>s. The value / key
-/// buffers and the callback instance are allocated <b>once</b> outside every measured loop, so what
-/// is left is attributable to the send path itself.
-/// <para>
-/// Budgets were set from measurements on this branch, with generous headroom over the observed
-/// values but far below the failure signal each one guards: a per-send value-sized copy would add
-/// ~<see cref="LargeValueSize"/> bytes, and a per-send closure / record capture / eager placeholder
-/// would push the callback-path delta well past <see cref="RegistrationDeltaBudgetBytes"/>.
-/// </para>
-/// </remarks>
 public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
@@ -66,52 +40,22 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
     private const int LargeValueSize = 512 * 1024;
 
-    // MEASURED on this branch (net10.0, arm64): the plain path costs ~280 B/send on the caller
-    // thread — the ProducerRecord and the TCS + its Task. The ceiling leaves headroom for runtime /
-    // TFM variation while still catching what it guards: a value-sized managed copy would add
-    // ~LargeValueSize bytes per send, and a Task-scoped pin would show here too.
-    //
-    // RE-BASELINED for M11/P3.1 (the DoD §10 obligation the accumulator brings). Two send-path costs
-    // moved and the budget still holds at 512 B:
-    //   * GONE — the per-send topic pin. The async path interns ONE permanently-pinned buffer per
-    //     DISTINCT topic (§4.1), so a steady-state send allocates nothing for its topic at all.
-    //   * NEW — the accumulator node's parallel arrays, which are a per-NODE cost the caller thread
-    //     pays when it grows or allocates one. Two things keep it off the per-send budget: the
-    //     record is marshalled into its blittable slot at append time rather than stored (so the
-    //     node has no per-slot SerializedProducerRecord, its widest field), and a drained node is
-    //     RECYCLED rather than re-allocated — so at steady state the node contributes zero.
-    // The remaining measurement is therefore essentially unchanged from Option C, which is why this
-    // number did not have to move.
+    // The ceiling catches a per-send value-sized copy (~LargeValueSize bytes) or a Task-scoped pin, with headroom
+    // for runtime variation.
     private const long PlainPerSendBudgetBytes = 512;
 
-    // MEASURED: the callback path costs 320 B/send — a delta of EXACTLY 40 B, which is one
-    // DeliveryRegistration (three fields, one object). The ceiling is deliberately tight rather
-    // than generous, because sensitivity is the whole point, and it was verified BOTH ways:
-    // injecting a second per-send object (an eagerly-built placeholder RecordMetadata held on the
-    // registration) took the measured delta from 40 B to 96 B and turned this test red. A captured
-    // closure or a captured ProducerRecord would too.
+    // The ceiling on what the callback adds per send, kept tight because sensitivity is the point.
     private const long RegistrationDeltaBudgetBytes = 64;
 
-    // How many times each measurement is repeated before the BEST (lowest) result is taken. See
-    // the rationale at the first use: the send accumulator charges a node allocation to whichever
-    // caller triggers it, which is noise on a per-send measurement, and the minimum removes it
-    // without weakening the budget.
+    // Each measurement is repeated and the lowest result taken: a one-off allocation in one attempt is noise, while a
+    // real per-send regression raises every attempt.
     private const int MeasurementAttempts = 4;
 
-    // M11/P3.5 T21 (ii) — the ABSOLUTE per-send budget of the callback overload's fast path. Neither
-    // budget above can see a constant per-send regression shared by both overloads: the 512 B
-    // ceiling is generous by design, and the 64 B one is a plain-to-callback DELTA, from which a cost
-    // both overloads pay (one more Task<T> for the first stage, 72 B) cancels out.
-    // MEASURED: 200 B/send on BOTH net8.0 and net10.0 — the plain path's 160 B plus the 40 B
-    // DeliveryRegistration — at M11/P3.5 S3, and again, unchanged, at M11/P3.6 S2 (3 runs per TFM) once
-    // the first stage yields an AsyncKafkaFuture<RecordMetadata>. The budget is that plus 16 B
-    // (M11/P3.6 D11 (a)), which is less than one boxed AsyncKafkaFuture<RecordMetadata> (24 B) and so
-    // less than one more Task<T> (72 B). History: P3.5's budget was that plus 32 B (232), verified red
-    // then by injecting one more Task<T> (a Task.FromResult first stage on the fast path).
-    private const long CallbackFastPathPerSendBudgetBytes = 216;
+    // The absolute per-send budget of the callback overload: the measured 424 B (net8.0, net10.0; the callback is
+    // a field of the delivery state) plus 16 B, less than one more object (24 B).
+    private const long CallbackFastPathPerSendBudgetBytes = 440;
 
-    // More attempts than the paired tests: an absolute figure has no matched pair to cancel a node
-    // allocation within an attempt, so it needs a drain-free run among them.
+    // More attempts than the paired tests, as an absolute figure has no matched pair to cancel a one-off allocation.
     private const int AbsoluteMeasurementAttempts = 8;
 
     [Fact]
@@ -125,10 +69,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
         await Warmup(producer, value, key, callback: null);
 
-        // BEST OF N (M11/P3.1): the accumulator allocates (or grows) a node on whichever caller
-        // thread needs a fresh one, so a drain landing inside a measured window makes that one run
-        // pay for a node the next run gets recycled. The minimum is the drain-free run; a genuine
-        // per-send regression raises EVERY attempt, minimum included, so sensitivity is unchanged.
+        // Best of N: a genuine per-send regression raises every attempt, the minimum included.
         long bytes = long.MaxValue;
         for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
         {
@@ -158,9 +99,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         await Warmup(producer, value, key, callback: null);
         await Warmup(producer, value, key, callback);
 
-        // BEST OF N — see PlainSend_PerRecordAllocation for why the minimum is the meaningful
-        // statistic here. Each attempt measures a matched plain/callback PAIR, so the node cost
-        // cancels within an attempt and the minimum picks the pair that paid none of it.
+        // Best of N over matched plain/callback pairs, so a one-off allocation cancels within an attempt.
         long plainBytes = 0;
         long callbackBytes = 0;
         long perSendDelta = long.MaxValue;
@@ -184,15 +123,13 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
             perSendDelta <= RegistrationDeltaBudgetBytes,
             $"Callback-path per-send allocation delta {perSendDelta} B exceeded the budget " +
             $"{RegistrationDeltaBudgetBytes} B (plain={plainBytes} B, callback={callbackBytes} B over " +
-            $"{SendCount} sends) — only ONE DeliveryRegistration may be added per send.");
+            $"{SendCount} sends) — the callback overload may add at most {RegistrationDeltaBudgetBytes} B per send.");
     }
 
     [Fact]
     public async Task CallbackSend_HasNoValueSizedCopy()
     {
-        // The callback path is still a hot path: a large value must cost the same as a small one, so
-        // the key/value bytes are still pinned and copied by the core during the call rather than
-        // being copied onto the managed heap (the DoD §10 obligation the plain path already carries).
+        // A large value must cost the same as a small one: the key and value are pinned, never copied onto the heap.
         byte[] key = MakeBytes(16, 0xAB);
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
@@ -203,7 +140,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
         await Warmup(producer, smallValue, key, callback);
 
-        // BEST OF N — see PlainSend_PerRecordAllocation. Each attempt is a matched small/large pair.
+        // Best of N over matched small/large pairs.
         long smallBytes = 0;
         long largeBytes = 0;
         long perSendMarginal = long.MaxValue;
@@ -233,10 +170,8 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     [Fact]
     public async Task CallbackSend_FastPath_PerRecordAllocation_StaysWithinItsMeasuredBudget()
     {
-        // M11/P3.5 T21 (ii) — Send(record, callback) with a permit free: the first stage is a struct
-        // over the delivery task, and the callback adds its one DeliveryRegistration. Measured
-        // absolutely (caller-thread bytes per Send over 64 sends, no token, best of 8), against a
-        // budget tight enough that one extra Task-sized allocation per send turns it red.
+        // Measured absolutely (bytes per Send over 64 sends, best of 8), against a budget that one more Task-sized
+        // allocation per send exceeds.
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
@@ -246,8 +181,6 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
         await Warmup(producer, value, key, callback);
 
-        // BEST OF N — see PlainSend_PerRecordAllocation; with no pair to cancel a node allocation,
-        // the minimum over more attempts is the drain-free run.
         long bytes = long.MaxValue;
         for (int attempt = 0; attempt < AbsoluteMeasurementAttempts; attempt++)
         {
@@ -267,7 +200,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     private static async Task Warmup(
         AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, IDeliveryCallback? callback)
     {
-        // Warm the send path (JIT + the first pump start) so the measured runs are steady-state.
+        // Warm up so the measured runs are steady-state.
         for (int i = 0; i < 3; i++)
         {
             _ = FireAndMeasure(producer, value, key, callback, out Task<RecordMetadata>[] sends);
@@ -328,10 +261,10 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     {
         private int _count;
 
-        /// <summary>Read only so the counter is not an unused field; the tests assert bytes, not counts.</summary>
+        // Read only so the counter is not an unused field; the tests assert bytes, not counts.
         internal int Count => _count;
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception) => _count++;
+        public void OnCompletion(RecordMetadata metadata, Exception? exception) => _count++;
     }
 }
 

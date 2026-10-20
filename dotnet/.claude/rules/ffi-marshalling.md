@@ -17,9 +17,8 @@ Three parts, so each client reads as one complete, self-contained story:
     AOT (§0.2), and the shared thread-topology framing (§0.3).
   - **Part A · Producer** — the producer end to end: thread model (§A1),
     handles (§A2), strings (§A3), zero-copy **send** (§A4), error model (§A5),
-    callbacks — the `RecordMetadata_copy` and `*_async` ABI forms **plus the
-    managed-only delivery callback that never crosses the ABI** (§A6), async
-    completion (§A7).
+    callbacks — the `_cb` completions and the per-record `Callback_t` delivery
+    callback (§A6), async completion (§A7).
   - **Part B · Consumer** — the consumer end to end: thread model (§B1),
     handles (§B2), strings (§B3), zero-copy **receive** (§B4), error model
     (§B5), completion callbacks (§B6), async completion (§B7).
@@ -212,13 +211,19 @@ loading code is phase-independent.
 ## 0.3 Thread topology & thread-safety (shared framing)
 
 The whole-system picture every section assumes. The C ABI runs all Kafka I/O on native threads
-owned by the Rust core. Since M19/P1 (the `0035d9ff` ABI) every client has one completion model:
-each blocking operation has a blocking form and a `_cb` twin, and the `_cb` completions and the
-user callbacks (delivery, rebalance listener, offset commit) are queued for the client's
-`__execute_callbacks`. No callback fires on a native thread of its own; the binding chooses the
-thread that drains. When the queue goes from empty to non-empty, the core calls the hook set with
-`__set_callbacks_notify`. The hook only signals; it runs while the core holds its notify lock
-(`rust/src/ffi/callback_queue.rs:248-255` at `0035d9ff`).
+owned by the Rust core. Since M19/P1 (the `0035d9ff` ABI, re-anchored at `851c8d95` by ledger 65)
+every client has one completion model: each blocking operation has a blocking form and a `_cb`
+twin. The `_cb` completions and the user callbacks (delivery, rebalance listener, offset commit)
+are queued for the client's `__execute_callbacks`, with one exception: the producer's `send_cb`
+and `send_with_callback_cb` fire their completion `cb` inside the call, on the calling thread,
+when the producer takes or refuses the record at once (§A1; `rust/src/ffi/producer/mod.rs:131-155`
+at `851c8d95`). No callback fires on a native thread of its own; the binding chooses the thread
+that drains. When the queue goes from empty to non-empty, the core calls the hook set with
+`__set_callbacks_notify`. The hook only signals. The core calls it after releasing its
+registration lock, so it can run on any thread that queues work, including a sending thread
+inside `send_with_callback_cb`, and two calls can overlap. `__set_callbacks_notify` does not wait
+for a call in flight, so the hook's opaque stays valid until the client's `_destroy` returns
+(`rust/src/ffi/callback_queue.rs:246-275` at `851c8d95`; BH:38467-38469).
 
 | Client | .NET thread | Who drains `__execute_callbacks` |
 |---|---|---|
@@ -244,18 +249,24 @@ applies to both clients.
 
   - A `callbackTask`-style poll-loop thread — nothing to poll here.
   - Assuming thread-per-broker / native threads scaling with cluster size.
-  - A notify hook that does more than signal: running `__execute_callbacks`, taking a lock the
-    client's callers may hold, or calling into the client. It runs under the core's notify lock
-    (BH:3846-3851; `rust/src/ffi/callback_queue.rs:248-255` at `0035d9ff`).
+  - A notify hook that does more than signal: running `__execute_callbacks`, calling into the
+    client, or taking a lock that a thread holds across a call into the core (a `Send`, a drain).
+    The hook can run on that very thread, inside the call (`callback_queue.rs:249-256` at
+    `851c8d95`).
+  - Freeing the hook's opaque before the client's `_destroy` returns, for example when the hook
+    is replaced: `__set_callbacks_notify` does not wait for a call in flight
+    (`callback_queue.rs:263-265`, `:270-275` at `851c8d95`; BH:38467-38469).
   - A client `_destroy` inside `__execute_callbacks`. A nested drain returns 0
-    (`callback_queue.rs:277-280` at `0035d9ff`), so the destroy cannot run the callbacks it
-    must run.
+    (`callback_queue.rs:283-284`, `:291-294` at `851c8d95`), so the destroy cannot run the
+    callbacks it must run.
 
 **Tests required (all clients):** `Dispose` returns without hanging, after the client's drain
 thread is joined and its in-flight uses reach 0, and destroys on the closing thread. A close
 called from inside a callback is deferred until the drain returns; it never destroys inside
-`__execute_callbacks`. For the consumer's routes see **§B2's path list**; do not restate them
-here.
+`__execute_callbacks`. The hook's opaque is freed only after `_destroy` returns. On the producer,
+the hook fired on the sending thread (an async `Send` whose record is taken at once while the
+queue was empty) signals the drain thread without a deadlock. For the consumer's routes see
+**§B2's path list**; do not restate them here.
 
 ---
 
@@ -263,327 +274,285 @@ here.
 
 ## A1 Thread model (producer)
 
-**Decision:** Per real `KafkaProducer`, the core owns a multi-thread tokio
-runtime + one Sender task over a single async Selector; the .NET side adds at most
-**two** background threads — one completion pump (§A7) and, on the **async path
-only**, one send-batch thread (§A7's send-batching tweak, taken in M11/P3.1) — never
-a per-send thread and never a poll loop.
+**Decision:** Per real `KafkaProducer`, the core owns a multi-thread tokio runtime and one Sender
+task over a single async Selector. A `_cb` send first tries the producer on the calling thread. A
+record the producer would have to wait for (metadata, buffer memory) goes to a submission task,
+which tries it again in FIFO order and otherwise leaves it to wait, up to `max.block.ms`, on a task
+of its own (`rust/src/ffi/producer/mod.rs:89-101` at `851c8d95`). The .NET side adds exactly
+**one** thread per producer, its `CompletionThread`: `confluent-kafka-producer-completion` on
+`KafkaProducer`, `confluent-kafka-producer-pump` on `AsyncKafkaProducer` (decision 26). It drains
+`Producer__execute_callbacks` when the notify hook signals. There is no send-batch thread, no
+per-send thread and no poll loop (M19/P1, decisions 4 and 9).
 
 ```
-   .NET (managed)                             │ C ABI │       Rust core (native, per producer)
-   ─────────────                              │       │       ─────────────────────────────────
-   caller thread(s):                          │       │   tokio multi-thread runtime (worker POOL)
-     SYNC  Send → Producer_send, enqueue ─────│──────►│     RecordAccumulator (enqueue, returns fast)
-     ASYNC Send → pin + append to             │       │   Sender task (spawned once in _new):
-             the send accumulator             │       │     NetworkClient + ONE async Selector
-   send-batch thread (1 bg, async):           │       │       ↕ multiplexes ALL brokers (event-driven)
-     _send_batch(records[]) ──────────────────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
-     unpin, hand futures to the pump          │       │
-   completion pump (1 bg thread, both paths): │       │
-      get_all / get(sync) ─block_on──────────►│──────►│
-     ◄── per-message metadata/err ────────────│◄──────│
-   Dispose: drain accumulator → join pump → flush/close
+   .NET (managed)                              │ C ABI │  Rust core (native, per producer)
+   ─────────────                               │       │  ─────────────────────────────────
+   caller thread(s):                           │       │  tokio multi-thread runtime
+     SYNC  Send → Producer_send_with_callback ─│──────►│    blocks until the record is in a batch
+     ASYNC Send → Producer_send_with_callback_cb ─────►│    try_send here; else submission task → own task
+             first stage completes at the      │       │  Sender task: NetworkClient + ONE Selector
+             handover cb                       │       │
+   CompletionThread (1 per producer):          │       │  callback queue
+     wait for the signal ◄─────────────────────│◄──────│    notify hook (empty → non-empty)
+     Producer__execute_callbacks ──────────────│──────►│    runs a queued handover cb / on_completion here
+       user callback → KafkaFutureImpl.Complete│       │
+       Producer__set_callback_result ──────────│──────►│
+   Close/Dispose: refuse calls → close → join the thread → wait for uses → destroy
 ```
-
-⚠ **The "at most two" is a cap on *kinds*, not a licence for more.** The batch thread
-is one thread for **all** sends on a producer, it polls nothing, and the sync path
-starts only the completion pump (M11/P4.2), never the batch thread. A per-send thread
-and a poll loop remain forbidden, verbatim.
 
 **Rule:**
 
-  - Native side (per real `KafkaProducer`): a multi-thread tokio runtime + one
-    spawned Sender task doing all I/O over a **single async Selector** (all
-    brokers multiplexed — NOT thread-per-broker), created in `KafkaProducer_new`,
-    torn down by `Producer_destroy`.
-  - .NET side: caller thread(s) + **at most two** background threads — one completion
-    pump (§A7) and, on the **async path only**, one send-batch thread; **no per-send
-    threads**. **No poll loop** — the core self-drives, so a stalled pump
-    delays result delivery but not sending.
-    ⚠ **Amended in M11/P3.1** — this read "exactly one completion pump". The
-    prohibitions it was really about are unchanged and still hold: the batch thread is
-    one thread for all of a producer's sends (not per-send), and it does not poll. The
-    **sync** path starts only the completion pump — lazily, on its first `Send`
-    (M11/P4.2) — and never the batch thread, so a sync-only producer spins exactly one
-    thread.
-  - **Submission order is call order.** The submission path must hand records to the
-    core in the order a caller called `Send`. Java documents ordering as preserved in
-    the default configuration
-    (`kafka/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java:274`
-    — *"if retries are disabled or if `enable.idempotence` is set to true, ordering
-    will be preserved"*), and a binding-side reorder happens **before** the core sees
-    the records, so **no core-side or broker-side setting can restore it** —
-    idempotence protects against retry-induced reordering, not against being handed
-    the records in the wrong order. A deferred / accumulating submission path must
-    therefore not let a send that finds capacity overtake one still waiting for it.
-    Do **not** rest this on `SemaphoreSlim` fairness: the .NET documentation
-    guarantees **no ordering** in which blocked waiters enter the semaphore, so an
-    ordering claim built on it is unfounded. The property is claimed **per caller**
-    (a caller's own successive sends), which is all Java's guarantee is about;
-    concurrent callers are not ordered against each other, and the anchor does not
-    order them either.
-    Superseded by M11/P3.4: append-first fixes a record's place under `_gate` before
-    any wait, so ordering needs no queue or submitter; the M11/P3.2 machinery was
-    deleted.
-  - **The bound must throttle a caller that awaits admission — so admission must be
-    awaitable.** `IAsyncProducer.Send` returns
-    `ValueTask<AsyncKafkaFuture<RecordMetadata>>`: the outer stage completes on
-    admission (never parking a thread), the inner `AsyncKafkaFuture` is delivery (its
-    `Get()` is the delivery `Task`, M11/P3.6).
-    An async wait behind a *single-stage* `Task` throttles nobody (measured
-    twice: M11/P6 63.5k/3.0 GB; M11/P3.2 2.04 GiB). A caller that does not await the
-    outer stage — or whose own token ends it early (M11/P3.5 D2 (c); the record is
-    still sent) — is deliberately not throttled (Python parity, M11/P3.5 D6), and that
-    is documented on the public surface.
-    ⚠ **Capping one container is NOT sufficient, and this was falsified rather than
-    argued:** with M11/P3.2's submission queue bypassed entirely, the identical bloat
-    reappeared in the node chain (p50 3,436 ms / 2.04 GiB — M11/P3.3 §2.3). The bound
-    belongs on **admission**, covering every route into the accumulator.
-    Superseded by M11/P3.4: there is no admission timeout (append-first; the record is
-    accepted before any wait). Java's buffer-exhaustion outcome comes from the core
-    inside `send_batch` and faults the delivery `Task` + fires the callback through
-    `DeliveryRegistration.Fire`. The stage-1 wait never fails; only the caller's own
-    token can end the stage-1 awaitable early, with `OperationCanceledException`, and
-    the record is still sent (M11/P3.5 D2 (c)). Do not claim `SemaphoreSlim` fairness;
-    ordering rests on append order.
-  - FFI is callable from any .NET thread; the core serializes via the producer's
-    internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
-  - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
-    the runtime's worker threads, so a blocked pump can't deadlock it.
-  - The one **ABI** callback (`RecordMetadata_copy`) fires synchronously on the
-    caller's (pump) thread — not a foreign thread (§A6). ⚠ It is no longer the
-    only callback the pump thread runs: the **managed-only delivery callback**
-    (§A6 form C, M14/P1) also runs there, by design — it is .NET's analogue of
-    Java's "background I/O thread" (`Callback.java:20-21`). It never crosses the
-    ABI, so nothing in §A6's keep-alive / no-unwind machinery applies to it.
-  - **Consequence for the pump thread:** it now runs one bounded piece of user
-    code per completion, so a slow delivery callback delays every other send's
-    completion (documented on the public interface), and the pump's own
-    correctness rests on that invocation being a **total no-throw boundary**
-    (§A6 form C). The awaiter's continuation still stays off the pump via
-    `RunContinuationsAsynchronously` (§A7).
+  - Native side (per real `KafkaProducer`): a multi-thread tokio runtime and one spawned Sender
+    task doing all I/O over a **single async Selector** (all brokers multiplexed, NOT
+    thread-per-broker), created in `KafkaProducer_new`, torn down by the producer's destroy.
+  - .NET side: the caller threads plus the one `CompletionThread`. That thread runs every queued
+    `_cb` completion and every `on_completion` inside `__execute_callbacks`, so every user
+    delivery callback, and on `AsyncKafkaProducer` the chain's steps after an async callback's
+    `Task` ends, outside it (ledger 54, B9; §A6). It is .NET's analogue of Java's background I/O
+    thread (`Callback.java:20-21`). Two other threads run producer callbacks: the caller's, for
+    the handover `cb` of an async `Send` whose record the producer takes or refuses at once
+    (BH:38240-38249), and the thread that destroys the producer, for the callbacks still
+    pending then (`rust/src/ffi/producer/mod.rs:166-178` at `851c8d95`): the closing thread, or
+    the `CompletionThread` after its drain when `Close` is called from a callback (decision 7).
+    A slow delivery callback delays every other completion on that producer; the public
+    interface says so.
+  - **The notify hook only signals** (decision 4c): it sets the thread's event. It is
+    thread-safe and cheap, takes no lock that `Send` may hold, never runs callbacks and never
+    calls into the producer, because it can run on any thread that queues work, a sending thread
+    inside `send_with_callback_cb` included, and two calls can overlap (§0.3). Its opaque is freed
+    only after `_destroy` returns.
+  - **No binding-side cap** (decision 9): no `SendAccumulator`, no admission semaphore, no
+    `CONFLUENT_KAFKA_PRODUCER_*` knobs. On the async path the only throttle is the first stage,
+    which completes at the handover `cb`: a caller that awaits it is bounded, and a caller that
+    does not await it can grow the core's outbox without bound. This is accepted, as Python
+    accepts it (plan §3.7).
+  - **Sync `Send`** calls the blocking `Producer_send_with_callback`, which returns once the record
+    is registered (serialized, partitioned, appended to a batch), as Java's `send` does. The core
+    applies `max.block.ms` (decision 4). It never calls
+    `KafkaFuture_get`, which runs the queued callbacks on the caller (BH:38216-38219).
+  - **Async `Send`** calls `Producer_send_with_callback_cb`. Its first stage
+    (`ValueTask<AsyncKafkaFuture<RecordMetadata>>`) completes at the handover `cb` and never
+    parks a thread. For a record the producer takes or refuses at once, the `cb` fires
+    **inside** the call, on the caller's thread: the common case once the topic's metadata is
+    cached (BH:38240-38249). For a queued record it fires later on the `CompletionThread`.
+    So set up everything the `cb` needs (the first-stage state, the pins, the `GCHandle`s)
+    before the P/Invoke. Hold no lock across the call that the `cb` also takes. Inside the call
+    the `cb` only records the outcome and releases the pins, and the first stage completes
+    synchronously after the call returns. The key and value stay borrowed until the `cb`
+    (BH:38190-38191). The binding adds no yield after a run of synchronous completions:
+    Python's `_FAST_PATH_YIELD_EVERY` keeps an asyncio loop fair, and .NET has no loop
+    (ledger 68).
+  - **Order is Java's, not call order (ledger 67b).** The core tries the producer first,
+    whatever its queue holds, so "a record taken at once can reach the producer before one
+    queued earlier, by this caller or by another" (`rust/src/ffi/producer/mod.rs:157-164` at
+    `851c8d95`). A caller's records keep their order only when the caller awaits each first
+    stage before its next `Send`, as Java's blocking `send` makes its caller wait. The binding
+    adds no queue to restore call order for a caller that does not await: that would put
+    Kafka behaviour in the binding. Concurrent callers are not ordered against each other, in
+    Java either. *(Withdraws the M11/P3.4 call-order promise.)*
+  - **Coverage (ledger 67a).** `Flush`, `Close` and the transaction operations cover every
+    record handed over before they began. A record still waiting inside the producer is a send
+    in progress: they do not wait for it, as Java's `flush()` and `commitTransaction()` do not
+    wait for a `send` blocked on another thread. `Close` fails it with "Producer closed while
+    send in progress", and no delivery callback fires for it (`mod.rs:103-129` at
+    `851c8d95`). A timed close (`Close(TimeSpan)`, ledger 82, and the 0 ms close from inside a
+    callback) spends at most its timeout on the drain and the close together, then waits for
+    the delivery reports without a bound (`mod.rs:72-74`, `:122-129` at `851c8d95`;
+    BH:38397-38407). *(Withdraws the M11/P3.4 `Flush` promise.)*
+  - **The `Send` token** (ledgers 19, 70, 71) never cancels the record. Already cancelled
+    at the call: `OperationCanceledException` before any pin or P/Invoke, and nothing is
+    sent. A record taken or refused inside the call ignores it. For a queued record the
+    first stage waits for the hand-over (up to `max.block.ms`); if the token fired by then,
+    the stage ends Canceled with the caller's token, whatever the outcome. A record the
+    producer took is still sent, and its delivery callback fires once. A record that `Close`
+    fails runs no callback, and its error is dropped. A `Flush` does not wait for a queued
+    record (ledger 67a). There is no token registration: the hand-over `cb` checks the
+    token when it completes the stage.
+  - FFI is callable from any .NET thread; the core serializes producer calls itself, so concurrent
+    `Send` is safe. Don't add a lock.
+  - `block_on` parks only the calling thread; the Sender keeps running on the runtime's worker
+    threads.
 
-**Why:** Java's single-Selector NIO model on tokio (§0.3) — a fixed native thread
-count, no poll loop, and a multi-thread runtime that makes `block_on` from the
-pump deadlock-free (the Sender runs on other worker threads).
+**Why:** Java's single-Selector NIO model on tokio (§0.3): a fixed native thread count and no
+poll loop. Every callback runs on a thread the binding chooses (the `CompletionThread`, the thread
+calling `Send`, or the thread that destroys the producer), never on a native thread of the
+core's, so no foreign-thread rule is left (§A6). One thread per producer is what Python has
+(decision 26). No cap, because Python has none and the first stage already bounds a caller that
+awaits it (decision 9).
 
 **Anti-patterns:**
 
-  - A binding-side lock around producer sends — the producer's `Mutex` already
-    serializes concurrent `Send` (don't double-lock).
-  - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
-    (shared, §0.3).
-  - A submission path that appends inline whenever capacity happens to be free, with
-    an earlier send still waiting for it — the ordering defect above. Equally: an
-    ordering argument that rests on `SemaphoreSlim` waiter order, or on many
-    independent per-send continuations being released "in order" by one
-    multi-permit `Release`.
-  - *(Superseded by M11/P3.4: the submission queue, its appender and the start/stop
-    handshake were deleted — append-first under `_gate` needs none of them. The
-    general lesson stands: a two-sided start/stop handshake needs a store→load fence
-    on both sides — an `Interlocked` operation, not a `Volatile.Write`.)*
-  - A deferred submission path with **no depth bound** — the container is not the
-    bound, and a correctness-only suite cannot see this: every record is still
-    delivered, in order, exactly once, so the tests pass while the client bloats.
-  - Treating an **async** admission wait as a throttle where the caller has **no
-    admission stage to await** (a single-stage `Task`) (it is not one — measured
-    twice), or capping **one** container and calling the population bounded (it
-    relocates, measured).
-  - A comment claiming the admission gate is **fair** — it is not; state the
-    starvation deviation instead.
-  - Linking the caller's token into the admission `WaitAsync` (the permit drifts and
-    the bound erodes silently, because the ceiling is `int.MaxValue`) — the token may
-    end only the separate stage-1 awaitable (D2 (c)), never the wait, and that
-    awaitable's registration is disposed when the wait completes; a stage-1
-    continuation that can run on the batch or pump thread; a stage 1 that faults or
-    cancels at teardown; a `SendViaPump` / `SubmitAdmitted` that is `async` or can
-    throw after the append.
-  - Wrapping the stage at the public boundary (an `async` adapter or a `ContinueWith`
-    from an internal `ValueTask<Task<…>>`) instead of building the `AsyncKafkaFuture`
-    where the stage completes (`SubmitAdmitted` / `CancellableFirstStage`), and boxing
-    it (passing it as an `object` `state`): either one is a per-send allocation on the
-    send path (M11/P3.6).
+  - A binding-side lock around producer sends.
+  - A send-batch thread, a binding-side send queue or accumulator, an admission semaphore, or any
+    other binding-side cap (decision 9).
+  - A notify hook that does work (§0.3).
+  - Calling the producer's destroy inside `__execute_callbacks`. A nested drain returns 0
+    (`callback_queue.rs:283-284`, `:291-294` at `851c8d95`), so the destroy cannot run the
+    pending callbacks it must run (`producer/mod.rs:166-178`). A close from a callback is deferred
+    (`dotnet/CLAUDE.md` §4 **Close/Dispose**).
+  - A sync `Send` or `Get()` that calls `KafkaFuture_get` / `_get_all`.
+  - Async `Send` code that assumes the handover `cb` fires later, on another thread: a lock held
+    across the P/Invoke that the `cb` also takes deadlocks, and a field set after the call is read
+    too early.
+  - A per-send thread, a `Task.Run`, or a `callbackTask`-style poll loop (§0.3).
 
 **Tests required:**
 
-  - Concurrent `Send` from many threads is correct (the `Mutex` holds).
-  - `Dispose` drains before destroying the handle — joins the pump (Option A, §A7).
-  - *(Option A only)* a long-blocked pump doesn't stop new sends being enqueued.
-  - **The order records reach `send_batch` equals call order, across a saturated
-    bound.** Append-first makes this deterministic: with the batch thread held back
-    and the bound saturated, a non-awaiting same-thread burst reaches `send_batch` in
-    call order (T7 below). It must be shown to **fail** when the append is deferred
-    into the stage-1 continuation (the pre-P3.4 shape).
-  - **A drain / `Flush` includes a send whose first stage is still waiting for
-    capacity** — its record is already in the chain (append-first), so `Flush` drains
-    it and its first stage completes
-    (`PublicProducerFirstStageTests.Flush_CompletesEveryPendingFirstStage_AndEveryDelivery`,
-    `SendAccumulatorTests.Flush_IncludesASendWhoseFirstStageIsStillWaitingOnAdmission`).
-  - **Teardown settles both stages of every send exactly once**, with nothing left
-    holding an unsettled `TaskCompletionSource`; a pending first stage completes
-    **successfully** (M11/P3.5 D3). Pins are taken with the append and released by the
-    send (§A4).
-  - **A token that fires while the first stage waits ends that stage with an
-    `OperationCanceledException` carrying the caller's token, and the record is still
-    sent** — asserted on the core's record count, not only on the awaiter's state
-    (T16, T17; M11/P3.5 D2 (c)). An **already**-canceled token throws synchronously
-    and appends nothing (D4).
-  - **Bounded acceptance under over-offer** (the M11/P3.3 DoD item). Flood the
-    send path, with the callers **awaiting** the first stage (the bound binds only
-    them — M11/P3.5 D6) faster than it drains — with the batch thread held back — and
-    assert the population of **accepted-but-not-yet-forwarded** records stays within
-    its documented bound. Assert on the accumulator's own witnesses, not on a
-    behavioural proxy: the depth of any one container alone is **not** the quantity of
-    interest (§A1's capping-one-container note), and a refusal-path counter can be
-    zeroed by teardown independently of the thing under test — which is why M11/P3.3's
-    first version of this test measured **0/8** and needed a second witness (the
-    gate's own `CurrentCount`). Drive it through **production's own entry points**
-    (DoD §12), and prove the mutation **in-suite** with **K=8 bursts and a fresh
-    harness per rep**: M11/P3.2 saw a guard fail **5/5 isolated** while the full suite
-    passed **5/5**, so a ratio without its regime is not evidence. Mutate fixture and
-    production **separately**.
-  - M11/P3.5 T1, T3, T4, T7, T9, T16 and T17, by name:
-      - T1 `SendAccumulatorTests.Admission_SaturatedBound_ReturnsTheCallAtOnce_WithItsFirstStagePending`
-      - T3 `SendAccumulatorTests.Admission_CallersThatDoNotAwaitTheFirstStage_AreNotThrottled`
-      - T4 `SendAccumulatorFirstStageTests.Admission_PermitAccounting_ReturnsToExactlyTheBound_AfterAFullDrain_IncludingCallerTokenCancels`
-      - T7 `SendAccumulatorFirstStageTests.Admission_NonAwaitingBurstAcrossASaturatedBound_IsSentInCallOrder`
-      - T9 `PublicProducerFirstStageTests.Teardown_WithANonAwaitingFloodPastTheBound_SettlesBothStagesOfEverySendExactlyOnce`,
-        and its deterministic half (D3)
-        `SendAccumulatorFirstStageTests.Admission_CancelableFirstStage_IsCompletedSuccessfullyByStopsCancel_WhenTheBatchThreadCannotDrain`
-      - T16 `SendAccumulatorTests.Admission_CallerTokenFiresWhileWaiting_EndsTheFirstStageCanceled_AndTheRecordIsStillSent`
-      - T17 `PublicProducerFirstStageTests.Send_CallerTokenFiresWhileTheFirstStageWaits_CancelsBothStages_AndTheRecordIsStillSent`
+  - Concurrent `Send` from many threads is correct.
+  - `Dispose` with sends in flight returns without hanging, joins the `CompletionThread`, and
+    destroys on the closing thread.
+  - A same-thread burst that awaits each first stage is delivered in call order (offsets
+    increase within each partition), on both producer flavors. No test asserts call order for
+    a burst that does not await (ledger 67b).
+  - `Flush` covers every send whose first stage completed before it began, and returns without
+    waiting for a send still waiting in the producer (an unreachable broker, `max.block.ms`
+    500).
+  - `Close` wakes an async `Send` waiting for metadata: its first stage faults with
+    "Producer closed while send in progress", and no delivery callback fires.
+  - An async `Send` whose record is taken at once (`AsyncMockProducer`) completes its first
+    stage synchronously, before `Send` returns.
+  - Teardown settles both stages of every send exactly once, and leaves no uncompleted
+    `TaskCompletionSource` or `KafkaFutureImpl`. Exception: a mock send left uncompleted at `Close`
+    stays pending, as in Java's and Python's mocks; `Dispose` flushes first.
+  - A `Send` racing `Close` (decision 7 refuses a `Send` that starts after `Close` with
+    `ObjectDisposedException`, before any P/Invoke, so the core's refusal inside the call is
+    reached only by a `Send` already past that check): each `Send` throws
+    `ObjectDisposedException`, or its first stage completes, or ends faulted with
+    `InvalidOperationException` (the core's `IllegalStateError`, decision 14) or the
+    `KafkaException` "Producer closed while send in progress"; no deadlock, and every first
+    stage settles exactly once.
+  - The `Send` token tests, by name (ledgers 19 and 71; the Actor confirms the names in P1.2):
+      - T17 `PublicProducerFirstStageTests.Send_CallerTokenFiresWhileTheRecordIsQueued_EndsTheFirstStageCanceledAfterTheHandOver`
+        (two cases, as Python's `test_cancelling_a_send_waiting_for_its_handover_raises_after_it`:
+        on an unreachable broker the first stage is still pending after the token fired, then ends
+        Canceled with the caller's token; if the metadata wait times out, the delivery callback
+        fires once with the `TimeoutException`; if `Close` fails the record, no delivery callback
+        fires; a `Flush` during the wait does not wait for it)
+      - T18 `PublicProducerFirstStageTests.Send_CallerTokenFiresAfterTheHandOver_DoesNotCancelGet`
+        (the token fires after the first stage completed; `Get()` returns the metadata)
 
 ---
 
 ## A2 Handle ownership & lifecycle (`SafeHandle`)
 
-**Decision:** Three ownership categories:
+**Decision (M19/P1, decisions 6 and 7):** three ownership categories.
 
-1. **Client / config** (producer, properties) → a `SafeHandle` that frees exactly
-   once (the blocking destroy joins the background task first).
-2. **Flat transient** (future / metadata / error) → read-and-free promptly,
-   **not** wrapped (a finalizable object per op is hot-path waste).
-3. **Owned result / container (borrow-root)** (the metric map, the partition-info
-   list) → the caller reads it, copies every value into owned managed types, then
-   `_destroy`s the root exactly once; the strings and elements it hands back
-   **borrow into it**, so it must outlive every borrow taken from it.
+1. **Client** → one `SafeClientHandle` per producer, destroyed exactly once, by the explicit
+   teardown only. Its handle is the class's `Producer` view, "a borrowed view valid until the
+   class handle is destroyed" (`KafkaProducer__as_Producer_err`, BH:38605-38618;
+   `MockProducer__as_Producer_err`, BH:38842-38853); there is no `kafka_producer_Producer_destroy`.
+   The class pointer (`KafkaProducer_t *` / `MockProducer_t *`) is kept in a field. The
+   configuration is the caller's: `ProducerConfig_new` leaves the map the caller's and delivers
+   an owned config (BH:39481-39493), and `KafkaProducer_new` leaves the config the caller's
+   (BH:38588-38603). The binding frees both right after `KafkaProducer_new`.
+2. **Flat transient** → read and freed in the call or callback that got it, never wrapped (a
+   finalizable object per record is hot-path waste): the owned `KafkaFuture_t *` a send
+   delivers, freed at once and never read (§A7; BH:3807-3811, BH:38166-38170;
+   `KafkaFuture_destroy_err`, BH:37992-38005); the per-send `ProducerRecord_t` and
+   `Callback_t`, freed right after the send call (`ProducerRecord_destroy_err`, BH:39731;
+   `Callback_destroy_err`, BH:38585; §A6); an owned error, freed once the error table has read
+   it (`Error_destroy_err`, BH:17957; §A5). `on_completion`'s `metadata` and `error` are
+   borrowed and never destroyed (§A6).
+3. **Owned result (borrow-root)** → copy every value out into managed types, then free the root
+   once, in a `finally`: `Metrics()`'s owned `kafka_Map_t` of owned `MetricName_t *` keys and
+   `KafkaMetric_t *` values (BH:38342-38355), freed with `kafka_Map_destroy_err`, which frees
+   the owned keys and values too (BH:40277-40288); `PartitionsFor`'s owned `kafka_List_t` of
+   owned `PartitionInfo_t *` (BH:3824-3826, BH:38316-38340), freed with `kafka_List_destroy_err`,
+   which frees the owned elements too (BH:40160-40171), copied through the common
+   `PartitionInfo` marshal (ledger 79 4d).
 
 | Handle | Category | Created by | Freed by |
 |---|---|---|---|
-| `Producer_t` | 1 — client (`SafeHandle`) | `KafkaProducer_new` / `MockProducer_new` | `ReleaseHandle → Producer_destroy` (via `Dispose`) |
-| `ProducerProperties_t` | 1 — config (`SafeHandle`, short) | `ProducerProperties_new` / `_from_configs` | the binding, after `KafkaProducer_new` |
-| `FutureRecordMetadata_t` | 2 — flat transient | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (`get_all` doesn't consume); a sync send's single future: the pump's `_destroy` after `_get` (M11/P4.2) |
-| `RecordMetadata_t` | 2 — flat transient | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
-| `KafkaError_t` | 2 — flat transient | any `out_error` slot | the reader: read accessors, then `_destroy` |
-| `kafka_producer_MetricMap_t` | 3 — owned result (borrow-root) | `Producer_metrics` | the reader: copy every entry out, then `kafka_producer_MetricMap_destroy` |
-| `kafka_consumer_PartitionInfoList_t` — **owned here** (a consumer type by name; the handle/accessors are shared with the consumer FFI) | 3 — owned result (borrow-root) | `Producer_partitions_for` (`*out_list`) · `_partitions_for_async` (callback arg) | the reader: copy the tree out, then `kafka_consumer_PartitionInfoList_destroy` |
+| `KafkaProducer_t` / `MockProducer_t`, held as its `Producer` view | 1 | `KafkaProducer_new`; the `MockProducer_with_*_err` constructors (BH:38809-38840) | `ReleaseHandle` → `KafkaProducer_destroy_err` (BH:38787-38800) / `MockProducer_destroy_err` (BH:38855-38867), only after `CloseExplicitly` |
+| the config `kafka_Map_t`, `ProducerConfig_t` | 1, short-lived | the binding | the binding, after `KafkaProducer_new` |
+| `ProducerRecord_t`, `Callback_t` | 2 | the binding, per send | the binding, right after the send call |
+| `KafkaFuture_t` from a send | 2 | the blocking send's return; the handover `cb` | the binding, at once, unread |
+| an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
+| `kafka_Map_t` (metrics), `kafka_List_t` (partitions) | 3 | `Metrics`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
 
-**Note — classify by the accessor, not the type.** The returning function's
-const-ness decides, not the type name:
-
-  - non-`const` return (or an `out` slot / a callback argument) with a `_destroy`
-    of its own → **owned**; free it exactly once after reading (Category 1/3).
-  - `const *` return → **borrowed**; never free it — it dies with its owning root.
-    Every `kafka_producer_MetricMap_get_*` accessor is `const`, so the name /
-    group / description / tag / string-value pointers it returns are borrowed
-    from the map (§A3).
-  - the same type can be owned in one call and borrowed in another —
-    `kafka_consumer_PartitionInfoList_t` is **owned** when the producer's
-    `partitions_for` hands it back (the producer must free it), yet is a borrowed
-    element elsewhere in the consumer FFI. Read the signature, not the prefix.
+**Note — classify by the accessor, not the type.** A non-`const` return, an `out_err` slot or a
+`_cb` argument the header calls owned is **owned**: free it once. A `const *` return, an
+`on_completion` argument and `kafka_common_Error_source_err`'s result are **borrowed**: never
+free them. The same type can be either (a `kafka_List_t` the binding builds stays the binding's;
+one `PartitionsFor` delivers is the reader's). Read the signature, not the prefix.
 
 **Rule:**
 
-  - `SafeProducerHandle : SafeHandle` — `ownsHandle: true`, `IsInvalid => handle
-    == IntPtr.Zero`, `ReleaseHandle` calls `Producer_destroy`. Runtime frees
-    exactly once, even on exceptions.
-  - Transient handles: free in a `finally` on the pump; the managed
-    `RecordMetadata`/`KafkaException` hold **copied values**, never the handle
-    (§A7). After `get_all`, each index has exactly one non-null of {metadata,
-    error} — free that one, plus the future via `_destroy_all`. All `_destroy`
-    are null-safe; `RecordMetadata_copy` frees its own handle (don't double-free).
-  - **Category 3 — owned result / container (borrow-root).** After a synchronous
-    state read (`Producer_metrics`, `Producer_partitions_for`), or inside the
-    completion callback of an `_async` form (`_partitions_for_async` hands the
-    callback the owned list on the producer's dispatcher thread — §A6/§A7):
-    read/iterate, **copy every value out** into owned managed types, then
-    `_destroy` the root **exactly once**, in a `finally` so a throw mid-read
-    cannot leak it. A container is a **borrow-root** — the `const char*` slices
-    (§A3) and every element it exposes borrow into it and die with it, so nothing
-    native-backed may survive the `_destroy`. **Copy-out is the only mode here**:
-    these are small metadata snapshots, and unlike the consumer's fetch batch
-    there is no raw-byte surface that would pay for keep-alive's lifetime
-    coupling (CLAUDE.md §6.4). Not a `SafeHandle` — the root is read and freed
-    within one call, so a finalizable wrapper buys nothing.
-    ⚠ **Do NOT import the consumer's concurrent-access null** (§B2/§B5) when
-    reading these. `Consumer_metrics` documents a null return **on a
-    concurrent-access rejection**; `kafka_producer_Producer_metrics` documents no
-    such null — the producer serializes through its own `Mutex` (§A1) and blocks
-    instead. So a producer null guard is **defensive only** (unreachable while the
-    handle is passed as the `SafeHandle`), and must not claim a rejection the
-    producer ABI never signals, nor name the consumer type (M11/P8 decision D-5).
-  - **Parent outlives children:** the producer must not be destroyed while the
-    pump holds futures from it — enforce via `Dispose` ordering (stop sends → join
-    pump → release handle, §A7), not `DangerousAddRef`.
-  - **Ref-management convention — sync = `SafeHandle`-param (auto), async = manual
-    `AddRef` (span-the-op).** For a client-handle call that needs the producer kept
-    alive across the native call, the form depends on when the native use ends:
-    - **Synchronous native call → pass the `SafeHandle` as the P/Invoke parameter.**
-      The marshaler auto-`DangerousAddRef`s before the call and `DangerousRelease`s
-      after — a **call-scoped** guard, which is exactly right for a synchronous op
-      whose native use ends when the call returns (the core copies key/value during
-      the call, §A4). A closed handle marshals to `ObjectDisposedException`. No
-      manual `DangerousAddRef`/`GetHandle`/`Release` bracketing. `Producer_send`
-      (`NativeMethods.ProducerSend(SafeProducerHandle, …)`) is the **first adopter**;
-      the sync teardown `Producer_flush`/`_close` and the sync consumer ops are a
-      **tracked follow-up migration** (part 5 of the M11/P3 close-record).
-    - **Async callback op (`*_async`) → manual `DangerousAddRef` held submit→callback.**
-      The auto marshaler releases its ref *before* the native call returns — i.e.
-      **before** the completion callback fires — so it is **insufficient** for an op
-      whose native use outlives the submit call. These keep the manual span-the-op
-      ref (`DangerousAddRef` at submit, `DangerousRelease` in the completion's
-      `FreeGcHandle`): `SubmitVoidOperation` / `SubmitOwnedHandleOperation` /
-      `CloseWithCallbackInternal` / `FlushInternal`. An async op can **never** use
-      the auto (SafeHandle-param) form.
-  - **Prefer `Dispose` over the finalizer:** `Producer_destroy` blocks (drops the
-    runtime, waiting for the Sender), which is wrong on the finalizer thread.
-    `Dispose` flushes/closes and joins the pump first; guard use-after-dispose
-    with `ObjectDisposedException`.
+  - **The client handle** (decision 6). One `SafeClientHandle` subclass per producer class,
+    `ownsHandle: true`, `IsInvalid => handle == IntPtr.Zero`. Operation P/Invokes take the
+    `SafeHandle` as their parameter, so the marshaller holds a call-scoped reference and a closed
+    handle throws `ObjectDisposedException`. A class-only call (the `MockProducer_*` functions)
+    takes `DangerousAddRefClass` and passes the stored class pointer. The destroy runs only from
+    `ReleaseHandle`, with the class pointer and no `AddRef`, and only after `CloseExplicitly`;
+    a handle released any other way (the finalizer) is leaked with one `Trace.TraceWarning`
+    (decision 7), because the destroy blocks and runs user callbacks.
+  - **Teardown order** (decision 7; `dotnet/CLAUDE.md` §4 **Close/Dispose**): refuse new calls
+    (`ObjectDisposedException`), close, stop and join the `CompletionThread`, wait for the
+    in-flight uses (P/Invokes in progress) to reach 0, then release, so the destroy runs on the
+    closing thread and never inside `__execute_callbacks`. A `Close` called from a callback
+    leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
+    view (BH:38787-38791), runs the callbacks still pending on its thread, and completes the
+    unreported ones as success (`rust/src/ffi/producer/mod.rs:166-178` at `851c8d95`), so no
+    report is made after it began.
+  - **References are call-scoped** (ledger 79 4b). Every `DangerousAddRef` is paired with a
+    `DangerousRelease` on the calling thread after the P/Invoke returns. The calls are inside the
+    use-count bracket, with the three exceptions Python makes. The drain (`__execute_callbacks`)
+    is a use that `Close` does not refuse: it is counted until the destroy begins, and refused
+    after, because a closing producer's completions still need it (Python's `_pump_use`,
+    `python/confluent_kafka/producer/_base.py:488-503` at `851c8d95`). A callback's report
+    (`Producer__set_callback_result`) is not counted, and is skipped once the destroy has begun
+    (Python's `_report`, `async_producer.py:628-637`). The close submits (`close_cb`,
+    `close_with_timeout_cb`), made after `Close` has begun, are not counted
+    (`producer.py:672-675`, `:696`; `async_producer.py:886-890`, `:920`). A `Close` from an
+    un-awaited `Task.Run` inside an async callback can move the destroy onto a pool thread; that
+    edge is accepted, as Python's async close from a callback tears down on a helper thread
+    (`async_producer.py:908-918`). No reference is held across a `_cb` completion, and none taken
+    in one call is released in a callback or a trampoline; a call made from inside one (the
+    report, a close from a callback) takes and releases its own. What keeps the producer alive
+    until a pending `_cb` completion fires is the teardown order (the `CompletionThread` is joined
+    before the destroy, and the destroy fires what is still pending), not a reference.
+  - **Transient handles** are freed in a `finally` on the thread that read them; the managed
+    `RecordMetadata`, `PartitionInfo` and exceptions hold copied values, never a handle. Every
+    `_destroy_err` is null-safe.
+  - **Owned results** are copied out completely before the root's destroy; nothing borrowed
+    from them survives it. Never destroy an element of an owned container on its own (the root's
+    destroy frees it: a double free). Copy-out is the only mode: these are small metadata
+    snapshots (`dotnet/CLAUDE.md` §6.4).
 
-**Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
-through exceptions; `IsInvalid == zero` matches our null-safe destroy. This is
-confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern. But a per-message
-`SafeHandle` allocates a finalizable object per record, so transient handles are
-read-and-freed instead (their lifetime is one pump cycle). `Producer_destroy`
-blocks (it drops the runtime and waits for the Sender), so the producer closes via
-`Dispose`, never the finalizer.
+**Why:** a `SafeHandle` is the robust form of "destroy exactly once", even through exceptions.
+Every operation takes the view, so the view is the handle; the class pointer is needed only by
+the destroy and the mock's own functions (decision 6). The destroy blocks, runs pending
+callbacks on its thread and invalidates every view, so it runs only on the closing thread after
+the drain thread is joined (decision 7). A reference held across a `_cb` completion would be
+released on the drain thread, which could then run the destroy inside `__execute_callbacks`
+(ledger 79 4b).
 
 **Anti-patterns:**
 
-  - Manual scattered `Producer_destroy` instead of a `SafeHandle` (leaks on
-    exceptions); wrapping per-message handles in a `SafeHandle`.
-  - Forgetting `_destroy_all` after `get_all` (leak per send); double-free (both
-    slots, or a handle `RecordMetadata_copy` already freed).
-  - Relying on the finalizer for the producer; destroying it before joining the
-    pump (use-after-free).
-  - Leaking an **owned result** (no `MetricMap_destroy` /
-    `PartitionInfoList_destroy` after marshalling), freeing it twice, or freeing
-    it anywhere but a `finally` (a throw mid-read leaks the root).
-  - Retaining anything **borrowed** from a Category-3 root — a raw `const char*`,
-    an element pointer — past its `_destroy`; copy out first.
-  - Mapping a null `Producer_metrics` result to the **consumer's**
-    concurrent-access `InvalidOperationException` message (D-5) — it states a
-    contract the producer ABI does not have.
+  - A destroy of the view (there is no `kafka_producer_Producer_destroy`), a destroy from the
+    finalizer or inside `__execute_callbacks`, or one before the `CompletionThread` is joined
+    and the uses reach 0.
+  - A raw `DangerousGetHandle()` passed to an operation P/Invoke; a `DangerousAddRef` held
+    across a `_cb` completion, or released in a callback or a trampoline.
+  - A `SafeHandle` around a per-send handle; reading the `KafkaFuture_t` a send delivers
+    (`KafkaFuture_get` runs the queued callbacks on the caller, §A6); keeping a
+    `ProducerRecord_t` or `Callback_t` past the send call.
+  - Destroying `on_completion`'s `metadata` or `error`, or an element of an owned `kafka_List_t`
+    / `kafka_Map_t` (a double free); leaking an owned root, or freeing it outside a `finally`.
+  - Keeping the config `kafka_Map_t` or `ProducerConfig_t` past `KafkaProducer_new` (a leak).
 
 **Tests required:**
 
-  - Create/dispose many producers — no leak/crash; send N and assert the handle
-    count returns to baseline (covers `_destroy_all`).
-  - Double-`Dispose` is safe; a call after `Dispose` throws
-    `ObjectDisposedException`.
-  - Each Category-3 result (`Producer_metrics`, `Producer_partitions_for`) is
-    freed exactly once after marshalling, on the throwing path too, and the
-    copied-out values stay valid after the root is destroyed.
+  - Create and dispose many producers of both flavors: no leak, no crash; a send burst leaves
+    no native handle behind.
+  - Double `Dispose` is safe; a call after `Dispose` throws `ObjectDisposedException` before any
+    native call.
+  - With a `PartitionsFor` in flight (an unreachable broker), `Dispose` destroys on the closing
+    thread, and the pending completion fires exactly once (ledger 79 4b).
+  - A producer finalized without `Dispose` is leaked with one `Trace.TraceWarning` and no
+    destroy.
+  - `Metrics` and `PartitionsFor` free their root exactly once, on the throwing path too, and
+    the copied values stay valid after it.
 
 ---
 
@@ -598,7 +567,6 @@ blocks (it drops the runtime and waits for the Sender), so the producer closes v
 |---|---|---|
 | In | topic, config key/value, `error_next` message | `Utf8Marshal.Pin` |
 | Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `RecordMetadata_topic`, other getters | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
-| Out — valid only during the callback | `RecordMetadata_copy` `topic` | `Utf8Marshal.PtrToString`, inside the callback |
 
 **All output pointers are borrowed** — .NET copies (`GetString`) before the owning
 handle is freed (or, for the callback, before it returns); it never owns the raw
@@ -644,22 +612,18 @@ strings living in the handle's cached `CString`.
 
 ## A4 Zero-copy & buffer lifetime — send path
 
-**Decision:** Pass key/value as `IntPtr` (address of the user's `byte[]`) + `int
-len` with **no intermediate copy**, pinned **only for the send call** — the pin
-is call-scoped, not Task-scoped. (Managed → unmanaged: a *GC-moves* hazard, fixed
-by pinning.)
-
-**Verified fact:** the core copies key/value into the batch buffer *synchronously
-during the send call* — `Producer_send → block_on(send()) → …
-RecordAccumulator::append → MemoryRecordsBuilder::append` writes the bytes into
-the batch's `Vec<u8>`, and `block_on` finishes before `Producer_send` returns. So
-the core holds no reference to the user buffer afterward (CLAUDE.md §12).
+**Decision:** Pass key and value with **no intermediate copy**. On the **sync** `Send` the pin is
+call-scoped (`fixed`): `Producer_send_with_callback` reads key and value during the call and
+holds no reference afterwards (BH:38166-38170, which it follows). On the **async** `Send`,
+`Producer_send_with_callback_cb` copies the record but **borrows its key and value until the
+handover `cb` fires** (BH:38183-38191), so the pin spans `Send` → handover `cb`. Never hold a pin
+past the handover, and never across the delivery future. (Managed → unmanaged: a *GC-moves*
+hazard, fixed by pinning.)
 
 **Rule:**
 
   - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; where
-    `fixed` doesn't fit — the N buffers of `_send_batch`, all borrowed for the whole
-    call — pin them explicitly and release in a `finally`. Unpin right after the call —
+    `fixed` doesn't fit, pin explicitly and release in a `finally`. Unpin right after the call —
     **never hold a pin across the returned delivery `Task`** (per-message pinned objects
     fragment the GC heap).
   - **The pinning primitive for key/value is `ReadOnlyMemory<byte>.Pin()` →
@@ -670,34 +634,25 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     already-referenced `System.Memory`). `GCHandle.Alloc(Pinned)` remains correct for
     buffers the binding *owns* and pins itself — the interned topic buffers and the
     empty-sentinel byte below.
-  - **Deferred send: the pin spans `Send` → …accumulator… → `send_batch` returns.**
-    This call-scoped rule was written against §A7's inline send. The producer's **async**
-    path is now deferred (a send-batch thread, as in the Python binding), so a pin taken
-    in `Send` is held until the batch thread's `send_batch` **returns** — and released
-    there, in a `finally`, **before** the future reaches the completion pump. The
-    underlying fact is unchanged and is what keeps this inside the rule rather than
-    outside it: `send_batch_inner` runs `producer_send` — i.e.
-    `rt.block_on(producer.send(record, None))` — per record and copies the topic with
-    `to_string_lossy().into_owned()`, so the core's borrow still ends when the native
-    call returns. "Unpin right after the call" and "never across the `Task`" both still
-    hold; only *which* call moved. The **sync** path is unchanged and stays `fixed`.
-    ⚠ **Consequence on the public surface:** a deferred send **borrows** the caller's
-    buffers past `Send`'s return, so a mutation before the drain IS visible on the wire.
-    **Acceptance is not release:** the `ValueTask` stage completing (yielding the
-    `AsyncKafkaFuture`) does not end the borrow — a buffer may be reused only after the
-    delivery `Task` (`future.Get()`) completes **without being canceled**, after the
-    record's delivery callback fires, or after a later `Flush` completes successfully. A
-    cancellation from either stage does not end it, and neither does `Close` / `Dispose`
-    returning, whose wait for the send-batch thread is bounded (M11/P3.5 91.11).
-    Document that on the **async** surface only — the sync send has no such window, and
-    telling sync users to defend against it states a constraint that does not exist.
-  - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
-    A `fixed` over `null` yields a null pointer, so gate length on `null`:
-    ```csharp
-    fixed (byte* k = key)   // key null → k == null
-        future = NativeMethods.kafka_producer_Producer_send(handle, topicPtr, partition,
-            timestamp, (IntPtr)k, key is null ? -1 : key.Length, /* value… */ out err);
-    ```
+  - **Async send: the pin spans `Send` → the handover `cb`.** The `cb` fires on the
+    `CompletionThread` or inside the call (§A1). Release the pins in the `cb`, before the first
+    stage completes, and on every path that ends without a `cb` (the P/Invoke throwing). The sync
+    path stays `fixed`.
+    ⚠ **Consequence on the public surface:** the async send borrows the caller's buffers until
+    the first stage completes, so a mutation before then can be visible on the wire. A buffer may
+    be reused once `Send` throws or its first stage has completed, in any state (ledger 73).
+    Document this on the **async** surface only; the sync send has no such window.
+  - Sentinels: absent and empty must stay distinct, on both paths: absent → no key / a null
+    value (a tombstone); empty → a **non-null** pointer with length 0. A `fixed` over `null`
+    yields a null pointer, so gate on the `null` reference, not on the pointer. Without
+    serializers the record's key and value are `kafka_Bytes_t *` that the record never copies
+    (`rust/src/ffi/producer/producer_record.rs:20-27` at `851c8d95`): absent is `NULL` (a null
+    key, or a null value, the tombstone); empty is a non-null `kafka_Bytes_t *` whose `data` is
+    non-null and whose `len` is 0 (BH:1944-1945), so the sentinel byte of the note below applies
+    to `data`. The `kafka_Bytes_t` and its bytes stay valid until the send has registered the
+    record: until the sync `Send` returns, so a stack `kafka_Bytes_t` is fine there; until the
+    handover `cb` on the async `Send`, so there it must not live on the stack (BH:38183-38191;
+    ledger 79 5c).
     **Note:** `fixed` also yields a null pointer for an **empty** (non-null)
     array — not just for `null` — and the core rejects `(null, len ≥ 0)`. So an
     **empty** key/value (`Length == 0`) must pass a **non-null** pointer — use a
@@ -705,26 +660,20 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     (`GCHandle.AddrOfPinnedObject` returns non-null for empty arrays on current
     runtimes too, but that's **undocumented** — prefer the sentinel. Python is
     unaffected — an empty `bytes` is non-null.)
-    ⚠ **A STACK sentinel is correct only for a call-scoped send.** Once the send is
-    deferred, that address is dead by the time the batch thread reads it — a
+    ⚠ **A STACK sentinel is correct only for a call-scoped send.** On the async send the core
+    reads the address until the handover `cb`, after `Send`'s frame may be gone — a
     use-after-free that "works" almost always and corrupts rarely, which is the worst
-    failure mode. The deferred path must use **one process-wide, permanently pinned
+    failure mode. The async path must use **one process-wide, permanently pinned
     1-byte static** instead (M11/P3.1 §4.2). Test it as a *stability* property — the same
     address for a record's key and value, and across separate calls at different stack
     depths — because that is exactly what a stack sentinel cannot satisfy and an
     "it sent successfully" assertion cannot detect.
-  - **The topic is the third buffer, and it is the one that gets missed.** While the send
-    is call-scoped it is just a scoped `Utf8Marshal.Pin`; deferred, a call-scoped topic
-    pointer is a use-after-free like the sentinel. Do not solve it with a per-record copy
-    (that is the allocation this section exists to prevent): intern **one permanently
-    pinned NUL-terminated buffer per distinct topic**, which is O(distinct topics)
-    permanent pins instead of O(records) transient ones. Bound the cache and **never
-    evict** — freeing a pinned buffer an in-flight record still points at is a
-    use-after-free — and free the whole cache only at a point where nothing can still
-    hold a pointer into it.
+  - **The topic is read when the record is built.** `ProducerRecord_new*` takes a NUL-terminated
+    `topic` and returns an owned record (BH:39527-39539), so the topic needs only a call-scoped
+    `Utf8Marshal.Pin` around that call, on both paths. No interned topic cache.
 
-**Why:** the borrow ends when the send call returns, so a call-scoped pin is
-exactly sufficient; Task-scoped pinning is unnecessary and fragments the heap.
+**Why:** the borrow ends when the sync call returns, or at the async handover `cb`, so a pin
+of exactly that span is sufficient; Task-scoped pinning is unnecessary and fragments the heap.
 Mirrors confluent-kafka-dotnet (pin around `produceva` with `MSG_F_COPY`, `Free`
 in `finally`). Any intermediate copy (`AllocHGlobal`+`Copy`, `ToArray()`) is the
 per-message allocation CLAUDE.md §12 exists to prevent.
@@ -737,23 +686,20 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 
 **Tests required:**
 
-  - **Mutation-after-send**, per surface: on a **call-scoped** send, mutate the caller's
-    `byte[]` right after `send` and the produced record is unchanged (proves the copy
-    happened during the call). On a **deferred** send that guarantee does not exist, so
-    the test asserts what must still hold — the mutation is *memory-safe* (the pin is
-    what makes it so) and the send still resolves — and the visibility window is
-    documented on the async surface instead.
+  - **Mutation-after-send**, per surface. Sync: mutate the caller's `byte[]` right after `Send`
+    returns, and the produced record is unchanged. Async: a mutation before the first stage
+    completes is memory-safe (the pin), and a mutation after it completes leaves the produced
+    record unchanged.
   - **Allocation budget** (DoD §10): a large value adds no value-sized managed
-    allocation. ⚠ Under a deferred send, whichever caller allocates or grows the
-    accumulator's node pays for it, which is noise on a per-send measurement; take the
-    **best of N matched attempts** rather than widening the budget, so a real per-send
-    regression (which raises every attempt) still fails.
-  - Absent vs empty key/value each produce the correct record — and, on a deferred send,
+    allocation. Take the **best of N matched attempts** rather than widening the budget,
+    so a real per-send regression (which raises every attempt) still fails.
+  - Absent vs empty key/value each produce the correct record — and, on the async send,
     that the empty sentinel's address is **stable across calls and stack depths**.
-  - **Pin/unpin balance on every path**, including the failure paths (the append refused,
-    the native call throwing, a node abandoned at teardown). A pinned `GCHandle` is a
-    strong root, so a leak is observable without any pin-counting API: hand each send a
-    buffer nothing else references and assert it becomes collectable.
+  - **Pin/unpin balance on every path**, including the failure paths (the P/Invoke throwing,
+    a handover `cb` carrying an error, and a refused record whose `cb` fires inside the call: a
+    `Send` racing `Close`). A pinned `GCHandle` is a strong root, so a leak is observable
+    without any pin-counting API: hand each send a buffer nothing else references and assert
+    it becomes collectable.
 
 ---
 
@@ -820,420 +766,271 @@ exceptions are unchanged.
 
 ---
 
-## A6 Callback & delegate marshalling (`RecordMetadata_copy`; the managed-only delivery callback)
+## A6 Callback & delegate marshalling (the `_cb` completions; the per-record `Callback_t`)
 
-**Decision:** the producer has **three** callback forms, and only the first two
-cross the ABI:
+**Decision:** Since M19/P1 two producer callback forms cross the ABI. The core calls both inside
+`Producer__execute_callbacks`, on the `CompletionThread` (§A1), with two exceptions: the async
+`Send`'s handover `cb` fires inside the call, on the caller's thread, when the producer takes or
+refuses the record at once (BH:38240-38249); and the producer's destroy runs the callbacks still
+pending on the thread that destroys it (`rust/src/ffi/producer/mod.rs:166-178` at `851c8d95`),
+which decision 7 makes the closing thread, or the `CompletionThread` after its drain. On
+`AsyncKafkaProducer` a completion queued behind a running async callback is handled later, on the
+pump, outside `__execute_callbacks` (ledger 54, B9; the async delivery callback paragraph at the
+end of this section).
 
-  - **Form A — the ABI's one *synchronous* callback, `RecordMetadata_copy`** (an
-    optional copy convenience). Marshal it as a kept-alive
-    `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on
-    the floor), keep the body no-throw, and pass context via a `GCHandle` in
-    `user_data`. Using it is optional — the per-field accessors
-    (`_offset`/`_partition`/`_topic`/`_timestamp` + `_destroy`) avoid callbacks
-    entirely.
-  - **Form B — the async *completion* callbacks** (producer `*_async`, §A7). Same
-    marshalling floor; the lifetime rules are §A7's.
-  - **Form C — a *managed-only* callback that never crosses the ABI** (the
-    delivery callback, `IDeliveryCallback`, M14/P1). Java's second `send`
-    signature (`Future<RecordMetadata> send(ProducerRecord, Callback)`,
-    `Producer.java:86`) is restored **on top of the completion path already in
-    use** — the pull-pump's batched `FutureRecordMetadata_get_all` (§A7 Option A/C)
-    or, for a sync send, the pump's single `FutureRecordMetadata_get` (M11/P4.2).
-    Nothing new is registered with
-    native, so there is **no delegate to root, no `GCHandle`, no `user_data`, no
-    `user_data_destroy` hook and no new `[DllImport]`** — the whole form is Mode A.
-    It is a *binding-layer* callback: the ABI has no idea it exists.
+  - **The `_cb` completions:** the async `Send`'s handover `cb`, `flush_cb`, `close_cb` /
+    `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
+    `opaque` the binding passed. No registration handle.
+  - **The per-record `Callback_t`** (decision 10): `Callback_new_err(self_, on_completion)` for
+    every sent record, passed to `send_with_callback` / `send_with_callback_cb`. The core reads the
+    registration during the call. `on_completion(self_, metadata, error, callback_id)` fires once,
+    later, and the binding reports its end through `Producer__set_callback_result`. A plain
+    `Send(record)` passes one too: it is what completes the record's future; only the user
+    callback is absent.
 
-**⚠ Do not reason about form C with form A/B's rules.** The instinct trained by
-Part B's three families is to look for a rooting site and a free site; form C has
-neither, and inventing one (a `GCHandle` per send) would be a pure regression. The
-one obligation it *does* inherit — a **total no-throw** invocation — comes from
-where it runs, not from the ABI (see the form-C Rule).
+`RecordMetadata_copy` (the old form A) does not exist at `0035d9ff`, and the managed-only delivery
+callback of M14/P1 (the old form C) is replaced by `Callback_t`.
 
-Form A fires **synchronously on the caller's (pump) thread** and returns before
-`RecordMetadata_copy` does; its `topic` pointer is valid **only during the call**
-(the core frees the handle right after — §A3):
+**Rule (both forms):**
 
-    void cb(int64_t offset, int32_t partition, const char* topic, int64_t timestamp, void* user_data)
+  - A named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`, blittable
+    parameters, held in a `static readonly` field so the GC cannot collect it while native holds
+    the thunk (netstandard2.0 has no `UnmanagedCallersOnly`).
+  - The body is a **no-throw boundary**: `try/catch` all of it. A managed exception unwinding into
+    Rust is UB.
+  - The `opaque` / `self_` is a `GCHandle` over the per-call state (`ToIntPtr`, recovered with
+    `FromIntPtr`).
 
-**Rule (forms A and B — the ABI-crossing forms):**
+**Rule (`_cb` completion):**
 
-  - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
-    blittable params (`long`/`int`/`IntPtr`/`IntPtr`). Take `topic` as `IntPtr`
-    and `Utf8Marshal.PtrToString` it *inside* the callback (§A3) — never `string`. Hold
-    the delegate in a `static readonly` field so the GC can't collect it while
-    native holds the thunk.
-  - The body is a **no-throw boundary**: `try/catch` it all (a managed exception
-    unwinding into Rust is UB); stash any failure and re-surface it after the call
-    returns. (Python does this via `PyErr_Print`.)
-  - Pass a `GCHandle` over the target as `user_data` (`ToIntPtr` → recover with
-    `FromIntPtr` → `Free()` exactly once after the call). Shape:
-    `RecordMetadata_copy(md, s_copyCb, GCHandle.ToIntPtr(gch))`.
+  - The `cb` frees its `opaque` `GCHandle`, exactly once. The only other free site is a `catch`
+    around the P/Invoke, when it threw before native ran.
+  - The `cb` frees what it owns (§A2) and completes its `Completion` or `TaskCompletionSource`
+    (§A7).
+  - The async `Send`'s handover `cb` releases the key and value pins (§A4) once. Inside the call,
+    or on the pump before `Send` has looked, it only records the outcome, and `Send` completes the
+    first stage from it and ignores the token. Otherwise it completes the pending stage: Canceled
+    with the caller's token if that token has fired, else with the outcome (§A1).
 
-**Rule (form C — the managed-only delivery callback):**
+**Rule (`Callback_t`, the delivery callback):**
 
-  - **Carry it, do not register it.** The per-send carrier is one nullable
-    reference field alongside the pending send (`null` on the plain
-    `Send(record)` path), holding the user callback plus whatever the failure-path
-    placeholder needs — never a closure and never the public record, so the
-    allocation-budgeted send path is unchanged (DoD §10).
-  - **Fire it where the completion is read, on whichever thread reads it.** That
-    is the pump thread on both surfaces (.NET's analogue of Java's background I/O
-    thread, `Callback.java:20-21`; the blocking sync surface read it inline on the
-    caller's thread until M11/P4.2) — the thread that already frees the completion's
-    native handles.
-  - **Invoke it BEFORE the delivery awaiter is released** (it is unordered relative to
-    the admission stage) — before `TrySetResult` /
-    `TrySetException`, and before the sync future's `Get()` returns or throws. Java's
-    `ProducerBatch.completeFutureAndFireCallbacks` sets the future's value, fires
-    the callbacks, and only then calls `produceFuture.done()`
-    (`ProducerBatch.java:303-323`).
-  - **Invoke it unconditionally** — never gated on `TrySet*`'s `bool` return. The
-    notification is owed per *record*, so an already-canceled awaiter still gets it.
-  - **Total no-throw, and the guard lives in exactly ONE place.** Put the
-    `try`/`catch` *inside* the shared invocation helper, not around each call site:
-    an escaping exception would abort the pump's per-index batch loop (stranding the
-    other records' `TaskCompletionSource`s), or escape into the pump loop's own
-    `catch` and fault the whole batch — one user bug becoming N failed sends. Log
-    the swallowed failure to `System.Diagnostics.Trace` and make the trace call
-    itself no-throw (a host `TraceListener` can throw); attribute it to the user
-    callback, never to a sibling family's callback type.
-  - **One helper for both flavors.** The sync and async send paths are separate
-    code, so a per-flavor invocation is how the ordering / placeholder / swallow
-    rules silently diverge. Route both through one method.
-  - **State the at-most-once boundary rather than papering over it — and enumerate
-    it EXHAUSTIVELY, by WALKING the code path rather than by recalling shapes.**
-    Form C fires only where the binding reads a *core* completion, so the boundary is
-    **every** path that faults a send — **or throws out of `Send`** — after the ABI
-    already accepted the record (`Producer_send` returned a live future *and* a null
-    `out_error`: the ABI's statement that the core has it). Derive the set
-    mechanically, by walking every such site from that acceptance to the callback's
-    invocation. **The walk's terminating condition is the callback invocation, and it
-    must pass through every frame the future travels, on both threads — including the
-    frames that sit OUTSIDE a method's own `try`.** Recalling shapes is what leaves
-    the list one short — it happened repeatedly in M14/P1's own review rounds: first
-    at "teardown only", then at a fixed count of paths, then at "the pump's window is
-    only AFTER the completion arrives" (the walk had stopped at the pump's batch
-    read, one frame short of the batch *setup* preceding it). On the pull-pump engine
-    the walk yields these shapes:
-      - *teardown* — a send accepted by the core with no pump left to collect its
-        result (two distinct sites: the enqueue that raced the gate closing, and the
-        queue drained at stop);
-      - *an unexpected managed failure BEFORE the completion is read* — the window
-        between the accepting `Producer_send` and the transfer of the future's
-        ownership to the pump (allocating the awaiter, its cancellation
-        registration). The orphaned future is destroyed **unread** and `Send`
-        rethrows. Two things a "the binding faults the send" clause misses here: the
-        send surfaces as a **throw**, not a faulted `Task`, so a residual definition
-        scoped to faulting alone excludes it; and the record **was** accepted, so a
-        public list attributing every no-callback throw to "nothing was sent / the
-        core rejected it" is *false* on this path. This shape is engine-shaped rather
-        than form-C-shaped — see §A7's ⚠ paragraph; and
-      - *an unexpected failure on the pump, between the send being handed to it and
-        the callback being invoked* — **on either side of the completion's arrival**,
-        because the pump can throw before its batched read reports as well as after,
-        and one wholesale-fault site covers throws from either side. **After** the read
-        reported: `get_all` has already reported for the **whole** batch, so
-        the core *did* report completions, yet the indices not yet reached are faulted
-        with no callback — and the duplicate-risk argument applies to that half. The
-        *before* half (a throw out of the `get_all` P/Invoke itself — the per-batch
-        allocation of the marshalling arrays used to be a second trigger here and is
-        **gone**, the arrays being reused fields since M11/P3.1 §12.3; the defensive
-        bound check preceding the read used to be a third and is **gone** too, every
-        pass being bounded by the arrays' capacity since M11/P3.2 §3B.3's
-        oversized-group split made that check unreachable by construction) does **not**
-        need an allocation failure to be reachable: a stale or
-        mismatched native surfaces an `EntryPointNotFoundException` from the pump's
-        *first* batched read, so the "OOM-only, therefore theoretical" defence is
-        unavailable for it. Neither half is a teardown path, so a residual clause that
-        says "teardown" misses them — and a clause scoped to "AFTER the completion
-        arrives" misses the *before* half, which was one of this rule's own misses.
-    Document each on the public surface, and state the residuals once, in `IDeliveryCallback`'s remarks, and put
-    no note at the faulting sites (`dotnet/CLAUDE.md` §4 Comments). The Critic checks
-    each faulting site against that list in review instead.
+  - **One `Callback_t` per record.** Destroy it (`Callback_destroy_err`) right after the send call
+    returns, success or error: the registration is read during the call (BH:38210-38211). Never
+    share one across records: `self_` is the only per-record identity, and `callback_id` appears
+    only when the callback fires.
+  - **`self_` lifetime** (decision 10): a `GCHandle` over the record's state (the user callback,
+    if any, and the record's `KafkaFutureImpl`). Keep it until `on_completion` fires, and free it
+    there, after reporting. After a send error (`out_err` set, or a handover `cb` with an error)
+    keep it until the producer's destroy has returned, then free it: the callback may still fire
+    once if the record reached the accumulator (BH:38221-38227, BH:38251-38254).
+  - **`metadata` and `error` are borrowed for the call** (BH:3860-3869). Read them; never destroy
+    them. `metadata` is non-null on failure too: the record's placeholder, offset -1
+    (`rust/src/ffi/producer/callback.rs:29-30` at `0035d9ff`).
+  - **Order** (decision 36): run the user delivery callback, if there is one; then complete the
+    record's `KafkaFutureImpl` (`Complete` / `CompleteWithError`, which releases every `Get` and
+    runs the `WhenComplete` actions); then report with
+    `Producer__set_callback_result(view, callback_id, NULL, error)`. On the async producer, a
+    completion handled by the chain (queued behind a running async callback, or the callback's own
+    end) follows the async form's order (`dotnet/CLAUDE.md` §4, **The async form**): callback,
+    report, then `Complete`.
+  - **The user callback's `exception`** is the error table's type (decision 14, ledger 33):
+    `Exception?`, and the same instance for a `local_callback` error, so an `ErrorNext(Exception)`
+    exception reaches the callback unchanged (decision 15).
+  - **A throwing user callback** (decision 20): catch it, report it through
+    `__set_callback_result` as a `local_callback` error carrying the exception (the core logs it
+    and leaves the record's outcome unchanged, BH:38215-38216), and write one `Trace.TraceError`.
+    The trace call is itself no-throw (a host `TraceListener` can throw). The record's future
+    still completes with the record's outcome.
+  - **Once per record the core accepted, unconditionally:** a record whose `Get` wait was
+    abandoned (a token or a timeout) still gets its callback. A record the send refused fires it
+    only if it had reached the accumulator (BH:38221-38227, BH:38251-38254); a record that `Close`
+    fails while it waits fires none (ledger 70; the core drops the callback with the rethrown
+    `KafkaException`, as Java's `doSend` does, `rust/src/producer/kafka_producer.rs:2420-2424` at
+    `851c8d95`). Report exactly once per `callback_id`, on every path, and never once the
+    producer's destroy has begun: it completes every unreported callback as success
+    (`rust/src/ffi/producer/mod.rs:174-178`).
+  - The per-record state is the only managed allocation the callback adds per send: no closure,
+    no captured public record (DoD §10).
 
-    **State each comparative axis ONCE, on the public surface, and have every other
-    site point at it.** This is the M14/P1 round-4 lesson, and it is a *structural*
-    rule rather than another thing to remember. Each of rounds 2–4 fixed a flagged
-    instance and left a parallel one alive — a missing site, then a stale
-    distinguishing clause, then a clause repaired in a code comment but **not in its
-    public-xmldoc twin** — and the round-4 sweep then found further copies of the same
-    kind. Every one of those lived in a *paraphrase* of an axis the paraphrasing site
-    does not own. So: the comparisons between residuals (teardown or not, completion
-    arrived or not, throw versus faulted `Task`, which surface) belong in exactly one
-    place — the public interface's remarks. When a repair *is* made to a comparative clause, grep
-    the clause's distinctive words across **every** document before calling it done; a
-    fix applied to one copy of a duplicated sentence is not a fix.
-
-    Outside the canonical enumeration there are no notes about residuals at all, so
-    nothing there can go stale. The walk narrative is carved out because a
-    *derivation* must be able to state its own arithmetic — a walk forbidden from saying
-    how many sites it yielded cannot be checked against the code, which is the entire
-    reason this rule prefers a walk to a recollection. Its counts live here, next to the
-    rule, rather than in a site note or on the public surface, which is where the
-    staleness the prohibition guards against actually bites.
-
-    Do NOT synthesize a completion: for teardown, for the
-    pre-read window **and for the pump window's before half** it would invent a
-    *failure* for a record the core may still deliver successfully, and on the
-    batch-abort path where completions had arrived a wholesale fault cannot tell which
-    indices already fired, so firing there would *guarantee* duplicates for them.
-    **A duplicate is worse than a drop** — the obligation is exactly-once per
-    record (root `CLAUDE.md` §9.5), and a duplicate delivery notification is the
-    classic FFI callback defect the settle-window test exists to catch. A per-index
-    "already fired" latch is what would close the batch-abort path; on
-    an OOM-only path it does not earn its per-send state, so record the drop instead.
-
-    ⚠ **Separately from the notification, every such site owes the handle-free
-    pattern (§A2).** A window that sits *outside* a method's `try` also sits outside
-    its `finally`, so the walk above doubles as the audit for "free every handle on
-    every path": the pull-pump's batch setup leaked the batch's future handles for
-    exactly that reason. Free from a source that is valid **before** any allocation
-    (the drained batch itself), with the **singular** destroy rather than the array
-    form — building the array is what failed — and keep the two free sites mutually
-    exclusive by rethrowing out of the recovery `catch`, so the `finally` is never
-    entered on that path.
-
-**Why:** the floor (netstandard2.0/net462) has no function pointers or
-`[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
-mechanism for forms A and B — the pattern confluent-kafka-dotnet uses. The GC sees
-only managed refs, not the native thunk (→ keep-alive); the CLR can't propagate an
-exception through a Rust frame (→ no-throw); `user_data` is C's only per-call
-context channel (→ `GCHandle`). Form C needs none of that precisely because it
-never becomes a native function pointer: it is host scaffolding restoring a Java
-signature (`dotnet/.claude/rules/bindings.md §1.2`) over a completion the binding already reads,
-which is why it is Mode A and why the pull-pump stays the engine underneath it.
+**Why:** the floor (netstandard2.0/net462) has no function pointers or `UnmanagedCallersOnly`, so a
+rooted Cdecl delegate is the only portable mechanism, as in confluent-kafka-dotnet. `self_` is
+the only per-record identity, so the binding needs one `Callback_t` per record (decision 10). The
+order is Java's (`ProducerBatch`: value set, callbacks, then `done()`) and Python's (`_complete`:
+the callback, then `complete_record`) (decision 36). Every callback now runs on a thread the
+binding chooses (the Decision above), never on a native thread of the core's, so the
+foreign-thread rules are gone; the no-throw rule stays because the frame below is still Rust.
 
 **Anti-patterns:**
 
-  - *(forms A/B)* A delegate with no rooted reference (or a bare inline lambda) —
-    collectible mid-call → crash.
-  - *(forms A/B)* An exception escaping the callback into native (UB).
-  - *(form A)* `topic` typed as `string`, or its pointer read/stored after the
-    callback returns (handle already freed — §A3).
-  - *(forms A/B)* Leaking or double-freeing the `user_data` `GCHandle`.
-  - *(form C)* Registering it with native — a `GCHandle`, a rooted delegate, or a
-    new `[DllImport]` (notably `Producer_send_async`) — to deliver something the
-    completion the binding already reads can deliver. That is a Mode-B change to
-    the completion **engine** masquerading as a callback feature, and the push
-    engine is measured slower than the pull-pump.
-  - *(form C)* Firing it *after* `TrySetResult` / after the sync completion is set, or gating
-    it on `TrySet*`'s `bool` — the first breaks Java's ordering, the second drops
-    the notification for a canceled awaiter.
-  - *(form C)* A second `try`/`catch` wrapped around the shared invocation helper
-    (it shadows the real guard without adding anything), or a batch-scoped `catch`
-    *instead of* the per-invocation one (one throwing callback then fails every
-    record in the batch).
-  - *(form C)* Delivering a `null` metadata on the failure path. Java's user
-    callback never sees one — the wrapper substitutes a `-1` placeholder
-    (`KafkaProducer.java:1597-1599`, `Callback.java:28-33`).
-  - *(form C)* A per-send closure, a captured public record, or an eagerly-built
-    placeholder — each turns the carrier into two or more allocations per send.
+  - A delegate with no rooted reference, or a bare inline lambda.
+  - An exception escaping a callback into native.
+  - Destroying the `metadata` or `error` handed to `on_completion`: they are borrowed, so that is a
+    double free.
+  - Freeing `self_` when the send call returned an error (the callback may still fire: a
+    use-after-free), or never freeing it after destroy (a leak).
+  - Keeping the `Callback_t` past the send call, or one `Callback_t` for several records.
+  - Completing the future before the user callback runs (decision 36), or skipping the callback
+    because no awaiter is left.
+  - Reporting a throwing callback only to `Trace`, or only through `local_callback`
+    (decision 20).
+  - Reading the returned `KafkaFuture_t *` with `KafkaFuture_get` (it runs the queued callbacks on
+    the caller, and from inside a callback it waits forever, BH:38216-38219). Free it at once.
 
 **Tests required:**
 
-  - *(form A)* Correct offset/partition/topic/timestamp delivered; a non-ASCII
-    topic read inside the callback is correct (ties §A3).
-  - *(forms A/B)* An exception thrown in the callback is caught, doesn't crash or
-    unwind into native, and is re-surfaced.
-  - *(forms A/B)* Aggressive GC while the callback is in use doesn't crash
-    (keep-alive; §A1).
-  - *(form C)* Every behavioural test runs against **both** producer flavors — the
-    two firing sites are separate code, so a one-flavor fix is the natural bug.
-  - *(form C)* Exactly-once per record, asserted **after a settle window** (a first
-    observation of "1" cannot distinguish one invocation from two), including an
-    N-record batch so the per-index firing is exercised.
-  - *(form C)* Ordering, with a **deterministic** probe — read the awaiter's own
-    completion state from *inside* the callback, not a ticket comparison (the
-    continuation is only *scheduled*, so tickets race).
-  - *(form C)* The failure path delivers non-null placeholder metadata **and** the
-    exception, with the exception's code and message asserted (DoD §3).
-  - *(form C)* No invocation on a synchronous throw out of `Send` — the test that
-    discriminates a correct implementation from a plausible-but-wrong one.
-  - *(form C)* A throwing callback is swallowed, is **observable** via a
-    `TraceListener`, leaves the send's own result intact, and does not disturb the
-    other records in the same batch.
-  - *(form C)* Allocation budget: the plain path unchanged, and the callback path
-    adding exactly one carrier — with the budget set from a measurement and its
-    sensitivity verified by injecting a second per-send allocation.
+  - Every behavioural test runs against **both** producer flavors.
+  - Exactly once per record, asserted after a settle window, including an N-record burst.
+  - Order, with a deterministic probe: from inside the user callback, read the record future's
+    state; it is not yet done.
+  - The failure path delivers non-null placeholder metadata (offset -1) and the exception, with
+    its type, code and message asserted (DoD §3).
+  - A send error from the call keeps `self_` alive until destroy; if the core fires the callback
+    later (a record appended before `maybeAddPartition` fails, BH:38221-38225), it fires once.
+  - `ErrorNext(exception)`: the same instance reaches the callback and `Get` (decision 15).
+  - A throwing user callback: reported through `local_callback` (the future keeps the record's
+    outcome), one `Trace.TraceError` seen by a `TraceListener`, and the other records unaffected.
+  - Aggressive GC while sends are in flight does not collect a delegate.
+  - `GCHandle` balance: after a burst and `Dispose`, every per-record state is collectable (no
+    leak), and none is freed early (no crash under GC stress).
+  - Allocation budget (DoD §10): the plain `Send` and the callback `Send`, each budget set from a
+    measurement, its sensitivity checked by injecting a second per-send allocation.
+
+**The async delivery callback (M19/P1, ledger 47).** `IAsyncDeliveryCallback` uses the sync
+callback's per-record `Callback_t` and `self` `GCHandle`; nothing else crosses the boundary.
+The trampoline copies the borrowed metadata and error before it returns, calls the callback on
+the pump, and does not wait for its `Task`. Each step after the `Task` ends runs on the pump:
+report through `kafka_producer_Producer__set_callback_result` (`NULL`, or a `local_callback`
+error whose opaque is the exception's `GCHandle`); complete the record's future; handle the
+next queued completion, whatever its callback. A completion queued behind a running async
+callback is copied by the trampoline and reported when its turn comes. Exactly one report per
+callback, on every path. A report after teardown is skipped: destroy has already completed it
+as success.
 
 ---
 
-## A7 Async / Future completion → `TaskCompletionSource`
+## A7 Async / Future completion → `KafkaFutureImpl`, `Completion`, `TaskCompletionSource`
 
-**Decision:** The producer exposes **both** a pull surface (a future you
-block/poll — `get` / `get_all` / `is_done`) and a push surface
-(`Producer_send_async` takes a completion callback (§A6) fired on a native
-dispatcher thread; both verified in the header, §0.3). So the producer's
-completion model is a **binding choice**, not ABI-forced — **OPEN** (pull pump vs
-push callback): both are viable and *shipped*; the trade-off is below, decision
-deferred. Both bridge to `Task<T>` via a `TaskCompletionSource` built with
-`RunContinuationsAsynchronously`.
+**Decision (M19/P1):** one completion model. The pull-pump (the old Option A) and the push
+dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
 
-⚠ **A user-facing delivery callback is NOT an input to that decision (M14/P1).**
-Java's `send(record, Callback)` is served by **§A6 form C** — a managed-only
-callback fired where the binding already reads the completion — so it works
-identically under either engine and required no ABI work (Mode A, zero new
-`[DllImport]`). Do not read "the user wants a callback" as an argument for the
-push option: `Producer_send_async` exists, but adopting it is an *engine* change
-with its own measured cost, independent of this surface.
+  - **A record's outcome:** `on_completion` (§A6) completes the record's `KafkaFutureImpl`.
+    `KafkaFuture<RecordMetadata>` (sync) and `AsyncKafkaFuture<RecordMetadata>` (async) are views
+    over it (`dotnet/CLAUDE.md` §4 futures). The owned `KafkaFuture_t *` a send returns is freed at
+    once and never read.
+  - **Sync waits** (decisions 4, 4b): `Send` is the blocking `send_with_callback` (§A1). `Flush`,
+    the five transaction ops, `PartitionsFor` and `Close` call their `_cb` form and wait on a
+    managed `Completion`. The blocking forms are not used for them, because they run the queued
+    delivery callbacks on the caller's thread while they wait (BH:38278-38281), which Java never
+    does.
+  - **Async waits:** the same `_cb` forms, each completing a `TaskCompletionSource` built with
+    `RunContinuationsAsynchronously`. The async `Send`'s first stage completes at the handover
+    `cb` (§A1).
 
-**Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
-`Task<RecordMetadata>`, completed by **one** background pump. `Send` appends
-and returns a `ValueTask<AsyncKafkaFuture<RecordMetadata>>` whose
-`AsyncKafkaFuture` wraps the TCS-backed delivery `Task` (`Get()`);
-the pump blocks
-on the batched `get_all` and completes each TCS. Mirrors the Python binding's
-`poll_futures_thread` (python-ffi.md §6).
+**Rule:**
 
-```
-Caller thread                         Completion pump (one bg thread)
-─────────────                         ───────────────────────────────
-Send():                          loop:
-  pin key/value (call-scoped, §A4)      drain a batch of (future, tcs)
-  Producer_send() → future handle       get_all(futures[])   ← BLOCKS
-  new TaskCompletionSource (tcs)        tcs[i].SetResult / SetException
-  append; return ValueTask<Future>      destroy_all(futures)
-Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pending, exit
-```
+  - A `_cb` completion runs on the `CompletionThread`, or inside the call (§A1). It frees its
+    handles (§A2), then completes its `Completion` or TCS exactly once. No continuation runs on the
+    `CompletionThread`: a TCS uses `RunContinuationsAsynchronously`, and a `Completion` waiter
+    wakes on its own thread.
+  - **In-callback rules** (Python's, plan §3.1 fact 3), on `KafkaProducer` and
+    `AsyncKafkaProducer` (the mocks: below), for a wait called from inside a delivery callback: on
+    the `CompletionThread`, or, from an `IAsyncDeliveryCallback`, after an `await` too, through an
+    `AsyncLocal<bool>` flag set around `OnCompletion` and reset when it returns (Python's
+    `_in_async_callback`, `python/confluent_kafka/producer/async_producer.py:138-139`, `:597-601`
+    at `851c8d95`; ledger 80, pick 4):
+      - `Flush` throws at once a `KafkaException` with Java's message "KafkaProducer.flush()
+        invocation inside a callback is not permitted because it may lead to deadlock."
+        (`KafkaProducer.java:1299-1300`). Python checks this itself, before calling native
+        (`python/confluent_kafka/producer/producer.py:593-595` at `851c8d95`); the core's
+        `flush_cb` reports the same error from a `KafkaProducer`'s callback (BH:38283-38287,
+        BH:38298-38313). The mocks follow Java's mock as far as the core allows:
+        `MockProducer.flush()` makes no in-callback check, so the `Flush` throw is
+        `KafkaProducer`'s and `AsyncKafkaProducer`'s only. From inside a mock's sync delivery
+        callback that the drain runs, the mock calls the **blocking** forms: the core sees the
+        callback and does not wait for the reports, and a nested drain returns 0, so no other
+        callback runs on the caller (BH:38283-38287; `rust/src/ffi/producer/mod.rs:396-406`,
+        `rust/src/ffi/callback_queue.rs:290-294` at `851c8d95`). From a mock callback the core
+        cannot see (a sync callback the async chain resumes, an async callback's synchronous part
+        queued behind another, an async callback after an `await`), the mock's `Flush` runs
+        Java's flush body: it calls `MockProducer_complete_next_err` until that returns false,
+        then returns without waiting for the reports (`MockProducer.java:364-365`; Python's
+        `_flush`, `python/confluent_kafka/producer/_mock_core.py:445-451`, and the async mock's
+        skip of its callback wait, `async_mock_producer.py:177-184`, at `851c8d95`). The core
+        queues each completed record's delivery callback (BH:38957-38968) where Java's mock runs
+        it inline, as Python's async mock schedules it; it runs after the calling callback
+        returns. `Close` from any mock callback returns at once and leaves the teardown to the
+        `CompletionThread`, as on the real producer. From an async mock callback after an
+        `await`, a commit or an abort keeps the flag: it waits with the `max.block.ms` deadline
+        and ends with the code-7 timeout below. That is a recorded deviation from Java's and
+        Python's mocks, which only a `_cb` form that skips the report wait would remove.
+      - A queued wait waits at most `max.block.ms` (read from the config dictionary, default
+        60000): from a sync callback `PartitionsFor` and the five transaction operations, whose
+        completion is queued behind the callback that waits; from an async callback after an
+        `await`, a commit or an abort, which waits for the callback's own report
+        (`with_txn_control_cb` passes `in_callback = false`, `rust/src/ffi/producer/mod.rs:992`
+        at `851c8d95`). It then throws a retriable `KafkaException` with code 7, Kafka's
+        `TimeoutException` (ledger 79 5d; Python's `KafkaTimeoutError`,
+        `python/confluent_kafka/producer/_base.py:470-472`), not `System.TimeoutException`,
+        which decision 14 keeps for -5. The message is Python's: from a sync callback
+        "Timeout expired after {ms}ms while awaiting {operation} from a send() callback, which
+        blocks the producer's completion thread" (`_base.py:130-134`); from an async callback
+        "Timeout expired after {ms}ms while awaiting {operation} from an async send() callback,
+        whose own report it waits for" (`async_producer.py:150-152`). The operation may still
+        take effect after the timeout.
+      - `Close` from a callback overrides a non-zero timeout to 0, with Java's warning
+        ("Overriding close timeout … to 0 ms in order to prevent useless blocking due to
+        self-join …"), queues `close_with_timeout_cb(0)`, and leaves the teardown to the
+        `CompletionThread` after its drain (`dotnet/CLAUDE.md` §4 **Close/Dispose**).
+  - **Which waits wait for the delivery reports** (`ReportWait`,
+    `rust/src/ffi/producer/mod.rs:482-509` at `851c8d95`): `Close`, timed or not, always,
+    without a bound; `Flush`, `CommitTransaction` and `AbortTransaction` when they succeed;
+    `InitTransactions`, `BeginTransaction` and `SendOffsetsToTransaction` never.
+  - **No own-thread guard** (decision 39). A `Get()` on the `CompletionThread` for a future that
+    only that thread can complete waits, as in Java and Python; `Get(TimeSpan)` and
+    `Get(CancellationToken)` end as usual.
+  - Cancellation is best-effort: a token never cancels the operation. `Get(token)` ends only the
+    caller's wait; the `Send` token ends the first stage only at the hand-over (§A1, ledgers 19
+    and 71).
+  - `Close` / `Dispose` order: `dotnet/CLAUDE.md` §4 **Close/Dispose** (refuse new calls, close,
+    join the `CompletionThread`, wait for in-flight uses, destroy on the closing thread).
 
-Note: the diagram predates the M11/P3.1 send-batch thread.
-
-**Rule (Option A):**
-
-  - `Send` never calls a blocking `_get`/`_get_all` on the caller's thread —
-    it pins (§A4), calls `Producer_send` (inline; a fast enqueue), checks the sync
-    `out_error`, enqueues `(future, tcs)`, returns `tcs.Task`. Inline send is fine
-    because .NET has no GIL (a send-batching thread is an optional throughput
-    tweak, not required).
-    ⚠ **That tweak has since been taken, on the ASYNC path only (M11/P3.1).** `Send`
-    now pins and appends to a binding-side accumulator, and a send-batch thread issues
-    `_send_batch`, mirroring the Python binding; the **sync** path keeps the inline
-    `Producer_send` verbatim. It changes only the send *submission* side — the
-    completion model below is untouched and Option A (this pull pump) remains the
-    engine. It was adopted on user direction and **not** for throughput: it converts the
-    caller's block from a native one inside the core's coarse mutex (which a concurrent
-    close cannot wake) into a managed, cancellable wait, closer to Java's `send`. ⚠
-    Lettering collision: "Option A" *here* is the pull pump, while M11/P3.1's PLAN calls
-    the send-batching design "Option A" — different letterings of different questions.
-    ⚠ **M11/P4.2 — the sync path now follows this rule too.** Its `Send` still calls
-    `Producer_send` inline (the core copies key and value during the call, so the
-    caller's buffers are reusable on return), then hands `(future, latch, callback)` to
-    this pump and returns a `KafkaFuture<RecordMetadata>`; it no longer blocks in `_get`
-    on the caller's thread. The bullets below describe the async batch path; a sync send
-    is read with the singular `_get` (one record per entry, in FIFO order), freed with
-    `_destroy`, and completes a `Monitor` latch rather than a TCS, so it runs no
-    continuation on the pump.
-  - **Exactly one** pump thread does all waits via batched `get_all` — O(1)
-    threads for unbounded in-flight sends. Per result: read fields + free handles
-    on the pump (§A2), `SetResult`/`SetException`, `destroy_all` the futures.
-  - Build the TCS with `RunContinuationsAsynchronously` — otherwise a slow awaiter
-    continuation runs on the pump thread and stalls every other completion.
-  - Completion is exactly-once (guard cancelled/done, free handles on every path).
-    Cancellation is best-effort: it discards the result, it does **not** abort an
-    in-flight send.
-  - `Dispose`: stop sends → drain/fault pending → **join the pump** →
-    `flush`/`close` → release the producer `SafeHandle`. Optional fast path: if
-    `is_done` at send time, complete synchronously (a `ValueTask`, no queue).
-
-**Why (Option A's case):** `Producer_send` copies key/value **synchronously** → a
-**call-scoped pin** (§A4), and one pump batches many completions per `get_all` —
-O(1) threads for unbounded in-flight sends. (The naive `Task.Run(get)` per send
-parks a pool thread per message — sync-over-async — which the pump avoids; matches
-CLAUDE.md §11 "shared completion task, not per-message spawn" and the Python
-design.)
-
-**Option B: push callback (available *now*, not future).** The producer ABI
-*already* ships `Producer_send_async(…, callback, user_data)` (verified:
-`src/ffi/producer.rs`, `confluent_kafka.h`), firing on a per-producer dispatcher
-thread with `(RecordMetadata*, KafkaError*)`. `Send` would register a
-kept-alive Cdecl callback (§A6) + a `GCHandle`(TCS); the callback completes the
-TCS. **Zero blocked threads, per-message, no pump.**
-
-**Open decision — pull pump (A) vs push callback (B):**
-
-  - **A (pull pump)** favors **call-scoped pinning** (`Producer_send` copies
-    synchronously, §A4) + **`get_all` batching** of many completions; costs one
-    pump thread. Python makes this choice.
-  - **B (push)** favors **zero blocked threads** — but the header says
-    `send_async` **borrows** key/value *"until `callback` fires"*, so the **pin
-    lasts until completion** (weaker than A's call-scoped pin, §A4), and it's one
-    callback per send (no `get_all` batching).
-
-Not committed — decide when the producer send path is built (as CLAUDE.md §6.4
-defers the consumer's copy-out-vs-keep-alive).
+**Why:** Java completes a record's future on its I/O thread and never runs callbacks on the
+thread that calls `flush()`; the `_cb` forms plus a managed wait give exactly that, and Python
+chose them for the same reason. `RunContinuationsAsynchronously` keeps an awaiter's continuation
+from stalling every later completion.
 
 **Anti-patterns:**
 
-  - `Task.Run(get)` per send / any one-thread-per-message pattern; a `Send`
-    that blocks on `_get`/`_get_all` directly.
-  - A TCS without `RunContinuationsAsynchronously`; running **unbounded, awaited,
-    or throw-escaping** user code on the pump.
-
-    ⚠ **Amended in M14/P1** — this bullet used to read "running user code on the
-    pump" flat, which forbade the shipped delivery callback (§A6 form C). Java
-    fires its `Callback` on the producer's **background I/O thread**
-    (`Callback.java:20-21`), and the pump thread is .NET's analogue of exactly
-    that, so running one bounded piece of user code there is the *faithful*
-    design, not a violation. What remains forbidden is the thing the original
-    bullet was really about: letting an **unbounded** amount of user work attach
-    itself to the pump, `await`ing user code on it, or letting a user throw
-    escape into the pump loop. All three stay closed — the awaiter's
-    continuation is kept off the pump by `RunContinuationsAsynchronously` (the
-    first half of this same bullet), the delivery callback is a **synchronous
-    `void`** with no `await` point, and its invocation is a **total no-throw**
-    boundary guarded in one place (§A6 form C). The residual cost is stated on
-    the public surface instead of being forbidden here: a slow delivery callback
-    delays the other completions in its batch, so keep it short.
-
-    ⚠ **At-most-once residuals that belong to THIS engine rather than to form C, so
-    §A6's boundary cannot be stated without them.** They are artifacts of the
-    pull-pump's shape — a future the caller must hand to a pump, and a pump that
-    resolves futures in batches — not of the delivery callback:
-      - *the pre-enqueue window.* `Producer_send` accepts the record and returns a
-        future that must then be handed to the pump, so everything allocated in
-        between (the awaiter, its cancellation registration) sits **after** the
-        core's acceptance and **before** any possibility of reading the completion.
-        A throw there destroys the future unread and rethrows out of `Send`: a
-        record the core accepted, and may still deliver, whose notification is
-        dropped. A push engine has no such handoff and therefore no such window.
-      - *the batch abort.* The pump loop's own `catch` faults an aborted batch
-        **wholesale** — correct, and what keeps the batch's awaiters from
-        hanging — and it catches throws from **both sides** of the batch read, which
-        is what makes this residual span the completion's arrival. If the throw
-        came *after* `get_all` reported, completions had arrived for **every** index,
-        so the indices the batch loop never reached lose their delivery notification
-        even though the core did report them. If it came *before* — from the `get_all`
-        P/Invoke itself against a stale native — nothing was reported and the whole
-        batch loses it. (The batch **setup** used to belong on this side too, when the
-        three marshalling arrays were allocated per batch outside the processing `try`;
-        M11/P3.1 §12.3 made them reused fields, so that trigger is gone. The
-        **defensive bound check** preceding the read used to belong here as well;
-        M11/P3.2 §3B.3 splits an oversized group into sub-passes each bounded by the
-        arrays' capacity, so that check cannot fail and its trigger is gone too.) So,
-        unlike the pre-enqueue window above, this residual is **not** OOM-only.
-    These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
-    be enumerated on the public surface alongside the teardown paths — the enumeration
-    itself, with the counts and the comparisons between residuals, lives in one place
-    (`IDeliveryCallback`'s remarks; §A6's round-5 amendment).
-    Firing from the fault path is not a repair: on a batch aborted *after*
-    `get_all` reported, a wholesale fault cannot tell which indices already fired, so
-    firing would duplicate the notification for those — worse than the drop; where
-    nothing was reported at all (the pre-enqueue window, and a batch aborted *before*
-    the read) firing would instead invent a failure for a record the core may deliver
-    successfully. A per-index "already fired" latch is what would close the
-    after-the-read half, which an OOM-only path does not earn.
-  - Destroying the producer before joining the pump; assuming cancel aborts the
-    send; holding a managed lock across `get_all`.
+  - `Task.Run(get)` per send, or any one-thread-per-message pattern.
+  - A sync `Flush`, transaction op or `Close` that calls the blocking form (delivery callbacks would
+    run on the caller), except a mock's call from inside a sync callback the drain runs (above),
+    where a nested drain runs none.
+  - A mock `Flush` from a callback the core cannot see that waits for the reports: it waits for the
+    calling callback's own report. It completes the pending sends and returns (above).
+  - A TCS without `RunContinuationsAsynchronously`; awaiting user code on the
+    `CompletionThread`; letting a user exception escape into the drain loop.
+  - A sync wait from a callback with no `max.block.ms` deadline: it can never complete, because its
+    `cb` is queued behind the callback that waits.
+  - Destroying the producer inside `__execute_callbacks`, or before the `CompletionThread` is
+    joined; holding a managed lock across a P/Invoke the `cb` needs.
+  - An own-thread `Get()` guard (decision 39 removed D9).
 
 **Tests required:**
 
-  - `Task` resolves with `RecordMetadata` / faults with `KafkaException`.
-  - `Dispose` with sends in flight returns (doesn't hang) — the pump-join
-    regression.
-  - Cancel is safe + frees handles; high-concurrency produce doesn't starve the
-    thread pool.
+  - A record's future resolves with `RecordMetadata`, or faults with the error table's type.
+  - `Flush`, the transaction ops, `PartitionsFor` and `Close` complete through their `_cb` forms
+    on both flavors, and run no delivery callback on the caller's thread.
+  - The in-callback rules, on `KafkaProducer` and `AsyncKafkaProducer`, from a sync callback
+    and from an async one after an `await`: `Flush` throws Java's message; a queued wait ends
+    after `max.block.ms` with a retriable `KafkaException`, code 7, and the matching Python
+    message (a short `max.block.ms` in the test); `Close` returns at once and the teardown runs
+    after the drain. On the mocks, the mock rules in the `Flush` bullet above. A mock's `Flush`
+    from a callback the core cannot see completes every pending send and returns at once, with no
+    `max.block.ms` wait and no code-7 timeout; the completed sends' delivery callbacks run after
+    the calling callback returns.
+  - `Dispose` with sends in flight returns (does not hang).
+  - A token ends only the wait and frees nothing early; high-concurrency produce does not starve
+    the thread pool.
 
 ---
 

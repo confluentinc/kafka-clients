@@ -13,123 +13,116 @@
 // limitations under the License.
 
 using System;
+using System.Text;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The <c>unsafe</c> send-path marshalling for the producer's inline pull-pump (ffi §A4,
-/// PLAN §3 Option C): pins the key / value bytes <b>call-scoped</b> (the core copies them
-/// synchronously during <c>Producer_send</c>, verified <c>rust/src/ffi/producer.rs</c>), applies the
-/// absent / empty / present sentinel logic, and returns the future handle — or throws a
-/// <see cref="KafkaException"/> on a synchronous <c>out_error</c>. Lives in
-/// <c>Internal/Interop/</c> because it is the only send-path code that needs <c>unsafe</c>
-/// (the <c>fixed</c> pins + raw pointers), keeping <c>unsafe</c> quarantined here (CLAUDE.md §2).
+/// Builds a send's <c>kafka_producer_ProducerRecord_t</c> over the record's own bytes and hands it to the producer:
+/// the blocking send borrows them for the call, the async send until its hand-over.
 /// </summary>
-internal static class ProducerSendMarshal
+internal static unsafe class ProducerSendMarshal
 {
-    /// <summary>
-    /// Sends one record synchronously through <c>kafka_producer_Producer_send</c> and returns the
-    /// resulting <c>KafkaFuture_RecordMetadata_t</c> handle. The topic and the key / value buffers are
-    /// pinned only for the duration of the P/Invoke — the core copies them into the batch buffer
-    /// during the call, so the pins are released the moment this returns (ffi §A4). Sentinels
-    /// (§A4): an <b>absent</b> (<see langword="null"/>) key/value passes
-    /// <see cref="IntPtr.Zero"/> + <c>len -1</c>; an <b>empty</b> (zero-length) one passes a
-    /// <b>non-null stack sentinel</b> + <c>len 0</c> (a <c>fixed</c> over an empty span yields a
-    /// null pointer, which the core rejects for a non-negative length); a <b>present</b> one
-    /// passes the pinned pointer + its length.
-    /// </summary>
-    /// <param name="producer">
-    /// The owned producer handle. Passed as the <see cref="SafeProducerHandle"/> (not a raw
-    /// <see cref="IntPtr"/>) so the P/Invoke marshaler auto-<c>DangerousAddRef</c>/<c>Release</c>s it
-    /// around the synchronous <c>Producer_send</c> — the call-scoped guard against a concurrent
-    /// <c>Producer_destroy</c> (ffi §A2 sync-op form). A closed handle marshals to
-    /// <see cref="ObjectDisposedException"/>.
-    /// </param>
-    /// <param name="topic">The destination topic (non-null; validated by the caller).</param>
-    /// <param name="partition">The target partition, or <c>-1</c> for no hint.</param>
-    /// <param name="timestamp">The timestamp in ms, or <c>-1</c> to let the producer stamp it.</param>
-    /// <param name="key">The record key, or <see langword="null"/> for no key.</param>
-    /// <param name="value">The record value, or <see langword="null"/> for a tombstone.</param>
-    /// <returns>A non-null <c>KafkaFuture_RecordMetadata_t</c> handle on success.</returns>
-    /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
-    internal static unsafe IntPtr Send(
+    private const int MaxStackTopicBytes = 1024;
+
+    internal static IntPtr Send(
         SafeProducerHandle producer,
-        string topic,
-        int partition,
-        long timestamp,
-        ReadOnlyMemory<byte>? key,
-        ReadOnlyMemory<byte>? value)
+        in SerializedProducerRecord record,
+        IntPtr callback,
+        ref IntPtr outErr,
+        out bool sent)
     {
-        // Call-scoped topic pin: Producer_send copies the topic synchronously (ffi §A3).
-        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
-
-        ReadOnlySpan<byte> keySpan = key.HasValue ? key.Value.Span : default;
-        ReadOnlySpan<byte> valueSpan = value.HasValue ? value.Value.Span : default;
-
-        // A non-null stack sentinel for the empty (Length == 0) case: `fixed` over an empty span
-        // yields a NULL pointer, and the core rejects (null, len >= 0). Its address is guaranteed
-        // non-null, so it distinguishes empty (non-null ptr, len 0) from absent (null ptr, len -1).
-        byte emptySentinel = 0;
-
-        fixed (byte* keyPtr = keySpan)
-        fixed (byte* valuePtr = valueSpan)
+        sent = false;
+        ReadOnlySpan<byte> key = record.Key.HasValue ? record.Key.GetValueOrDefault().Span : default;
+        ReadOnlySpan<byte> value = record.Value.HasValue ? record.Value.GetValueOrDefault().Span : default;
+        byte empty = 0;
+        fixed (byte* keyData = key)
+        fixed (byte* valueData = value)
         {
-            byte* keyArg;
-            int keyLen;
-            if (!key.HasValue)
+            KafkaBytes keyBytes = new KafkaBytes(key.IsEmpty ? (IntPtr)(&empty) : (IntPtr)keyData, key.Length);
+            KafkaBytes valueBytes = new KafkaBytes(value.IsEmpty ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
+            IntPtr nativeRecord = NewRecord(
+                in record,
+                record.Key.HasValue ? (IntPtr)(&keyBytes) : IntPtr.Zero,
+                record.Value.HasValue ? (IntPtr)(&valueBytes) : IntPtr.Zero,
+                ref outErr);
+            if (nativeRecord == IntPtr.Zero)
             {
-                keyArg = null;              // absent
-                keyLen = -1;
-            }
-            else if (keySpan.Length == 0)
-            {
-                keyArg = &emptySentinel;    // empty: non-null pointer, length 0
-                keyLen = 0;
-            }
-            else
-            {
-                keyArg = keyPtr;            // present
-                keyLen = keySpan.Length;
+                return IntPtr.Zero;
             }
 
-            byte* valueArg;
-            int valueLen;
-            if (!value.HasValue)
+            sent = true;
+            try
             {
-                valueArg = null;            // absent (tombstone)
-                valueLen = -1;
+                return NativeMethods.ProducerSendWithCallback(producer, nativeRecord, callback, ref outErr);
             }
-            else if (valueSpan.Length == 0)
+            finally
             {
-                valueArg = &emptySentinel;  // empty: non-null pointer, length 0
-                valueLen = 0;
+                Destroy(nativeRecord);
             }
-            else
+        }
+    }
+
+    internal static bool SendWithHandOver(
+        SafeProducerHandle producer,
+        in SerializedProducerRecord record,
+        ref SendPins pins,
+        IntPtr callback,
+        NativeMethods.ProducerSendCallback handOver,
+        IntPtr opaque,
+        ref IntPtr outErr)
+    {
+        pins.Pin(record.Key, record.Value, out IntPtr key, out IntPtr value);
+        IntPtr nativeRecord = NewRecord(in record, key, value, ref outErr);
+        if (nativeRecord == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            NativeMethods.ProducerSendWithCallbackCb(producer, nativeRecord, callback, handOver, opaque);
+        }
+        finally
+        {
+            Destroy(nativeRecord);
+        }
+
+        return true;
+    }
+
+    private static IntPtr NewRecord(in SerializedProducerRecord record, IntPtr key, IntPtr value, ref IntPtr outErr)
+    {
+        string topic = record.Topic;
+        int partition = record.Partition ?? -1;
+        long timestamp = record.Timestamp ?? -1;
+        int capacity = Encoding.UTF8.GetMaxByteCount(topic.Length) + 1;
+        if (capacity <= MaxStackTopicBytes)
+        {
+            byte* buffer = stackalloc byte[capacity];
+            int length;
+            fixed (char* chars = topic)
             {
-                valueArg = valuePtr;        // present
-                valueLen = valueSpan.Length;
+                length = Encoding.UTF8.GetBytes(chars, topic.Length, buffer, capacity - 1);
             }
 
-            IntPtr future = NativeMethods.ProducerSend(
-                producer,
-                topicPin.Pointer,
-                partition,
-                timestamp,
-                (IntPtr)keyArg,
-                keyLen,
-                (IntPtr)valueArg,
-                valueLen,
-                out IntPtr error);
+            buffer[length] = 0;
+            return NativeMethods.ProducerRecordWithPartitionTimestampKey(
+                (IntPtr)buffer, partition, timestamp, key, value, ref outErr);
+        }
 
-            // Synchronous validation / buffer failure: null future + non-null out_error. FromHandle
-            // frees the error exactly once (null-safe) and returns null on success.
-            KafkaException? failure = KafkaException.FromHandle(error);
-            if (failure is not null)
-            {
-                throw failure;
-            }
+        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(topic);
+        return NativeMethods.ProducerRecordWithPartitionTimestampKey(
+            pinned.Pointer, partition, timestamp, key, value, ref outErr);
+    }
 
-            return future;
+    private static void Destroy(IntPtr nativeRecord)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ProducerRecordDestroy(nativeRecord, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(outErr);
         }
     }
 }

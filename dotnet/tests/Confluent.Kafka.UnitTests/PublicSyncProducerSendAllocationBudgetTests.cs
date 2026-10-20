@@ -23,34 +23,10 @@ using Xunit.Abstractions;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M11/P4 — the sync <see cref="IProducer.Send(ProducerRecord)"/> is on the send path, so the DoD §10
-/// hot-path allocation audit applies (ffi §A4, PLAN §7). The <b>marginal</b> fact asserts that
-/// <see cref="IProducer.Send"/> adds <b>no value-sized managed allocation</b>: a large value costs the
-/// same as a small one, proving the key/value bytes are pinned (via <c>fixed</c>) and copied by the core
-/// during the call, never onto the managed heap. The <b>mutation-after-send</b> fact proves the copy
-/// happened during the call (the caller may reuse/mutate its buffers the moment
-/// <see cref="IProducer.Send"/> returns). The <b>absolute</b> fact (M11/P4.2 D11) pins the whole
-/// per-send caller-thread cost, which the marginal subtraction cannot see.
+/// The send-path allocation audit for the sync <c>IProducer.Send</c>: a large value costs the same as a small one
+/// (the key and value are pinned for the call, never copied onto the heap), the caller may mutate its buffers once
+/// Send returns, and the absolute per-send caller-thread cost stays within its budget.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>What the caller thread allocates per send (M11/P4.2).</b> <see cref="IProducer.Send"/> returns once
-/// the core has accepted the record, with a <see cref="KafkaFuture{T}"/> — a struct, so it allocates
-/// nothing itself. The caller's per-send allocations are the <see cref="ProducerRecord{TKey, TValue}"/>
-/// (the test's own), the send's <c>SyncCompletion</c> latch, the pump's <c>PendingSyncSend</c> entry and
-/// the topic's call-scoped UTF-8 pin, all value-size-independent. The <see cref="RecordMetadata"/> and its strings are copied out on the
-/// send-completion pump, so the caller-thread figure does not include them; the absolute fact also
-/// reports a caller + pump figure as a second definition, without asserting it.
-/// </para>
-/// <para>
-/// <b>Measured on the caller thread</b> with <see cref="GC.GetAllocatedBytesForCurrentThread"/>. The
-/// value buffer is allocated <b>once</b> outside the measured loop and reused across sends, so any
-/// value-sized allocation would come from the send path itself, and the (large − small) subtraction
-/// cancels everything value-size-independent. The mock can't read back value bytes broker-free
-/// (integration-only), so the mutation-after-send fact asserts the send <em>completes correctly</em>
-/// (correct offsets) after the buffer is mutated and reused — the call-scoped-copy proof the mock allows.
-/// </para>
-/// </remarks>
 public sealed class PublicSyncProducerSendAllocationBudgetTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
@@ -61,12 +37,9 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     private const int SmallValueSize = 64;
     private const int LargeValueSize = 512 * 1024;
 
-    // The per-send caller-thread cost is a fixed record + latch + pump entry — value-size-independent
-    // (see the class remarks). A generous ceiling that still catches a value-sized copy (~LargeValueSize
-    // bytes per send) or a Task-scoped pin.
+    // A generous ceiling on the value-size-independent per-send cost that still catches a value-sized copy
+    // (~LargeValueSize bytes per send) or a Task-scoped pin.
     private const long PerSendBudgetBytes = 512;
-
-    // ---- Mutation-after-send (runs on every TFM; proves the core copied during the call) ----
 
     [Fact]
     public void Send_MutatingBufferAfterSend_ProducesUnchangedRecord()
@@ -81,10 +54,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             () => firstFuture = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
             s_deadline);
 
-        // Mutate the caller's buffers AFTER Send returns and BEFORE its Get. The core copied key/value
-        // into the batch synchronously DURING Producer_send (ffi §A4), so the buffers are reusable the
-        // moment Send returns — the mutation cannot affect the produced record. A second send reusing
-        // the mutated buffers succeeds independently (proving buffer reuse is safe).
+        // Mutate the buffers after Send returns and before Get: the core read them during the call, so the record is
+        // unchanged, and a second send reusing them succeeds.
         for (int i = 0; i < value.Length; i++)
         {
             value[i] = 0xFF;
@@ -108,26 +79,15 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
 
 #if NET8_0_OR_GREATER
 
-    // GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
-    // test (net462 runs are Windows/CI-only) — so the budget facts + their helpers are net8.0+ only,
-    // keeping the net462 TFM smoke leg compiling.
+    // GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, so the budget facts are net8.0+ only.
 
-    // M11/P4.2 D11 — the ABSOLUTE per-send caller-thread budget of the sync Send. Definition: the bytes
-    // GC.GetAllocatedBytesForCurrentThread charges to the sending thread per plain Send(record) (no
-    // callback) on an auto-completing MockProducer, over SendCount sends with a 64 B value, best of
-    // AbsoluteMeasurementAttempts; each attempt's futures are waited on outside the measured window.
-    // MEASURED: 272 B/send on BOTH net8.0 and net10.0 (17408 B over 64 sends, 3 runs per TFM, every run
-    // identical) at M11/P4.2 S4 — the ProducerRecord (64 B), the SyncCompletion latch (48 B), the topic's
-    // call-scoped UTF-8 pin for this 21-character topic (120 B: Utf8Marshal.Pin's encoded bytes plus
-    // their NUL-terminated copy) and, by difference, the pump's PendingSyncSend entry (40 B); the first
-    // three were measured one by one on net8.0. RecordMetadata is no longer here: the pump copies it out,
-    // which only the caller + pump figure the test reports can see. The budget is that plus 16 B (M11/P4.2 D11, the P3.6 D11 (a) precedent), which is less than one boxed
-    // KafkaFuture<RecordMetadata> (24 B). The two TFMs agree, so one constant serves both.
+    // The absolute per-send caller-thread budget of a plain Send(record) on an auto-completing mock, over SendCount
+    // sends with a 64 B value, best of AbsoluteMeasurementAttempts, each attempt's futures waited on outside the
+    // measured window.
     private const long AbsolutePerSendBudgetBytes = 288;
 
-    // Best of N, as the async fast-path budget (PublicProducerSendAllocationBudgetTests): an absolute
-    // figure has no matched pair to cancel an occasional growth allocation on the caller thread (the
-    // pump queue's ConcurrentQueue segment), so it needs a growth-free run among the attempts.
+    // Best of N: an absolute figure has no matched pair to cancel an occasional growth allocation, so it needs a
+    // growth-free run among the attempts.
     private const int AbsoluteMeasurementAttempts = 8;
 
     private readonly ITestOutputHelper _output;
@@ -140,9 +100,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     [Fact]
     public void Send_AbsoluteCallerThreadBudget()
     {
-        // The marginal fact below subtracts every value-size-independent per-send cost away, so it cannot
-        // see one more object per send — a boxed KafkaFuture<RecordMetadata> (24 B), for instance. This
-        // one can: it is the whole caller-thread cost, against a budget of the measured figure + 16 B.
+        // The marginal fact cancels every value-size-independent cost, so it cannot see one more object per send;
+        // this one measures the whole caller-thread cost.
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
@@ -151,7 +110,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         // Pre-allocated OUTSIDE every measured window; storing a struct into it allocates nothing.
         KafkaFuture<RecordMetadata>[] futures = new KafkaFuture<RecordMetadata>[SendCount];
 
-        // Warm up (JIT, the pump's start, the queue's first segments) so the measured runs are steady-state.
+        // Warm up so the measured runs are steady-state.
         for (int i = 0; i < 3; i++)
         {
             _ = SendAndMeasureCallerThread(producer, value, key, futures);
@@ -166,10 +125,9 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             callerBytes = Math.Min(callerBytes, measured);
         }
 
-        // Second definition, REPORTED ONLY (not asserted): every thread's allocations — caller + pump
-        // (the pump copies RecordMetadata and its strings out) — from before the first send to after the
-        // last Get, best of the same N. Process-wide, so a concurrently running test can inflate an
-        // attempt; the minimum is the quiet one.
+        // A second definition, reported and not asserted: every thread's allocations, the completion thread's
+        // included, from before the first send to after the last Get, best of N. Process-wide, so the minimum is the
+        // quiet attempt.
         long totalBytes = long.MaxValue;
         for (int attempt = 0; attempt < AbsoluteMeasurementAttempts; attempt++)
         {
@@ -261,8 +219,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             futures[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
         }
 
-        // The pump copies each send's metadata out BEFORE it opens that send's latch, so once the last
-        // Get returns every pump-side allocation for these sends has happened.
+        // Each send's metadata is copied out before its future completes, so the last Get returns after those copies.
         GetAll(futures);
         return GC.GetTotalAllocatedBytes(precise: true) - before;
     }

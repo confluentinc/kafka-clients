@@ -32,28 +32,31 @@ layer.
 **One call, end to end** (mechanics → ffi-marshalling.md):
 
 ```
-producer.Send(record)  ──►  ValueTask<AsyncKafkaFuture<RecordMetadata>>   (await → accepted · await future.Get() → delivered)
-   validate args · pin key/value · make TaskCompletionSource
-        │  P/Invoke: NativeMethods.Producer_send(handle, …, out err) → future handle
-        │  completion pump blocks on get_all(), completes each TCS
-        │    (Option A — pull-pump shown; the producer's completion model is
-        │     OPEN, push is Option B — ffi §A7. The consumer is push-only, no pump.)
+producer.Send(record)  ──►  ValueTask<AsyncKafkaFuture<RecordMetadata>>   (await → handed over · await future.Get() → delivered)
+   validate args · serialize · pin key/value · Callback_new (self = the record's state)
+        │  P/Invoke: kafka_producer_Producer_send_with_callback_cb(view, record, callback, cb, opaque)
+        │  the handover cb unpins; the first stage completes in Send when the producer takes or refuses
+        │    the record at once, else in the cb on the CompletionThread. Later on_completion runs the user
+        │    callback, then the record's KafkaFutureImpl completes, on the CompletionThread (ffi §A1, §A6,
+        │    §A7). The consumer and admin use the same queue.
         ▼
-   C ABI  kafka_producer_Producer_send / _get_all   (flat pointers, out-params)
+   C ABI  kafka_producer_Producer_send_with_callback_cb / _Producer__execute_callbacks   (flat pointers, out_err)
         ▼
-   Rust   Producer::send(ProducerRecord) → KafkaFuture<RecordMetadata>   (the logic)
+   Rust   Producer::send(ProducerRecord, Callback) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
 **Status:** The C ABI exposes the **producer** and **consumer**. Every blocking op
 has a blocking form and a `_cb` twin, whose completion is queued for the client's
-`__execute_callbacks` (M19/P1, the `0035d9ff` ABI); instantaneous ops are sync-only by design
+`__execute_callbacks` (M19/P1; the `851c8d95` ABI, ledger 65), except that the
+producer's `send_cb` and `send_with_callback_cb` complete inside the call when the producer takes
+or refuses the record at once (`ffi-marshalling.md` §A1); instantaneous ops are sync-only by design
 (`assignment`/`subscription`/`paused`/`client_id`/`group_metadata`/`wakeup`/
 `enforce_rebalance`). `current_lag` and `seek_with_metadata` are also sync-only and
 are now **shipped as sync members** (M5/P7): `CurrentLag` is a genuine non-blocking
 local read, and both `Seek` overloads ship sync for Python parity — a deliberate §4
-divergence, not a gap. Only `close_with_timeout` remains sync-only yet **blocks in
-Java** with no timed *async* form — a **gap**, not a design choice (so there is no
-timed *async* close, §4 Disposal). ⚠ `Consumer_commit_async`
+divergence, not a gap. The consumer's timed close, Java's `close(CloseOptions)`
+(`close_with_options` and its `_cb` twin), is not exposed in .NET yet (§4
+Disposal). ⚠ `Consumer_commit_async`
 is Java's `commitAsync` — a *sync* call returning `KafkaError*`, **not** a push
 variant (the push variant of `commitSync` is `commit_sync_async`);
 `poll_async` is the only `_async` fn taking a timeout. The admin client is exposed
@@ -162,21 +165,33 @@ public class KafkaException : Exception {        // flat, for now (§4, ffi §A5
 public interface IDeliveryCallback {              // Java `Callback` (producer); M14/P1 — see §4
     // SYNC `void`, like Java's onCompletion. `metadata` is NON-nullable (Java's user callback never
     // sees null — the -1 placeholder is substituted on failure); `exception` null == success.
-    void OnCompletion(RecordMetadata metadata, KafkaException? exception);
+    // `exception` is the error table's type: a `KafkaException`, a .NET built-in for the Java
+    // built-ins, or the same instance a user callback threw.
+    void OnCompletion(RecordMetadata metadata, Exception? exception);
+}
+
+public interface IAsyncDeliveryCallback {          // Java `Callback`, async form (M19/P1)
+    // On IAsyncProducer only. Called on the pump thread; the pump does not wait for the Task.
+    // Every later completion of the producer waits until this Task ends; the record's future completes then.
+    Task OnCompletion(RecordMetadata metadata, Exception? exception);
 }
 
 public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable {   // Java `Producer<K,V>`
     // method names mirror Java — no `Async` suffix; the interface carries the async distinction
-    // outer = admission (Java's send blocking, never parks a thread — M11/P3.5); inner = the Future —
+    // outer = the handover (Java's send blocking; completes at the core's handover cb, never parks a thread); inner = the Future —
     // AsyncKafkaFuture<RecordMetadata>, a readonly struct whose Get() is the delivery Task (M11/P3.6)
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
     // Java's SECOND send signature — send(record, Callback) STILL returns the Future, so the callback
     // is an ADDITIONAL parameter, not an alternative (M11/P8 D-6 shape: declared identically on both
-    // producer interfaces, no shared base). Fires on the pump thread, before the delivery Task completes (§4).
+    // producer interfaces, no shared base). Fires on the producer's completion thread, before the record's future completes (§4).
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback,
+        CancellationToken cancellationToken = default);
+    // Java has no async callback; Python's async producer takes an `async def` one (M19/P1).
+    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IAsyncDeliveryCallback callback,
         CancellationToken cancellationToken = default);
     Task Flush(CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);
+    Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);   // Java close(Duration) (M19/P1)
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
     IReadOnlyDictionary<MetricName, IMetric> Metrics();   // Java metrics() — NON-blocking, so it stays SYNC (M11/P8)
 }
@@ -186,12 +201,12 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 }
 
 // The sync `IProducer<TKey,TValue>` (sync mirror) is **shipped** (M11/P4), generic-only (M11/P5):
-// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns on acceptance (blocks only while
+// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns once the record is registered (the blocking `send_with_callback`; it blocks only while
 // the core waits for metadata or for buffer.memory, ≤ max.block.ms); future.Get() = Java send(record).get() (M11/P4.2);
 // KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, IDeliveryCallback) — Java's second send
-// signature, the callback fired on the send-completion pump thread before Get() returns (M11/P4.2); void Flush() /
-// Close(); IReadOnlyList<PartitionInfo> PartitionsFor(string); IReadOnlyDictionary<MetricName, IMetric>
-// Metrics() (M11/P8). Real + mock: KafkaProducer / MockProducer.
+// signature, the callback fired on the producer's completion thread (`confluent-kafka-producer-completion`) before Get() returns; void Flush() /
+// Close(); void Close(TimeSpan) (M19/P1); IReadOnlyList<PartitionInfo> PartitionsFor(string);
+// IReadOnlyDictionary<MetricName, IMetric> Metrics() (M11/P8). Real + mock: KafkaProducer / MockProducer.
 // `Metrics()` and the callback-taking `Send` are declared IDENTICALLY on both producer interfaces —
 // there is deliberately **no** `IProducerCommon` for them (M11/P8 decision D-6; the asymmetry with the
 // consumer's `IConsumerCommon` is recorded rather than typed away). Both are **public-API additions**
@@ -210,7 +225,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
         bool autoComplete = true);
     public bool CompleteNext();
-    public bool ErrorNext(int code, string? message = null);
+    public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); Get and the callback see the same instance
     public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
 }
@@ -220,9 +235,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **no
 longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
-`send(record, Callback)` never needed the ABI at all — M14/P1 shipped it as a
-**managed-only** callback over the completion the binding already reads, ffi §A6
-form C):
+`send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10):
 `ProducerRecord.headers()`, `RecordMetadata`'s serialized-size / `has*` accessors,
 and `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
@@ -232,11 +245,9 @@ ABI grows to cover it.
 
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke
-(no per-record callback through the ABI, `CLAUDE.md §11` — and M14/P1's delivery
-callback does not change that: it is **managed-only**, ffi §A6 form C); the
-serialized bytes flow
-into the *already-shipped* send/pump stack (an internal `SerializedProducerRecord`
-carrier; zero new `[DllImport]`). Three decisions:
+(no serializer callback through the ABI, `CLAUDE.md §11`; the per-record `Callback_t` is the
+delivery callback, not a serde, ffi §A6); the serialized bytes flow into the record that
+`ProducerRecord_new*` builds (an internal `SerializedProducerRecord` carrier). Three decisions:
 
   - **Invoke-on-null (Java-faithful).** The serializer is **always invoked**, even for
     a `null` `TKey`/`TValue` (Java `KafkaProducer.doSend` calls `serialize(topic, …,
@@ -487,17 +498,17 @@ its C# realization, and where the enforcing rule lives.
 
 | Java | C# idiom | Rule / detail |
 |---|---|---|
-| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7; the sync producer's latch is completed by the same pull-pump (M11/P4.2); admin: one completion per key, ffi §B6 shape 4 (M15/P14) |
-| `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<AsyncKafkaFuture<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (admission, completes on acceptance, no thread parked), the inner `AsyncKafkaFuture` is the `Future` (`await future.Get()` = Java's `future.get()`); on `IProducer` it is `KafkaFuture<RecordMetadata>` — `Send` is the block (the core's inline accept, ≤ `max.block.ms`), `future.Get()` is the `Future` (M11/P4.2) | M11/P3.5, M11/P3.6, M11/P4.2, ffi §A1 |
+| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. | a `KafkaFutureImpl` (decision 4a) completed on the client's drain thread — producer ffi §A7, consumer ffi §B7; admin: one completion per key, ffi §B6 shape 4 (M15/P14) |
+| `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<AsyncKafkaFuture<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (it completes at the core's handover `cb`; no thread parked), the inner `AsyncKafkaFuture` is the `Future` (`await future.Get()` = Java's `future.get()`); on `IProducer` it is `KafkaFuture<RecordMetadata>` — `Send` is the block (the blocking `send_with_callback`, ≤ `max.block.ms`), `future.Get()` is the `Future` (M11/P4.2) | M11/P3.5, M11/P3.6, M11/P4.2, ffi §A1 |
 | **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`pause`/`resume`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7. ⚠ `seek` also blocks in Java but ships **sync** (Python parity, M5/P7 §4 divergence — see **Stays sync**) |
-| `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
+| `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close, then join the client's drain thread, wait for the in-flight uses, and destroy on the closing thread — §4 **Close/Dispose**; ffi §A7, §B2 |
 | `KafkaException` hierarchy | `KafkaException` has `Code` and `IsRetriable`. There is no `IsFatal`: the C ABI has no such predicate. The Java built-in exceptions map to .NET built-ins: `ConcurrentModificationException` and `IllegalStateException` → `InvalidOperationException`; `IllegalArgumentException` → `ArgumentException`; `java.util.concurrent.TimeoutException` → `System.TimeoutException`. Every other core error is a `KafkaException` with its code. A managed exception that went through the core as a `local_callback` error comes back as the same instance. Typed subclasses may be added later; they must derive from `KafkaException`. | ffi §A5 |
 | `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException`, sync and async, with the core's message (decision 17). A later `ConcurrentModificationException : InvalidOperationException` would be non-breaking. | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, plus `ConsumerRebalanceListenerBase` carrying Java's `onPartitionsLost` default; registered by the `Subscribe(topics, listener)` overload (M9/P6 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback is a sync C fn pointer returning `KafkaError*`, the rebalance blocks on it, and it fires on the core's **dispatcher thread**. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)`; passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback returns `void` and fires on the core's **dispatcher thread**. See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
-| `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**) | ⚠ **not the caller's task, and NOT an ABI callback at all** — it is **managed-only** (ffi §A6 **form C**: nothing crosses the C boundary, zero new `[DllImport]`, the pull-pump unchanged). Fires on the producer's send-completion **pump thread** on both surfaces (the sync surface fired inline on the caller's until M11/P4.2), **before** the **delivery** awaiter is released / `Get()` returns (unordered relative to acceptance), with **non-null** `-1` placeholder metadata on failure. See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
+| `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncDeliveryCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
@@ -533,13 +544,13 @@ where it is needed, in one concise code comment (§4 Comments).
 | Decision | Default | Why / when |
 |---|---|---|
 | **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
-| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` (no `Async` suffix — mirrors Java; the timed *consumer* close is deferred, §1). *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close(TimeSpan)` over the sync `kafka_admin_AdminClient_close`. | first client type |
-| **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `dotnet/.claude/rules/bindings.md §2`). | first async method |
+| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` (no `Async` suffix — mirrors Java; the timed *consumer* close is deferred, §1). The producer has it (M19/P1, ledger 82): `void Close(TimeSpan)` on `IProducer` and `Task Close(TimeSpan, CancellationToken)` on `IAsyncProducer`, over `kafka_producer_Producer_close_with_timeout_cb`. The timeout bounds the drain of the queued sends and the close; the delivery reports are then awaited without a bound, as Java's `close(Duration)` joins its I/O thread. A negative timeout throws `ArgumentOutOfRangeException` with Java's message, "The timeout cannot be negative.", on `KafkaProducer` and `AsyncKafkaProducer`, before the closed check, as in Java; the mocks close as for zero, as Java's mock never reads the timeout. `TimeSpan.Zero` is valid. Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close(TimeSpan)` over the sync `kafka_admin_AdminClient_close`. | first client type |
+| **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** the `Send` token never cancels the record. Already cancelled at the call: `Send` throws `OperationCanceledException` and nothing is sent. If it fires while a queued record waits, the first stage (the `ValueTask` that hands back the future) still waits for the hand-over, up to `max.block.ms`, then ends with `OperationCanceledException` carrying the token, whatever the outcome, as Python's `send` does. A record the producer took is still sent, and its delivery callback fires once; a record `Close` fails runs none. After the hand-over, and for a record taken or refused inside the call, the token does nothing. `Get(token)` ends only that wait, and `Cancel(bool)` on a send's future returns `false` (Java's `FutureRecordMetadata`). CKD's token cancels the one Task it returns. **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `dotnet/.claude/rules/bindings.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `byte[]?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and wrapping any serializer throw in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread — Java-contract fidelity, not a foreign-thread UB guard). No per-record callback through the ABI (`CLAUDE.md §11`) — M14/P1's delivery callback is **managed-only** and does not change that (ffi §A6 form C). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `byte[]?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and wrapping any serializer throw in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread — Java-contract fidelity, not a foreign-thread UB guard). No serializer callback through the ABI (`CLAUDE.md §11`); the per-record `Callback_t` is the delivery callback, not a serde (ffi §A6). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
 | **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). The first such subclass is shipped: **`SerializationException : KafkaException`** (M6/P1a) — a flat Java-parity subclass the built-in serdes throw on malformed input; catchable as `KafkaException`. | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
@@ -598,7 +609,7 @@ Java's `KafkaFutureImpl` format. `BaseFunction` and `BiConsumer` are delegates n
   `OperationCanceledException`.
 - A send's future is the same type. Its `Cancel(bool)` returns `false` and changes nothing, and
   `IsCancelled` is `false`, as Java's `FutureRecordMetadata`. Nothing cancels a send's future:
-  the `Send` token ends only the caller's await of the first stage (§4 Cancellation row), and
+  the `Send` token acts only on the first stage (§4 Cancellation row), and
   `Get(token)` ends only that wait.
 
 `ThenApply` functions and `WhenComplete` actions run where the future completes: the producer's
@@ -649,8 +660,7 @@ stricter than Python.
 a sync entry point, wrapping the sync call in `Task.Run` would be sync-over-async
 (forbidden, ffi §B7). `current_lag` / `seek_with_metadata` are **now shipped as sync
 members** (M5/P7, per the divergence above — a sync member calling the sync ABI
-directly is not sync-over-async). Only `close_with_timeout` remains an un-honorable
-gap (no timed *async* close), a **Mode B** (§6.3) item, not a judgment call.
+directly is not sync-over-async).
 
 ⚠ **§4 divergence — the rebalance listener is SYNC, and runs on the core's dispatcher
 thread (M9/P6).** `IConsumerRebalanceListener`'s three methods return `void`, not
@@ -713,106 +723,77 @@ deliberately stricter than the reference, recorded rather than silent. Note the
 **other** overload is deliberately *not* stricter — `CommitAsync(offsets, null)`
 **is** honoured, as Java's `commitAsync(Map, null)`.
 
-⚠ **§4 divergence — the delivery callback is SYNC, and the callback-taking `send`
-is kept ALONGSIDE the `Task` (M14/P1).** `IDeliveryCallback.OnCompletion` returns
-`void`, not `Task`, on both producer flavors, and both `IProducer` and
-`IAsyncProducer` carry a **second** `Send` overload taking it — declared
-identically on each, no shared base (the M11/P8 D-6 `Metrics()` precedent). The
-sync-vs-async table's third row is what permits keeping it: Java's second `send`
-signature *still returns the `Future`* (`Producer.java:86`), so the callback is an
-**additional** parameter rather than an alternative, and it fires at a point no
-`Task` continuation can occupy. Unlike the two consumer callback divergences this
-is **not** an ABI-shape divergence at all: nothing new crosses the C boundary
-(ffi §A6 **form C** — a managed-only callback, zero new `[DllImport]`, the
-pull-pump untouched). Seven parts, each decided against the Java source:
+⚠ **§4 divergence — the delivery callback is SYNC (with an async form on `IAsyncProducer`,
+M19/P1), and the callback-taking `send` is kept ALONGSIDE the future (M14/P1; mechanism changed
+in M19/P1).** `IDeliveryCallback.OnCompletion` returns `void`, not `Task`, and both `IProducer`
+and `IAsyncProducer` carry a **second** `Send` overload taking it, declared identically on each,
+with no shared base (the M11/P8 D-6 `Metrics()` precedent). Java's second `send` signature
+*still returns the `Future`* (`Producer.java:86`), so the callback is an **additional** parameter,
+not an alternative. Since M19/P1 it crosses the ABI as one `Callback_t` per record (ffi §A6,
+decision 10). The parts, each decided against the Java source:
 
-- **Thread.** It runs on the producer's send-completion **pump thread** — .NET's
-  analogue of the "background I/O thread" Java documents (`Callback.java:20-21`) —
-  on **both** surfaces (the sync surface ran it inline on the caller's thread until
-  M11/P4.2). So this is `void` for a *stronger* reason than
-  the consumer's two: an `await`ed callback would stall every other completion in
-  the same pump batch.
-  ⚠ **Sub-divergence retired (M11/P4.2).** Until M11/P4.2 the sync surface had no
-  pump, so one `IDeliveryCallback` instance handed to concurrent sync `Send` calls
-  was entered on N caller threads at once — a divergence from Java, whose callbacks
-  all run on one I/O thread. The sync surface now completes on the producer's single
-  pump thread too, so one producer's callbacks never overlap each other on either
-  surface. What can still overlap is stated in `IDeliveryCallback`'s remarks: the
-  async send-batch thread's per-record rejection against the pump, and one instance
-  shared across two producers (one pump each).
+- **Thread.** It runs on the producer's completion thread (`confluent-kafka-producer-completion`
+  or `confluent-kafka-producer-pump`), .NET's analogue of the "background I/O thread" Java
+  documents (`Callback.java:20-21`), on both surfaces: inside `__execute_callbacks`, or, on
+  `IAsyncProducer`, as a chain step behind a running async callback (ffi §A6). So one
+  producer's callbacks never overlap each other. A callback still pending when the producer is
+  destroyed runs on the thread that destroys it (§4 **Close/Dispose**). The sync form is `void`,
+  so the pump never waits on it past its return. The async form (below) returns a `Task`; the
+  pump thread does not wait for it, but every later completion of the producer waits until it
+  ends. One instance shared across two producers can run on both threads at once.
 - **Ordering.** It runs **before** the delivery awaiter is released / before `Get()` returns,
-  mirroring `ProducerBatch.java:303-323` (value set → callbacks → `done()`).
-  **Stricter than Python**, which resolves its future first
-  (`producer.py:322-327`), so a Python awaiter can be released before the callback
-  runs.
-- **Non-null metadata.** The delivered `RecordMetadata` is **never null** — on the
-  failure path it is Java's `-1` placeholder
-  (`KafkaProducer.java:1597-1599`, contract at `Callback.java:28-33`), carrying the
-  topic and the record's explicit partition (or `-1`; the core's error has no
-  resolved partition — a recorded deviation from Java's `topicPartition()`). Also
-  **stricter than Python**, whose `on_delivery` receives `None` on failure.
-- **Which outcomes fire it.** A throw *out of* `Send` fires **nothing** (Java's
-  `doSend` re-throws from its terminal catches without invoking the callback,
-  `KafkaProducer.java:1069-1081`); a send whose completion the binding **reads**
-  does fire, success or failure. Those two clauses are not complements: a record
-  can be accepted by the core and still never have its completion read. Which
-  throws sit on which side of that line is enumerated once, under **Recorded
-  residuals** in `IDeliveryCallback`'s remarks — do not restate it here. There is
-  **no analogue of Java's `catch (ApiException)` row** ("callback fires *and* a
-  failed future is returned without throwing", `:1056-1068`) — the core surfaces
-  those through the record's future, not the synchronous out-param. That is a
-  deviation forced by the ABI, not a choice. Since M11/P4.2 the sync surface matches
-  that row's *outcome*, as the async surface already did: `Send` returns, the
-  callback fires (on the pump, not the caller), and the future's `Get()` throws.
-- **Exactly-once, per record.** Invoked unconditionally, never gated on
-  `TrySetResult`'s `bool`, so a send whose delivery `Task` was already canceled still gets
-  its notification (CLAUDE.md §9.5; Python states the same obligation,
-  `producer.py:301-303`). **Recorded residuals** (the public guarantee is scoped to
-  exactly these, ffi §A6 form C's at-most-once boundary): a send whose core
-  completion the binding never turns into a result does not fire. *Teardown* shapes —
-  a send that raced the pump's gate closing, and a send drained from the pump's queue
-  at close (Python's `close()` likewise cancels its pending futures without invoking
-  `on_delivery`). *Non-teardown* shapes — unexpected-failure windows belonging to the
-  pull-pump engine, **before** the send reaches the pump and **on** it. *Before:* an
-  allocation failure between the accepting `Producer_send` and the handoff to the pump
-  destroys the future unread and rethrows — so it surfaces as a *throw* out of `Send`
-  for a record the core **had** accepted, which is why the "which outcomes fire it"
-  bullet above may not equate "throws" with "nothing was sent". *On the pump:* a
-  failure between the handoff and the callback, on **either side** of the
-  completion's arrival — after it, the indices of a resolved batch not yet reached
-  are faulted although the core *did* report for all of them; before it, the batch's
-  read never reported at all, and that half does not need an allocation failure to be
-  reachable (a stale or mismatched native surfaces an
-  `EntryPointNotFoundException` out of the pump's first batched read). Firing from the
-  fault path repairs none of them — where completions had arrived, the batch
-  path faults wholesale and cannot tell which indices already fired, so firing would
-  *duplicate* the notification for those, and a duplicate is worse than a drop under
-  an exactly-once obligation; where none had (the pre-handoff window, and the pump
-  window's before half) firing would invent a failure for a record the core may still
-  deliver. Since M11/P4.2 the **sync** surface completes on the same pump, so every
-  residual class applies to it too; its sites are enumerated with the async ones in
-  `IDeliveryCallback`'s remarks. The wording here under-stated the boundary in
-  successive M14/P1 review rounds
-  — first by naming only teardown, then by scoping the pump's window to *after* the
-  completion arrived — and each *re-scoping* of a comparative clause produced the next
-  round's stale one. ffi §A6 form C therefore states the *method*
-  (walk every faulting/throwing site after the ABI accepts the record, through every
-  frame the future passes on both threads) rather than a list to recall, and its
-  single-source rule puts the **enumeration, the counts and the comparisons between**
-  residuals in exactly one place — `IDeliveryCallback`'s remarks. This bullet states
-  the shapes and points there; it is deliberately not a second copy of that
-  enumeration, and neither is any code-side note.
-- **Throwing is not meaningful.** As with `IOffsetCommitCallback` there is no error
-  return channel, so an exception is traced to `System.Diagnostics.Trace` and
-  **swallowed** (Java logs and swallows, `ProducerBatch.java:318-320`; so does
-  Python). The guard sits in one shared invocation helper, so a throwing callback
-  cannot fault the other records in its batch.
+  mirroring `ProducerBatch.java:303-323` (value set → callbacks → `done()`), as Python
+  does (`_complete` runs the callback, then `complete_record`).
+- **Non-null metadata.** The delivered `RecordMetadata` is **never null**: on the failure path it is
+  Java's `-1` placeholder (`KafkaProducer.java:1597-1599`, contract at `Callback.java:28-33`), as
+  the core delivers it (offset -1, `rust/src/ffi/producer/callback.rs:29-30` at `0035d9ff`).
+  Python's `on_delivery` receives `None` on failure, so this is stricter than Python.
+- **Which outcomes fire it.** Every record the core accepted fires it exactly once, success or
+  failure. A record rejected before the append fires nothing: the sync `Send` throws, and the
+  async `Send`'s first stage faults. When the send reports an error, the callback may still
+  fire later, once, if the record reached the accumulator (Java's `doSend` appends the record
+  with its callback before `maybeAddPartition` fails; BH:38221-38227, BH:38251-38254). So an
+  error from `Send` does not prove the callback will not fire. A record that `Close` fails while
+  it waits for metadata or buffer memory ("Producer closed while send in progress") fires
+  nothing (ledger 70): Java's `doSend` rethrows that `KafkaException` without the callback.
+- **Exactly-once, per record.** Invoked unconditionally, also for a record whose `Get` wait was
+  abandoned (CLAUDE.md §9.5). The pull-pump's recorded residuals (teardown and pump-window drops)
+  are gone with the pump: the core fires every accepted record's callback, at the latest during
+  destroy, which runs on the closing thread (§4 **Close/Dispose**).
+- **A `Get()` from inside the callback** on the record's own future waits, and never returns, as
+  in Java and Python (decision 39). `Get(TimeSpan)` and `Get(token)` end as usual.
+- **Throwing.** An exception the callback throws is reported to the core through `local_callback`
+  (the core logs it and leaves the record's outcome unchanged) and written once to
+  `System.Diagnostics.Trace` (decision 20). It never faults the record's future or another
+  record.
 - **Null callback rejected** (`ArgumentNullException`) although Java accepts
   `send(record, null)` (`KafkaProducer.java:1058` guards `if (callback != null)`).
   Exactly the `CommitAsync(callback)` sub-divergence above, and here it points only
   one way: the plain `Send(record)` overload already spells "no callback", so — unlike
   `commitAsync(Map, null)` — there is no second parameter that would make a
   null-accepting form non-redundant.
+
+**The async form (M19/P1, ledger 47).** `IAsyncProducer` also takes `IAsyncDeliveryCallback`,
+whose `OnCompletion` returns `Task`, as Python's async producer accepts an `async def`
+callback. Java has no async form, and `IProducer` takes the sync callback only. The pump calls
+it and does not wait for its `Task`. While its `Task` runs, every later completion of the
+producer waits behind it, in completion order, whatever callback its send has (async, sync or
+none), as Python's does; the producer keeps one such queue (Python keeps one per event loop).
+When the `Task` ends, on the pump: the callback is reported through
+`kafka_producer_Producer__set_callback_result`, a fault or a cancel as a `local_callback`
+error carrying the exception, traced once; then the record's future completes; then the next
+queued completion is handled. The record's outcome does not change. `Close` waits for the
+report; `Flush` and a transaction commit or abort wait for it when they succeed. From inside
+the callback on `AsyncKafkaProducer`, after an `await` too: `Flush` throws Java's "may lead to
+deadlock" message; `Close` closes with a 0 ms timeout and Java's warning, and returns at once; a
+transaction commit or abort fails after `max.block.ms` with a retriable `KafkaException`, code 7.
+`AsyncMockProducer`'s Java mock has no such rules, but after an `await` the core cannot see the
+callback. There `Close` returns at once; `Flush` completes the mock's pending sends and returns
+without waiting for their reports, as Java's and Python's mock `flush()` do
+(`ffi-marshalling.md` §A7); and a commit or an abort ends with the same code-7 timeout, a
+recorded deviation. A callback that awaits
+`Get()` of its own record, or of any later record of the producer, never ends. A `null`
+callback throws `ArgumentNullException`, and `Send(record, null)` does not compile.
 
 ⚠ **§4 reentrancy row — `ConsumerHandle` is host scaffolding that restores a Java
 behavior, not new API surface (M9/P8; DoD #7).** `ConsumerHandle` and
@@ -935,10 +916,10 @@ Index:
 **Part A · Producer** (end to end)
 - §A1 Thread model · §A2 Handle ownership (`SafeHandle` vs transient) ·
   §A3 String marshalling (UTF-8, the shared mechanism) · §A4 Zero-copy — send
-  (call-scoped pin) · §A5 Error model (flat `KafkaException` + preconditions) ·
-  §A6 Callback marshalling (three forms: `RecordMetadata_copy`, the `*_async`
-  completions, and the **managed-only** delivery callback that never crosses the
-  ABI) · §A7 Async completion (pull-pump *vs* push — open)
+  (call-scoped pin; the async send pins until the handover) · §A5 Error model
+  (flat `KafkaException` + preconditions) ·
+  §A6 Callback marshalling (the `_cb` completions and the per-record `Callback_t`) ·
+  §A7 Async completion (`KafkaFutureImpl`, `Completion`, the in-callback rules)
 
 **Part B · Consumer** (end to end)
 - §B1 Thread model · §B2 Handle ownership (owned container + borrowed view) ·
@@ -1084,8 +1065,8 @@ touch the public Java shape (§3/§4).
 - Unit tests hold a `MockProducer` / `MockConsumer` (manual-drive via
   `complete_next`/`error_next` and `add_record`/`set_poll_error`), and `await` the
   returned `Task` with a timeout — the timeout doubles as the **completion /
-  deadlock regression guard** (the producer pull-pump's join; the consumer/push
-  dispatcher hand-off)
+  deadlock regression guard** (the producer's `CompletionThread` hand-off; the
+  consumer/push dispatcher hand-off)
 - **TFM-matrix smoke test**: the binding loads and a `MockProducer` / `MockConsumer`
   round-trip on **net462** (via netstandard2.0), **net8.0**, **net10.0**
 - Parity obligations (`definition-of-done.md §3`): mirror the Java/Rust tests,

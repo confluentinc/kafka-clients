@@ -18,60 +18,27 @@ using System.Globalization;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A typed record to publish to a topic — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.ProducerRecord&lt;K, V&gt;</c>, passed to
-/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/> /
-/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue})"/> (and their
-/// <see cref="IDeliveryCallback"/>-taking overloads).
-/// The producer serializes <typeparamref name="TKey"/> / <typeparamref name="TValue"/> to bytes
-/// with the serializers supplied to its constructor (M11/P5).
+/// A record to send to a topic, Java's <c>org.apache.kafka.clients.producer.ProducerRecord&lt;K, V&gt;</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Generic-only (M11/P5, PLAN §3.1).</b> The producer surface is generic-only, mirroring the
-/// consumer's M6/P1b conversion — there is no bytes-specialized sibling. Bytes users write
-/// <c>ProducerRecord&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>.
-/// </para>
-/// <para>
-/// <b>Clipped to today's ABI (CLAUDE.md §3).</b> The current <c>kafka_producer_Producer_send</c>
-/// takes topic / partition / timestamp / key / value only, so this omits Java's <c>headers()</c> —
-/// the ABI's send path has no headers field. It arrives additively when the ABI grows to carry it.
-/// </para>
-/// <para>
-/// <b>Three-state key / value (PLAN §3.4).</b> <see cref="Key"/> / <see cref="Value"/> are
-/// <c>TKey?</c> / <c>TValue?</c>: a <see langword="null"/> (reference) key/value is handed to the
-/// serializer unchanged (Java-faithful — the serializer is <b>always</b> invoked, even on null),
-/// and the serializer's <c>byte[]?</c> return drives the wire sentinel — <see langword="null"/>
-/// bytes → an absent field (no key / tombstone), empty bytes → present-but-empty. For a value type
-/// <c>T</c> (e.g. <c>ProducerRecord&lt;string, long&gt;</c>), <c>T?</c> is the default-nullable
-/// annotation, <b>not</b> <c>Nullable&lt;T&gt;</c> — a <c>0L</c> value is a present value, not a
-/// tombstone; a user needing a value-type tombstone uses a nullable value type (e.g.
-/// <c>&lt;string, long?&gt;</c>) with a matching serde.
-/// </para>
-/// <para>
-/// <b>Immutable, and validated in the constructor (Java-faithful).</b> Java's
-/// <c>ProducerRecord</c> constructor rejects a null topic and a negative partition; this mirrors
-/// that — the checks live here, not on the send path, so the invariants hold for the record's
-/// whole life and every precondition fires (before any native call) at construction (ffi §A5).
-/// A negative <see cref="Timestamp"/> is <b>not</b> rejected here (a pre-existing .NET choice,
-/// orthogonal to the generic conversion — PLAN §3.9): <c>null</c> means "let the producer stamp
-/// it", and a non-null value is forwarded verbatim.
-/// </para>
+/// The producer calls its serializers also for a <see langword="null"/> key or value, as Java does. A
+/// <see langword="null"/> result is an absent field (no key, or a tombstone), and an empty result a present, empty
+/// one. For a value type <c>TValue?</c> is not <c>Nullable&lt;T&gt;</c>: a value-type tombstone needs a nullable
+/// value type, such as <c>long?</c>, with a matching serde. A negative <see cref="Timestamp"/> is not rejected,
+/// where Java's constructor rejects it.
 /// </remarks>
 /// <typeparam name="TKey">The key type.</typeparam>
 /// <typeparam name="TValue">The value type.</typeparam>
 public sealed class ProducerRecord<TKey, TValue>
 {
     /// <summary>
-    /// Initializes a new record. Mirrors the Java / Python constructor argument order
-    /// (<c>topic</c>, <c>value</c>, then optional <c>key</c> / <c>partition</c> /
-    /// <c>timestamp</c>).
+    /// Initializes a record from the topic and value, as Java's <c>ProducerRecord(topic, value)</c>, and the optional
+    /// key, partition and timestamp.
     /// </summary>
     /// <param name="topic">The destination topic (required, non-null).</param>
     /// <param name="value">
-    /// The record value, or <see langword="null"/> for a tombstone (subject to the serializer —
-    /// PLAN §3.4). An empty value is distinct from a null one only if the serializer preserves the
-    /// distinction (e.g. <see cref="Serdes.ByteArray"/>).
+    /// The record value, or <see langword="null"/> for a tombstone (subject to the serializer). An empty value
+    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray"/> does.
     /// </param>
     /// <param name="key">
     /// The record key, or <see langword="null"/> for no key (subject to the serializer).
@@ -131,12 +98,7 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <summary>The record value, or <see langword="null"/> for a tombstone.</summary>
     public TValue? Value { get; }
 
-    /// <summary>
-    /// Returns a string of the form
-    /// <c>"ProducerRecord(topic=…, partition=…, timestamp=…, key=…, value=…)"</c>, echoing Java's
-    /// <c>ProducerRecord.toString()</c> shape (the key / value render via their own
-    /// <see cref="object.ToString"/>, <c>null</c> when absent).
-    /// </summary>
+    /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,

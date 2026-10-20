@@ -31,9 +31,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicNonGenericKafkaFutureTests
 {
-    private const string DefaultValueMessage =
-        "This KafkaFuture is a default value and is bound to no operation; only IProducer.Send and the IAdmin result "
-        + "types return a usable one.";
+    private const string DefaultValueMessage = "This KafkaFuture is a default value and is bound to no operation.";
 
     [Fact]
     public void Default_GetAndIsDone_ThrowInvalidOperationException_WithItsMessage()
@@ -572,8 +570,7 @@ public sealed class PublicNonGenericKafkaFutureTests
     {
         NotSupportedException thrown = Assert.IsType<NotSupportedException>(outcome);
         Assert.Equal(
-            "KafkaFuture." + member + " is not supported on a pending future returned by IProducer.Send or an IAdmin "
-            + "result.",
+            "KafkaFuture." + member + " is not supported on a pending future returned by an IAdmin result.",
             thrown.Message);
     }
 

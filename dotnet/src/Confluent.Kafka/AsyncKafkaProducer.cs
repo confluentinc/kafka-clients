@@ -22,72 +22,9 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The real, typed Kafka producer — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.KafkaProducer&lt;K, V&gt;</c>. A thin, Java-shaped forwarder
-/// over the internal <see cref="NativeProducer"/> lifecycle wrapper (which owns the native handle
-/// and the completion bridge, ffi-marshalling.md §A) plus the two serializers. All Kafka logic
-/// lives in the Rust core; this type only restores the Java shape and serializes
-/// <typeparamref name="TKey"/> / <typeparamref name="TValue"/> to bytes above the bytes-based core.
+/// The real asynchronous Kafka producer, Java's <c>org.apache.kafka.clients.producer.KafkaProducer&lt;K, V&gt;</c>:
+/// it serializes the key and value on the caller's thread and forwards the bytes to the native producer.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Send + async peripherals.</b> This producer implements the <see cref="IAsyncProducer{TKey, TValue}"/>
-/// surface — <c>Send</c> (the M11/P3 send path over the inline pull-pump, ffi §A7 Option C,
-/// with the M11/P5 typed serialize skin above it) plus the M11/P2 peripherals <see cref="Flush"/> /
-/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>. Transactions remain deferred.
-/// </para>
-/// <para>
-/// <b>Serialize above the bytes core (M11/P5, CLAUDE.md §11).</b> <c>Send</c> serializes the
-/// record's key / value to bytes on the caller's thread (before the P/Invoke — no per-record
-/// callback through the ABI), then forwards the internal bytes carrier to
-/// <see cref="NativeProducer.SendViaPump"/>. A serializer throw is wrapped in a
-/// <see cref="SerializationException"/> and raised <b>synchronously</b> (Java-faithful — the async
-/// <c>Send</c> serializes inline before enqueuing to the pump, so the wrap surfaces before the
-/// <see cref="ValueTask{TResult}"/> is returned).
-/// </para>
-/// <para>
-/// <b>Both of Java's <c>send</c> signatures (M14/P1).</b>
-/// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> adds
-/// Java's <c>send(record, Callback)</c>; the callback runs on the producer's send-completion pump
-/// thread — .NET's analogue of Java's background I/O thread — before the record's delivery
-/// <see cref="Task{TResult}"/> is completed. See <see cref="IDeliveryCallback"/>.
-/// </para>
-/// <para>
-/// <b>Disposal — thin forwarders over <see cref="NativeProducer"/> (ffi §A7; M11/P2.1).</b>
-/// <see cref="DisposeAsync"/> / <see cref="Dispose"/> / <see cref="Close(CancellationToken)"/> each
-/// forward straight to the matching <see cref="NativeProducer"/> teardown flavor, which owns the
-/// whole graceful-close → destroy and the one-shot latch (mirroring the consumer's thin forwarders
-/// over <c>NativeConsumer</c>). <see cref="DisposeAsync"/> is primary (async close via
-/// <c>Producer_close_async</c>, swallows any close error); <see cref="Dispose"/> is the blocking
-/// fallback (sync <c>Producer_close</c>, swallows); <see cref="Close(CancellationToken)"/> surfaces
-/// a close failure. All are idempotent (the merged latch lives in <see cref="NativeProducer"/>);
-/// a close error never prevents the destroy.
-/// </para>
-/// <para>
-/// <b>Cancellation is best-effort (no native abort).</b> The producer has no <c>wakeup()</c>, so
-/// a canceled token cancels the .NET-side waits — the record's delivery task, and a first stage still
-/// pending — but does not abort the in-flight native op, and never un-sends a record that was appended
-/// (M11/P3.5 D2 (c)); <see cref="IAsyncProducer{TKey, TValue}"/> states the contract in full.
-/// </para>
-/// <para>
-/// ⚠ <b>Do not mutate a record's key / value buffers until its delivery <see cref="Task{TResult}"/>
-/// (<see cref="AsyncKafkaFuture{T}.Get()"/>) completes without being canceled</b> (M11/P3.1 decision
-/// D6). The async send is deferred — the binding borrows the serialized bytes until a background batch
-/// thread hands the
-/// record to the core — so a mutation in that window is visible on the wire. A cancellation does
-/// not end the borrow; see <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full
-/// note. The <b>synchronous</b> producer has no such window.
-/// </para>
-/// <para>
-/// ⚠ <b>Under sustained saturation <c>Send</c>'s first stage waits; the calling thread does
-/// not</b> (M11/P3.3): once the producer holds its bound of records accepted but not yet handed to
-/// its send-batch thread, a send returns with its first stage pending until capacity frees. The
-/// record is appended <em>before</em> that wait (M11/P3.4), so saturation delays the first stage and
-/// never refuses the record. A caller that awaits the first stage is throttled by it; one that does
-/// not is not (Python parity) — <see cref="IAsyncProducer{TKey, TValue}"/> states it in full. The
-/// <b>synchronous</b> producer has no such window either.
-/// </para>
-/// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
 public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TValue>
@@ -97,9 +34,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     private readonly ISerializer<TValue> _valueSerializer;
 
     /// <summary>
-    /// Creates a real producer from a configuration map and the key / value serializers (Java
-    /// <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>). Config keys are the Java
-    /// dotted names (e.g. <c>bootstrap.servers</c>); values are strings.
+    /// Creates a producer from a configuration map of Java's dotted keys and the key and value serializers
+    /// (Java <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>).
     /// </summary>
     /// <param name="config">The producer configuration.</param>
     /// <param name="keySerializer">The serializer for record keys.</param>
@@ -117,13 +53,12 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        _native = NativeProducer.Create(config);
+        _native = NativeProducer.Create(config, NativeProducer.PumpThreadName);
     }
 
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
-        // Precondition (ffi §A5): null record BEFORE any serialize / P-Invoke.
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -138,13 +73,6 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         IDeliveryCallback callback,
         CancellationToken cancellationToken = default)
     {
-        // Preconditions (ffi §A5) in Java's own order: the RECORD first — Java's doSend is reached
-        // through interceptors.onSend(record), which touches the record before the callback is ever
-        // examined — then the CALLBACK (M14/P1 decision D8: rejected although Java accepts null,
-        // because the two-arg overload already spells "no callback" and the parameter is non-nullable
-        // under #nullable enable). Both are thrown BEFORE the closed check, the serialize and any
-        // P/Invoke, so neither a disposed producer nor a stateful serializer can mask them — and
-        // per D5 a throw out of Send means the callback is NOT invoked.
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -158,42 +86,39 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         return SendValidated(record, callback, cancellationToken);
     }
 
-    /// <summary>
-    /// The shared send skin behind both <c>Send</c> overloads (M14/P1): closed-check → serialize →
-    /// forward, building the delivery-callback carrier only when one was supplied. Each overload
-    /// validates its own arguments first, so this deliberately does <b>not</b> re-check them (a
-    /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
-    /// synchronous rather than faulting the returned <see cref="ValueTask{TResult}"/>.
-    /// </summary>
+    /// <inheritdoc/>
+    public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
+        ProducerRecord<TKey, TValue> record,
+        IAsyncDeliveryCallback callback,
+        CancellationToken cancellationToken = default)
+    {
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+
+        return SendValidated(record, null, cancellationToken, callback);
+    }
+
+    // Not async, so a serializer throw stays synchronous.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback? callback,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IAsyncDeliveryCallback? asyncCallback = null)
     {
-        // Closed-check BEFORE the serialize (M11/P8, Minor 8), Java-faithful: Java's
-        // KafkaProducer.doSend calls throwIfProducerClosed() before serializing the key/value.
-        // Without it a STATEFUL serializer runs for a record that can never be sent — a Schema
-        // Registry serializer REGISTERS A SCHEMA as a side effect — and a serializer throw masks
-        // the real ObjectDisposedException behind a SerializationException. The order is
-        // null-check -> closed-check -> serialize: the null check stays first so the documented
-        // precondition order (pinned by Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed)
-        // is unchanged. The native layer re-checks; that is the race re-check, not a duplicate.
+        // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
-        // Serialize the key/value to bytes on THIS thread (a serializer throw surfaces synchronously
-        // as a SerializationException — Java-faithful, and per D5 fires no callback), then forward
-        // the internal bytes carrier to the pump.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
 
-        // The carrier holds the two fields Java's -1 placeholder metadata needs (D6): the topic, and
-        // the record's EXPLICIT partition or -1 when it let the producer choose. Allocated only on
-        // the callback-taking path (D11), so the plain Send stays allocation-identical.
-        DeliveryRegistration? delivery = callback is null
-            ? null
-            : new DeliveryRegistration(callback, record.Topic, record.Partition ?? -1);
-
-        return _native.SendViaPump(serialized, delivery, cancellationToken);
+        return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }
 
     /// <inheritdoc/>
@@ -210,6 +135,10 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Close(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.CloseWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

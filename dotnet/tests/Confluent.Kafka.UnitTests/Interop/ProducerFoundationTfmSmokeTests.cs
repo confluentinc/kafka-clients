@@ -23,15 +23,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The TFM-matrix smoke test for the M11/P1 producer foundation: the internal
-/// <see cref="NativeProducer"/> create (mock + config paths) → assert the handle is
-/// valid → teardown round-trip. There is no public producer API yet (foundation
-/// only), so the smoke rides the internal wrapper via <c>InternalsVisibleTo</c>.
-///
-/// It uses only APIs available on the netstandard2.0 floor so it <b>compiles on
-/// net462</b> (via ns2.0) as well as net8.0 / net10.0 — the net462 leg's <em>build</em>
-/// must pass locally even though its <em>run</em> is Windows/CI-only; net10.0 runs
-/// locally. Nothing here uses modern-only APIs.
+/// The TFM-matrix smoke test for the internal <see cref="NativeProducer"/>: create (mock and config paths), a
+/// valid handle, and teardown, with netstandard2.0-safe APIs only so it compiles on net462.
 /// </summary>
 public sealed class ProducerFoundationTfmSmokeTests
 {
@@ -65,8 +58,6 @@ public sealed class ProducerFoundationTfmSmokeTests
         Assert.False(producer.Handle.IsInvalid);
         await producer.DisposeAsync();
 
-        // Post-teardown the handle is inaccessible (use-after-dispose guard) — the
-        // same contract on every TFM.
         Assert.Throws<ObjectDisposedException>(() => producer.Handle);
     }
 }

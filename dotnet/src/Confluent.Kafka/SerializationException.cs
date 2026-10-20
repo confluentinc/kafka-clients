@@ -38,4 +38,13 @@ public class SerializationException : KafkaException
         : base(message, innerException)
     {
     }
+
+    /// <summary>
+    /// Initializes an exception with a cause, whose type's full name and message, Java's <c>cause.toString()</c>,
+    /// become the message, or the default message for a <see langword="null"/> cause.
+    /// </summary>
+    public SerializationException(Exception? cause)
+        : base(cause)
+    {
+    }
 }

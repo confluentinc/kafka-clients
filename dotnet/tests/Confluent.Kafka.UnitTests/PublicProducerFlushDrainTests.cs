@@ -22,19 +22,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M11/P3.1 slice S6 — <c>Flush</c> drains the accumulator (§3.5). This is a deliberate divergence
-/// <b>toward Java</b> and away from the Python anchor: Python's <c>flush()</c> never signals its
-/// send thread (<c>record_batches_new_record_cnd</c> has exactly three signal sites and none is a
-/// flush entry point), so it can return while records are still buffered inside the binding —
-/// although from the caller's view those records <b>were</b> sent, because <c>send()</c> returned.
+/// The async Flush covers the sends handed over before it: when it returns the records have reached the core and
+/// the sends still resolve; a Flush with nothing pending still reaches the core; a cancelled token throws first.
 /// </summary>
-/// <remarks>
-/// <b>This is the test the anchor lacks</b> — Python's own <c>test_flush</c> asserts only that it
-/// does not raise. The assertion here is on <c>HistoryCount()</c>, i.e. on what reached the
-/// <em>core</em>, because that is precisely what "the accumulator was drained" means and it is
-/// deterministic. Asserting instead that the send <c>Task</c>s are resolved would be asserting one
-/// extra hop — the completion pump's — which <c>Flush</c> does not and should not promise.
-/// </remarks>
 public sealed class PublicProducerFlushDrainTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
@@ -55,29 +45,14 @@ public sealed class PublicProducerFlushDrainTests
 
         Assert.Equal(SendCount, producer.HistoryCount());
 
-        // And they still resolve normally afterwards — the flush drained, it did not consume.
+        // The flush did not consume the sends: they still resolve.
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
     }
-
-    // ⚠ THE CONTROL FOR THE TEST ABOVE LIVES IN Interop/SendAccumulatorTests, deliberately:
-    // WithoutADrain_TheRecordsHaveNotReachedTheCore. It is what makes "history is 16 after Flush"
-    // meaningful rather than possibly just "the window elapsed", so it has to hold — and here it
-    // could not. The public producer reads its window from the environment (10 ms) and that window
-    // is FREE-RUNNING (§3.3): the batch thread's deadline comes from the top of its own loop, so a
-    // drain can land microseconds after the first append. A GC pause or thread-pool hiccup inside
-    // the 16-send window flipped the assertion to 16, and a flake in the control would read as a
-    // product regression in the thing it controls for. The accumulator-level form takes an explicit
-    // 60 s window, so only an explicit drain can move the records — and it asserts BOTH halves
-    // (nothing before the drain, everything after). Setting the environment variable here instead
-    // is not an option: this assembly runs its test classes in PARALLEL (see AssemblyInfo), so a
-    // process-wide override would reach producers other tests are constructing.
 
     [Fact]
     public async Task Flush_WithNothingBuffered_StillFlushesTheCore()
     {
-        // The accumulator exists but is empty (its drain returns a completed task), and the
-        // send-less case where no accumulator was ever started — both must still reach the core
-        // flush rather than short-circuit.
+        // A producer that never sent, and one whose sends all completed: both still reach the core's flush.
         using AsyncMockProducer<byte[], byte[]> neverSent =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => neverSent.Flush(), s_deadline);
@@ -94,9 +69,7 @@ public sealed class PublicProducerFlushDrainTests
     [Fact]
     public async Task Flush_PreCanceledToken_ThrowsSynchronouslyEvenWithRecordsBuffered()
     {
-        // The precondition contract survives the drain: ffi §A5 wants it thrown before anything
-        // else happens, and moving the drain in front of the core flush must not turn it into a
-        // faulted Task.
+        // A cancelled token throws before anything happens, with records pending too.
         using AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 

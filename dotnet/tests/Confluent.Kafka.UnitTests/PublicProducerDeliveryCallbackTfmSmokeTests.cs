@@ -22,11 +22,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The TFM-matrix smoke test for the M14/P1 delivery-callback overload (plan §9 item 10): the
-/// <c>Send(record, callback)</c> round-trip on <b>both</b> producer flavors, plus the failure path's
-/// non-null placeholder metadata. Uses only APIs available on the netstandard2.0 floor so it
-/// <b>compiles on net462</b> (via ns2.0) as well as net8.0 / net10.0 — the net462 leg's <em>build</em>
-/// must pass locally even though its <em>run</em> is Windows/CI-only; net10.0 runs locally.
+/// The TFM-matrix smoke test for the delivery-callback overload: Send(record, callback) on both producer mocks,
+/// the failure path's non-null placeholder metadata, and the overload on the real clients, with
+/// netstandard2.0-safe APIs only so it compiles on net462.
 /// </summary>
 public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
 {
@@ -52,8 +50,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Assert.Equal(Topic, metadata.Topic);
         Assert.Equal(0, metadata.Partition);
 
-        // The callback fires on the pump thread, so give it the same bounded wait the behavioural
-        // suite uses rather than assuming it has already run when the task resolved.
+        // The callback runs on the completion thread; a bounded wait for it.
         await TestTimeout.Run(() => WaitForCompletions(callback, 1), s_deadline);
         Assert.Null(callback.LastException);
         Assert.Equal(Topic, callback.LastMetadata!.Topic);
@@ -75,8 +72,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
 
         Assert.Equal(Topic, metadata.Topic);
 
-        // The sync flavor invokes the callback on the pump thread, before Get returned (M11/P4.2 D3,
-        // superseding M14/P1 D3's inline-on-the-caller).
+        // The sync flavor runs the callback on the completion thread, before Get returns.
         Assert.Equal(1, callback.Count);
         Assert.Null(callback.LastException);
         Assert.Equal(Topic, callback.LastMetadata!.Topic);
@@ -92,29 +88,25 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 1),
             callback).Delivery();
-        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
-        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
-        producer.WaitForSendsToReachCore(s_deadline);
-        Assert.True(producer.ErrorNext(2, "tfm-delivery-error"));
+        Assert.True(producer.ErrorNext(new KafkaException(2, "tfm-delivery-error", isRetriable: true)));
 
         await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
 
         await TestTimeout.Run(() => WaitForCompletions(callback, 1), s_deadline);
 
-        // Java's contract: the user callback never sees a null metadata (Callback.java:28-33).
+        // The user callback never sees a null metadata, as Java's Callback contract states.
         Assert.NotNull(callback.LastMetadata);
         Assert.Equal(Topic, callback.LastMetadata!.Topic);
         Assert.Equal(1, callback.LastMetadata.Partition);
         Assert.Equal(-1L, callback.LastMetadata.Offset);
         Assert.NotNull(callback.LastException);
-        Assert.Equal(2, callback.LastException!.Code);
+        Assert.Equal(2, Assert.IsType<KafkaException>(callback.LastException).Code);
     }
 
     [Fact]
     public void RealProducers_DeclareTheCallbackOverload()
     {
-        // The real clients cannot be driven broker-free, so the smoke leg pins that the overload is
-        // callable on them (a compile-time + load-time check on every TFM).
+        // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
         Dictionary<string, string> config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
 
         using AsyncKafkaProducer<byte[], byte[]> asyncProducer =
@@ -143,6 +135,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         }
     }
 
+    /// <summary>A delivery callback that counts its calls.</summary>
     private sealed class SmokeDeliveryCallback : IDeliveryCallback
     {
         private int _count;
@@ -151,9 +144,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
 
         internal RecordMetadata? LastMetadata { get; private set; }
 
-        internal KafkaException? LastException { get; private set; }
+        internal Exception? LastException { get; private set; }
 
-        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             LastMetadata = metadata;
             LastException = exception;
