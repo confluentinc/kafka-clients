@@ -122,6 +122,9 @@ breaking changes.
   Java's does, and then, in one INFO line, the supplied keys it did not use:
   `These configurations '[a, b]' were supplied but are not used yet.` This
   replaces the warning logged per unknown key.
+- `MockConsumer` is `Send` but not `Sync` by declaration, as `KafkaConsumer`
+  is, rather than through one of its fields: a future field cannot make it
+  `Sync` by accident.
 
 ### Admin client
 

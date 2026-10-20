@@ -27,7 +27,9 @@
 //! through the `&mut self` dispatch surface. `wakeup()` is callable from
 //! any task because it takes `&self` and uses an atomic flag.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -75,6 +77,20 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 /// constructor only forwards `offsetResetStrategy.toString()`, so Rust callers
 /// pass the `auto.offset.reset` string (`"earliest"`, `"latest"`, `"none"`) to
 /// [`MockConsumer::new`] instead.
+///
+/// # Threads
+///
+/// Like [`KafkaConsumer`](crate::consumer::KafkaConsumer), the mock is `Send`
+/// but not `Sync` (`consumer-threading.md` §2): it can move to another task,
+/// but it cannot be shared between them. Another task reaches it through
+/// [`Consumer::handle`].
+///
+/// ```compile_fail,E0277
+/// use confluent_kafka::consumer::MockConsumer;
+///
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<MockConsumer<String, String>>();
+/// ```
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
@@ -121,6 +137,9 @@ pub struct MockConsumer<K, V> {
     should_rebalance: Arc<AtomicBool>,
     /// `i64::MAX` is the "no cap" sentinel mirroring Java's `Long.MAX_VALUE`.
     max_poll_records: i64,
+    /// Zero-sized: keeps the mock `Send` and makes it `!Sync` whatever its
+    /// other fields are, as `KafkaConsumer` (see `Threads` above).
+    not_sync: PhantomData<Cell<()>>,
 }
 
 impl<K, V> MockConsumer<K, V> {
@@ -158,6 +177,7 @@ impl<K, V> MockConsumer<K, V> {
             closed: Arc::new(AtomicBool::new(false)),
             should_rebalance: Arc::new(AtomicBool::new(false)),
             max_poll_records: i64::MAX,
+            not_sync: PhantomData,
         }
     }
 
@@ -1315,7 +1335,8 @@ mod tests {
     use super::*;
 
     /// `MockConsumer` has the same thread shape as `KafkaConsumer`: it can
-    /// move to another task but not be shared (`consumer-threading.md` §2).
+    /// move to another task but not be shared (`consumer-threading.md` §2),
+    /// through its `not_sync` marker.
     #[test]
     fn mock_consumer_is_send_and_not_sync() {
         use crate::test_thread_safety::{is_send, is_sync};
