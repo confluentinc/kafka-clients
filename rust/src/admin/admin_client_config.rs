@@ -283,7 +283,7 @@ pub struct AdminClientConfig {
 }
 
 impl fmt::Debug for AdminClientConfig {
-    /// The typed settings, whose secrets are [`Password`](crate::common::config::types::Password)s
+    /// The typed settings, whose secrets are `Password`s
     /// rendered as `[hidden]`, and the keys of the properties, never their
     /// values: they also hold keys this configuration does not define, whose
     /// values may be secrets, and Java never prints a raw original value.
