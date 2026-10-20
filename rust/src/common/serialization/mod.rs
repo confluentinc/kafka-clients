@@ -176,7 +176,9 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     ///
     /// Corresponds to Java's `default void close()`. As in Java, the method
     /// must be idempotent, as it may be called multiple times. The producer
-    /// calls it once, from its `close`, after its I/O task has stopped.
+    /// calls it once: from its `close`, after its I/O task has stopped, or
+    /// from a constructor that fails, as Java's catch does
+    /// (`KafkaProducer.java:519-523`).
     ///
     /// It takes `&self`, unlike [`Deserializer::close`]: the producer shares
     /// its serializers with every concurrent `send` and closes through a shared
