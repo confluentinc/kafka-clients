@@ -175,13 +175,14 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
     impl<K, V> KafkaConsumer<K, V> {
         pub fn new(
             config: ConsumerConfig,
-            key_deserializer: Box<dyn Deserializer<K>>,
-            value_deserializer: Box<dyn Deserializer<V>>,
+            key_deserializer: Box<dyn DynDeserializer<K>>,
+            value_deserializer: Box<dyn DynDeserializer<V>>,
         ) -> Result<Self, Error> {
             match GroupProtocol::of(config.group_protocol())? {
                 GroupProtocol::Consumer => Ok(Self {
                     delegate: AsyncKafkaConsumer::<K, V>::new(
                         config, key_deserializer, value_deserializer)?,
+                    not_sync: PhantomData,
                 }),
                 GroupProtocol::Classic => Err(Error::unsupported_version(
                     "Classic group protocol is not yet supported in this client; \

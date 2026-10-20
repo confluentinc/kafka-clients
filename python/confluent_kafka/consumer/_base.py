@@ -1574,7 +1574,8 @@ class _ConsumerState:
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's
-        # returns a stub without a group.id, so the binding checks it.
+        # check is a panic, which crosses the FFI as IllegalStateError, so the
+        # binding checks it.
         if not self._group_id_defined:
             with self._use():
                 pass
