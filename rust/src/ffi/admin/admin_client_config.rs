@@ -20,14 +20,16 @@
 //! happens here, so `kafka_admin_AdminClient_create` only sees a valid
 //! configuration.
 //!
-//! `AdminClient::create` takes an `AdminClientConfig` by value, while the C
-//! constructor borrows the handle; the handle therefore keeps the validated
-//! properties and rebuilds the Rust value for every client created from it,
-//! so one configuration can build several clients (Java's `Properties` can be
-//! reused the same way), each with its own record of the keys it used. The
-//! handle also keeps the configuration validated in
+//! `AdminClient::create` takes an `AdminClientConfig` by value, which is not
+//! `Clone` (CLAUDE.md §3), while the C constructor borrows the handle; the
+//! handle therefore keeps the configuration built in
 //! [`kafka_admin_AdminClientConfig_new`], which answers `AbstractConfig`'s
-//! getters (`kafka_admin_AdminClientConfig_get_int`, ...).
+//! getters (`kafka_admin_AdminClientConfig_get_int`, ...), and each client
+//! created from it gets a copy of it
+//! ([`AdminClientConfig::copy_for_client`]), so one configuration can build
+//! several clients, each with its own record of the keys it used. The
+//! configuration's warnings are logged once, when the handle is built; the
+//! copies log none of them.
 
 use std::collections::HashMap;
 use std::ffi::c_char;
@@ -35,8 +37,8 @@ use std::ffi::c_char;
 use crate::admin::AdminClientConfig;
 use crate::common::Error;
 use crate::ffi::common::config::config_getters::{self, LentStrings};
-use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::{fail_with, init_default_logger};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_t, kafka_Map_t, map_strings, sorted_string_list};
 
@@ -47,17 +49,23 @@ pub struct kafka_admin_AdminClientConfig_t {
 }
 
 pub(crate) struct AdminClientConfigInner {
-    props: HashMap<String, String>,
-    /// The configuration the getters read.
+    /// The configuration the getters read, which each client copies.
     config: AdminClientConfig,
     /// The values [`kafka_admin_AdminClientConfig_get_string`] lent out.
     strings: LentStrings,
 }
 
 impl AdminClientConfigInner {
-    /// The Rust configuration this handle stands for.
+    /// The configuration of a client created from the handle: a copy of the
+    /// handle's ([`AdminClientConfig::copy_for_client`]), with its own record
+    /// of the keys used, logging none of the warnings the handle's logged.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`AdminClientConfig::copy_for_client`] does, which it does
+    /// not in practice.
     pub(crate) fn build(&self) -> Result<AdminClientConfig, Error> {
-        AdminClientConfig::new(&self.props)
+        self.config.copy_for_client()
     }
 }
 
@@ -81,6 +89,10 @@ pub(crate) unsafe fn admin_client_config_ref<'a>(
 /// properties (the map stays the caller's) and delivers the configuration,
 /// owned by the caller ([`kafka_admin_AdminClientConfig_destroy`]).
 ///
+/// It first sets up the default stderr logger, as creating a client does, so
+/// the warnings the configuration logs while it is built are not lost when it
+/// is created before any client; its clients do not log them again.
+///
 /// # Safety
 ///
 /// `props` must be a live map of C strings and `out_err` a valid slot pointing
@@ -91,6 +103,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
     props: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_AdminClientConfig_t {
+    init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, i.e. a valid map
     // whose keys and values are NUL-terminated strings, as `map_strings` requires; they are copied
     // into owned strings.
@@ -100,7 +113,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
     };
-    let inner = AdminClientConfigInner { props, config, strings: LentStrings::default() };
+    let inner = AdminClientConfigInner { config, strings: LentStrings::default() };
     Box::into_raw(Box::new(inner)) as *mut kafka_admin_AdminClientConfig_t
 }
 
@@ -532,8 +545,8 @@ mod tests {
             assert_eq!(take_list(kafka_admin_AdminClientConfig_unused(config)), ["bootstrap.servers"]);
             kafka_admin_AdminClientConfig_log_unused(config);
 
-            // A configuration rebuilt for a client starts with nothing used.
-            let built = admin_client_config_ref(config).build().expect("rebuilt");
+            // A configuration copied for a client starts with nothing used.
+            let built = admin_client_config_ref(config).build().expect("copied");
             assert_eq!(built.unused().len(), 3);
 
             kafka_admin_AdminClientConfig_destroy(config);
@@ -551,8 +564,56 @@ mod tests {
         assert!(names.iter().any(|n| n == "bootstrap.controllers"));
     }
 
+    /// The handle logs the configuration's warnings once, when it is built;
+    /// the copies its clients get log none of them, as Java's one
+    /// `AdminClientConfig` per `Admin.create` logs them once.
     #[test]
-    fn new_validates_and_rebuilds_the_configuration() {
+    fn new_logs_the_warnings_once_and_its_copies_none() {
+        use log::Level;
+
+        use crate::test_log_capture::capture_logs;
+
+        let props = box_string_map([
+            ("bootstrap.servers", "localhost:9092,localhost:9092"),
+            ("ssl.cipher.suites", "TLS_AES_128_GCM_SHA256"),
+            ("retry.backoff.ms", "2000"),
+            ("retry.backoff.max.ms", "1000"),
+        ]);
+        let mut error = std::ptr::null_mut();
+        let warnings = |lines: &[(Level, String)]| {
+            lines
+                .iter()
+                .filter(|(level, _)| *level == Level::Warn)
+                .map(|(_, line)| line.split(' ').take(3).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+        };
+        // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once after
+        // `new` copied it; `error` is a valid slot pointing at null, left null on success; `config`
+        // is the live handle `new` returned, read only while alive and destroyed once at the end.
+        unsafe {
+            let (config, new_lines) = capture_logs(|| kafka_admin_AdminClientConfig_new(props, &mut error));
+            assert!(error.is_null());
+            kafka_Map_destroy(props);
+            assert_eq!(
+                warnings(&new_lines),
+                [
+                    "Configuration key \"bootstrap.servers\"",
+                    "Configuration 'retry.backoff.ms' with",
+                    "ssl.cipher.suites is not",
+                ],
+                "{new_lines:?}"
+            );
+            for _ in 0..2 {
+                let (built, copy_lines) = capture_logs(|| admin_client_config_ref(config).build().expect("copied"));
+                assert!(copy_lines.is_empty(), "{copy_lines:?}");
+                assert_eq!(built.unused(), admin_client_config_ref(config).config.unused());
+            }
+            kafka_admin_AdminClientConfig_destroy(config);
+        }
+    }
+
+    #[test]
+    fn new_validates_and_copies_the_configuration() {
         let props = box_string_map([("bootstrap.servers", "localhost:9092"), ("request.timeout.ms", "1234")]);
         let mut error = std::ptr::null_mut();
         // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once after
@@ -563,10 +624,10 @@ mod tests {
             assert!(error.is_null());
             kafka_Map_destroy(props);
 
-            let built = admin_client_config_ref(config).build().expect("rebuilt");
+            let built = admin_client_config_ref(config).build().expect("copied");
             assert_eq!(built.request_timeout_ms(), 1234);
-            // The handle rebuilds a fresh value for every client created from it.
-            admin_client_config_ref(config).build().expect("rebuilt twice");
+            // The handle copies its configuration for every client created from it.
+            admin_client_config_ref(config).build().expect("copied twice");
             kafka_admin_AdminClientConfig_destroy(config);
         }
     }

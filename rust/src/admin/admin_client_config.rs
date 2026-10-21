@@ -36,7 +36,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 use crate::common::Error;
-use crate::common::config::abstract_config::{AbstractConfig, ValuesReader, string_originals};
+use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
     CaseInsensitiveValidString, ConfigDef, Importance, Range, Type, ValidList, ValidString,
 };
@@ -429,20 +429,63 @@ impl AdminClientConfig {
     /// client with no bootstrap address at all.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = AbstractConfig::with_hooks(
+        let config = Self::build(string_originals(props), true)?;
+        config
+            .client_dns_lookup
+            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
+        Ok(config)
+    }
+
+    /// The configuration of one more client given this one: the same
+    /// properties, with its own record of the keys used, as [`Self::new`]
+    /// leaves it. It is not `Clone` (CLAUDE.md §3).
+    ///
+    /// Java's `Admin.create` builds one `AdminClientConfig` and hands it to
+    /// one client, which logs nothing about it. The copy therefore logs none
+    /// of the warnings [`Self::new`] logs: it makes the same parse and the
+    /// same reads, marking the same keys used and failing the same way, but
+    /// logs neither the parse's warning that a list's duplicate values are
+    /// removed, nor the post-processing's warnings (the reconnect and retry
+    /// backoff, the connection setup timeout), nor that `ssl.cipher.suites` is
+    /// ignored, nor `new`'s TLS hostname-verification warning.
+    ///
+    /// Unlike the consumer's and producer's, an admin configuration derives
+    /// no `client.id`: `KafkaAdminClient.createInternal` does, taking one
+    /// number per client (`KafkaAdminClient.generateClientId`), so the copy
+    /// leaves `client.id` as given.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::new`] does; this configuration's properties already
+    /// passed it, so it does not in practice.
+    #[cfg_attr(
+        not(any(feature = "ffi", test)),
+        expect(dead_code, reason = "only the C config handle copies a configuration")
+    )]
+    pub(crate) fn copy_for_client(&self) -> Result<Self, Error> {
+        Self::build(self.config.originals_map().clone(), false)
+    }
+
+    /// Java's `AdminClientConfig(Map)` without the TLS hostname-verification
+    /// warning [`Self::new`] adds: parses `originals` and post-processes them,
+    /// logging the parse's, the post-processing's and the
+    /// `ssl.cipher.suites` warnings only when `log_warnings` is true.
+    fn build(originals: ConfigMap, log_warnings: bool) -> Result<Self, Error> {
+        let config = AbstractConfig::with_hooks_and_log_warnings(
             &CONFIG,
-            string_originals(props),
+            originals,
             false,
+            log_warnings,
             "AdminClientConfig",
             |originals| originals,
             // Java's `postProcessParsedConfig`.
             |config| {
                 CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
-                CommonClientConfigs::warn_disabling_exponential_backoff(config, true)?;
+                CommonClientConfigs::warn_disabling_exponential_backoff(config, log_warnings)?;
                 Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
                     config,
                     config.parsed_values(),
-                    true,
+                    log_warnings,
                 ))
             },
         )?;
@@ -489,7 +532,7 @@ impl AdminClientConfig {
         // for a protocol that uses them (`ChannelBuilders.clientChannelBuilder`),
         // so only then are they marked used.
         let mut ssl_values = ValuesReader::new(&config);
-        let ssl_config = SslConfigs::from_values(&mut ssl_values)?;
+        let ssl_config = SslConfigs::from_values(&mut ssl_values, log_warnings)?;
         if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
             values.append(ssl_values);
         }
@@ -500,7 +543,6 @@ impl AdminClientConfig {
         }
         let read_keys = values.into_read_keys();
 
-        client_dns_lookup.warn_if_tls_hostname_verification_affected(security_protocol, &ssl_config);
         Ok(Self {
             config,
             read_keys,
@@ -1098,9 +1140,9 @@ mod tests {
             config.unused(),
             HashSet::from(["send.buffer.bytes".to_string(), "ssl.keystore.location".to_string()])
         );
-        // A configuration built again from the same properties has its own
-        // used set, as each client built from one C handle does.
-        assert_eq!(AdminClientConfig::new(&props).unwrap().unused(), all);
+        // A copy for one more client has its own used set, as each client
+        // built from one C handle does.
+        assert_eq!(config.copy_for_client().unwrap().unused(), all);
 
         props.insert("security.protocol".to_string(), "SSL".to_string());
         props.insert("ssl.keystore.password".to_string(), "p".to_string());
@@ -1111,6 +1153,67 @@ mod tests {
             ssl.unused(),
             HashSet::from(["send.buffer.bytes".to_string(), "some.unknown.key".to_string()])
         );
+    }
+
+    /// `new` logs each configuration warning once (the parse's duplicate
+    /// values, the post-processing's, the ignored `ssl.cipher.suites`, the TLS
+    /// hostname verification); a copy for one more client logs none of them,
+    /// as Java's client logs nothing about the config it is given, but makes
+    /// the same reads, so it equals `new`'s and its used set is `new`'s.
+    #[test]
+    fn test_copy_for_client_logs_no_configuration_warning() {
+        use log::Level;
+
+        use crate::test_log_capture::capture_logs;
+
+        let props: HashMap<String, String> = [
+            (AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
+            (AdminClientConfig::SECURITY_PROTOCOL_CONFIG, "SSL"),
+            (
+                AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG,
+                "resolve_canonical_bootstrap_servers_only",
+            ),
+            (AdminClientConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
+            (AdminClientConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "1000"),
+            (AdminClientConfig::RECONNECT_BACKOFF_MS_CONFIG, "100"),
+            (AdminClientConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, "40000"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, "30000"),
+            ("some.unknown.key", "x"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let (config, new_lines) = capture_logs(|| AdminClientConfig::new(&props).unwrap());
+        let warnings = |lines: &[(Level, String)]| {
+            lines
+                .iter()
+                .filter(|(level, _)| *level == Level::Warn)
+                .map(|(_, line)| line.split(' ').take(3).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            warnings(&new_lines),
+            [
+                "Configuration key \"bootstrap.servers\"",
+                "Configuration 'retry.backoff.ms' with",
+                "Configuration 'socket.connection.setup.timeout.ms' with",
+                "Disabling exponential reconnect",
+                "ssl.cipher.suites is not",
+                "client.dns.lookup=resolve_canonical_bootstrap_servers_only with security.protocol=SSL:",
+            ],
+            "{new_lines:?}"
+        );
+        let (copy, copy_lines) = capture_logs(|| config.copy_for_client().unwrap());
+        assert!(copy_lines.is_empty(), "{copy_lines:?}");
+        assert_eq!(copy, config);
+        assert_eq!(copy.bootstrap_servers(), ["localhost:9092".to_string()]);
+        let new_unused = config.unused();
+        assert_eq!(copy.unused(), new_unused);
+        copy.mark_read_keys_used();
+        assert_eq!(copy.unused(), HashSet::from(["some.unknown.key".to_string()]));
+        // The copy's used set is its own.
+        assert_eq!(config.unused(), new_unused);
     }
 
     /// Java's `AbstractConfig.equals` / `hashCode`: equal originals.

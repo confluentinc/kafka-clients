@@ -289,6 +289,13 @@ breaking changes.
   handle share it, as Java's producers given one `ProducerConfig` do. A
   generated id used to take a second number from the `producer-<n>`
   sequence, so the handle's `producer-1` built a `producer-2`.
+- Each configuration warning of the C config handles
+  (`kafka_consumer_ConsumerConfig_t`, `kafka_producer_ProducerConfig_t`,
+  `kafka_admin_AdminClientConfig_t`) is logged once per handle, when
+  `_new` builds it, not again for every client created from it, as Java's
+  one config object per client logs it once. `_new` sets up the default
+  stderr logger first, as creating a client does, so the warnings are not
+  lost when the handle is created before any client.
 
 ## [0.2.0-beta.1] - 2026-10-19
 
