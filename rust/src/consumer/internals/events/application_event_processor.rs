@@ -1262,7 +1262,8 @@ impl ApplicationEventProcessor {
                 // auto-commit (Milestone-12 divergence fix, PR #176) is still
                 // pending — the member simply stays `RECONCILING` and a later
                 // bg-loop iteration `try_recv`s the stored callback ack / commit
-                // result (see `consumer-threading.md` §31 / §41 and
+                // result (see `consumer-threading.md` §31, Phase 41
+                // `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md` and
                 // `ConsumerMembershipManager::PendingReconcile::AwaitingCommit`).
                 // It NEVER blocks the bg loop on an ack or on the commit. The
                 // `.await` here is just the async-fn call boundary, not a wait;

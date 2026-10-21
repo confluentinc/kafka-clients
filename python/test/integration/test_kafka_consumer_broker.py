@@ -375,10 +375,10 @@ def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: 
 
 
 # ---------------------------------------------------------------------------
-# commit_nowait() while a rebalance is delivered: the core's commit processes
-# the background events while it waits for its offsets (consumer-threading.md
-# §31), so a listener callback queued then runs on the calling thread (or loop)
-# inside commit_nowait() — it must never block (Critic 76 B1)
+# commit_nowait() while a rebalance is in progress: the core's commit does not
+# process the background events (as in Java, only poll() and unsubscribe()
+# deliver listener callbacks), so commit_nowait() must neither block on nor
+# run a pending listener method (Critic 76 B1)
 # ---------------------------------------------------------------------------
 class _Producing:
     """Produce to every partition of ``topic`` until stopped."""
@@ -551,15 +551,12 @@ def test_async_commit_nowait_during_a_rebalance_runs_the_listener_on_the_loop(
                 if not (await consumer.poll(timeout=0.5)).is_empty():
                     await asyncio.sleep(0.05)
                     # commit_nowait waits for its offsets as Java's commitAsync
-                    # does, delivering the listener methods that wait drains:
-                    # each one is awaited before the call returns. Whether a
-                    # rebalance lands inside this call or inside a poll depends
-                    # on timing, so this is only an invariant of every run, not
-                    # a proof that the path ran here; the deterministic test of
-                    # the mechanism (the same _wait_on_loop wait for a coroutine
-                    # listener method and a coroutine commit callback) is
-                    # test_async_coroutine_callback_is_awaited_before_the_
-                    # delivering_call_returns[commit_nowait].
+                    # does and, as in Java, delivers no listener method (only
+                    # poll() and unsubscribe() do), so no listener may still be
+                    # running when it returns. This is an invariant of every
+                    # run; the deterministic test of the coroutine-callback
+                    # wait is test_async_coroutine_callback_is_awaited_before_
+                    # the_delivering_call_returns[commit_nowait].
                     await consumer.commit_nowait()
                     assert state["running"] == 0, "a listener outlived commit_nowait"
                 if member is None and any(e[:2] == ("assigned", 4) for e in events):

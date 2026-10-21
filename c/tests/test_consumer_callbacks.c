@@ -16,7 +16,8 @@
 // `ConsumerRebalanceListener` and `OffsetCommitCallback` registrations
 // (CLAUDE.md §4, "Traits"), their `callback_id` reporting protocol, the
 // thread each one runs on, and the `ConsumerHandle` a listener calls the
-// consumer back through (consumer-threading.md §31, §41).
+// consumer back through (consumer-threading.md §31; Phase 41,
+// design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md).
 //
 // The thread contract (CLAUDE.md §4, "Async variants of blocking methods"):
 // a blocking entry point (`MockConsumer_rebalance`, `commit_async_with_callback`)
