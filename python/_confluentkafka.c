@@ -5542,7 +5542,9 @@ static PyObject* py_Consumer_list_topics_cb(PyObject* self, PyObject* args) {
 //
 // Java captures the consumer variable inside a listener; the Rust client
 // exposes a ConsumerHandle for the same re-entrancy (consumer-threading.md
-// §31/§41). The blocking forms run the operation on the runtime and wait on a
+// §31; Phase 41,
+// design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md).
+// The blocking forms run the operation on the runtime and wait on a
 // channel, so they are safe inside a rebalance listener; the `_cb` forms are
 // for coroutine listeners. The handle outliving its consumer fails every
 // operation with LocalIllegalState("consumer destroyed").
