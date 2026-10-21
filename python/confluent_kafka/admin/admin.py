@@ -36,6 +36,15 @@ every call using it has returned. After ``close()`` every call raises
 ``IllegalStateError("Cannot accept new calls when AdminClient is closing.")``,
 Java's own message for a call on a closing client.
 
+An RPC's ``options`` left out is Java's short form, which passes ``new
+XxxOptions()``; an explicit ``None`` is Java's ``null``, which
+``KafkaAdminClient`` dereferences, and raises ``TypeError("options must not be
+None")``. Every other ``None`` is Java's ``null`` too: where Java gives it a
+meaning (``elect_leaders(partitions=None)``, all partitions) it keeps it, and
+where Java dereferences it, it raises ``TypeError("<param> must not be None")``,
+in Java's order, after the closed check (CLAUDE.md, Python Binding Conventions,
+Implementation over the FFI, exception 4 and Order).
+
 Members are in Java's declaration order.
 
 Not generated, for want of an entry point (the name looked for is
@@ -69,7 +78,7 @@ from typing import TYPE_CHECKING, Any, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms, reject_str
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka._wait import WAIT_SLICE_S
@@ -134,6 +143,7 @@ from confluent_kafka.admin.renew_delegation_token_options import RenewDelegation
 from confluent_kafka.admin.terminate_transaction_options import TerminateTransactionOptions
 from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 
 if TYPE_CHECKING:
@@ -403,10 +413,16 @@ class _Pump:
 
 
 def close_timeout_ms(timeout: Duration | None) -> int:
-    """``close(Duration)``'s timeout in milliseconds (``-1`` for ``close()``); a
-    negative one raises ``IllegalArgumentError("The timeout cannot be
-    negative.")``, as ``KafkaAdminClient.close(Duration)`` does."""
-    return _CLOSE_FOREVER_MS if timeout is None else duration_to_ms(timeout, default_ms=0)
+    """``close(Duration)``'s timeout in milliseconds (``-1`` for ``close()``, the
+    timeout left out); a ``None`` is Java's null ``Duration``, which
+    ``KafkaAdminClient.close(Duration)`` dereferences (``timeout.toMillis()``):
+    ``TypeError("timeout must not be None")``; a negative one raises
+    ``IllegalArgumentError("The timeout cannot be negative.")``, as Java does."""
+    if timeout is MISSING:
+        return _CLOSE_FOREVER_MS
+    if timeout is None:
+        raise TypeError("timeout must not be None")
+    return duration_to_ms(timeout, default_ms=0)
 
 
 class Admin(_AdminState):
@@ -453,7 +469,12 @@ class Admin(_AdminState):
 
         return KafkaAdminClient._create_internal(configs=configs)
 
-    def close(self, *, timeout: Duration | None = None) -> None:
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
+
+    def close(self, *, timeout: Duration = MISSING) -> None:
         """Close the Admin client and release all associated resources.
 
         The close operation has a grace period during which current operations
@@ -508,8 +529,14 @@ class Admin(_AdminState):
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    @overload
+    def create_topics(self, *, new_topics: Iterable[NewTopic]) -> CreateTopicsResult[Sync]: ...
+    @overload
     def create_topics(self, *, new_topics: Iterable[NewTopic],
-                      options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Sync]:
+                      options: CreateTopicsOptions) -> CreateTopicsResult[Sync]: ...
+
+    def create_topics(self, *, new_topics: Iterable[NewTopic],
+                      options: CreateTopicsOptions = MISSING) -> CreateTopicsResult[Sync]:
         """Create a batch of new topics.
 
         This operation is not transactional so it may succeed for some topics while
@@ -527,22 +554,27 @@ class Admin(_AdminState):
         when creating the new topics (Java's ``createTopics(newTopics)`` passes
         ``new CreateTopicsOptions()``). Returns the ``CreateTopicsResult``.
         """
-        if options is None:
-            options = CreateTopicsOptions()
-        native = self._call(_lib.Admin_create_topics,
-                            *_conversions.create_topics_args(new_topics),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(new_topics, "new_topics")
+        args = _conversions.create_topics_args(new_topics)
+        reads = _conversions.any_topic_name(row[0] for row in args[0])
+        options = _conversions.options_or_new(options, CreateTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_create_topics, *args, options._setters_ran())
         return _conversions.create_topics_result(native, Sync, None)
 
     @overload
+    def delete_topics(self, *, topics: Iterable[str]) -> DeleteTopicsResult[Sync]: ...
+    @overload
     def delete_topics(self, *, topics: Iterable[str],
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Sync]: ...
+    @overload
+    def delete_topics(self, *, topics: TopicCollection) -> DeleteTopicsResult[Sync]: ...
     @overload
     def delete_topics(self, *, topics: TopicCollection,
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]: ...
+                      options: DeleteTopicsOptions) -> DeleteTopicsResult[Sync]: ...
 
     def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
-                      options: DeleteTopicsOptions | None = None) -> DeleteTopicsResult[Sync]:
+                      options: DeleteTopicsOptions = MISSING) -> DeleteTopicsResult[Sync]:
         """Delete a batch of topics.
 
         This operation is not transactional so it may succeed for some topics while
@@ -566,40 +598,52 @@ class Admin(_AdminState):
         ``options``: the options to use when deleting the topics (Java's short forms
         pass ``new DeleteTopicsOptions()``). Returns the ``DeleteTopicsResult``.
         """
+        if topics is None:  # the shape checks precede the closed check
+            raise _conversions.ambiguous_none("delete_topics", "topics",
+                                              ("Iterable[str]", "TopicCollection"))
+        reject_str("topics", topics)
         self._check_not_closed()
-        if options is None:
-            options = DeleteTopicsOptions()
         by_ids, keys = _conversions.topic_collection_target(topics, "deleteTopics")
-        native = self._call(_lib.Admin_delete_topics, *_conversions.delete_topics_args(by_ids, keys),
-                            options._setters_ran())
+        args = _conversions.delete_topics_args(by_ids, keys)
+        reads = (_conversions.any_topic_id(keys) if by_ids
+                 else _conversions.any_topic_name(keys))
+        options = _conversions.options_or_new(options, DeleteTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_delete_topics, *args, options._setters_ran())
         return _conversions.delete_topics_result(native, by_ids, Sync, None)
 
-    def list_topics(self, *, options: ListTopicsOptions | None = None) -> ListTopicsResult[Sync]:
+    @overload
+    def list_topics(self) -> ListTopicsResult[Sync]: ...
+    @overload
+    def list_topics(self, *, options: ListTopicsOptions) -> ListTopicsResult[Sync]: ...
+
+    def list_topics(self, *, options: ListTopicsOptions = MISSING) -> ListTopicsResult[Sync]:
         """List the topics available in the cluster.
 
         ``options``: the options to use when listing the topics (Java's
         ``listTopics()`` passes ``new ListTopicsOptions()``). Returns the
         ``ListTopicsResult``.
         """
-        if options is None:
-            options = ListTopicsOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, ListTopicsOptions)
         native = self._call(_lib.Admin_list_topics, options._setters_ran())
         return _conversions.list_topics_result(native, Sync, None)
 
     @overload
+    def describe_topics(self, *, topic_names: Iterable[str]) -> DescribeTopicsResult[Sync]: ...
+    @overload
     def describe_topics(self, *, topic_names: Iterable[str],
-                        options: DescribeTopicsOptions | None = None
-                        ) -> DescribeTopicsResult[Sync]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Sync]: ...
+    @overload
+    def describe_topics(self, *, topics: TopicCollection) -> DescribeTopicsResult[Sync]: ...
     @overload
     def describe_topics(self, *, topics: TopicCollection,
-                        options: DescribeTopicsOptions | None = None
-                        ) -> DescribeTopicsResult[Sync]: ...
+                        options: DescribeTopicsOptions) -> DescribeTopicsResult[Sync]: ...
 
     @java_forms(Form("topic_names"), Form("topic_names", "options"),
                 Form("topics"), Form("topics", "options"))
-    def describe_topics(self, *, topic_names: Iterable[str] | None = None,
-                        topics: TopicCollection | None = None,
-                        options: DescribeTopicsOptions | None = None
+    def describe_topics(self, *, topic_names: Iterable[str] = MISSING,
+                        topics: TopicCollection = MISSING,
+                        options: DescribeTopicsOptions = MISSING
                         ) -> DescribeTopicsResult[Sync]:
         """Describe some topics in the cluster.
 
@@ -613,22 +657,34 @@ class Admin(_AdminState):
         short forms pass ``new DescribeTopicsOptions()``). Returns the
         ``DescribeTopicsResult``.
         """
+        if topics is MISSING:
+            reject_str("topic_names", topic_names)  # the shape check precedes the closed check
         self._check_not_closed()
-        if options is None:
-            options = DescribeTopicsOptions()
-        if topics is None:
-            assert topic_names is not None
-            form, keys = _conversions.DESCRIBE_TOPIC_NAMES, list(topic_names)
+        if topics is MISSING:
+            _conversions.non_null(topic_names, "topic_names")  # TopicCollection.ofTopicNames(null)
+        if topics is MISSING:
+            assert topic_names is not None  # the non_null above
+            form, keys = (_conversions.DESCRIBE_TOPIC_NAMES,
+                          _conversions.describe_topic_names(topic_names))
         else:
             by_ids, keys = _conversions.topic_collection_target(topics, "describeTopics")
             form = (_conversions.DESCRIBE_TOPIC_ID_COLLECTION if by_ids
                     else _conversions.DESCRIBE_TOPIC_NAME_COLLECTION)
-        native = self._call(_lib.Admin_describe_topics, *_conversions.describe_topics_args(form, keys),
-                            options._setters_ran())
+        args = _conversions.describe_topics_args(form, keys)
+        reads = (form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION
+                 or _conversions.any_topic_name(keys))
+        options = _conversions.options_or_new(options, DescribeTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_topics, *args, options._setters_ran())
         return _conversions.describe_topics_result(
             native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Sync, None)
 
-    def describe_cluster(self, *, options: DescribeClusterOptions | None = None
+    @overload
+    def describe_cluster(self) -> DescribeClusterResult[Sync]: ...
+    @overload
+    def describe_cluster(self, *,
+                         options: DescribeClusterOptions) -> DescribeClusterResult[Sync]: ...
+
+    def describe_cluster(self, *, options: DescribeClusterOptions = MISSING
                          ) -> DescribeClusterResult[Sync]:
         """Get information about the nodes in the cluster.
 
@@ -641,13 +697,18 @@ class Admin(_AdminState):
         Returns the ``DescribeClusterResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DescribeClusterOptions()
+        options = _conversions.options_or_new(options, DescribeClusterOptions)
         native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
         return _conversions.describe_cluster_result(native, Sync, None)
 
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter) -> DescribeAclsResult[Sync]: ...
+    @overload
+    def describe_acls(self, *, filter: AclBindingFilter,
+                      options: DescribeAclsOptions) -> DescribeAclsResult[Sync]: ...
+
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                      options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Sync]:
+                      options: DescribeAclsOptions = MISSING) -> DescribeAclsResult[Sync]:
         """Lists access control lists (ACLs) according to the supplied filter.
 
         Note: it may take some time for changes made by ``create_acls`` or
@@ -659,14 +720,22 @@ class Admin(_AdminState):
         ACLs (Java's ``describeAcls(filter)`` passes ``new DescribeAclsOptions()``).
         Returns the ``DescribeAclsResult``.
         """
-        if options is None:
-            options = DescribeAclsOptions()
-        native = self._call(_lib.Admin_describe_acls, *_conversions.describe_acls_args(filter),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(filter, "filter")
+        args = _conversions.describe_acls_args(filter)
+        reads = not filter.is_unknown()
+        options = _conversions.options_or_new(options, DescribeAclsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_acls, *args, options._setters_ran())
         return _conversions.describe_acls_result(native, Sync, None)
 
+    @overload
+    def create_acls(self, *, acls: Iterable[AclBinding]) -> CreateAclsResult[Sync]: ...
+    @overload
     def create_acls(self, *, acls: Iterable[AclBinding],
-                    options: CreateAclsOptions | None = None) -> CreateAclsResult[Sync]:
+                    options: CreateAclsOptions) -> CreateAclsResult[Sync]: ...
+
+    def create_acls(self, *, acls: Iterable[AclBinding],
+                    options: CreateAclsOptions = MISSING) -> CreateAclsResult[Sync]:
         """Creates access control lists (ACLs) which are bound to specific resources.
 
         This operation is not transactional so it may succeed for some ACLs while fail
@@ -681,14 +750,21 @@ class Admin(_AdminState):
         ACLs (Java's ``createAcls(acls)`` passes ``new CreateAclsOptions()``). Returns
         the ``CreateAclsResult``.
         """
-        if options is None:
-            options = CreateAclsOptions()
-        native = self._call(_lib.Admin_create_acls, *_conversions.create_acls_args(acls),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(acls, "acls")
+        args = _conversions.create_acls_args(acls)
+        options = _conversions.options_or_new(options, CreateAclsOptions)
+        native = self._call(_lib.Admin_create_acls, *args, options._setters_ran())
         return _conversions.create_acls_result(native, Sync, None)
 
+    @overload
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter]) -> DeleteAclsResult[Sync]: ...
+    @overload
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                    options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Sync]:
+                    options: DeleteAclsOptions) -> DeleteAclsResult[Sync]: ...
+
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter],
+                    options: DeleteAclsOptions = MISSING) -> DeleteAclsResult[Sync]:
         """Deletes access control lists (ACLs) according to the supplied filters.
 
         This operation is not transactional so it may succeed for some ACLs while fail
@@ -700,14 +776,22 @@ class Admin(_AdminState):
         the ACLs (Java's ``deleteAcls(filters)`` passes ``new DeleteAclsOptions()``).
         Returns the ``DeleteAclsResult``.
         """
-        if options is None:
-            options = DeleteAclsOptions()
-        native = self._call(_lib.Admin_delete_acls, *_conversions.delete_acls_args(filters),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(filters, "filters")
+        args = _conversions.delete_acls_args(filters)
+        options = _conversions.options_or_new(options, DeleteAclsOptions)
+        native = self._call(_lib.Admin_delete_acls, *args, options._setters_ran())
         return _conversions.delete_acls_result(native, Sync, None)
 
+    @overload
+    def describe_configs(self, *,
+                         resources: Iterable[ConfigResource]) -> DescribeConfigsResult[Sync]: ...
+    @overload
     def describe_configs(self, *, resources: Iterable[ConfigResource],
-                         options: DescribeConfigsOptions | None = None
+                         options: DescribeConfigsOptions) -> DescribeConfigsResult[Sync]: ...
+
+    def describe_configs(self, *, resources: Iterable[ConfigResource],
+                         options: DescribeConfigsOptions = MISSING
                          ) -> DescribeConfigsResult[Sync]:
         """Get the configuration for the specified resources.
 
@@ -740,16 +824,25 @@ class Admin(_AdminState):
         ``DescribeConfigsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DescribeConfigsOptions()
-        native = self._call(_lib.Admin_describe_configs,
-                            *_conversions.describe_configs_args(list(resources)),
-                            options._setters_ran())
+        _conversions.non_null(resources, "resources")
+        args = _conversions.describe_configs_args(list(resources))
+        options = _conversions.options_or_new(options, DescribeConfigsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_describe_configs, *args, options._setters_ran())
         return _conversions.describe_configs_result(native, Sync, None)
+
+    @overload
+    def incremental_alter_configs(
+        self, *,
+        configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+    ) -> AlterConfigsResult[Sync]: ...
+    @overload
+    def incremental_alter_configs(self, *,
+                                  configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
+                                  options: AlterConfigsOptions) -> AlterConfigsResult[Sync]: ...
 
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-            options: AlterConfigsOptions | None = None) -> AlterConfigsResult[Sync]:
+            options: AlterConfigsOptions = MISSING) -> AlterConfigsResult[Sync]:
         """Incrementally update the configuration for the specified resources.
 
         Updates are not transactional so they may succeed for some resources while
@@ -774,16 +867,29 @@ class Admin(_AdminState):
         ``new AlterConfigsOptions()``). Returns the ``AlterConfigsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = AlterConfigsOptions()
-        native = self._call(_lib.Admin_incremental_alter_configs,
-                            *_conversions.incremental_alter_configs_args(configs),
-                            options._setters_ran())
+        _conversions.non_null(configs, "configs")
+        _conversions.check_keys(configs, "configs")  # nodeFor(resource), before options
+        # Java reads options per node (3006), the ops only in createRequest.
+        options = _conversions.options_or_new(options, AlterConfigsOptions, read=bool(configs))
+        args = _conversions.incremental_alter_configs_args(configs)
+        native = self._call(_lib.Admin_incremental_alter_configs, *args, options._setters_ran())
         return _conversions.incremental_alter_configs_result(native, Sync, None)
+
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+    ) -> AlterReplicaLogDirsResult[Sync]: ...
+    @overload
+    def alter_replica_log_dirs(
+        self, *,
+        replica_assignment: Mapping[TopicPartitionReplica, str],
+        options: AlterReplicaLogDirsOptions,
+    ) -> AlterReplicaLogDirsResult[Sync]: ...
 
     def alter_replica_log_dirs(
             self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
-            options: AlterReplicaLogDirsOptions | None = None
+            options: AlterReplicaLogDirsOptions = MISSING
             ) -> AlterReplicaLogDirsResult[Sync]:
         """Change the log directory for the specified replicas. If the replica does
         not exist on the broker, the result shows REPLICA_NOT_AVAILABLE for the given
@@ -805,15 +911,23 @@ class Admin(_AdminState):
         ``AlterReplicaLogDirsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = AlterReplicaLogDirsOptions()
-        native = self._call(_lib.Admin_alter_replica_log_dirs,
-                            *_conversions.alter_replica_log_dirs_args(replica_assignment),
-                            options._setters_ran())
+        _conversions.non_null(replica_assignment, "replica_assignment")
+        # replica.brokerId() (3048) before options (3070); the log dir is not read.
+        _conversions.check_keys(replica_assignment, "replica_assignment")
+        reads = bool(replica_assignment)
+        options = _conversions.options_or_new(options, AlterReplicaLogDirsOptions, read=reads)
+        args = _conversions.alter_replica_log_dirs_args(replica_assignment)
+        native = self._call(_lib.Admin_alter_replica_log_dirs, *args, options._setters_ran())
         return _conversions.alter_replica_log_dirs_result(native, Sync, None)
 
+    @overload
+    def describe_log_dirs(self, *, brokers: Iterable[int]) -> DescribeLogDirsResult[Sync]: ...
+    @overload
     def describe_log_dirs(self, *, brokers: Iterable[int],
-                          options: DescribeLogDirsOptions | None = None
+                          options: DescribeLogDirsOptions) -> DescribeLogDirsResult[Sync]: ...
+
+    def describe_log_dirs(self, *, brokers: Iterable[int],
+                          options: DescribeLogDirsOptions = MISSING
                           ) -> DescribeLogDirsResult[Sync]:
         """Query the information of all log directories on the given set of brokers.
 
@@ -824,16 +938,31 @@ class Admin(_AdminState):
         ``new DescribeLogDirsOptions()``). Returns the ``DescribeLogDirsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DescribeLogDirsOptions()
-        native = self._call(_lib.Admin_describe_log_dirs,
-                            *_conversions.describe_log_dirs_args(list(brokers)),
-                            options._setters_ran())
+        _conversions.non_null(brokers, "brokers")
+        broker_ids = list(brokers)
+        # new Call(…, calcDeadlineMs(now, options.timeoutMs()), new ConstantNodeIdProvider(
+        # brokerId)) reads options before it unboxes the broker id (3128-3129).
+        options = _conversions.options_or_new(options, DescribeLogDirsOptions,
+                                              read=bool(broker_ids))
+        args = _conversions.describe_log_dirs_args(broker_ids)
+        native = self._call(_lib.Admin_describe_log_dirs, *args, options._setters_ran())
         return _conversions.describe_log_dirs_result(native, Sync, None)
+
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+    ) -> DescribeReplicaLogDirsResult[Sync]: ...
+    @overload
+    def describe_replica_log_dirs(
+        self, *,
+        replicas: Iterable[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> DescribeReplicaLogDirsResult[Sync]: ...
 
     def describe_replica_log_dirs(
             self, *, replicas: Iterable[TopicPartitionReplica],
-            options: DescribeReplicaLogDirsOptions | None = None
+            options: DescribeReplicaLogDirsOptions = MISSING
             ) -> DescribeReplicaLogDirsResult[Sync]:
         """Query the replica log directory information for the specified replicas.
 
@@ -845,15 +974,24 @@ class Admin(_AdminState):
         ``DescribeReplicaLogDirsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DescribeReplicaLogDirsOptions()
-        native = self._call(_lib.Admin_describe_replica_log_dirs,
-                            *_conversions.describe_replica_log_dirs_args(list(replicas)),
-                            options._setters_ran())
+        _conversions.non_null(replicas, "replicas")
+        args = _conversions.describe_replica_log_dirs_args(list(replicas))
+        reads = bool(args[0])
+        options = _conversions.options_or_new(options, DescribeReplicaLogDirsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_replica_log_dirs, *args, options._setters_ran())
         return _conversions.describe_replica_log_dirs_result(native, Sync, None)
 
+    @overload
+    def create_partitions(
+        self, *,
+        new_partitions: Mapping[str, NewPartitions],
+    ) -> CreatePartitionsResult[Sync]: ...
+    @overload
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
-                          options: CreatePartitionsOptions | None = None
+                          options: CreatePartitionsOptions) -> CreatePartitionsResult[Sync]: ...
+
+    def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
+                          options: CreatePartitionsOptions = MISSING
                           ) -> CreatePartitionsResult[Sync]:
         """Increase the number of partitions of the topics given as the keys of
         ``new_partitions`` according to the corresponding values. **If partitions are
@@ -896,15 +1034,23 @@ class Admin(_AdminState):
         Returns the ``CreatePartitionsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = CreatePartitionsOptions()
-        native = self._call(_lib.Admin_create_partitions,
-                            *_conversions.create_partitions_args(new_partitions),
-                            options._setters_ran())
+        _conversions.non_null(new_partitions, "new_partitions")
+        args = _conversions.create_partitions_args(new_partitions)
+        options = _conversions.options_or_new(options, CreatePartitionsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_create_partitions, *args, options._setters_ran())
         return _conversions.create_partitions_result(native, Sync, None)
 
+    @overload
+    def delete_records(
+        self, *,
+        records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+    ) -> DeleteRecordsResult[Sync]: ...
+    @overload
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                       options: DeleteRecordsOptions | None = None
+                       options: DeleteRecordsOptions) -> DeleteRecordsResult[Sync]: ...
+
+    def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+                       options: DeleteRecordsOptions = MISSING
                        ) -> DeleteRecordsResult[Sync]:
         """Delete records whose offset is smaller than the given offset of the
         corresponding partition.
@@ -917,14 +1063,25 @@ class Admin(_AdminState):
         ``new DeleteRecordsOptions()``). Returns the ``DeleteRecordsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DeleteRecordsOptions()
+        _conversions.non_null(records_to_delete, "records_to_delete")
+        # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (3385) before
+        # options (3388); the values are read by the handler.
+        _conversions.check_keys(records_to_delete, "records_to_delete")
+        options = _conversions.options_or_new(options, DeleteRecordsOptions)
         native = self._call(_lib.Admin_delete_records,
                             *_conversions.delete_records_args(records_to_delete),
                             options._setters_ran())
         return _conversions.delete_records_result(native, Sync, None)
 
-    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
+    @overload
+    def create_delegation_token(self) -> CreateDelegationTokenResult[Sync]: ...
+    @overload
+    def create_delegation_token(
+        self, *,
+        options: CreateDelegationTokenOptions,
+    ) -> CreateDelegationTokenResult[Sync]: ...
+
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions = MISSING
                                 ) -> CreateDelegationTokenResult[Sync]:
         """Create a Delegation Token.
 
@@ -946,14 +1103,23 @@ class Admin(_AdminState):
         ``createDelegationToken()`` passes ``new CreateDelegationTokenOptions()``).
         Returns the ``CreateDelegationTokenResult``.
         """
-        if options is None:
-            options = CreateDelegationTokenOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, CreateDelegationTokenOptions)
         native = self._call(_lib.Admin_create_delegation_token,
                             _conversions.create_delegation_token_options(options))
         return _conversions.create_delegation_token_result(native, Sync, None)
 
+    @overload
+    def renew_delegation_token(self, *, hmac: bytes) -> RenewDelegationTokenResult[Sync]: ...
+    @overload
+    def renew_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult[Sync]: ...
+
     def renew_delegation_token(self, *, hmac: bytes,
-                               options: RenewDelegationTokenOptions | None = None
+                               options: RenewDelegationTokenOptions = MISSING
                                ) -> RenewDelegationTokenResult[Sync]:
         """Renew a Delegation Token.
 
@@ -979,13 +1145,23 @@ class Admin(_AdminState):
         RenewDelegationTokenOptions()``). Returns the ``RenewDelegationTokenResult``,
 .
         """
-        if options is None:
-            options = RenewDelegationTokenOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, RenewDelegationTokenOptions)
+        _conversions.non_null(hmac, "hmac")
         native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
         return _conversions.renew_delegation_token_result(native, Sync, None)
 
+    @overload
+    def expire_delegation_token(self, *, hmac: bytes) -> ExpireDelegationTokenResult[Sync]: ...
+    @overload
+    def expire_delegation_token(
+        self, *,
+        hmac: bytes,
+        options: ExpireDelegationTokenOptions,
+    ) -> ExpireDelegationTokenResult[Sync]: ...
+
     def expire_delegation_token(self, *, hmac: bytes,
-                                options: ExpireDelegationTokenOptions | None = None
+                                options: ExpireDelegationTokenOptions = MISSING
                                 ) -> ExpireDelegationTokenResult[Sync]:
         """Expire a Delegation Token.
 
@@ -1012,13 +1188,22 @@ class Admin(_AdminState):
         ExpireDelegationTokenOptions()``). Returns the ``ExpireDelegationTokenResult``,
 .
         """
-        if options is None:
-            options = ExpireDelegationTokenOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, ExpireDelegationTokenOptions)
+        _conversions.non_null(hmac, "hmac")
         native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
         return _conversions.expire_delegation_token_result(native, Sync, None)
 
+    @overload
+    def describe_delegation_token(self) -> DescribeDelegationTokenResult[Sync]: ...
+    @overload
+    def describe_delegation_token(
+        self, *,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult[Sync]: ...
+
     def describe_delegation_token(self, *,
-                                  options: DescribeDelegationTokenOptions | None = None
+                                  options: DescribeDelegationTokenOptions = MISSING
                                   ) -> DescribeDelegationTokenResult[Sync]:
         """Describe the Delegation Tokens.
 
@@ -1040,14 +1225,26 @@ class Admin(_AdminState):
         ``describeDelegationToken()`` passes ``new DescribeDelegationTokenOptions()``).
         Returns the ``DescribeDelegationTokenResult``.
         """
-        if options is None:
-            options = DescribeDelegationTokenOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, DescribeDelegationTokenOptions)
         native = self._call(_lib.Admin_describe_delegation_token,
                             _conversions.describe_delegation_token_options(options))
         return _conversions.describe_delegation_token_result(native, Sync, None)
 
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeConsumerGroupsOptions,
+    ) -> DescribeConsumerGroupsResult[Sync]: ...
+    @overload
+    def describe_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+    ) -> DescribeConsumerGroupsResult[Sync]: ...
+
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
-                                 options: DescribeConsumerGroupsOptions | None = None
+                                 options: DescribeConsumerGroupsOptions = MISSING
                                  ) -> DescribeConsumerGroupsResult[Sync]:
         """Describe some consumer groups in the cluster.
 
@@ -1056,29 +1253,41 @@ class Admin(_AdminState):
         passes ``new DescribeConsumerGroupsOptions()``). Returns the
         ``DescribeConsumerGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        if options is None:
-            options = DescribeConsumerGroupsOptions()
-        native = self._call(_lib.Admin_describe_consumer_groups, list(group_ids),
+        _conversions.non_null(group_ids, "group_ids")
+        options = _conversions.options_or_new(options, DescribeConsumerGroupsOptions)
+        native = self._call(_lib.Admin_describe_consumer_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.describe_consumer_groups_result(native, Sync, None)
 
     @overload
-    def list_consumer_group_offsets(self, *, group_id: str,
-                                    options: ListConsumerGroupOffsetsOptions | None = None
-                                    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    def list_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def list_consumer_group_offsets(self, *,
+                                    group_id: str) -> ListConsumerGroupOffsetsResult[Sync]: ...
     @overload
     def list_consumer_group_offsets(
-        self, *, group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> ListConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def list_consumer_group_offsets(
+        self, *,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
     ) -> ListConsumerGroupOffsetsResult[Sync]: ...
 
     @java_forms(Form("group_id", "options"), Form("group_id"),
                 Form("group_specs", "options"), Form("group_specs"))
     def list_consumer_group_offsets(
-        self, *, group_id: str | None = None,
-        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None = None,
-        options: ListConsumerGroupOffsetsOptions | None = None
+        self, *, group_id: str = MISSING,
+        group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] = MISSING,
+        options: ListConsumerGroupOffsetsOptions = MISSING
     ) -> ListConsumerGroupOffsetsResult[Sync]:
         """List the consumer group offsets available in the cluster: of all
         partitions of the one group ``group_id``, or, for the specified consumer
@@ -1095,18 +1304,32 @@ class Admin(_AdminState):
         ``ListConsumerGroupOffsetsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = ListConsumerGroupOffsetsOptions()
+        if group_specs is not MISSING:
+            _conversions.non_null(group_specs, "group_specs")  # groupSpecs.keySet()
+        options = _conversions.options_or_new(options, ListConsumerGroupOffsetsOptions)
+        if group_id is not MISSING:
+            _conversions.non_null(group_id, "group_id")
         native = self._call(_lib.Admin_list_consumer_group_offsets,
                             *_conversions.list_consumer_group_offsets_args(group_id, group_specs),
                             options._setters_ran())
-        if group_specs is None:
-            assert group_id is not None  # java_forms: one or the other
+        if group_specs is MISSING:  # java_forms: one or the other
+            assert group_id is not None  # the non_null above
             return _conversions.list_consumer_group_offsets_result([group_id], native, Sync, None)
+        assert group_specs is not None  # the non_null above
         return _conversions.list_consumer_group_offsets_result(group_specs, native, Sync, None)
 
+    @overload
+    def delete_consumer_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DeleteConsumerGroupsOptions,
+    ) -> DeleteConsumerGroupsResult[Sync]: ...
+    @overload
+    def delete_consumer_groups(self, *,
+                               group_ids: Iterable[str]) -> DeleteConsumerGroupsResult[Sync]: ...
+
     def delete_consumer_groups(self, *, group_ids: Iterable[str],
-                               options: DeleteConsumerGroupsOptions | None = None
+                               options: DeleteConsumerGroupsOptions = MISSING
                                ) -> DeleteConsumerGroupsResult[Sync]:
         """Delete consumer groups from the cluster.
 
@@ -1115,16 +1338,31 @@ class Admin(_AdminState):
         ``new DeleteConsumerGroupsOptions()``). Returns the
         ``DeleteConsumerGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        if options is None:
-            options = DeleteConsumerGroupsOptions()
-        native = self._call(_lib.Admin_delete_consumer_groups, list(group_ids),
+        _conversions.non_null(group_ids, "group_ids")
+        options = _conversions.options_or_new(options, DeleteConsumerGroupsOptions)
+        native = self._call(_lib.Admin_delete_consumer_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.delete_consumer_groups_result(native, Sync, None)
 
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> DeleteConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def delete_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        partitions: Iterable[TopicPartition],
+    ) -> DeleteConsumerGroupOffsetsResult[Sync]: ...
+
     def delete_consumer_group_offsets(self, *, group_id: str,
                                       partitions: Iterable[TopicPartition],
-                                      options: DeleteConsumerGroupOffsetsOptions | None = None
+                                      options: DeleteConsumerGroupOffsetsOptions = MISSING
                                       ) -> DeleteConsumerGroupOffsetsResult[Sync]:
         """Delete committed offsets for a set of partitions in a consumer group. This
         will succeed at the partition level only if the group is not actively
@@ -1137,15 +1375,21 @@ class Admin(_AdminState):
         ``DeleteConsumerGroupOffsetsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = DeleteConsumerGroupOffsetsOptions()
+        options = _conversions.options_or_new(options, DeleteConsumerGroupOffsetsOptions)
+        _conversions.non_null(group_id, "group_id")
+        _conversions.non_null(partitions, "partitions")
         tps = list(partitions)
         native = self._call(_lib.Admin_delete_consumer_group_offsets,
                             *_conversions.delete_consumer_group_offsets_args(group_id, tps),
                             options._setters_ran())
         return _conversions.delete_consumer_group_offsets_result(tps, native, Sync, None)
 
-    def list_groups(self, *, options: ListGroupsOptions | None = None) -> ListGroupsResult[Sync]:
+    @overload
+    def list_groups(self) -> ListGroupsResult[Sync]: ...
+    @overload
+    def list_groups(self, *, options: ListGroupsOptions) -> ListGroupsResult[Sync]: ...
+
+    def list_groups(self, *, options: ListGroupsOptions = MISSING) -> ListGroupsResult[Sync]:
         """List the groups available in the cluster.
 
         ``options``: the options to use when listing the groups (Java's
@@ -1153,14 +1397,21 @@ class Admin(_AdminState):
         ``ListGroupsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = ListGroupsOptions()
+        options = _conversions.options_or_new(options, ListGroupsOptions)
         native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
         return _conversions.list_groups_result(native, Sync, None)
 
+    @overload
+    def elect_leaders(self, *, election_type: ElectionType,
+                      partitions: Iterable[TopicPartition] | None) -> ElectLeadersResult[Sync]: ...
+    @overload
     def elect_leaders(self, *, election_type: ElectionType,
                       partitions: Iterable[TopicPartition] | None,
-                      options: ElectLeadersOptions | None = None) -> ElectLeadersResult[Sync]:
+                      options: ElectLeadersOptions) -> ElectLeadersResult[Sync]: ...
+
+    def elect_leaders(self, *, election_type: ElectionType,
+                      partitions: Iterable[TopicPartition] | None,
+                      options: ElectLeadersOptions = MISSING) -> ElectLeadersResult[Sync]:
         """Elect a replica as leader for the given ``partitions``, or for all
         partitions if the argument to ``partitions`` is ``None``.
 
@@ -1196,16 +1447,28 @@ class Admin(_AdminState):
         ``ElectLeadersResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = ElectLeadersOptions()
+        options = _conversions.options_or_new(options, ElectLeadersOptions)
+        _conversions.non_null(election_type, "election_type")
         native = self._call(_lib.Admin_elect_leaders,
                             *_conversions.elect_leaders_args(election_type, partitions),
                             options._setters_ran())
         return _conversions.elect_leaders_result(native, Sync, None)
 
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+    ) -> AlterPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def alter_partition_reassignments(
+        self, *,
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
+        options: AlterPartitionReassignmentsOptions,
+    ) -> AlterPartitionReassignmentsResult[Sync]: ...
+
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-            options: AlterPartitionReassignmentsOptions | None = None
+            options: AlterPartitionReassignmentsOptions = MISSING
             ) -> AlterPartitionReassignmentsResult[Sync]:
         """Change the reassignments for one or more partitions. Providing ``None``
         (Java's ``Optional.empty()``) will **revert** the reassignment for the
@@ -1239,16 +1502,34 @@ class Admin(_AdminState):
         ``new AlterPartitionReassignmentsOptions()``). Returns the result.
         """
         self._check_not_closed()
-        if options is None:
-            options = AlterPartitionReassignmentsOptions()
-        native = self._call(_lib.Admin_alter_partition_reassignments,
-                            *_conversions.alter_partition_reassignments_args(reassignments),
-                            options._setters_ran())
+        _conversions.non_null(reassignments, "reassignments")
+        args = _conversions.alter_partition_reassignments_args(reassignments)
+        options = _conversions.options_or_new(options, AlterPartitionReassignmentsOptions)
+        native = self._call(_lib.Admin_alter_partition_reassignments, *args, options._setters_ran())
         return _conversions.alter_partition_reassignments_result(native, Sync, None)
 
+    @overload
+    def list_partition_reassignments(self) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] | None = None,
-            options: ListPartitionReassignmentsOptions | None = None
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition],
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
+
+    def list_partition_reassignments(
+            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Sync]:
         """List the current reassignments for the given partitions, or all of the
         current partition reassignments.
@@ -1263,19 +1544,23 @@ class Admin(_AdminState):
         - ``TimeoutError`` If the request timed out before the controller could list
           the current reassignments.
 
-        ``partitions``: the partitions we want to get reassignment for, or ``None``
+        ``partitions``: the partitions we want to get reassignment for, left out
         (Java's ``listPartitionReassignments()`` and
         ``listPartitionReassignments(options)``, which pass ``Optional.empty()``) if we
-        want to get the reassignments for all partitions in the cluster; ``options``:
+        want to get the reassignments for all partitions in the cluster; a ``None`` is
+        Java's ``Optional.of(null)`` and raises ``TypeError``; ``options``:
         the options to use (Java's short forms pass
         ``new ListPartitionReassignmentsOptions()``). Returns the result.
         """
         self._check_not_closed()
-        if options is None:
-            options = ListPartitionReassignmentsOptions()
-        native = self._call(_lib.Admin_list_partition_reassignments,
-                            *_conversions.list_partition_reassignments_args(partitions),
-                            options._setters_ran())
+        targets: Iterable[TopicPartition] | None = None
+        if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
+            _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
+            targets = partitions
+        args = _conversions.list_partition_reassignments_args(targets)
+        reads = _conversions.all_partitions_valid(args[0])
+        options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions, read=reads)
+        native = self._call(_lib.Admin_list_partition_reassignments, *args, options._setters_ran())
         return _conversions.list_partition_reassignments_result(native, Sync, None)
 
     def remove_members_from_consumer_group(
@@ -1290,14 +1575,31 @@ class Admin(_AdminState):
         ``RemoveMembersFromConsumerGroupResult``.
         """
         self._check_not_closed()
+        # Java reads options.reason() first; the group id only later, in the call.
+        _conversions.non_null(options, "options")
+        _conversions.non_null(group_id, "group_id")
         args = _conversions.remove_members_from_consumer_group_args(group_id, options)
         native = self._call(_lib.Admin_remove_members_from_consumer_group, *args,
                             options._setters_ran())
         return _conversions.remove_members_from_consumer_group_result(options, native, Sync, None)
 
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+    ) -> AlterConsumerGroupOffsetsResult[Sync]: ...
+    @overload
+    def alter_consumer_group_offsets(
+        self, *,
+        group_id: str,
+        offsets: Mapping[TopicPartition, OffsetAndMetadata],
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> AlterConsumerGroupOffsetsResult[Sync]: ...
+
     def alter_consumer_group_offsets(self, *, group_id: str,
                                      offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                                     options: AlterConsumerGroupOffsetsOptions | None = None
+                                     options: AlterConsumerGroupOffsetsOptions = MISSING
                                      ) -> AlterConsumerGroupOffsetsResult[Sync]:
         """Alters offsets for the specified group. In order to succeed, the group
         must be empty.
@@ -1313,15 +1615,25 @@ class Admin(_AdminState):
         ``AlterConsumerGroupOffsetsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = AlterConsumerGroupOffsetsOptions()
+        options = _conversions.options_or_new(options, AlterConsumerGroupOffsetsOptions)
+        _conversions.non_null(group_id, "group_id")
+        _conversions.non_null(offsets, "offsets")
         native = self._call(_lib.Admin_alter_consumer_group_offsets,
                             *_conversions.alter_consumer_group_offsets_args(group_id, offsets),
                             options._setters_ran())
         return _conversions.alter_consumer_group_offsets_result(native, Sync, None)
 
+    @overload
+    def list_offsets(
+        self, *,
+        topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+    ) -> ListOffsetsResult[Sync]: ...
+    @overload
     def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
-                     options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Sync]:
+                     options: ListOffsetsOptions) -> ListOffsetsResult[Sync]: ...
+
+    def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+                     options: ListOffsetsOptions = MISSING) -> ListOffsetsResult[Sync]:
         """List offset for the specified partitions. This operation enables to find
         the beginning offset, end offset as well as the offset matching a timestamp
         in partitions.
@@ -1332,16 +1644,25 @@ class Admin(_AdminState):
         ``new ListOffsetsOptions()``). Returns the ``ListOffsetsResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = ListOffsetsOptions()
+        _conversions.non_null(topic_partition_offsets, "topic_partition_offsets")
+        args = _conversions.list_offsets_args(topic_partition_offsets)
+        options = _conversions.options_or_new(options, ListOffsetsOptions)
         partitions = list(topic_partition_offsets)
-        native = self._call(_lib.Admin_list_offsets,
-                            *_conversions.list_offsets_args(topic_partition_offsets, options),
-                            options._setters_ran())
+        native = self._call(_lib.Admin_list_offsets, *args, options.isolation_level().id(), options._setters_ran())
         return _conversions.list_offsets_result(native, partitions, Sync, None)
 
+    @overload
+    def describe_client_quotas(self, *,
+                               filter: ClientQuotaFilter) -> DescribeClientQuotasResult[Sync]: ...
+    @overload
+    def describe_client_quotas(
+        self, *,
+        filter: ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> DescribeClientQuotasResult[Sync]: ...
+
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                               options: DescribeClientQuotasOptions | None = None
+                               options: DescribeClientQuotasOptions = MISSING
                                ) -> DescribeClientQuotasResult[Sync]:
         """Describes all entities matching the provided filter that have at least one
         client quota configuration value defined.
@@ -1362,15 +1683,28 @@ class Admin(_AdminState):
         DescribeClientQuotasOptions()``). Returns the ``DescribeClientQuotasResult``
         containing the result.
         """
-        if options is None:
-            options = DescribeClientQuotasOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, DescribeClientQuotasOptions)
+        _conversions.non_null(filter, "filter")
         native = self._call(_lib.Admin_describe_client_quotas,
                             *_conversions.describe_client_quotas_args(filter),
                             options._setters_ran())
         return _conversions.describe_client_quotas_result(native, Sync, None)
 
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+    ) -> AlterClientQuotasResult[Sync]: ...
+    @overload
+    def alter_client_quotas(
+        self, *,
+        entries: Iterable[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> AlterClientQuotasResult[Sync]: ...
+
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                            options: AlterClientQuotasOptions | None = None
+                            options: AlterClientQuotasOptions = MISSING
                             ) -> AlterClientQuotasResult[Sync]:
         """Alters client quota configurations with the specified alterations.
 
@@ -1394,26 +1728,31 @@ class Admin(_AdminState):
         ``alterClientQuotas(entries)`` passes ``new AlterClientQuotasOptions()``).
         Returns the ``AlterClientQuotasResult`` containing the result.
         """
-        if options is None:
-            options = AlterClientQuotasOptions()
-        native = self._call(_lib.Admin_alter_client_quotas,
-                            *_conversions.alter_client_quotas_args(entries),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(entries, "entries")
+        args = _conversions.alter_client_quotas_args(entries)
+        options = _conversions.options_or_new(options, AlterClientQuotasOptions)
+        native = self._call(_lib.Admin_alter_client_quotas, *args, options._setters_ran())
         return _conversions.alter_client_quotas_result(native, Sync, None)
 
     @overload
-    def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
-                                        ) -> DescribeUserScramCredentialsResult[Sync]: ...
+    def describe_user_scram_credentials(self) -> DescribeUserScramCredentialsResult[Sync]: ...
     @overload
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None,
-            options: DescribeUserScramCredentialsOptions
+        self, *,
+        users: Sequence[str] | None,
+    ) -> DescribeUserScramCredentialsResult[Sync]: ...
+    @overload
+    def describe_user_scram_credentials(
+        self, *,
+        users: Sequence[str] | None,
+        options: DescribeUserScramCredentialsOptions,
     ) -> DescribeUserScramCredentialsResult[Sync]: ...
 
     @java_forms(Form(), Form("users"), Form("users", "options"))
     def describe_user_scram_credentials(
-            self, *, users: Sequence[str] | None = UNSET,
-            options: DescribeUserScramCredentialsOptions | None = None
+            self, *, users: Sequence[str] | None = MISSING,
+            options: DescribeUserScramCredentialsOptions = MISSING
     ) -> DescribeUserScramCredentialsResult[Sync]:
         """Describe SASL/SCRAM credentials.
 
@@ -1437,18 +1776,32 @@ class Admin(_AdminState):
         DescribeUserScramCredentialsOptions()``). Java has no form taking ``options``
         alone. Returns the ``DescribeUserScramCredentialsResult``.
         """
-        if options is None:
-            options = DescribeUserScramCredentialsOptions()
-        if users is UNSET:
-            users = None
+        if users is not MISSING and users is not None:
+            reject_str("users", users)  # the shape check precedes the closed check
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, DescribeUserScramCredentialsOptions)
+        if users is MISSING:
+            users = None  # Java's describeUserScramCredentials() passes null: all users
         native = self._call(_lib.Admin_describe_user_scram_credentials,
                             *_conversions.describe_user_scram_credentials_args(users),
                             options._setters_ran())
         return _conversions.describe_user_scram_credentials_result(native, Sync, None)
 
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+    ) -> AlterUserScramCredentialsResult[Sync]: ...
+    @overload
+    def alter_user_scram_credentials(
+        self, *,
+        alterations: Sequence[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> AlterUserScramCredentialsResult[Sync]: ...
+
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
-            options: AlterUserScramCredentialsOptions | None = None
+            options: AlterUserScramCredentialsOptions = MISSING
     ) -> AlterUserScramCredentialsResult[Sync]:
         """Alter SASL/SCRAM credentials.
 
@@ -1473,14 +1826,20 @@ class Admin(_AdminState):
         passes ``new AlterUserScramCredentialsOptions()``). Returns the
         ``AlterUserScramCredentialsResult``.
         """
-        if options is None:
-            options = AlterUserScramCredentialsOptions()
-        native = self._call(_lib.Admin_alter_user_scram_credentials,
-                            *_conversions.alter_user_scram_credentials_args(alterations),
-                            options._setters_ran())
+        self._check_not_closed()
+        _conversions.non_null(alterations, "alterations")
+        args = _conversions.alter_user_scram_credentials_args(alterations)
+        options = _conversions.options_or_new(options, AlterUserScramCredentialsOptions)
+        native = self._call(_lib.Admin_alter_user_scram_credentials, *args, options._setters_ran())
         return _conversions.alter_user_scram_credentials_result(native, Sync, None)
 
-    def describe_features(self, *, options: DescribeFeaturesOptions | None = None
+    @overload
+    def describe_features(self) -> DescribeFeaturesResult[Sync]: ...
+    @overload
+    def describe_features(self, *,
+                          options: DescribeFeaturesOptions) -> DescribeFeaturesResult[Sync]: ...
+
+    def describe_features(self, *, options: DescribeFeaturesOptions = MISSING
                           ) -> DescribeFeaturesResult[Sync]:
         """Describes finalized as well as supported features. The request is issued to
         any random broker.
@@ -1495,13 +1854,22 @@ class Admin(_AdminState):
         DescribeFeaturesOptions()``). Returns the ``DescribeFeaturesResult`` containing
         the result.
         """
-        if options is None:
-            options = DescribeFeaturesOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, DescribeFeaturesOptions)
         native = self._call(_lib.Admin_describe_features, options._setters_ran())
         return _conversions.describe_features_result(native, Sync, None)
 
+    @overload
+    def update_features(
+        self, *,
+        feature_updates: Mapping[str, FeatureUpdate],
+    ) -> UpdateFeaturesResult[Sync]: ...
+    @overload
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                        options: UpdateFeaturesOptions | None = None
+                        options: UpdateFeaturesOptions) -> UpdateFeaturesResult[Sync]: ...
+
+    def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
+                        options: UpdateFeaturesOptions = MISSING
                         ) -> UpdateFeaturesResult[Sync]:
         """Applies specified updates to finalized features. This operation is not
         transactional so some updates may succeed while the rest may fail.
@@ -1554,15 +1922,30 @@ class Admin(_AdminState):
         passes ``new UpdateFeaturesOptions()``). Returns the ``UpdateFeaturesResult``
         containing the result.
         """
-        if options is None:
-            options = UpdateFeaturesOptions()
+        self._check_not_closed()
+        _conversions.non_null(feature_updates, "feature_updates")
+        if None in feature_updates:
+            # Utils.isBlank(null) (4726-4727), before options (4733); the FFI cannot
+            # carry the null, so Python raises Java's error (a blank key gets the
+            # same error from the core).
+            raise IllegalArgumentError(message="Provided feature can not be empty.")
+        options = _conversions.options_or_new(options, UpdateFeaturesOptions)
         native = self._call(_lib.Admin_update_features,
                             *_conversions.update_features_args(feature_updates),
                             options._setters_ran())
         return _conversions.update_features_result(native, Sync, None)
 
+    @overload
+    def unregister_controller(self, *, controller_id: int) -> UnregisterControllerResult[Sync]: ...
+    @overload
+    def unregister_controller(
+        self, *,
+        controller_id: int,
+        options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult[Sync]: ...
+
     def unregister_controller(self, *, controller_id: int,
-                              options: UnregisterControllerOptions | None = None
+                              options: UnregisterControllerOptions = MISSING
                               ) -> UnregisterControllerResult[Sync]:
         """Unregister a controller.
 
@@ -1586,14 +1969,23 @@ class Admin(_AdminState):
         ``UnregisterControllerResult`` containing the result.
         """
         self._check_not_closed()
-        if options is None:
-            options = UnregisterControllerOptions()
+        _conversions.non_null(controller_id, "controller_id")
+        options = _conversions.options_or_new(options, UnregisterControllerOptions)
         native = self._call(_lib.Admin_unregister_controller, controller_id,
                             options._setters_ran())
         return _conversions.unregister_controller_result(native, Sync, None)
 
+    @overload
+    def describe_producers(
+        self, *,
+        partitions: Iterable[TopicPartition],
+    ) -> DescribeProducersResult[Sync]: ...
+    @overload
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                           options: DescribeProducersOptions | None = None
+                           options: DescribeProducersOptions) -> DescribeProducersResult[Sync]: ...
+
+    def describe_producers(self, *, partitions: Iterable[TopicPartition],
+                           options: DescribeProducersOptions = MISSING
                            ) -> DescribeProducersResult[Sync]:
         """Describe active producer state on a set of topic partitions. Unless a
         specific broker is requested through ``DescribeProducersOptions.broker_id()``,
@@ -1603,15 +1995,30 @@ class Admin(_AdminState):
         the method behavior (Java's ``describeProducers(partitions)`` passes ``new
         DescribeProducersOptions()``). Returns the result.
         """
-        if options is None:
-            options = DescribeProducersOptions()
+        self._check_not_closed()
+        _conversions.non_null(partitions, "partitions")
         targets = list(partitions)
-        native = self._call(_lib.Admin_describe_producers,
-                            *_conversions.describe_producers_args(targets), options._setters_ran())
+        # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (4997) before
+        # options (4998).
+        args = _conversions.describe_producers_args(targets)
+        options = _conversions.options_or_new(options, DescribeProducersOptions)
+        native = self._call(_lib.Admin_describe_producers, *args, options._setters_ran())
         return _conversions.describe_producers_result(native, Sync, None, targets)
 
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+    ) -> DescribeTransactionsResult[Sync]: ...
+    @overload
+    def describe_transactions(
+        self, *,
+        transactional_ids: Iterable[str],
+        options: DescribeTransactionsOptions,
+    ) -> DescribeTransactionsResult[Sync]: ...
+
     def describe_transactions(self, *, transactional_ids: Iterable[str],
-                              options: DescribeTransactionsOptions | None = None
+                              options: DescribeTransactionsOptions = MISSING
                               ) -> DescribeTransactionsResult[Sync]:
         """Describe the state of a set of transactional IDs from the respective
         transaction coordinators, which are dynamically discovered.
@@ -1621,15 +2028,23 @@ class Admin(_AdminState):
         ``describeTransactions(transactionalIds)`` passes ``new
         DescribeTransactionsOptions()``). Returns the result.
         """
-        if options is None:
-            options = DescribeTransactionsOptions()
-        ids = list(transactional_ids)
+        reject_str("transactional_ids", transactional_ids)  # the shape check precedes the closed check
+        self._check_not_closed()
+        _conversions.non_null(transactional_ids, "transactional_ids")
+        options = _conversions.options_or_new(options, DescribeTransactionsOptions)
+        ids = _conversions.transactional_ids_list(transactional_ids)
         native = self._call(_lib.Admin_describe_transactions,
                             *_conversions.describe_transactions_args(ids), options._setters_ran())
         return _conversions.describe_transactions_result(native, Sync, None, ids)
 
+    @overload
+    def abort_transaction(self, *, spec: AbortTransactionSpec) -> AbortTransactionResult[Sync]: ...
+    @overload
     def abort_transaction(self, *, spec: AbortTransactionSpec,
-                          options: AbortTransactionOptions | None = None
+                          options: AbortTransactionOptions) -> AbortTransactionResult[Sync]: ...
+
+    def abort_transaction(self, *, spec: AbortTransactionSpec,
+                          options: AbortTransactionOptions = MISSING
                           ) -> AbortTransactionResult[Sync]:
         """Forcefully abort a transaction which is open on a topic partition. This will
         send a ``WriteTxnMarkers`` request to the partition leader in order to abort the
@@ -1640,13 +2055,20 @@ class Admin(_AdminState):
         filters) (Java's ``abortTransaction(spec)`` passes ``new
         AbortTransactionOptions()``). Returns the result.
         """
-        if options is None:
-            options = AbortTransactionOptions()
+        self._check_not_closed()
+        _conversions.non_null(spec, "spec")
+        options = _conversions.options_or_new(options, AbortTransactionOptions)
         native = self._call(_lib.Admin_abort_transaction, *_conversions.abort_transaction_args(spec),
                             options._setters_ran())
         return _conversions.abort_transaction_result(native, Sync, None, spec)
 
-    def list_transactions(self, *, options: ListTransactionsOptions | None = None
+    @overload
+    def list_transactions(self) -> ListTransactionsResult[Sync]: ...
+    @overload
+    def list_transactions(self, *,
+                          options: ListTransactionsOptions) -> ListTransactionsResult[Sync]: ...
+
+    def list_transactions(self, *, options: ListTransactionsOptions = MISSING
                           ) -> ListTransactionsResult[Sync]:
         """List active transactions in the cluster. This will query all potential
         transaction coordinators in the cluster and collect the state of all
@@ -1659,14 +2081,21 @@ class Admin(_AdminState):
         ``listTransactions()`` passes ``new ListTransactionsOptions()``). Returns the
         result.
         """
-        if options is None:
-            options = ListTransactionsOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, ListTransactionsOptions)
         native = self._call(_lib.Admin_list_transactions,
                             _conversions.list_transactions_options(options))
         return _conversions.list_transactions_result(native, Sync, None)
 
+    @overload
+    def fence_producers(self, *,
+                        transactional_ids: Iterable[str]) -> FenceProducersResult[Sync]: ...
+    @overload
     def fence_producers(self, *, transactional_ids: Iterable[str],
-                        options: FenceProducersOptions | None = None
+                        options: FenceProducersOptions) -> FenceProducersResult[Sync]: ...
+
+    def fence_producers(self, *, transactional_ids: Iterable[str],
+                        options: FenceProducersOptions = MISSING
                         ) -> FenceProducersResult[Sync]:
         """Fence out all active producers that use any of the provided transactional
         IDs.
@@ -1676,26 +2105,30 @@ class Admin(_AdminState):
         ``fenceProducers(transactionalIds)`` passes ``new FenceProducersOptions()``).
         Returns the ``FenceProducersResult``.
         """
-        if options is None:
-            options = FenceProducersOptions()
-        ids = list(transactional_ids)
+        reject_str("transactional_ids", transactional_ids)  # the shape check precedes the closed check
+        self._check_not_closed()
+        _conversions.non_null(transactional_ids, "transactional_ids")
+        options = _conversions.options_or_new(options, FenceProducersOptions)
+        ids = _conversions.transactional_ids_list(transactional_ids)
         native = self._call(_lib.Admin_fence_producers, *_conversions.fence_producers_args(ids),
                             options._setters_ran())
         return _conversions.fence_producers_result(native, Sync, None, ids)
 
     @overload
-    def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
-                              options: ListConfigResourcesOptions
-                              ) -> ListConfigResourcesResult[Sync]: ...
+    def list_config_resources(
+        self, *,
+        config_resource_types: Iterable[ConfigResource.Type],
+        options: ListConfigResourcesOptions,
+    ) -> ListConfigResourcesResult[Sync]: ...
     @overload
     def list_config_resources(self) -> ListConfigResourcesResult[Sync]: ...
 
     @java_forms(Form("config_resource_types", "options",
-                     defaults={"config_resource_types": (), "options": None}),
+                     defaults={"config_resource_types": (), "options": MISSING}),
                 Form())
     def list_config_resources(
-            self, *, config_resource_types: Iterable[ConfigResource.Type] = UNSET,
-            options: ListConfigResourcesOptions | None = None
+            self, *, config_resource_types: Iterable[ConfigResource.Type] = MISSING,
+            options: ListConfigResourcesOptions = MISSING
             ) -> ListConfigResourcesResult[Sync]:
         """List the configuration resources available in the cluster which matches
         config resource type. If no config resource types are specified, all
@@ -1708,15 +2141,25 @@ class Admin(_AdminState):
         ``ListConfigResourcesResult``.
         """
         self._check_not_closed()
-        if options is None:
-            options = ListConfigResourcesOptions()
+        options = _conversions.options_or_new(options, ListConfigResourcesOptions)
+        _conversions.non_null(config_resource_types, "config_resource_types")
         native = self._call(_lib.Admin_list_config_resources,
                             *_conversions.list_config_resources_args(config_resource_types),
                             options._setters_ran())
         return _conversions.list_config_resources_result(native, Sync, None)
 
+    @overload
+    def describe_classic_groups(
+        self, *,
+        group_ids: Iterable[str],
+        options: DescribeClassicGroupsOptions,
+    ) -> DescribeClassicGroupsResult[Sync]: ...
+    @overload
+    def describe_classic_groups(self, *,
+                                group_ids: Iterable[str]) -> DescribeClassicGroupsResult[Sync]: ...
+
     def describe_classic_groups(self, *, group_ids: Iterable[str],
-                                options: DescribeClassicGroupsOptions | None = None
+                                options: DescribeClassicGroupsOptions = MISSING
                                 ) -> DescribeClassicGroupsResult[Sync]:
         """Describe some classic groups in the cluster.
 
@@ -1725,15 +2168,26 @@ class Admin(_AdminState):
         passes ``new DescribeClassicGroupsOptions()``). Returns the
         ``DescribeClassicGroupsResult``.
         """
+        reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        if options is None:
-            options = DescribeClassicGroupsOptions()
-        native = self._call(_lib.Admin_describe_classic_groups, list(group_ids),
+        _conversions.non_null(group_ids, "group_ids")
+        options = _conversions.options_or_new(options, DescribeClassicGroupsOptions)
+        native = self._call(_lib.Admin_describe_classic_groups, _conversions.group_ids_list(group_ids),
                             options._setters_ran())
         return _conversions.describe_classic_groups_result(native, Sync, None)
 
+    @overload
+    def force_terminate_transaction(self, *,
+                                    transactional_id: str) -> TerminateTransactionResult[Sync]: ...
+    @overload
+    def force_terminate_transaction(
+        self, *,
+        transactional_id: str,
+        options: TerminateTransactionOptions,
+    ) -> TerminateTransactionResult[Sync]: ...
+
     def force_terminate_transaction(self, *, transactional_id: str,
-                                    options: TerminateTransactionOptions | None = None
+                                    options: TerminateTransactionOptions = MISSING
                                     ) -> TerminateTransactionResult[Sync]:
         """Force terminate a transaction for the given transactional ID.
 
@@ -1746,8 +2200,9 @@ class Admin(_AdminState):
         ``forceTerminateTransaction(transactionalId)`` passes ``new
         TerminateTransactionOptions()``). Returns the ``TerminateTransactionResult``.
         """
-        if options is None:
-            options = TerminateTransactionOptions()
+        self._check_not_closed()
+        options = _conversions.options_or_new(options, TerminateTransactionOptions)
+        _conversions.non_null(transactional_id, "transactional_id")
         native = self._call(_lib.Admin_force_terminate_transaction, transactional_id,
                             options._setters_ran())
         return _conversions.force_terminate_transaction_result(native, Sync, None)

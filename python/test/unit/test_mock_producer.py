@@ -695,7 +695,7 @@ def test_should_throw_class_cast_exception() -> None:
     # from send(). The mock calls the serializer, so send() raises the error the
     # serializer raises for that value.
     with pytest.raises(Exception) as direct:
-        int_serializer()(TOPIC, "key1", ())
+        int_serializer()(topic=TOPIC, data="key1", headers=())
     with MockProducer(cluster=_empty_cluster(), auto_complete=True, partitioner=None,
                       key_serializer=int_serializer(),
                       value_serializer=string_serializer()) as custom_producer:
@@ -733,13 +733,13 @@ def test_metadata_on_exception() -> None:
     producer = build_mock_producer(False)
     seen: list[tuple[RecordMetadata, Exception | None]] = []
 
-    def callback(md: RecordMetadata, exception: Exception | None) -> None:
-        assert md is not None
-        assert md.offset() == -1, "Invalid offset"
-        assert md.timestamp() == -1, "Invalid timestamp"
-        assert md.serialized_key_size() == -1, "Invalid Serialized Key size"
-        assert md.serialized_value_size() == -1, "Invalid Serialized value size"
-        seen.append((md, exception))
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
+        assert metadata is not None
+        assert metadata.offset() == -1, "Invalid offset"
+        assert metadata.timestamp() == -1, "Invalid timestamp"
+        assert metadata.serialized_key_size() == -1, "Invalid Serialized Key size"
+        assert metadata.serialized_value_size() == -1, "Invalid Serialized value size"
+        seen.append((metadata, exception))
 
     metadata = producer.send(record=RECORD2, callback=callback)
     e = IllegalArgumentError(message="dummy exception")

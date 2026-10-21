@@ -1385,6 +1385,70 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
     ctx.cleanup().await;
 }
 
+/// `deleteConsumerGroups` over a batch of an empty group and a group id that
+/// never existed, with an explicit timeout.
+///
+/// The second scenario for `delete_consumer_groups`, whose other scenario covers
+/// the empty and the non-empty (`NON_EMPTY_GROUP`) groups one per call. Java's
+/// `DeleteConsumerGroupsResult` keeps one future per group id, and
+/// `DeleteConsumerGroupsHandler` completes each from its own `DeleteGroups`
+/// result: a group the coordinator has no record of is `GROUP_ID_NOT_FOUND`,
+/// which fails only that key while the empty group beside it is deleted.
+///
+/// The empty group is created the way Java's `PlaintextAdminIntegrationTest`
+/// does it for offset-only groups: an admin offset commit with no member, which
+/// makes the coordinator create a group holding just the committed offset.
+async fn delete_consumer_groups_reports_an_unknown_group_per_key<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = admin.name();
+    let topic = ctx.topic("admin_delete_groups_unknown");
+    let empty_group = ctx.group_id("g_delete_offsets_only");
+    let unknown_group = ctx.group_id("g_delete_never_existed");
+
+    create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
+    alter_consumer_group_offsets_awaiting_propagation(
+        &admin,
+        &empty_group,
+        &HashMap::from([(TopicPartition::new(topic.clone(), 0), OffsetAndMetadata::new(1).unwrap())]),
+        "commit an offset to create a member-less group",
+    )
+    .await;
+
+    let deleted = admin
+        .delete_consumer_groups(
+            &[empty_group.clone(), unknown_group.clone()],
+            DeleteConsumerGroupsOptions::new().set_timeout_ms(Some(30_000)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: delete consumer groups: {e}"));
+    assert_eq!(
+        deleted.len(),
+        2,
+        "{backend} backend: one entry per requested group, got {:?}",
+        deleted.keys().collect::<Vec<_>>()
+    );
+    deleted[&empty_group]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: deleting a member-less group should succeed: {e}"));
+    let err = deleted[&unknown_group]
+        .as_ref()
+        .expect_err(&format!("{backend} backend: deleting a group that never existed must fail"));
+    assert!(
+        matches!(err, Error::GroupIdNotFound(_)),
+        "{backend} backend: an unknown group is GROUP_ID_NOT_FOUND, got {err:?}"
+    );
+    assert!(
+        !err.is_retriable_error(),
+        "{backend} backend: GROUP_ID_NOT_FOUND is not retriable"
+    );
+
+    admin.close(Some(Duration::from_secs(5))).await.expect("close");
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_ml_admin_list_groups_shows_live_group,
     list_groups_shows_live_group,
@@ -1443,5 +1507,10 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_ml_admin_remove_members_rejects_an_explicitly_empty_selection,
     remove_members_rejects_an_explicitly_empty_selection,
+    kip848_3_broker(NUM_PARTITIONS as u16)
+);
+multilanguage_admin_test!(
+    test_ml_admin_delete_consumer_groups_reports_an_unknown_group_per_key,
+    delete_consumer_groups_reports_an_unknown_group_per_key,
     kip848_3_broker(NUM_PARTITIONS as u16)
 );

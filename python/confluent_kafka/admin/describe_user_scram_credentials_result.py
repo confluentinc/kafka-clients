@@ -21,7 +21,7 @@ holds the generated ``DescribeUserScramCredentialsResponseData`` (the private he
 ``Errors.forCode(code).exception(message)`` (``_errors_for_code``). Java's constructor is
 package-private: ``__init__`` raises ``TypeError`` and ``_new`` builds it (CLAUDE.md,
 Python Binding Conventions, Class family); its ``Objects.requireNonNull(dataFuture)``
-raises ``NullPointerError()``. The private static ``getScramCredentialInfosFor`` is
+raises ``TypeError``. The private static ``getScramCredentialInfosFor`` is
 ``_get_scram_credential_infos_for``. Java collects the users into a ``List``, so
 ``users()`` is a ``list[str]``.
 
@@ -46,7 +46,6 @@ from confluent_kafka.admin._internals import (
     _errors_for_code,
 )
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.scram_credential_info import ScramCredentialInfo
@@ -83,7 +82,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         """Java's package-private ``DescribeUserScramCredentialsResult(dataFuture)``:
         ``data_future`` is the future indicating response data from the call."""
         if data_future is None:
-            raise NullPointerError()
+            raise TypeError("data_future must not be None")
         result = cls.__new__(cls)
         result._data_future = data_future
         result._kind = kind

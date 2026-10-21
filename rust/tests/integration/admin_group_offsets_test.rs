@@ -597,6 +597,76 @@ async fn delete_consumer_group_offsets_on_active_group_errors<F: AdminBackendFac
     ctx.cleanup().await;
 }
 
+/// `alterConsumerGroupOffsets` on a group with a live member fails per
+/// partition, with an explicit timeout.
+///
+/// The second scenario for `alter_consumer_group_offsets`, whose other scenario
+/// alters an empty group. An admin commit carries no member id and generation
+/// `-1`, which the KIP-848 coordinator accepts only while the group is empty
+/// (`ConsumerGroup.validateOffsetCommit`); with a member present it rejects the
+/// commit with `UNKNOWN_MEMBER_ID`, and Java's `AlterConsumerGroupOffsetsHandler`
+/// files that member-level error under each requested partition rather than
+/// failing the call. The committed offset is unchanged afterwards.
+async fn alter_consumer_group_offsets_on_active_group_errors<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = admin.name();
+    let topic = ctx.topic("admin_offsets_alter_active");
+    let group_id = ctx.group_id("g_offsets_alter_active");
+    create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
+    let tp0 = TopicPartition::new(topic.clone(), 0);
+    let tp1 = TopicPartition::new(topic.clone(), 1);
+
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
+    subscribe_and_join(&mut consumer, &topic).await;
+    consumer
+        .commit_sync_with_offsets(HashMap::from([(tp0.clone(), OffsetAndMetadata::new(3).unwrap())]))
+        .await
+        .expect("commit");
+    // Keep the member alive across the alter attempt.
+    let _ = consumer.poll(Duration::from_millis(200)).await;
+
+    let altered = admin
+        .alter_consumer_group_offsets(
+            &group_id,
+            &HashMap::from([
+                (tp0.clone(), OffsetAndMetadata::new(1).unwrap()),
+                (tp1.clone(), OffsetAndMetadata::new(1).unwrap()),
+            ]),
+            AlterConsumerGroupOffsetsOptions::new().set_timeout_ms(Some(30_000)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: alter consumer group offsets: {e}"));
+    assert_eq!(
+        altered.len(),
+        2,
+        "{backend} backend: one entry per requested partition, got {:?}",
+        altered.keys().collect::<Vec<_>>()
+    );
+    for tp in [&tp0, &tp1] {
+        let err = altered[tp]
+            .as_ref()
+            .expect_err(&format!("{backend} backend: altering {tp} of an active group must fail"));
+        assert!(
+            matches!(err, Error::UnknownMemberId(_)),
+            "{backend} backend: an admin commit to a group with members is UNKNOWN_MEMBER_ID, got {err:?}"
+        );
+    }
+    let _ = consumer.poll(Duration::from_millis(200)).await;
+    let listed = list_offsets(&admin, &group_id).await;
+    assert_eq!(
+        committed(&listed, &tp0),
+        Some(3),
+        "{backend} backend: the rejected alteration must leave the member's commit in place"
+    );
+
+    drop(consumer);
+    admin.close(Some(Duration::from_secs(5))).await.expect("close");
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(
     test_ml_admin_list_consumer_group_offsets_matches_committed,
     list_consumer_group_offsets_matches_committed,
@@ -620,5 +690,10 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_ml_admin_delete_consumer_group_offsets_on_active_group_errors,
     delete_consumer_group_offsets_on_active_group_errors,
+    kip848_3_broker(NUM_PARTITIONS as u16)
+);
+multilanguage_admin_test!(
+    test_ml_admin_alter_consumer_group_offsets_on_active_group_errors,
+    alter_consumer_group_offsets_on_active_group_errors,
     kip848_3_broker(NUM_PARTITIONS as u16)
 );

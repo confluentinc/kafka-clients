@@ -264,7 +264,7 @@ def test_commit_nowait_rejects_offsets_without_a_callback() -> None:
 
 
 def test_commit_nowait_takes_offsets_with_a_null_callback() -> None:
-    # callback defaults to UNSET, so callback=None is given: Java's
+    # callback defaults to MISSING, so callback=None is given: Java's
     # commitAsync(offsets, null) (CLAUDE.md, Python Binding Conventions,
     # Signatures).
     c = mock()
@@ -330,11 +330,11 @@ def test_every_stub_form_works() -> None:
     c.commit()
     c.commit(offsets={TP: OffsetAndMetadata(offset=2)})
     c.commit_nowait()
-    c.commit_nowait(callback=lambda offsets, exception: None)
+    c.commit_nowait(callback=lambda *, offsets, exception, **_: None)
     c.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
-                    callback=lambda offsets, exception: None)
+                    callback=lambda *, offsets, exception, **_: None)
     c.close()
-    c.close(option=CloseOptions.timeout(timedelta(seconds=1)))
+    c.close(option=CloseOptions.timeout(timeout=timedelta(seconds=1)))
 
 
 async def test_cancelling_close_waits_for_its_teardown() -> None:

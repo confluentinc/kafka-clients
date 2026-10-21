@@ -232,8 +232,10 @@ doc-check:
 
 # Package the crate as it would be published, fail if the compressed `.crate`
 # is above 3 MiB, and build a fresh project that depends on it.
+# `--locked`: a Cargo.lock that does not match the manifests fails here, on the
+# pull request, rather than in the release, which packages with `--locked`.
 package-check:
-	cargo xtask package-check
+	cargo --locked xtask package-check
 
 # Compare the Rust API (cargo-semver-checks) and the C ABI (libabigail's
 # abidiff) with a release tag, by default the highest one not above the
@@ -255,7 +257,7 @@ check-api-compat:
 # command line, so a caller passing values it did not write (the Semaphore
 # Task) checks them and passes them in the environment instead.
 bump-version:
-	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
+	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
 	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"}
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer

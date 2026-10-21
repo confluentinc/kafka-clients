@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
+from confluent_kafka._args import MISSING
+
 from .consumer import Consumer
 
 if TYPE_CHECKING:
@@ -69,8 +71,8 @@ class KafkaConsumer(Consumer[K, V]):
                  value_deserializer: Deserializer[V]) -> None: ...
 
     def __init__(self, *, configs: dict[str, Any],
-                 key_deserializer: Deserializer[Any] | None = None,
-                 value_deserializer: Deserializer[Any] | None = None) -> None:
+                 key_deserializer: Deserializer[Any] | None = MISSING,
+                 value_deserializer: Deserializer[Any] | None = MISSING) -> None:
         """A consumer is instantiated by providing a set of key-value pairs as
         configuration, and a key and a value deserializer. Valid configuration
         strings are documented at
@@ -85,4 +87,7 @@ class KafkaConsumer(Consumer[K, V]):
         to avoid resource leaks.
         """
         Consumer.__init__(self)
-        self._start(configs, key_deserializer, value_deserializer)
+        # Left out or None (Java's null, which KafkaConsumer reads as "use the
+        # config key"): the config route (Signatures, the serde exception).
+        self._start(configs, None if key_deserializer is MISSING else key_deserializer,
+                    None if value_deserializer is MISSING else value_deserializer)

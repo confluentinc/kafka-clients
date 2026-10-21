@@ -35,7 +35,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["ClientQuotaFilterComponent"]
 
@@ -66,7 +65,7 @@ class ClientQuotaFilterComponent:
         ``match_is_null`` is Java's ``null`` ``match``; otherwise ``match`` is
         the ``Optional``'s value, ``None`` for ``Optional.empty()``."""
         if entity_type is None:
-            raise NullPointerError()
+            raise TypeError("entity_type must not be None")
         component = cls.__new__(cls)
         component._entity_type = entity_type
         component._match = match
@@ -78,7 +77,7 @@ class ClientQuotaFilterComponent:
         """Constructs and returns a filter component that exactly matches the
         provided entity name for the entity type."""
         if entity_name is None:
-            raise NullPointerError()
+            raise TypeError("entity_name must not be None")
         return ClientQuotaFilterComponent._new(entity_type=entity_type, match=entity_name,
                                                match_is_null=False)
 
@@ -120,7 +119,7 @@ class ClientQuotaFilterComponent:
 
     def __str__(self) -> str:
         if self._match_is_null:
-            match = "null"
+            match = "None"
         elif self._match is None:
             match = "Optional.empty"
         else:

@@ -15,10 +15,12 @@
 """``OffsetCommitCallback``: Java's
 ``org.apache.kafka.clients.consumer.OffsetCommitCallback``.
 
-A single-method callback interface, so a ``Callable`` alias of the interface's
-name (CLAUDE.md, Python Binding Conventions, Idiom translations), called
-positionally as ``callback(offsets, exception)`` — Java's ``onComplete(offsets,
-exception)``. ``offsets`` is ``None`` where Java passes ``null``: when the commit
+A single-method callback interface, so a ``Protocol`` of the interface's name
+whose ``__call__`` takes Java's parameters keyword-only plus ``**kwargs``
+(CLAUDE.md, Python Binding Conventions, Idiom translations), called as
+``callback(offsets=..., exception=...)`` — Java's ``onComplete(offsets,
+exception)``; ``commit_nowait()`` rejects a callback without ``**kwargs`` with
+``IllegalArgumentError("callback must accept **kwargs")``. ``offsets`` is ``None`` where Java passes ``null``: when the commit
 failed, and for an explicit empty ``offsets`` (whose commit completes at once
 with ``null``, ``AsyncKafkaConsumer.commit``); ``MockConsumer`` passes the offsets
 given, as Java's mock does. ``exception`` is ``None`` when the commit completed
@@ -39,14 +41,14 @@ method): it is awaited on the event loop, inside the call that delivers it,
 callbacks still starting one at a time in the order the commits complete. The
 synchronous consumers reject one: ``KafkaConsumer`` closes its coroutine and
 the delivering call raises ``TypeError``, ``MockConsumer`` raises ``TypeError``
-from ``commit_nowait()``. This alias stays Java's
+from ``commit_nowait()``. This protocol stays Java's
 plain callback; ``AsyncConsumer.commit_nowait`` spells out the coroutine form
 beside it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import Any, Protocol
 
 from confluent_kafka.common.topic_partition import TopicPartition
 
@@ -54,8 +56,15 @@ from .offset_and_metadata import OffsetAndMetadata
 
 __all__ = ["OffsetCommitCallback"]
 
-#: A callback the user implements to handle the completion of a commit
-#: requested with ``commit_nowait()``: ``callback(offsets, exception)``.
-OffsetCommitCallback = Callable[
-    [dict[TopicPartition, OffsetAndMetadata] | None, Exception | None], None
-]
+
+class OffsetCommitCallback(Protocol):
+    """A callback interface that the user can implement to trigger custom
+    actions when a commit request completes (Java's ``onComplete``)."""
+
+    def __call__(self, *, offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                 exception: Exception | None, **kwargs: Any) -> None:
+        """A callback method the user can implement to provide asynchronous
+        handling of commit request completion. ``offsets`` is ``None`` where
+        Java passes ``null``; ``exception`` is ``None`` when the commit
+        completed successfully."""
+        ...

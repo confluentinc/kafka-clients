@@ -31,6 +31,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
+from confluent_kafka._args import MISSING
+from confluent_kafka._java import java_str
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
@@ -68,17 +70,19 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def partitions_to_offset_and_metadata(self, *, group_id: str | None = None
+    def partitions_to_offset_and_metadata(self, *, group_id: str = MISSING
                                           ) -> KafkaFuture[_Offsets] | AsyncKafkaFuture[_Offsets]:
         """Return a future which yields a map of topic partitions to
-        ``OffsetAndMetadata`` objects, for the specified group (``group_id``) or, without
-        it, for the one group requested. If the group does not have a committed offset for
-        a partition, the corresponding value in the returned map will be ``None``.
+        ``OffsetAndMetadata`` objects, for the specified group (``group_id``) or, with it
+        left out, for the one group requested. If the group does not have a committed
+        offset for a partition, the corresponding value in the returned map will be
+        ``None``.
 
         Without ``group_id``, raises ``IllegalStateError`` when offsets of several groups
-        were requested; with it, ``IllegalArgumentError`` when that group's were not.
+        were requested; with it, ``IllegalArgumentError`` when that group's were not (a
+        ``None`` is Java's ``null`` group id, ``CoordinatorKey.byGroupId(null)``).
         """
-        if group_id is None:
+        if group_id is MISSING:
             if len(self._futures) != 1:
                 raise IllegalStateError(
                     message="Offsets from multiple consumer groups were requested. "
@@ -87,7 +91,8 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
             return next(iter(self._futures.values()))
         if group_id not in self._futures:
             raise IllegalArgumentError(
-                message="Offsets for consumer group '" + group_id + "' were not requested.")
+                message="Offsets for consumer group '" + java_str(group_id)
+                + "' were not requested.")
         return self._futures[group_id]
 
     def all(self) -> KafkaFuture[dict[str, _Offsets]] | AsyncKafkaFuture[dict[str, _Offsets]]:

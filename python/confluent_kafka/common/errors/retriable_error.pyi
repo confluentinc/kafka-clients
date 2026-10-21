@@ -14,9 +14,18 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.RetriableError).
 
+from typing import overload
+
 from confluent_kafka.common.errors.api_error import ApiError
 
 __all__ = ["RetriableError"]
 
 class RetriableError(ApiError):
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...

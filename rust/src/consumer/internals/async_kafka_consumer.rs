@@ -10279,7 +10279,7 @@ mod tests {
         // ...and must NOT have armed a user-visible wakeup. This is the
         // regression: with `network_thread_close.wakeup()` here, the next
         // `poll()` / `commit_sync()` / `position()` fails with
-        // `Wakeup("WakeupTrigger fired")` even though the user never called
+        // `Wakeup` (Java's message-less `WakeupException`) even though the user never called
         // `wakeup()`.
         assert!(
             !handles.bg_wakeup_called.load(Ordering::Acquire),

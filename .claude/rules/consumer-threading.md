@@ -637,7 +637,8 @@ in a batch) only if profiling shows header allocation is hot.
 
   - `Deserializer::deserialize(&self, topic: &str, data: Vec<u8>)` —
     forces a per-record copy.
-  - `#[async_trait]` on `Deserializer`.
+  - `#[async_trait]` on `Deserializer` — it boxes a future per record; the
+    trait's own `async fn` / `impl Future` (and `InlineFuture` for `dyn`) does not.
   - `Bytes::copy_from_slice(...)` where `Bytes::slice(...)` would do.
   - `CompletedFetch { records: Vec<ConsumerRecord<K, V>> }` — pre-decoded
     records in a vec require a second pass that copies all bytes. Hold the

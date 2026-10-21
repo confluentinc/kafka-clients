@@ -3562,13 +3562,106 @@ static PyObject* ConsumerRecord_get_delivery_count(ConsumerRecordObject* self, v
     return PyLong_FromLong(count);
 }
 
-// headers -> list[(key: str, value: memoryview | None)], in insertion order
-// (bytes for a mock batch, see `record_bytes_to_py`).
+// The Python classes a fetched record's headers are built as --
+// `confluent_kafka.common.header.Header` and `confluent_kafka.common.headers.
+// Headers` -- and the slot descriptors of their fields, looked up once. The
+// objects are allocated without running the classes' keyword constructors and
+// their slots set directly: the values are already in the form the
+// constructors would make (a str key, a read-only byte view).
+static PyTypeObject* py_header_type = NULL;
+static PyTypeObject* py_headers_type = NULL;
+static PyObject* header_key_slot = NULL;      // Header._key
+static PyObject* header_value_slot = NULL;    // Header._value
+static PyObject* headers_list_slot = NULL;    // Headers._headers
+static PyObject* headers_read_only_slot = NULL;  // Headers._read_only
+
+static PyObject* slot_descriptor(PyTypeObject* type, const char* name) {
+    PyObject* d = PyObject_GetAttrString((PyObject*)type, name);
+    if (d != NULL && Py_TYPE(d)->tp_descr_set == NULL) {
+        Py_DECREF(d);
+        PyErr_Format(PyExc_TypeError, "%s.%s is not a slot", type->tp_name, name);
+        return NULL;
+    }
+    return d;
+}
+
+static int load_header_types(void) {
+    if (py_headers_type != NULL) return 0;
+    PyObject* module = PyImport_ImportModule("confluent_kafka.common.headers");
+    if (module == NULL) return -1;
+    PyObject* header = PyObject_GetAttrString(module, "Header");
+    PyObject* headers = header ? PyObject_GetAttrString(module, "Headers") : NULL;
+    Py_DECREF(module);
+    if (headers == NULL) { Py_XDECREF(header); return -1; }
+    if (!PyType_Check(header) || !PyType_Check(headers)) {
+        Py_DECREF(header); Py_DECREF(headers);
+        PyErr_SetString(PyExc_TypeError, "Header and Headers must be classes");
+        return -1;
+    }
+    PyObject* k = slot_descriptor((PyTypeObject*)header, "_key");
+    PyObject* v = k ? slot_descriptor((PyTypeObject*)header, "_value") : NULL;
+    PyObject* l = v ? slot_descriptor((PyTypeObject*)headers, "_headers") : NULL;
+    PyObject* r = l ? slot_descriptor((PyTypeObject*)headers, "_read_only") : NULL;
+    if (r == NULL) {
+        Py_XDECREF(k); Py_XDECREF(v); Py_XDECREF(l);
+        Py_DECREF(header); Py_DECREF(headers);
+        return -1;
+    }
+    header_key_slot = k;
+    header_value_slot = v;
+    headers_list_slot = l;
+    headers_read_only_slot = r;
+    py_header_type = (PyTypeObject*)header;
+    py_headers_type = (PyTypeObject*)headers;  // set last: the "loaded" flag
+    return 0;
+}
+
+static int set_slot(PyObject* descr, PyObject* obj, PyObject* value) {
+    return Py_TYPE(descr)->tp_descr_set(descr, obj, value);
+}
+
+// A `Header` with the given key and value (both borrowed); NULL on failure.
+static PyObject* new_header(PyObject* key, PyObject* value) {
+    PyObject* h = py_header_type->tp_alloc(py_header_type, 0);
+    if (h == NULL) return NULL;
+    if (set_slot(header_key_slot, h, key) < 0 || set_slot(header_value_slot, h, value) < 0) {
+        Py_DECREF(h);
+        return NULL;
+    }
+    return h;
+}
+
+// A writable `Headers` holding the tuple `items` of `Header`s (borrowed);
+// NULL on failure. It stays writable, as Java's CompletedFetch leaves it.
+static PyObject* new_headers(PyObject* items) {
+    PyObject* hs = py_headers_type->tp_alloc(py_headers_type, 0);
+    if (hs == NULL) return NULL;
+    if (set_slot(headers_list_slot, hs, items) < 0
+        || set_slot(headers_read_only_slot, hs, Py_False) < 0) {
+        Py_DECREF(hs);
+        return NULL;
+    }
+    return hs;
+}
+
+// headers -> a `confluent_kafka.common.Headers` of `Header`s, in insertion
+// order (CLAUDE.md, Python Binding Conventions, Behaviour with no other home):
+// each key a str, each value a memoryview into the batch, never copied
+// (CLAUDE.md §14), or None for a null value. A mock batch's values are bytes
+// copies (see `record_bytes_to_py`), viewed as memoryviews too.
 static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* closure) {
     kafka_common_Error_t *ffi_err = NULL;
+    if (load_header_types() < 0) return NULL;
     const kafka_common_header_internals_RecordHeaders_t* rh = NULL;
     if (ffi_raise((rh = kafka_consumer_ConsumerRecord_headers_err(self->rec, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (rh == NULL) return PyList_New(0);
+    PyObject* items = NULL;
+    if (rh == NULL) {
+        items = PyTuple_New(0);
+        if (items == NULL) return NULL;
+        PyObject* out = new_headers(items);
+        Py_DECREF(items);
+        return out;
+    }
     // The interface view is borrowed from the class handle (never destroyed);
     // the `__as_` conversion takes the read-only handle, and only the reading
     // `to_array` is called on its view.
@@ -3576,11 +3669,17 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
     kafka_List_t* arr = NULL;  // owned list of borrowed headers
     if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(rh, &ffi_err), ffi_take(&ffi_err)))
         || ffi_raise((arr = kafka_common_header_Headers_to_array_err(headers, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    if (arr == NULL) return PyList_New(0);
     int32_t n = 0;
-    if (ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) { ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    PyObject* list = PyList_New(n);
-    if (list == NULL) { ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
+    if (arr != NULL
+        && ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) {
+        ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
+    items = PyTuple_New(n);  // the empty tuple is a shared singleton
+    if (items == NULL) {
+        if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
     for (int32_t i = 0; i < n; i++) {
         void* rec_header = NULL;
         const kafka_common_header_Header_t* h = NULL;
@@ -3591,21 +3690,29 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
                    (const kafka_common_header_internals_RecordHeader_t*)rec_header, &ffi_err), ffi_take(&ffi_err)))
             || ffi_raise((hkey = kafka_common_header_Header_key_err(h, &ffi_err), ffi_take(&ffi_err)))
             || ffi_raise((hval = kafka_common_header_Header_value_err(h, &ffi_err), ffi_take(&ffi_err)))) {
-            Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+            Py_DECREF(items); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
             return NULL;
         }
         PyObject* pykey = PyUnicode_FromString(hkey ? hkey : "");
         PyObject* pyval = record_bytes_to_py(self->batch, &hval);
-        if (pykey == NULL || pyval == NULL) {
-            Py_XDECREF(pykey); Py_XDECREF(pyval); Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        if (pyval != NULL && PyBytes_Check(pyval)) {
+            PyObject* view = PyMemoryView_FromObject(pyval);  // a view of the copy
+            Py_DECREF(pyval);
+            pyval = view;
+        }
+        PyObject* header = (pykey != NULL && pyval != NULL) ? new_header(pykey, pyval) : NULL;
+        Py_XDECREF(pykey);
+        Py_XDECREF(pyval);
+        if (header == NULL) {
+            Py_DECREF(items); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
             return NULL;
         }
-        PyObject* tuple = Py_BuildValue("(NN)", pykey, pyval);  // steals both
-        if (tuple == NULL) { Py_DECREF(list); ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        PyList_SET_ITEM(list, i, tuple);  // steals ref
+        PyTuple_SET_ITEM(items, i, header);  // steals ref
     }
-    ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
-    return list;
+    if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+    PyObject* out = new_headers(items);
+    Py_DECREF(items);
+    return out;
 }
 
 static PyObject* ConsumerRecord_repr(ConsumerRecordObject* self) {
@@ -3630,7 +3737,7 @@ static PyGetSetDef ConsumerRecord_getsetters[] = {
     {"serialized_value_size", (getter)ConsumerRecord_get_serialized_value_size, NULL, "Serialized value size", NULL},
     {"leader_epoch", (getter)ConsumerRecord_get_leader_epoch, NULL, "Leader epoch or None", NULL},
     {"delivery_count", (getter)ConsumerRecord_get_delivery_count, NULL, "Delivery count or None", NULL},
-    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers list of (key, value)", NULL},
+    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.Headers of Header objects", NULL},
     {NULL}
 };
 
@@ -4424,6 +4531,32 @@ static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     return ret;
 }
 
+// ConsumerHandle_group_metadata(hh) -> (ConsumerGroupMetadata | None, err | None),
+// as Consumer_group_metadata, read through the handle (safe inside a listener,
+// while the consumer's own call is in flight). The handle's function cannot
+// fail: its `_err` twin reports only a caught panic.
+static PyObject* py_ConsumerHandle_group_metadata(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    kafka_consumer_ConsumerGroupMetadata_t* m = NULL;
+    kafka_common_Error_t* err = (m = kafka_consumer_ConsumerHandle_group_metadata_err(handle_self(h), &ffi_err), ffi_take(&ffi_err));
+    if (err != NULL) {
+        if (m) ffi_unraisable((kafka_consumer_ConsumerGroupMetadata_destroy_err(m, &ffi_err), ffi_take(&ffi_err)));
+        return cvalue_error(Py_None, err);
+    }
+    ConsumerGroupMetadataObject* obj =
+        PyObject_New(ConsumerGroupMetadataObject, &ConsumerGroupMetadataType);
+    if (obj == NULL) {
+        ffi_unraisable((kafka_consumer_ConsumerGroupMetadata_destroy_err(m, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
+    obj->handle = m;
+    PyObject* ret = cvalue_error((PyObject*)obj, NULL);
+    Py_DECREF(obj);
+    return ret;
+}
+
 // Consumer_client_id(handle) -> str | None: the client.id Consumer_KafkaConsumer_new
 // read from the consumer's ConsumerConfig (generated there when unset); None
 // for a mock. Java's KafkaConsumer.clientId() is package-private, so the core
@@ -4610,8 +4743,8 @@ static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {             
 }
 
 // Shape: (self, list<TopicPartition>[, timeout_ms]) -> map. A negative
-// timeout_ms selects the Java overload without a timeout (the `_NT` variant
-// below serves the ConsumerHandle, whose Java methods have no timeout form).
+// timeout_ms selects the Java overload without a timeout. Serves the consumer
+// and its ConsumerHandle alike.
 // py(h, tps, ms) -> (dict | None, err) / py_cb(h, tps, ms, cb)
 #define DEF_TPLIST_MAP_OPS(pyname, SELF_T, SELF_FN, OP, OP_T, OP_CB, OP_T_CB, CONV)     \
 static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
@@ -4824,8 +4957,8 @@ static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {             
 }
 
 // Shape: commit_sync(self[, offsets][, timeout_ms]) -> err.
-// py(h, spec | None, ms) / py_cb(h, spec | None, ms, cb). The `_NT` variant
-// below serves the ConsumerHandle, whose Java methods have no timeout form.
+// py(h, spec | None, ms) / py_cb(h, spec | None, ms, cb). Serves the consumer
+// and its ConsumerHandle alike.
 #define DEF_COMMIT_SYNC_OPS(pyname, SELF_T, SELF_FN, OP, OP_T, OP_O, OP_OT, OP_CB, OP_T_CB, OP_O_CB, OP_OT_CB) \
 static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
     unsigned long long h; PyObject* spec; long long ms;                                 \
@@ -4915,8 +5048,8 @@ DEF_POSITION_OPS(Consumer_position, kafka_consumer_Consumer_t*, consumer_self,
 // presence flag. py(h, topic, partition) -> ((present, lag), err | None) /
 // py_cb(h, topic, partition, cb) with cb((present, lag), err | None); lag is 0
 // when not present, and Python reads present 0 as None. The consumer has only the
-// `_cb` twin here (its sync class waits on it); the ConsumerHandle has only the
-// blocking form, which a listener calls from inside the consumer's own waiting
+// `_cb` twin here (its sync class waits on it); the ConsumerHandle has both,
+// and a listener calls the blocking form from inside the consumer's own waiting
 // call.
 #define DEF_CURRENT_LAG_OP(pyname, SELF_T, SELF_FN, OP)                                 \
 static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
@@ -5475,115 +5608,6 @@ static PyObject* py_ConsumerHandle_paused(PyObject* self, PyObject* args) {
     return tp_list_to_py(list);
 }
 
-// No-timeout variants of the map-returning shapes (the ConsumerHandle's Java
-// methods have no Duration overload). py(h, tps) / py_cb(h, tps, cb)
-#define DEF_TPLIST_MAP_OPS_NT(pyname, SELF_T, SELF_FN, OP, OP_CB, CONV)                 \
-static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
-    kafka_common_Error_t *ffi_err = NULL;                                               \
-    unsigned long long h; PyObject* tps;                                                \
-    if (!PyArg_ParseTuple(args, "KO", &h, &tps)) return NULL;                           \
-    tp_list_t l;                                                                        \
-    if (tp_list_build(tps, &l) < 0) return NULL;                                        \
-    SELF_T s = SELF_FN(h);                                                              \
-    kafka_Map_t* out = NULL;                                                            \
-    kafka_common_Error_t* err = NULL;                                                   \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    out = OP(s, l.list, &err);                                                          \
-    Py_END_ALLOW_THREADS                                                                \
-    tp_list_free(&l);                                                                   \
-    if (err != NULL) { if (out) ffi_unraisable((kafka_Map_destroy_err(out, &ffi_err), ffi_take(&ffi_err))); return cvalue_error(Py_None, err); } \
-    PyObject* value = CONV(out);                                                        \
-    if (value == NULL) return NULL;                                                     \
-    PyObject* ret = cvalue_error(value, NULL);                                          \
-    Py_DECREF(value);                                                                   \
-    return ret;                                                                         \
-}                                                                                       \
-static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {                     \
-    unsigned long long h; PyObject* tps; PyObject* cb;                                  \
-    if (!PyArg_ParseTuple(args, "KOO", &h, &tps, &cb)) return NULL;                     \
-    tp_list_t l;                                                                        \
-    if (tp_list_build(tps, &l) < 0) return NULL;                                        \
-    ValueCbCtx* ctx = value_cb_ctx_new(cb, CONV, NULL);                                 \
-    if (ctx == NULL) { tp_list_free(&l); return NULL; }                                 \
-    SELF_T s = SELF_FN(h);                                                              \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    OP_CB(s, l.list, consumer_map_cb, ctx);                                             \
-    Py_END_ALLOW_THREADS                                                                \
-    tp_list_free(&l);                                                                   \
-    Py_RETURN_NONE;                                                                     \
-}
-
-// py(h, [(t, p, ts)]) -> (dict | None, err) / py_cb(h, spec, cb)
-#define DEF_TIMESTAMPS_MAP_OPS_NT(pyname, SELF_T, SELF_FN, OP, OP_CB)                   \
-static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
-    kafka_common_Error_t *ffi_err = NULL;                                               \
-    unsigned long long h; PyObject* spec;                                               \
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;                          \
-    tp_i64_map_t m;                                                                     \
-    if (tp_i64_map_build(spec, &m) < 0) return NULL;                                    \
-    SELF_T s = SELF_FN(h);                                                              \
-    kafka_Map_t* out = NULL;                                                            \
-    kafka_common_Error_t* err = NULL;                                                   \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    out = OP(s, m.map, &err);                                                           \
-    Py_END_ALLOW_THREADS                                                                \
-    tp_i64_map_free(&m);                                                                \
-    if (err != NULL) { if (out) ffi_unraisable((kafka_Map_destroy_err(out, &ffi_err), ffi_take(&ffi_err))); return cvalue_error(Py_None, err); } \
-    PyObject* value = oat_map_to_py(out);                                               \
-    if (value == NULL) return NULL;                                                     \
-    PyObject* ret = cvalue_error(value, NULL);                                          \
-    Py_DECREF(value);                                                                   \
-    return ret;                                                                         \
-}                                                                                       \
-static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {                     \
-    unsigned long long h; PyObject* spec; PyObject* cb;                                 \
-    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &cb)) return NULL;                    \
-    tp_i64_map_t m;                                                                     \
-    if (tp_i64_map_build(spec, &m) < 0) return NULL;                                    \
-    ValueCbCtx* ctx = value_cb_ctx_new(cb, oat_map_to_py, NULL);                        \
-    if (ctx == NULL) { tp_i64_map_free(&m); return NULL; }                              \
-    SELF_T s = SELF_FN(h);                                                              \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    OP_CB(s, m.map, consumer_map_cb, ctx);                                              \
-    Py_END_ALLOW_THREADS                                                                \
-    tp_i64_map_free(&m);                                                                \
-    Py_RETURN_NONE;                                                                     \
-}
-
-// Shape: (self[, offsets]) -> err, for the handle's commit_sync / commit_async.
-// py(h, spec | None) / py_cb(h, spec | None, cb)
-#define DEF_COMMIT_OPS_NT(pyname, SELF_T, SELF_FN, OP, OP_O, OP_CB, OP_O_CB)            \
-static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
-    unsigned long long h; PyObject* spec;                                               \
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;                          \
-    offsets_map_t m; memset(&m, 0, sizeof(m));                                          \
-    int with_offsets = spec != Py_None;                                                 \
-    if (with_offsets && offsets_map_build(spec, &m) < 0) return NULL;                   \
-    SELF_T s = SELF_FN(h);                                                              \
-    kafka_common_Error_t* err = NULL;                                                   \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    if (with_offsets) OP_O(s, m.map, &err); else OP(s, &err);                           \
-    Py_END_ALLOW_THREADS                                                                \
-    if (with_offsets) offsets_map_free(&m);                                             \
-    return err_result(err);                                                             \
-}                                                                                       \
-static PyObject* py_##pyname##_cb(PyObject* self, PyObject* args) {                     \
-    unsigned long long h; PyObject* spec; PyObject* cb;                                 \
-    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &cb)) return NULL;                    \
-    offsets_map_t m; memset(&m, 0, sizeof(m));                                          \
-    int with_offsets = spec != Py_None;                                                 \
-    if (with_offsets && offsets_map_build(spec, &m) < 0) return NULL;                   \
-    VoidCbCtx* ctx = void_cb_ctx_new(cb);                                               \
-    if (ctx == NULL) { if (with_offsets) offsets_map_free(&m); return NULL; }           \
-    SELF_T s = SELF_FN(h);                                                              \
-    Py_BEGIN_ALLOW_THREADS                                                              \
-    if (with_offsets) OP_O_CB(s, m.map, producer_void_cb, ctx);                         \
-    else OP_CB(s, producer_void_cb, ctx);                                               \
-    Py_END_ALLOW_THREADS                                                                \
-    if (with_offsets) offsets_map_free(&m);                                             \
-    Py_RETURN_NONE;                                                                     \
-}
-
 #define HANDLE_T const kafka_consumer_ConsumerHandle_t*
 
 DEF_TPLIST_VOID_OPS(ConsumerHandle_seek_to_beginning, HANDLE_T, handle_self,
@@ -5606,18 +5630,104 @@ DEF_POSITION_OPS(ConsumerHandle_position, HANDLE_T, handle_self,
 DEF_CURRENT_LAG_OP(ConsumerHandle_current_lag, HANDLE_T, handle_self,
                    kafka_consumer_ConsumerHandle_current_lag)
 
-DEF_TPLIST_MAP_OPS_NT(ConsumerHandle_committed, HANDLE_T, handle_self,
-                      kafka_consumer_ConsumerHandle_committed, kafka_consumer_ConsumerHandle_committed_cb, oam_map_to_py)
-DEF_TPLIST_MAP_OPS_NT(ConsumerHandle_beginning_offsets, HANDLE_T, handle_self,
-                      kafka_consumer_ConsumerHandle_beginning_offsets, kafka_consumer_ConsumerHandle_beginning_offsets_cb, long_map_to_py)
-DEF_TPLIST_MAP_OPS_NT(ConsumerHandle_end_offsets, HANDLE_T, handle_self,
-                      kafka_consumer_ConsumerHandle_end_offsets, kafka_consumer_ConsumerHandle_end_offsets_cb, long_map_to_py)
-DEF_TIMESTAMPS_MAP_OPS_NT(ConsumerHandle_offsets_for_times, HANDLE_T, handle_self,
-                          kafka_consumer_ConsumerHandle_offsets_for_times, kafka_consumer_ConsumerHandle_offsets_for_times_cb)
+DEF_CURRENT_LAG_CB_OP(ConsumerHandle_current_lag_cb, HANDLE_T, handle_self,
+                      kafka_consumer_ConsumerHandle_current_lag_cb)
 
-DEF_COMMIT_OPS_NT(ConsumerHandle_commit_sync, HANDLE_T, handle_self,
-                  kafka_consumer_ConsumerHandle_commit_sync, kafka_consumer_ConsumerHandle_commit_sync_with_offsets,
-                  kafka_consumer_ConsumerHandle_commit_sync_cb, kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb)
+// The handle's Duration overloads (KIP-1306's RebalanceConsumer): the shapes the
+// consumer uses, a negative timeout_ms selecting the overload without it.
+DEF_TPLIST_MAP_OPS(ConsumerHandle_committed, HANDLE_T, handle_self,
+                   kafka_consumer_ConsumerHandle_committed, kafka_consumer_ConsumerHandle_committed_with_timeout,
+                   kafka_consumer_ConsumerHandle_committed_cb, kafka_consumer_ConsumerHandle_committed_with_timeout_cb,
+                   oam_map_to_py)
+DEF_TPLIST_MAP_OPS(ConsumerHandle_beginning_offsets, HANDLE_T, handle_self,
+                   kafka_consumer_ConsumerHandle_beginning_offsets, kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout,
+                   kafka_consumer_ConsumerHandle_beginning_offsets_cb, kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb,
+                   long_map_to_py)
+DEF_TPLIST_MAP_OPS(ConsumerHandle_end_offsets, HANDLE_T, handle_self,
+                   kafka_consumer_ConsumerHandle_end_offsets, kafka_consumer_ConsumerHandle_end_offsets_with_timeout,
+                   kafka_consumer_ConsumerHandle_end_offsets_cb, kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb,
+                   long_map_to_py)
+DEF_TIMESTAMPS_MAP_OPS(ConsumerHandle_offsets_for_times, HANDLE_T, handle_self,
+                       kafka_consumer_ConsumerHandle_offsets_for_times, kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout,
+                       kafka_consumer_ConsumerHandle_offsets_for_times_cb, kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb)
+
+DEF_COMMIT_SYNC_OPS(ConsumerHandle_commit_sync, HANDLE_T, handle_self,
+                    kafka_consumer_ConsumerHandle_commit_sync, kafka_consumer_ConsumerHandle_commit_sync_with_timeout,
+                    kafka_consumer_ConsumerHandle_commit_sync_with_offsets, kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout,
+                    kafka_consumer_ConsumerHandle_commit_sync_cb, kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb,
+                    kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb, kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb)
+
+// ConsumerHandle_partitions_for(hh, topic, timeout_ms) -> (list | None, err | None)
+static PyObject* py_ConsumerHandle_partitions_for(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long h; const char* topic; long long ms;
+    if (!PyArg_ParseTuple(args, "KsL", &h, &topic, &ms)) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    kafka_List_t* infos = NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    if (ms >= 0) err = (infos = kafka_consumer_ConsumerHandle_partitions_for_with_timeout(s, topic, (int64_t)ms, &ffi_err), ffi_take(&ffi_err));
+    else err = (infos = kafka_consumer_ConsumerHandle_partitions_for(s, topic, &ffi_err), ffi_take(&ffi_err));
+    Py_END_ALLOW_THREADS
+    if (err != NULL) {
+        if (infos) ffi_unraisable((kafka_List_destroy_err(infos, &ffi_err), ffi_take(&ffi_err)));
+        return cvalue_error(Py_None, err);
+    }
+    PyObject* value = partition_info_list_to_py(infos);
+    if (value == NULL) return NULL;
+    PyObject* ret = cvalue_error(value, NULL);
+    Py_DECREF(value);
+    return ret;
+}
+
+static PyObject* py_ConsumerHandle_partitions_for_cb(PyObject* self, PyObject* args) {
+    unsigned long long h; const char* topic; long long ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsLO", &h, &topic, &ms, &cb)) return NULL;
+    ValueCbCtx* ctx = value_cb_ctx_new(cb, NULL, partition_info_list_to_py);
+    if (ctx == NULL) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    Py_BEGIN_ALLOW_THREADS
+    if (ms >= 0) kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb(s, topic, (int64_t)ms, consumer_list_cb, ctx);
+    else kafka_consumer_ConsumerHandle_partitions_for_cb(s, topic, consumer_list_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+// ConsumerHandle_list_topics(hh, timeout_ms) -> (dict | None, err | None)
+static PyObject* py_ConsumerHandle_list_topics(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long h; long long ms;
+    if (!PyArg_ParseTuple(args, "KL", &h, &ms)) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    kafka_Map_t* out = NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    if (ms >= 0) err = (out = kafka_consumer_ConsumerHandle_list_topics_with_timeout(s, (int64_t)ms, &ffi_err), ffi_take(&ffi_err));
+    else err = (out = kafka_consumer_ConsumerHandle_list_topics(s, &ffi_err), ffi_take(&ffi_err));
+    Py_END_ALLOW_THREADS
+    if (err != NULL) {
+        if (out) ffi_unraisable((kafka_Map_destroy_err(out, &ffi_err), ffi_take(&ffi_err)));
+        return cvalue_error(Py_None, err);
+    }
+    PyObject* value = topics_map_to_py(out);
+    if (value == NULL) return NULL;
+    PyObject* ret = cvalue_error(value, NULL);
+    Py_DECREF(value);
+    return ret;
+}
+
+static PyObject* py_ConsumerHandle_list_topics_cb(PyObject* self, PyObject* args) {
+    unsigned long long h; long long ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KLO", &h, &ms, &cb)) return NULL;
+    ValueCbCtx* ctx = value_cb_ctx_new(cb, topics_map_to_py, NULL);
+    if (ctx == NULL) return NULL;
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
+    Py_BEGIN_ALLOW_THREADS
+    if (ms >= 0) kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb(s, (int64_t)ms, consumer_map_cb, ctx);
+    else kafka_consumer_ConsumerHandle_list_topics_cb(s, consumer_map_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
 
 // ConsumerHandle_commit_async(hh) -> err | None
 //
@@ -10999,17 +11109,23 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_resume_cb", py_ConsumerHandle_resume_cb, METH_VARARGS, "resume twin; cb(err | None)"},
     {"ConsumerHandle_position", py_ConsumerHandle_position, METH_VARARGS, "position(hh, topic, partition, timeout_ms) -> (int, err | None)"},
     {"ConsumerHandle_current_lag", py_ConsumerHandle_current_lag, METH_VARARGS, "current_lag(hh, topic, partition) -> ((present, lag), err | None), present 0 for an empty lag"},
+    {"ConsumerHandle_current_lag_cb", py_ConsumerHandle_current_lag_cb, METH_VARARGS, "current_lag twin; cb((present, lag), err | None)"},
     {"ConsumerHandle_position_cb", py_ConsumerHandle_position_cb, METH_VARARGS, "position twin; cb(int, err | None)"},
-    {"ConsumerHandle_committed", py_ConsumerHandle_committed, METH_VARARGS, "committed(hh, tps) -> (dict | None, err | None)"},
+    {"ConsumerHandle_committed", py_ConsumerHandle_committed, METH_VARARGS, "committed(hh, tps, timeout_ms) -> (dict | None, err | None)"},
     {"ConsumerHandle_committed_cb", py_ConsumerHandle_committed_cb, METH_VARARGS, "committed twin; cb(dict | None, err | None)"},
-    {"ConsumerHandle_beginning_offsets", py_ConsumerHandle_beginning_offsets, METH_VARARGS, "beginning_offsets(hh, tps) -> (dict | None, err | None)"},
+    {"ConsumerHandle_beginning_offsets", py_ConsumerHandle_beginning_offsets, METH_VARARGS, "beginning_offsets(hh, tps, timeout_ms) -> (dict | None, err | None)"},
     {"ConsumerHandle_beginning_offsets_cb", py_ConsumerHandle_beginning_offsets_cb, METH_VARARGS, "beginning_offsets twin; cb(dict | None, err | None)"},
-    {"ConsumerHandle_end_offsets", py_ConsumerHandle_end_offsets, METH_VARARGS, "end_offsets(hh, tps) -> (dict | None, err | None)"},
+    {"ConsumerHandle_end_offsets", py_ConsumerHandle_end_offsets, METH_VARARGS, "end_offsets(hh, tps, timeout_ms) -> (dict | None, err | None)"},
     {"ConsumerHandle_end_offsets_cb", py_ConsumerHandle_end_offsets_cb, METH_VARARGS, "end_offsets twin; cb(dict | None, err | None)"},
-    {"ConsumerHandle_offsets_for_times", py_ConsumerHandle_offsets_for_times, METH_VARARGS, "offsets_for_times(hh, [(t, p, ts)]) -> (dict | None, err | None)"},
+    {"ConsumerHandle_offsets_for_times", py_ConsumerHandle_offsets_for_times, METH_VARARGS, "offsets_for_times(hh, [(t, p, ts)], timeout_ms) -> (dict | None, err | None)"},
     {"ConsumerHandle_offsets_for_times_cb", py_ConsumerHandle_offsets_for_times_cb, METH_VARARGS, "offsets_for_times twin; cb(dict | None, err | None)"},
-    {"ConsumerHandle_commit_sync", py_ConsumerHandle_commit_sync, METH_VARARGS, "commit_sync(hh, offsets_spec | None) -> err | None"},
+    {"ConsumerHandle_commit_sync", py_ConsumerHandle_commit_sync, METH_VARARGS, "commit_sync(hh, offsets_spec | None, timeout_ms) -> err | None"},
     {"ConsumerHandle_commit_sync_cb", py_ConsumerHandle_commit_sync_cb, METH_VARARGS, "commit_sync twin; cb(err | None)"},
+    {"ConsumerHandle_partitions_for", py_ConsumerHandle_partitions_for, METH_VARARGS, "partitions_for(hh, topic, timeout_ms) -> (list | None, err | None)"},
+    {"ConsumerHandle_partitions_for_cb", py_ConsumerHandle_partitions_for_cb, METH_VARARGS, "partitions_for twin; cb(list | None, err | None)"},
+    {"ConsumerHandle_list_topics", py_ConsumerHandle_list_topics, METH_VARARGS, "list_topics(hh, timeout_ms) -> (dict | None, err | None)"},
+    {"ConsumerHandle_list_topics_cb", py_ConsumerHandle_list_topics_cb, METH_VARARGS, "list_topics twin; cb(dict | None, err | None)"},
+    {"ConsumerHandle_group_metadata", py_ConsumerHandle_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
     {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh) -> err | None"},
     {"ConsumerHandle_commit_async_cb", py_ConsumerHandle_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
     {"ConsumerHandle_commit_async_callback", py_ConsumerHandle_commit_async_callback, METH_VARARGS,

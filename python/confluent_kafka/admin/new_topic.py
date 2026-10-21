@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 
 from ._values import frozen
@@ -57,6 +57,8 @@ class NewTopic:
                  "_configs")
 
     @overload
+    def __init__(self, *, name: str, num_partitions: int, replication_factor: int) -> None: ...
+    @overload
     def __init__(self, *, name: str, num_partitions: int | None,
                  replication_factor: int | None) -> None: ...
     @overload
@@ -65,9 +67,9 @@ class NewTopic:
 
     @java_forms(Form("name", "num_partitions", "replication_factor"),
                 Form("name", "replicas_assignments"))
-    def __init__(self, *, name: str, num_partitions: int | None = UNSET,
-                 replication_factor: int | None = UNSET,
-                 replicas_assignments: Mapping[int, Sequence[int]] | None = None) -> None:
+    def __init__(self, *, name: str, num_partitions: int | None = MISSING,
+                 replication_factor: int | None = MISSING,
+                 replicas_assignments: Mapping[int, Sequence[int]] = MISSING) -> None:
         """A new topic with the specified replication factor and number of
         partitions, ``None`` defaulting them to the broker configurations for
         ``num.partitions`` and ``default.replication.factor`` respectively; or
@@ -76,15 +78,18 @@ class NewTopic:
         ``replicas_assignments``: a map from partition id to replica ids (i.e.
         broker ids). Although not enforced, it is generally a good idea for all
         partitions to have the same number of replicas. The first replica will
-        be treated as the preferred leader.
+        be treated as the preferred leader. A ``None`` raises ``TypeError``
+        (Java's ``Collections.unmodifiableMap(null)``).
         """
         self._name = name
         self._configs: dict[str, str] | None = None
-        if replicas_assignments is None:
+        if replicas_assignments is MISSING:
             self._num_partitions: int | None = num_partitions
             self._replication_factor: int | None = replication_factor
             self._replicas_assignments: dict[int, tuple[int, ...]] | None = None
         else:
+            if replicas_assignments is None:
+                raise TypeError("replicas_assignments must not be None")
             self._num_partitions = None
             self._replication_factor = None
             self._replicas_assignments = {
@@ -118,7 +123,7 @@ class NewTopic:
     @overload
     def configs(self, *, configs: Mapping[str, str] | None) -> NewTopic: ...
 
-    def configs(self, *, configs: Mapping[str, str] | None = UNSET
+    def configs(self, *, configs: Mapping[str, str] | None = MISSING
                 ) -> dict[str, str] | None | NewTopic:
         """With no argument: the configuration for the new topic or ``None`` if
         no configs ever specified.
@@ -126,7 +131,7 @@ class NewTopic:
         With ``configs``: set the configuration to use on the new topic and
         return this ``NewTopic``.
         """
-        if configs is UNSET:
+        if configs is MISSING:
             c = self._configs
             return None if c is None else dict(c)
         self._configs = None if configs is None else dict(configs)

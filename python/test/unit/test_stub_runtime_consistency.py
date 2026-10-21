@@ -14,9 +14,9 @@
 
 """The ``@overload`` stubs and the runtime accept the same sets of keywords.
 
-CLAUDE.md, Python Binding Conventions, Signatures: "A stub admits a set of
-given parameters only if that set is a Java overload", and ``java_forms``
-accepts exactly the Java overloads' sets. So for every public class and method
+CLAUDE.md, Python Binding Conventions, Signatures: "One ``@typing.overload``
+stub per Java overload, with exactly that overload's parameters and no
+defaults", and ``java_forms`` accepts exactly the Java overloads' sets. So for every public class and method
 with stubs (inline ``@overload``\\ s in a ``.py`` file, or a generated ``.pyi``
 stub), every subset of the implementation signature's keyword-only parameters
 is admitted by some stub iff the runtime accepts it. A method ``java_forms``

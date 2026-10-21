@@ -690,7 +690,7 @@ def test_error_is_retriable(ex, expected):
 
 
 @pytest.mark.parametrize("message,expected", [
-    ("WakeupTrigger fired", True),
+    ("", False),  # the core's WakeupError has Java's empty message; its type decides
     ("wakeup", True),
     ("Timed out waiting for the coordinator", False),
     ("This is not the correct coordinator.", False),

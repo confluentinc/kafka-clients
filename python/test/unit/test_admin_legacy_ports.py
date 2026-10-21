@@ -208,7 +208,7 @@ from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
 from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
     UnknownTopicOrPartitionError,
 )
-from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
+from confluent_kafka import UnsupportedOperationError
 
 from .admin_futures import failure
 

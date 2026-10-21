@@ -7,9 +7,10 @@ name: Bump version
 # PR's own build runs the checks, the API compatibility check among them.
 #
 # Required Task parameters:
-#   VERSION         -- X.Y.Z, or X.Y.Z-alpha.N / -beta.N / -rc.N. The Cargo
-#                      manifests get it as given, the Python packages in
-#                      PEP 440 (0.3.0-rc.1 -> 0.3.0rc1).
+#   VERSION         -- X.Y.Z, or X.Y.Z-alpha.N / -beta.N / -dev.N / -rc.N. The
+#                      Cargo manifests get it as given, the Python packages in
+#                      PEP 440 (0.3.0-rc.1 -> 0.3.0rc1, 0.3.0-dev.1 ->
+#                      0.3.0.dev1).
 # Optional:
 #   PYTHON_VERSION  -- a PEP 440 version for the Python packages instead
 #                      (e.g. 4.4.0 or 4.4.0.post1). Python versions only

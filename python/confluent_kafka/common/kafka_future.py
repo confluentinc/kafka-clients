@@ -66,9 +66,10 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka._wait import WAIT_SLICE_S, done_within
 
 if TYPE_CHECKING:
@@ -320,9 +321,9 @@ class _KafkaFutureImpl(_FutureState[T]):
 def _to_string(state: int, outcome: Any) -> str:
     value = outcome if state == _VALUE else None
     error = outcome if state >= _ERROR else None
-    shown_value = "null" if value is None else str(value)
-    shown_error = "null" if error is None else _throwable.to_string(error)
-    done = "true" if (error is not None or value is not None) else "false"
+    shown_value = "None" if value is None else str(value)
+    shown_error = "None" if error is None else _throwable.to_string(error)
+    done = "True" if (error is not None or value is not None) else "False"
     return f"KafkaFuture{{value={shown_value},exception={shown_error},done={done}}}"
 
 
@@ -382,7 +383,7 @@ _USER_COMPLETION_MESSAGE = "User code should not complete futures returned from 
 def _user_completion() -> BaseException:
     """Java's ``UnsupportedOperationException`` (``UnsupportedOperationError``)
     for user code completing an inner future."""
-    from confluent_kafka import UnsupportedOperationError
+    from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
     return UnsupportedOperationError(message=_USER_COMPLETION_MESSAGE)
 
@@ -565,6 +566,19 @@ class _KafkaFutureBase(Generic[T]):
         return _to_string(impl._state, impl._outcome)
 
 
+
+
+def _checked_futures(futures: Any) -> list[Any]:
+    """``allOf(KafkaFuture<?>... futures)``'s argument: Java's
+    ``Arrays.stream(futures)`` dereferences a null array, and each null element
+    is dereferenced in turn (``KafkaFuture.java:76, 80``)."""
+    if futures is None:
+        raise TypeError("futures must not be None")
+    sources = list(futures)
+    if any(f is None for f in sources):
+        raise TypeError("futures must not contain None")
+    return sources
+
 class KafkaFuture(_KafkaFutureBase[T]):
     """A flexible future which supports call chaining and other asynchronous
     programming patterns.
@@ -618,8 +632,11 @@ class KafkaFuture(_KafkaFutureBase[T]):
     def all_of(*, futures: tuple[KafkaFuture[Any], ...]) -> KafkaFuture[None]:
         """Returns a new KafkaFuture that is completed when all the given futures
         have completed. If any future fails, the returned future fails with it.
-        If multiple futures fail, the first failure is returned."""
-        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of([f._python_state() for f in futures]))
+        If multiple futures fail, the first failure is returned. A ``None``
+        ``futures``, or a ``None`` among them, raises ``TypeError``, as Java's
+        ``Arrays.stream(null)`` and ``kafkaFuture.toCompletionStage()`` do."""
+        return KafkaFuture._of_impl(_KafkaFutureImpl.all_of(
+            [f._python_state() for f in _checked_futures(futures)]))
 
     def to_completion_stage(self) -> concurrent.futures.Future[T]:
         """Gets the inner ``concurrent.futures.Future`` this future waits on,
@@ -665,16 +682,23 @@ class KafkaFuture(_KafkaFutureBase[T]):
         request or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
-    def get(self, *, timeout: Duration | None = None) -> T:
+    @overload
+    def get(self) -> T: ...
+    @overload
+    def get(self, *, timeout: Duration) -> T: ...
+    def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising
         ``confluent_kafka.TimeoutError`` when it elapses first (a negative or
-        zero timeout raises at once unless the future is done).
+        zero timeout raises at once unless the future is done). A ``None``
+        timeout raises ``TypeError``, as Java's null ``TimeUnit`` does.
 
         A failed future raises ``confluent_kafka.ExecutionError`` from the
         failure; a cancelled one ``concurrent.futures.CancelledError``. The wait
         is in short slices, so Ctrl+C ends it."""
-        seconds = None if timeout is None else _timeout_s(timeout)
+        if timeout is None:  # Java's unit.toNanos(timeout) on a null TimeUnit
+            raise TypeError("timeout must not be None")
+        seconds = None if timeout is MISSING else _timeout_s(timeout)
         impl = self._read_done_handle()
         if impl is None or impl._state == _PENDING:
             inner = self._waiter()
@@ -803,8 +827,11 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
     def all_of(*, futures: tuple[AsyncKafkaFuture[Any], ...]) -> AsyncKafkaFuture[None]:
         """Returns a new AsyncKafkaFuture that is completed when all the given
         futures have completed. If any future fails, the returned future fails
-        with it. If multiple futures fail, the first failure is returned."""
-        sources = list(futures)
+        with it. If multiple futures fail, the first failure is returned. A
+        ``None`` ``futures``, or a ``None`` among them, raises ``TypeError``, as
+        Java's ``Arrays.stream(null)`` and ``kafkaFuture.toCompletionStage()``
+        do."""
+        sources = _checked_futures(futures)
         loop = next((f._loop for f in sources if f._loop is not None), None)
         return AsyncKafkaFuture._of_impl(
             _KafkaFutureImpl.all_of([f._python_state() for f in sources]), loop)
@@ -838,16 +865,23 @@ class AsyncKafkaFuture(_KafkaFutureBase[T]):
         or the core."""
         return super().cancel(may_interrupt_if_running=may_interrupt_if_running)
 
-    async def get(self, *, timeout: Duration | None = None) -> T:
+    @overload
+    async def get(self) -> T: ...
+    @overload
+    async def get(self, *, timeout: Duration) -> T: ...
+    async def get(self, *, timeout: Duration = MISSING) -> T:
         """Waits if necessary for this future to complete, and then returns its
         result; with ``timeout``, for at most that long, raising
         ``confluent_kafka.TimeoutError`` when it elapses first (a negative or
-        zero timeout raises at once unless the future is done).
+        zero timeout raises at once unless the future is done). A ``None``
+        timeout raises ``TypeError``, as Java's null ``TimeUnit`` does.
 
         A failed future raises ``confluent_kafka.ExecutionError`` from the
         failure; a cancelled one ``asyncio.CancelledError``. Cancelling the
         awaiting task does not cancel the future."""
-        seconds = None if timeout is None else _timeout_s(timeout)
+        if timeout is None:  # Java's unit.toNanos(timeout) on a null TimeUnit
+            raise TypeError("timeout must not be None")
+        seconds = None if timeout is MISSING else _timeout_s(timeout)
         impl = self._read_done_handle()
         if impl is None or impl._state == _PENDING:
             inner = self._waiter()

@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.CoordinatorLoadInProgressError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
@@ -22,4 +22,7 @@ __all__ = ["CoordinatorLoadInProgressError"]
 
 class CoordinatorLoadInProgressError(RetriableError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...

@@ -137,6 +137,7 @@ for both group protocols; the translations run the consumer protocol's arm.
 from __future__ import annotations
 
 import asyncio
+import logging
 import gc
 import inspect
 import math
@@ -155,10 +156,10 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import (
-    ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
+    ConcurrentModificationError, IllegalArgumentError, IllegalStateError,
     UnsupportedOperationError,
 )
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import Headers, KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import InvalidGroupIdError, WakeupError
@@ -170,6 +171,14 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.consumer import _base as consumer_base
 from confluent_kafka.consumer._base import poll_timeout_ms
+
+
+def _caller(deserializer: Any) -> Any:
+    """The positional caller the consumer calls ``deserializer`` through
+    (``_kwargs.serde_caller``), as ``deserialize_batch`` expects."""
+    from confluent_kafka._kwargs import DESERIALIZER_NAMES, serde_caller
+
+    return serde_caller(deserializer, DESERIALIZER_NAMES)
 
 WAIT = 10.0
 TOPIC = "test"
@@ -218,12 +227,11 @@ def test_subscription() -> None:
 
 
 def test_subscription_on_null_topic_collection() -> None:
-    # Java's subscribe((List) null) throws IllegalArgumentException; an omitted
-    # (None) topics matches no Java overload.
+    # Java's subscribe((List) null) throws IllegalArgumentException: a None is
+    # Java's null, so (topics) with a null collection (Signatures).
     with new_consumer() as consumer, pytest.raises(IllegalArgumentError) as e:
-        consumer.subscribe(topics=None)
-    assert str(e.value) == ("subscribe() takes one of (topics), (topics, callback), "
-                            "(pattern, callback), (pattern); got ()")
+        consumer.subscribe(topics=None)  # type: ignore[arg-type]
+    assert str(e.value) == "Topic collection to subscribe to cannot be None"
 
 
 def test_subscription_on_empty_topic() -> None:
@@ -270,7 +278,7 @@ def test_assign_on_empty_topic_partition() -> None:
 def test_assign_on_null_topic_partition() -> None:
     with new_consumer(None) as consumer, pytest.raises(IllegalArgumentError) as e:
         consumer.assign(partitions=None)  # type: ignore[arg-type]
-    assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+    assert str(e.value) == "Topic partitions collection to assign to cannot be None"
 
 
 def test_assign_on_null_topic_partition_after_close() -> None:
@@ -286,15 +294,18 @@ def test_assign_on_null_topic_partition_after_close() -> None:
 # (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
 # exception 4): the method, its keyword, Java's error class and message.
 NULL_ARGUMENT_CASES: list[tuple[str, str, type[Exception], str]] = [
-    ("pause", "partitions", NullPointerError, "The partitions to pause must be nonnull"),
-    ("resume", "partitions", NullPointerError, "The partitions to resume must be nonnull"),
-    ("offsets_for_times", "timestamps_to_search", NullPointerError,
-     "Timestamps to search cannot be null"),
+    ("pause", "partitions", TypeError, "partitions must not be None"),
+    ("resume", "partitions", TypeError, "partitions must not be None"),
+    ("offsets_for_times", "timestamps_to_search", TypeError,
+     "timestamps_to_search must not be None"),
     ("seek_to_beginning", "partitions", IllegalArgumentError,
-     "Partitions collection cannot be null"),
-    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be null"),
-    ("beginning_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
-    ("end_offsets", "partitions", NullPointerError, "Partitions cannot be null"),
+     "Partitions collection cannot be None"),
+    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be None"),
+    ("beginning_offsets", "partitions", TypeError, "partitions must not be None"),
+    ("end_offsets", "partitions", TypeError, "partitions must not be None"),
+    # Java dereferences the null with no check of its own (TopicMetadataEvent's
+    # Objects.requireNonNull(topic)): the same TypeError.
+    ("partitions_for", "topic", TypeError, "topic must not be None"),
 ]
 
 
@@ -305,6 +316,33 @@ def test_a_null_argument_raises_java_s_error(method: str, keyword: str,
         getattr(consumer, method)(**{keyword: None})
     assert type(e.value) is error
     assert str(e.value) == message
+
+
+def test_committed_with_null_partitions() -> None:
+    # Java: throwIfGroupIdNotDefined(), then partitions.isEmpty() dereferences the
+    # null with no check of its own; the group-less consumer reports the group first.
+    with new_consumer() as consumer, pytest.raises(TypeError) as e:
+        consumer.committed(partitions=None)  # type: ignore[arg-type]
+    assert str(e.value) == "partitions must not be None"
+    with new_consumer(None) as consumer, pytest.raises(InvalidGroupIdError) as g:
+        consumer.committed(partitions=None)  # type: ignore[arg-type]
+    assert str(g.value) == NO_GROUP_ID
+
+
+def test_async_committed_with_null_partitions() -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        with pytest.raises(TypeError) as e:
+            await consumer.committed(partitions=None)  # type: ignore[arg-type]
+        assert str(e.value) == "partitions must not be None"
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+        groupless: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs(None))
+        with pytest.raises(InvalidGroupIdError) as g:
+            await groupless.committed(partitions=None)  # type: ignore[arg-type]
+        assert str(g.value) == NO_GROUP_ID
+        await groupless.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize("method, keyword, error, message", NULL_ARGUMENT_CASES)
@@ -328,7 +366,7 @@ def test_the_async_consumer_makes_the_same_null_checks(
             await getattr(consumer, method)(**{keyword: None})
         assert type(e.value) is error
         assert str(e.value) == message
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
         with pytest.raises(IllegalStateError) as e:
             await getattr(consumer, method)(**{keyword: None})
         assert str(e.value) == CLOSED
@@ -436,7 +474,7 @@ def test_offsets_for_times_timeout() -> None:
     with pytest.raises(KafkaTimeoutError) as e:
         consumer.offsets_for_times(timestamps_to_search={TP0: 0})
     assert str(e.value) == OFFSETS_TIMEOUT
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_beginning_offsets_timeout() -> None:
@@ -444,7 +482,7 @@ def test_beginning_offsets_timeout() -> None:
     with pytest.raises(KafkaTimeoutError) as e:
         consumer.beginning_offsets(partitions=[TP0])
     assert str(e.value) == OFFSETS_TIMEOUT
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_end_offsets_timeout() -> None:
@@ -452,7 +490,7 @@ def test_end_offsets_timeout() -> None:
     with pytest.raises(KafkaTimeoutError) as e:
         consumer.end_offsets(partitions=[TP0])
     assert str(e.value) == OFFSETS_TIMEOUT
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def _metric_value(consumer: KafkaConsumer[Any, Any], name: str) -> Any:
@@ -510,7 +548,7 @@ def test_metrics_removed_on_close() -> None:
         'The "count" meta-metric key was removed from the Consumer metrics map, but it '
         "unexpectedly had no entry")
     assert metrics, "The consumer should have created metrics, but they are unexpectedly empty"
-    consumer.close(option=CloseOptions.timeout(timedelta(0)))
+    consumer.close(option=CloseOptions.timeout(timeout=timedelta(0)))
     with pytest.raises(IllegalStateError) as e:
         consumer.metrics()
     assert str(e.value) == CLOSED
@@ -531,8 +569,8 @@ def test_poll_idle_ratio_zero() -> None:
 
 def test_close_should_be_idempotent() -> None:
     consumer = new_consumer()
-    consumer.close(option=CloseOptions.timeout(timedelta(0)))
-    consumer.close(option=CloseOptions.timeout(timedelta(0)))
+    consumer.close(option=CloseOptions.timeout(timeout=timedelta(0)))
+    consumer.close(option=CloseOptions.timeout(timeout=timedelta(0)))
     with pytest.raises(IllegalStateError) as e:
         consumer.assignment()
     assert str(e.value) == CLOSED
@@ -634,7 +672,7 @@ def test_prevent_multi_thread() -> None:
     finally:
         worker.join(WAIT)
     assert isinstance(outcome.get("error"), WakeupError)
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_invalid_group_metadata() -> None:
@@ -649,7 +687,7 @@ def test_invalid_group_metadata() -> None:
     finally:
         worker.join(WAIT)
     # accessing closed consumer is illegal
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     with pytest.raises(IllegalStateError) as e:
         consumer.group_metadata()
     assert str(e.value) == CLOSED
@@ -801,7 +839,7 @@ def test_closed_first_then_the_argument_checks() -> None:
     with pytest.raises(IllegalStateError) as e:
         consumer.poll(timeout=-1)
     assert str(e.value) == CLOSED
-    consumer.close(option=CloseOptions.timeout(-1))
+    consumer.close(option=CloseOptions.timeout(timeout=-1))
 
     async def main() -> None:
         async_consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
@@ -809,7 +847,7 @@ def test_closed_first_then_the_argument_checks() -> None:
         with pytest.raises(IllegalStateError) as e:
             await async_consumer.poll(timeout=-1)
         assert str(e.value) == CLOSED
-        await async_consumer.close(option=CloseOptions.timeout(-1))
+        await async_consumer.close(option=CloseOptions.timeout(timeout=-1))
 
     asyncio.run(main())
 
@@ -817,12 +855,12 @@ def test_closed_first_then_the_argument_checks() -> None:
 def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     consumer = new_consumer()
     with pytest.raises(IllegalArgumentError) as e:
-        consumer.close(option=CloseOptions.timeout(-1))
+        consumer.close(option=CloseOptions.timeout(timeout=-1))
     assert str(e.value) == "The timeout cannot be negative."
     with pytest.raises(IllegalArgumentError):
-        consumer.close(option=CloseOptions.timeout(timedelta(seconds=-1)))
+        consumer.close(option=CloseOptions.timeout(timeout=timedelta(seconds=-1)))
     assert consumer.subscription() == set()
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_poll_reads_a_timedelta_exactly() -> None:
@@ -854,16 +892,16 @@ def test_a_timeout_beyond_a_long_raises_before_the_ffi_and_the_consumer_stays_op
     with pytest.raises(ValueError):
         consumer.poll(timeout=float("nan"))
     with pytest.raises(OverflowError) as e:
-        consumer.close(option=CloseOptions.timeout(1e300))
+        consumer.close(option=CloseOptions.timeout(timeout=1e300))
     assert str(e.value) == TOO_LONG
     with pytest.raises(OverflowError):
-        consumer.close(option=CloseOptions.timeout(float("inf")))
+        consumer.close(option=CloseOptions.timeout(timeout=float("inf")))
     with pytest.raises(ValueError):
-        consumer.close(option=CloseOptions.timeout(float("nan")))
+        consumer.close(option=CloseOptions.timeout(timeout=float("nan")))
     # Still open: nothing reached the FFI.
     assert consumer.assignment() == {TP0}
     assert consumer.poll(timeout=0).is_empty()
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     with pytest.raises(IllegalStateError) as e:
         consumer.assignment()
     assert str(e.value) == CLOSED
@@ -878,12 +916,12 @@ def test_an_async_timeout_beyond_a_long_raises_before_the_ffi_and_the_consumer_s
             await consumer.poll(timeout=1e300)
         assert str(e.value) == TOO_LONG
         with pytest.raises(OverflowError) as e:
-            await consumer.close(option=CloseOptions.timeout(1e300))
+            await consumer.close(option=CloseOptions.timeout(timeout=1e300))
         assert str(e.value) == TOO_LONG
         with pytest.raises(ValueError):
-            await consumer.close(option=CloseOptions.timeout(float("nan")))
+            await consumer.close(option=CloseOptions.timeout(timeout=float("nan")))
         assert consumer.assignment() == {TP0}
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
         with pytest.raises(IllegalStateError) as e:
             consumer.assignment()
         assert str(e.value) == CLOSED
@@ -1020,41 +1058,120 @@ def test_a_duration_overload_raises_overflow_and_nan_before_the_ffi(method: str)
 def test_a_duration_overload_checks_the_closed_state_first(method: str) -> None:
     call, _ = NEGATIVE[method]
     consumer = new_consumer()
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     for timeout in (-1, float("nan")):
         with pytest.raises(IllegalStateError) as e:
             call(consumer, timeout=timeout)
         assert str(e.value) == CLOSED
 
 
-# The Duration overloads whose ConsumerHandle form has no timeout.
-UNTIMED_IN_CALLBACK = ("commit", "committed", "offsets_for_times", "beginning_offsets",
-                       "end_offsets")
-
-
-@pytest.mark.parametrize("method", UNTIMED_IN_CALLBACK + tuple(sorted(METADATA)))
-def test_a_timeout_inside_a_callback_is_refused_where_the_handle_has_no_timed_form(
-        method: str) -> None:
-    # Inside a callback the call goes through the core's ConsumerHandle, which
-    # has a timed form of position only: the others are refused for a given
-    # timeout, as partitions_for / list_topics are refused there, rather than
-    # waiting default.api.timeout.ms (deviation: goes when the handle has one).
-    call = TIMED[method][0] if method in TIMED else METADATA[method][0]
-    with new_consumer() as consumer:
+@pytest.mark.parametrize("method", sorted(TIMED))
+def test_a_timed_call_inside_a_callback_passes_its_timeout(method: str) -> None:
+    # Inside a callback the call goes through the core's ConsumerHandle,
+    # whose Duration overloads (kafka_consumer_ConsumerHandle_<method>
+    # _with_timeout) take the timeout, as the consumer's do: it bounds the
+    # wait, not default.api.timeout.ms. Updated for the handle's timed forms
+    # (was: refused with ConcurrentModificationError, run decision 18b).
+    call, message = TIMED[method]
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
         consumer.assign(partitions=[TP0])
         raised: list[BaseException] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
-            for timeout in (0, -1, 1.0):
+        def callback(**kwargs: Any) -> None:
+            for timeout in (0.2, -1):
                 try:
                     call(consumer, timeout=timeout)
                 except BaseException as exc:  # noqa: BLE001 - asserted below
                     raised.append(exc)
 
         consumer.commit_nowait(offsets={}, callback=callback)
+        started = time.monotonic()
         consumer.commit(offsets={})
-        assert [type(e) for e in raised] == [ConcurrentModificationError] * 3
-        assert {str(e) for e in raised} == {CONCURRENT}
+        assert time.monotonic() - started < WAIT
+        timed_out, negative = raised
+        assert isinstance(timed_out, KafkaTimeoutError)
+        assert str(timed_out) == message.format(200)
+        assert isinstance(negative, IllegalArgumentError)
+        assert str(negative) == NEGATIVE[method][1].format(-1000)
+
+
+@pytest.mark.parametrize("method", sorted(METADATA))
+def test_a_metadata_call_inside_a_callback_goes_through_the_handle(method: str) -> None:
+    # partitions_for / list_topics inside a callback: the handle's forms
+    # (kafka_consumer_ConsumerHandle_partitions_for / _list_topics, and their
+    # _with_timeout forms) answer as the consumer's do. Updated (was: refused
+    # with ConcurrentModificationError, the handle having no such form).
+    call, zero, expired = METADATA[method]
+    with new_consumer(**{"default.api.timeout.ms": 300}) as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            for timeout in (0, 0.2, None):
+                try:
+                    if timeout is None:  # the untimed overload
+                        call(consumer)
+                    else:
+                        call(consumer, timeout=timeout)
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [KafkaTimeoutError] * 3
+        assert str(raised[0]) == zero
+        assert str(raised[1]) in expired and str(raised[2]) in expired
+
+
+def test_group_metadata_inside_a_callback_goes_through_the_handle() -> None:
+    # group_metadata() inside a callback reads the handle's shared slot
+    # (kafka_consumer_ConsumerHandle_group_metadata), the delivering call
+    # holding the consumer's guard.
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        seen: list[Any] = []
+
+        def callback(**kwargs: Any) -> None:
+            seen.append(consumer.group_metadata())
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        (metadata,) = seen
+        outside = consumer.group_metadata()
+        assert metadata.group_id() == outside.group_id() == GROUP_ID
+        assert metadata.generation_id() == outside.generation_id()
+        assert metadata.member_id() == outside.member_id()
+
+
+@pytest.mark.parametrize("method", ["assign", "subscribe", "subscription", "unsubscribe", "poll",
+                                    "close"])
+def test_what_the_handle_has_no_form_of_is_refused_inside_a_callback(method: str) -> None:
+    # assign, subscribe, subscription, unsubscribe, poll and close have no
+    # ConsumerHandle form (KIP-1306's RebalanceConsumer has none of them):
+    # inside a callback they reach the busy consumer and raise
+    # ConcurrentModificationError, as Java's acquire() does from another thread.
+    calls: dict[str, Callable[[Any], Any]] = {
+        "assign": lambda c: c.assign(partitions=[TP0]),
+        "subscription": lambda c: c.subscription(),
+        "subscribe": lambda c: c.subscribe(topics=[TOPIC]),
+        "unsubscribe": lambda c: c.unsubscribe(),
+        "poll": lambda c: c.poll(timeout=0),
+        "close": lambda c: c.close(option=CloseOptions.timeout(timeout=0)),
+    }
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            try:
+                calls[method](consumer)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [ConcurrentModificationError]
+        assert str(raised[0]) == CONCURRENT
 
 
 def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
@@ -1062,7 +1179,7 @@ def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
         consumer.assign(partitions=[TP0])
         raised: list[BaseException] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             try:
                 consumer.position(partition=TP0, timeout=0.2)
             except BaseException as exc:  # noqa: BLE001 - asserted below
@@ -1119,7 +1236,7 @@ def test_current_lag_inside_a_callback_goes_through_the_handle(
         consumer.assign(partitions=[TP0])
         answered: list[object] = []
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             try:
                 answered.append(consumer.current_lag(topic_partition=TP0))
             except BaseException as exc:  # noqa: BLE001 - asserted below
@@ -1229,7 +1346,7 @@ def test_the_async_duration_overloads() -> None:
         with pytest.raises(TypeError):
             await consumer.position(TP0, 1.0)  # type: ignore[misc]
         assert await consumer.end_offsets(partitions=[TP0], timeout=0) == {}
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
         with pytest.raises(IllegalStateError) as e:
             await consumer.committed(partitions={TP0}, timeout=-1)
         assert str(e.value) == CLOSED
@@ -1244,12 +1361,12 @@ def test_close_with_a_timeout_is_not_generated() -> None:
     with pytest.raises(TypeError):
         consumer.close(timeout=0)  # type: ignore[call-arg]
     assert consumer.subscription() == set()
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_close_twice_is_harmless_and_calls_after_it_raise() -> None:
     consumer = new_consumer()
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     consumer.close()
     consumer.wakeup()  # a no-op once closed
     for call in (consumer.assignment, consumer.subscription, consumer.paused, consumer.metrics,
@@ -1271,13 +1388,13 @@ def test_close_from_another_thread_while_polling_fails_and_stays_open() -> None:
     worker, outcome = _poll_in_background(consumer)
     try:
         with pytest.raises(ConcurrentModificationError):
-            consumer.close(option=CloseOptions.timeout(0))
+            consumer.close(option=CloseOptions.timeout(timeout=0))
         consumer.wakeup()
     finally:
         worker.join(WAIT)
     assert isinstance(outcome.get("error"), WakeupError)
     assert consumer.subscription() == {TOPIC}
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def _spy_close(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
@@ -1324,14 +1441,14 @@ def test_close_from_another_thread_fails_before_changing_anything(
             time.sleep(0.01)
         for _ in range(20):
             with pytest.raises(ConcurrentModificationError) as e:
-                consumer.close(option=CloseOptions.timeout(0))
+                consumer.close(option=CloseOptions.timeout(timeout=0))
             assert str(e.value) == CONCURRENT
         # The FFI close was never reached: nothing changed.
         assert calls == []
     finally:
         worker.join(WAIT)
     assert outcome == {"calls": ({TP0}, True)}
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     assert len(calls) == 1
 
 
@@ -1349,16 +1466,20 @@ def test_async_close_from_another_thread_fails_before_changing_anything(
         await task
         outcome["assignment"] = consumer.assignment()
         await asyncio.get_running_loop().run_in_executor(None, release.wait, WAIT)
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     worker = threading.Thread(target=asyncio.run, args=(main(consumer),))
     worker.start()
     try:
         assert polling.wait(WAIT)
-        with pytest.raises(ConcurrentModificationError) as e:
-            asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
-        assert str(e.value) == CONCURRENT
+        # Updated for the one-loop binding (was: the guard's
+        # ConcurrentModificationError): a close() from another thread's loop
+        # is refused before it changes anything, as the consumer is bound to
+        # the worker's loop.
+        with pytest.raises(RuntimeError) as e:
+            asyncio.run(consumer.close(option=CloseOptions.timeout(timeout=0)))
+        assert str(e.value) == BOUND_ELSEWHERE
         assert calls == []
     finally:
         release.set()
@@ -1395,7 +1516,7 @@ def test_close_races_calls_from_other_threads_without_touching_a_freed_handle() 
         closed = False
         while not closed:
             try:
-                consumer.close(option=CloseOptions.timeout(0))
+                consumer.close(option=CloseOptions.timeout(timeout=0))
                 closed = True
             except ConcurrentModificationError:
                 pass
@@ -1414,7 +1535,7 @@ def test_two_threads_closing_at_once_tear_down_once() -> None:
         def close() -> None:
             barrier.wait()
             try:
-                consumer.close(option=CloseOptions.timeout(0))
+                consumer.close(option=CloseOptions.timeout(timeout=0))
             except ConcurrentModificationError:
                 pass  # the other close is inside the consumer
             except BaseException as exc:  # noqa: BLE001
@@ -1440,7 +1561,7 @@ def test_close_releases_the_listener() -> None:
     del listener
     gc.collect()
     assert ref() is not None
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     gc.collect()
     assert ref() is None
 
@@ -1467,8 +1588,8 @@ def test_commit_callback_runs_on_the_thread_of_a_later_waiting_call() -> None:
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         seen: list[tuple[Any, Any, int]] = []
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
-            (o, e, threading.get_ident())))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        seen.append((offsets, exception, threading.get_ident())))
         consumer.commit(offsets={})
         assert seen == [(None, None, threading.get_ident())]
 
@@ -1479,12 +1600,13 @@ def test_commit_callback_runs_inside_a_later_commit_nowait() -> None:
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         seen: list[int] = []
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(threading.get_ident()))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        seen.append(threading.get_ident()))
         assert seen == []
         # The core queues the completed commit's callback from a task of its
         # own; let it run, then a later commit_nowait() delivers it.
         time.sleep(0.2)
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert seen == [threading.get_ident()]
 
 
@@ -1493,7 +1615,7 @@ def test_commit_callback_may_call_back_into_the_consumer() -> None:
         consumer.assign(partitions=[TP0])
         seen: dict[str, Any] = {}
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             seen["assignment"] = consumer.assignment()
             seen["paused"] = consumer.paused()
 
@@ -1507,7 +1629,7 @@ def test_another_thread_during_the_commit_callback_meets_the_guard() -> None:
         consumer.assign(partitions=[TP0])
         seen: dict[str, Any] = {}
 
-        def callback(offsets: Any, exception: Any) -> None:
+        def callback(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             def other() -> None:
                 try:
                     consumer.assignment()
@@ -1542,7 +1664,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
     started, release = threading.Event(), threading.Event()
     ran_on: list[int] = []
 
-    def slow(offsets: Any, exception: Any) -> None:
+    def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         ran_on.append(threading.get_ident())
         started.set()
         release.wait(WAIT)
@@ -1556,7 +1678,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
 
         def first() -> None:
             try:
-                consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+                consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
                 outcome["first"] = "returned"
             except BaseException as exc:  # noqa: BLE001
                 outcome["first"] = exc
@@ -1566,7 +1688,7 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
         assert started.wait(WAIT)
         started_at = time.monotonic()
         with pytest.raises(ConcurrentModificationError) as e:
-            consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+            consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert str(e.value) == CONCURRENT
         # Refused at once, not queued behind the first call.
         assert time.monotonic() - started_at < 1.0
@@ -1589,7 +1711,8 @@ def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> Non
     seen: dict[str, str] = {}
 
     def record(name: str) -> Any:
-        return lambda o, e: seen.__setitem__(name, threading.current_thread().name)
+        return lambda *, offsets, exception, **_: seen.__setitem__(
+            name, threading.current_thread().name)
 
     def commit_nowait_on(thread_name: str, callback_name: str) -> None:
         worker = threading.Thread(
@@ -1606,7 +1729,7 @@ def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> Non
         assert seen == {"first": "thread-b"}
         time.sleep(0.2)
         # And the second's inside this thread's call.
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_: None)
         assert seen == {"first": "thread-b", "second": threading.current_thread().name}
     finally:
         consumer.close()
@@ -1621,9 +1744,10 @@ def queue_a_raising_commit_callback(consumer: KafkaConsumer[bytes, bytes], raise
     """Queue a commit callback that raises ``raised``, with one more callback
     queued behind it: the raising one queues it (an empty commit completes at
     once) before it raises."""
-    def boom(offsets: Any, exception: Any) -> None:
+    def boom(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         events.append("boom")
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("next"))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        events.append('next'))
         raise raised
 
     consumer.commit_nowait(offsets={}, callback=boom)
@@ -1673,10 +1797,10 @@ def test_a_raising_commit_callback_propagates_from_a_commit_inside_a_callback() 
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
 
-        def raising(offsets: Any, exception: Any) -> None:
+        def raising(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             raise raised
 
-        def first(offsets: Any, exception: Any) -> None:
+        def first(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             consumer.commit_nowait(offsets={}, callback=raising)
             try:
                 consumer.commit(offsets={})
@@ -1700,7 +1824,7 @@ def test_close_wraps_a_raising_commit_callback(raised: BaseException) -> None:
     consumer.assign(partitions=[TP0])
     queue_a_raising_commit_callback(consumer, raised, events)
     with pytest.raises(KafkaError) as e:
-        consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+        consumer.close(option=CloseOptions.timeout(timeout=timedelta(seconds=5)))
     assert type(e.value) is KafkaError
     assert str(e.value) == "Failed to close kafka consumer"
     assert e.value.__cause__ is raised
@@ -1717,7 +1841,7 @@ def test_close_raises_a_keyboard_interrupt_of_a_commit_callback_as_it_is() -> No
     consumer.assign(partitions=[TP0])
     queue_a_raising_commit_callback(consumer, raised, events)
     with pytest.raises(KeyboardInterrupt) as e:
-        consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+        consumer.close(option=CloseOptions.timeout(timeout=timedelta(seconds=5)))
     assert e.value is raised
     with pytest.raises(IllegalStateError):
         consumer.assignment()
@@ -1731,7 +1855,7 @@ def test_close_swallows_a_raising_commit_callback_of_the_auto_commit() -> None:
     consumer = new_consumer(**{"enable.auto.commit": True})
     consumer.assign(partitions=[TP0])
     queue_a_raising_commit_callback(consumer, raised, events)
-    consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+    consumer.close(option=CloseOptions.timeout(timeout=timedelta(seconds=5)))
     assert events == ["boom", "next"]
 
 
@@ -1746,11 +1870,11 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
         await consumer.assign(partitions=[TP0])
         seen: list[int] = []
-        await consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
-            threading.get_ident()))
+        await consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                              seen.append(threading.get_ident()))
         await consumer.commit(offsets={})
         assert seen == [threading.get_ident()]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -1777,9 +1901,9 @@ def test_async_commit_nowait_raises_its_own_error_and_close_does_not() -> None:
         assert str(e.value) == NO_GROUP_ID
         with pytest.raises(InvalidGroupIdError) as e:
             await consumer.commit_nowait(offsets={TP0: OffsetAndMetadata(offset=1)},
-                                         callback=lambda o, e: None)
+                                         callback=lambda *, offsets, exception, **_: None)
         assert str(e.value) == NO_GROUP_ID
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -1789,11 +1913,11 @@ def test_async_a_raising_commit_callback_propagates_from_commit_nowait(coroutine
     raised = CommitCallbackError("callback boom")
     events: list[str] = []
 
-    def plain(offsets: Any, exception: Any) -> None:
+    def plain(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         events.append("boom")
         raise raised
 
-    async def awaited(offsets: Any, exception: Any) -> None:
+    async def awaited(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
         await asyncio.sleep(0)
         events.append("boom")
         raise raised
@@ -1812,7 +1936,7 @@ def test_async_a_raising_commit_callback_propagates_from_commit_nowait(coroutine
         # The consumer goes on, and close() does not raise it again.
         await consumer.commit(offsets={})
         assert events == ["boom"]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -1937,7 +2061,7 @@ def test_ctrl_c_while_a_coroutine_listener_failure_is_reported_still_reports_it(
             give_up.cancel()
         assert deferred == [True]
         assert reports == [(CALLBACK_ID, asyncio.CancelledError)] * 2
-        loop.run_until_complete(consumer.close(option=CloseOptions.timeout(0)))
+        loop.run_until_complete(consumer.close(option=CloseOptions.timeout(timeout=0)))
     finally:
         loop.close()
 
@@ -1961,7 +2085,7 @@ class RecordingDeserializer:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, topic: str, data: memoryview | None, headers: Any = None) -> Any:
+    def __call__(self, *, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> Any:
         return None if data is None else bytes(data).decode()
 
 
@@ -1974,7 +2098,7 @@ def test_the_config_route_builds_and_configures_the_deserializers() -> None:
     assert key.configured is not None and key.configured[1] is True
     assert value.configured is not None and value.configured[1] is False
     assert key.configured[0]["key.deserializer"] == path
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     # Java closes the deserializers at consumer close.
     assert (key.closed, value.closed) == (1, 1)
 
@@ -1987,7 +2111,7 @@ def test_a_deserializer_argument_wins_over_its_config_key() -> None:
     # The config key is not used: nothing was built from it.
     assert RecordingDeserializer.instances == []
     assert consumer._value_deserializer is given
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_given_deserializers_are_closed_at_close_but_not_configured() -> None:
@@ -1995,7 +2119,7 @@ def test_given_deserializers_are_closed_at_close_but_not_configured() -> None:
     key, value = RecordingDeserializer(), RecordingDeserializer()
     consumer = KafkaConsumer(configs=configs(), key_deserializer=key, value_deserializer=value)
     assert key.configured is None and value.configured is None
-    consumer.close(option=CloseOptions.timeout(0))
+    consumer.close(option=CloseOptions.timeout(timeout=0))
     consumer.close()
     assert (key.closed, value.closed) == (1, 1)
 
@@ -2033,9 +2157,13 @@ def test_a_failing_configure_closes_the_key_deserializer_and_the_core_consumer(
 
     monkeypatch.setattr(_lib, "Consumer_destroy", destroy)
     RecordingDeserializer.instances.clear()
-    with pytest.raises(ValueError, match="cannot configure"):
+    with pytest.raises(KafkaError) as failed:
         KafkaConsumer(configs=configs(**{"key.deserializer": RecordingDeserializer,
                                          "value.deserializer": FailingConfigureDeserializer}))
+    # Java's constructor wraps it: KafkaException("Failed to construct kafka consumer", t).
+    assert str(failed.value) == "Failed to construct kafka consumer"
+    assert isinstance(failed.value.__cause__, ValueError)
+    assert str(failed.value.__cause__) == "cannot configure"
     key, value = RecordingDeserializer.instances
     assert (key.closed, value.closed) == (1, 0)
     assert len(destroyed) == 1
@@ -2094,7 +2222,7 @@ def test_the_async_consumer_configures_with_the_generated_client_id() -> None:
             **{"value.deserializer": DeserializerForClientId}))
         client_id = _lib.Consumer_client_id(consumer._h)
         assert DeserializerForClientId.client_ids == [client_id]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2106,12 +2234,52 @@ def test_no_deserializer_means_bytes() -> None:
         assert type(consumer._value_deserializer) is type(bytes_deserializer())
 
 
+class RaisingCloseDeserializer(RecordingDeserializer):
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("close failed")
+
+
+def _closing_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith("Exception while closing serde")]
+
+
+def test_a_deserializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # Java's Utils.closeQuietly: the exception is logged, the other deserializer
+    # is still closed, close() returns normally.
+    key, value = RaisingCloseDeserializer(), RecordingDeserializer()
+    consumer = KafkaConsumer(configs=configs(), key_deserializer=key, value_deserializer=value)
+    with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+        consumer.close(option=CloseOptions.timeout(timeout=0))
+    assert (key.closed, value.closed) == (1, 1)
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)
+
+
+def test_an_async_consumer_deserializer_close_that_raises_is_logged_not_raised(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async def main() -> None:
+        key, value = RecordingDeserializer(), RaisingCloseDeserializer()
+        consumer = AsyncKafkaConsumer(configs=configs(), key_deserializer=key,
+                                      value_deserializer=value)
+        with caplog.at_level(logging.WARNING, logger="confluent_kafka"):
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
+        assert (key.closed, value.closed) == (1, 1)
+
+    asyncio.run(main())
+    warnings = _closing_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+    assert isinstance(warnings[0].exc_info[1], RuntimeError)
+
+
 def test_async_consumer_closes_its_deserializers() -> None:
     async def main() -> None:
         key, value = RecordingDeserializer(), RecordingDeserializer()
         consumer = AsyncKafkaConsumer(configs=configs(), key_deserializer=key,
                                       value_deserializer=value)
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
         assert (key.closed, value.closed) == (1, 1)
 
     asyncio.run(main())
@@ -2146,11 +2314,11 @@ def test_async_consumer_surface_without_a_broker() -> None:
                                 "empty topic")
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=None)  # type: ignore[arg-type]
-        assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+        assert str(e.value) == "Topic partitions collection to assign to cannot be None"
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=[None])  # type: ignore[list-item]
         assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
         await consumer.close()
         with pytest.raises(IllegalStateError):
             consumer.assignment()
@@ -2183,9 +2351,10 @@ def test_async_concurrent_use_on_one_loop_meets_the_guard() -> None:
         # Java's metrics() takes no acquire(): it answers.
         assert isinstance(consumer.metrics(), dict)
         consumer.wakeup()
-        with pytest.raises(WakeupError):
+        with pytest.raises(WakeupError) as woken:
             await poll
-        await consumer.close(option=CloseOptions.timeout(0))
+        assert str(woken.value) == ""  # Java's WakeupException has no message
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2203,7 +2372,7 @@ def test_cancelling_an_async_poll_wakes_the_consumer_and_lets_it_end() -> None:
         assert time.monotonic() - started < 5
         # The call ended: the consumer is usable again.
         assert consumer.subscription() == {TOPIC}
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2237,7 +2406,7 @@ def test_cancelling_an_async_commit_nowait_leaves_no_wakeup_armed(
         release = asyncio.Event()
         ended: list[bool] = []
 
-        async def slow(offsets: Any, exception: Any) -> None:
+        async def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await release.wait()
             ended.append(True)
@@ -2254,7 +2423,7 @@ def test_cancelling_an_async_commit_nowait_leaves_no_wakeup_armed(
         assert wakeups == []
         assert (await consumer.poll(timeout=0)).is_empty()
         await consumer.commit(offsets={})
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2308,7 +2477,7 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow(offsets: Any, exception: Any) -> None:
+        async def slow(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await release.wait()
 
@@ -2327,7 +2496,7 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         assert time.monotonic() - start < 5
         assert len(wakeups) == 1
         assert (await consumer.poll(timeout=0)).is_empty()
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2343,11 +2512,12 @@ def test_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_poll() 
         consumer.assign(partitions=[TP0])
         consumer.wakeup()
         consumer.commit(offsets={})
-        with pytest.raises(WakeupError):
+        with pytest.raises(WakeupError) as woken:
             consumer.poll(timeout=0)
+        assert str(woken.value) == ""  # Java's WakeupException has no message
         assert consumer.poll(timeout=0).is_empty()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_async_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_poll() -> None:
@@ -2362,7 +2532,7 @@ def test_async_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_p
                 await consumer.poll(timeout=0)
             assert (await consumer.poll(timeout=0)).is_empty()
         finally:
-            await consumer.close(option=CloseOptions.timeout(0))
+            await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2425,7 +2595,7 @@ def test_a_wake_on_ctrl_c_the_call_did_not_consume_never_outlives_it(
         elif then == "handle_committed":
             raised: list[BaseException] = []
 
-            def committed(offsets: Any, exception: Any) -> None:
+            def committed(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
                 try:
                     consumer.committed(partitions=[TP0])
                 except Exception as exc:
@@ -2439,7 +2609,7 @@ def test_a_wake_on_ctrl_c_the_call_did_not_consume_never_outlives_it(
             assert [type(e) for e in raised] == [KafkaTimeoutError]
         assert consumer.poll(timeout=0).is_empty()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_poll() -> None:
@@ -2451,12 +2621,13 @@ def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_po
     consumer = new_consumer()
     try:
         consumer.assign(partitions=[TP0])
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: consumer.wakeup())
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        consumer.wakeup())
         with pytest.raises(WakeupError):
             consumer.poll(timeout=0)
         assert consumer.poll(timeout=0).is_empty()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_cancelling_a_call_whose_completion_is_queued_leaves_no_wakeup_armed(
@@ -2505,7 +2676,7 @@ def test_cancelling_a_call_whose_completion_is_queued_leaves_no_wakeup_armed(
             await asyncio.wait_for(asyncio.shield(running), 5)
         assert wakeups == []
         assert (await consumer.poll(timeout=0)).is_empty()
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -2520,20 +2691,30 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     # trampoline, which printed it and left the result's handles allocated.
     #
     # On the branch C API a completion is delivered only by a drain of the
-    # consumer's callbacks vector, which the stopped loop never runs: the next
-    # call on the consumer, from another loop, drains it (and delivers the result
-    # to the closed loop), so the test makes that call.
+    # consumer's callbacks vector, which the stopped loop never runs. Under the
+    # one-loop binding the only call another loop may make is close(), once
+    # the bound loop is closed (LoopBinding.bind_for_close): it drains the
+    # vector (and delivers the result to the closed loop), so the test makes
+    # that call; any other call from there is refused first.
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
     _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
     assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
-    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+
+    def is_closed() -> bool:
+        # The delivery's check (Undelivered.hand_over) saw the loop open;
+        # everything else (the binding, the abandoned-use release) sees it closed.
+        return sys._getframe(1).f_code.co_name != "hand_over"
+
+    loop.is_closed = is_closed  # type: ignore[method-assign]
     capfd.readouterr()
     held.release.set()
     _await_queued_completion(consumer)
-    asyncio.run(consumer.assign(partitions=[TP0]))
+    _refused_from_another_loop(lambda: consumer.assign(partitions=[TP0]))
+    assert not held.delivered.is_set()
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
     assert held.delivered.is_set()
     del loop.is_closed
     ((_, error),) = held.payloads
@@ -2541,17 +2722,17 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     assert held.raised == []
     assert capfd.readouterr().err == ""
     assert freed_errors == [error]
-    _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
 
 def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The result is left for its loop while the loop is stopped, and the loop
-    # then closes, so it can never be delivered there: the consumer's next
-    # awaiting call, from another loop, frees it. (On the branch C API that call
-    # is also the drain that delivers the result, the stopped loop draining
-    # nothing.)
+    # then closes, so it can never be delivered there: close() from another
+    # loop, the one call the binding then allows (LoopBinding.bind_for_close),
+    # frees it; any other call from there is refused first. (On the branch C
+    # API that close is also the drain that delivers the result, the stopped
+    # loop draining nothing.)
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
     _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
@@ -2559,12 +2740,13 @@ def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     stopped_loop.loop.close()
     _await_queued_completion(consumer)
     assert freed_errors == []
-    asyncio.run(consumer.assign(partitions=[TP0]))
+    _refused_from_another_loop(lambda: consumer.assign(partitions=[TP0]))
+    assert freed_errors == []
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
     assert held.delivered.is_set()
     ((_, error),) = held.payloads
     assert error
     assert freed_errors == [error]
-    _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
 
 @pytest.mark.parametrize("same_thread", [True, False], ids=["same thread", "another thread"])
@@ -2701,7 +2883,7 @@ class _StrandedCallback:
         never = asyncio.Event()
         consumer = self.consumer
 
-        async def stuck(offsets: Any, exception: Any) -> None:
+        async def stuck(*, offsets: Any, exception: Any, **kwargs: Any) -> None:
             started.set()
             await never.wait()
 
@@ -2738,7 +2920,7 @@ class _StrandedCallback:
 
     def discard(self) -> None:
         if not self.consumer._is_closed():  # noqa: SLF001
-            asyncio.run(self.consumer.close(option=CloseOptions.timeout(1.0)))
+            asyncio.run(self.consumer.close(option=CloseOptions.timeout(timeout=1.0)))
         for pending in self._tasks:
             pending._log_destroy_pending = False  # noqa: SLF001
             pending.get_coro().close()
@@ -2763,7 +2945,7 @@ def test_a_coroutine_commit_callback_left_on_a_closed_loop_does_not_block_close(
 
     try:
         monkeypatch.setattr(_lib, "Consumer__set_callback_result", report)
-        assert stranded.close_on_another_thread(CloseOptions.timeout(1.0)) is None
+        assert stranded.close_on_another_thread(CloseOptions.timeout(timeout=1.0)) is None
         ((_, error),) = reported
         assert isinstance(error, asyncio.CancelledError)
         assert stranded.consumer._is_closed()  # noqa: SLF001
@@ -2796,7 +2978,7 @@ def test_close_waits_for_a_stranded_callback_s_call_within_its_own_timeout(
     event = _RecordingEvent()
     stranded.consumer._pending_event = event  # noqa: SLF001
     try:
-        option = CloseOptions.timeout(timeout)
+        option = CloseOptions.timeout(timeout=timeout)
         started = time.monotonic()
         outcome = stranded.close_on_another_thread(option)
         assert outcome is None or isinstance(outcome, ConcurrentModificationError)
@@ -2831,10 +3013,23 @@ def _await_queued_completion(consumer: AsyncKafkaConsumer[Any, Any]) -> None:
     assert consumer._pending_event.wait(WAIT)  # noqa: SLF001
 
 
+BOUND_ELSEWHERE = "AsyncKafkaConsumer is bound to a different event loop"
+
+
+def _refused_from_another_loop(call: Any) -> None:
+    """The one-loop binding (``_async.LoopBinding``): a waiting call other than
+    ``close()`` from a fresh loop, after the consumer's own loop closed, is
+    refused with ``RuntimeError`` and no effect."""
+    with pytest.raises(RuntimeError) as e:
+        asyncio.run(call())
+    assert str(e.value) == BOUND_ELSEWHERE
+
+
 def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) -> None:
     """``close()`` from a fresh loop on this thread, which must not wait for the
     call left on ``stopped_loop``. Should it wait, a timer ends that call's use
-    after WAIT, so the test fails instead of hanging the suite."""
+    after WAIT, so the test fails instead of hanging the suite. The bound loop
+    being closed, the fresh loop's close() is allowed (LoopBinding.bind_for_close)."""
     fired = threading.Event()
 
     def end_the_call() -> None:
@@ -2844,7 +3039,7 @@ def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) ->
     watchdog = threading.Timer(WAIT, end_the_call)
     watchdog.start()
     try:
-        asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+        asyncio.run(consumer.close(option=CloseOptions.timeout(timeout=0)))
     finally:
         watchdog.cancel()
     assert not fired.is_set(), "close() waited for a call whose event loop had closed"
@@ -2907,7 +3102,8 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
         consumer.seek_to_beginning(partitions=[TP0])
         consumer.seek_to_end(partitions=[TP0])
         assert consumer.poll(timeout=0).is_empty()
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: committed.append((o, e)))
+        consumer.commit_nowait(offsets={}, callback=lambda *, offsets, exception, **_:
+                                                        committed.append((offsets, exception)))
         consumer.commit(offsets={})
         # The commit callback ran inside the later waiting call, on this thread.
         assert committed == [(None, None)]
@@ -2922,7 +3118,7 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
             with pytest.raises(KafkaTimeoutError):
                 call()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_only_the_calls_java_wakes_are_woken() -> None:
@@ -3007,7 +3203,7 @@ def test_ctrl_c_wakes_only_a_call_java_can_wake(
         assert consumer.poll(timeout=0).is_empty()
         consumer.commit(offsets={})
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 class _NativeRecord:
@@ -3030,7 +3226,7 @@ class _NativeRecord:
         self.serialized_value_size = -1 if value is None else len(value)
         self.key = None if key is None else memoryview(key)
         self.value = None if value is None else memoryview(value)
-        self.headers = ()
+        self.headers = Headers()  # what the extension builds: writable, empty
         self.leader_epoch = None
 
 
@@ -3052,7 +3248,7 @@ class _NativeBatch:
 
 # A null key or value is not deserialized (Serialization; Java's
 # CompletedFetch.parseRecord: `keyBytes == null ? null : deserialize(...)`).
-def _refuses_null(topic: str, data: memoryview | None, headers: Any = None) -> str:
+def _refuses_null(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
     """A deserializer that fails on Java's null, as one assuming non-null
     bytes would."""
     if data is None:
@@ -3063,8 +3259,8 @@ def _refuses_null(topic: str, data: memoryview | None, headers: Any = None) -> s
 def test_a_null_key_is_not_deserialized() -> None:
     from confluent_kafka.consumer._poll import deserialize_batch
     result = deserialize_batch(_NativeBatch([_NativeRecord(TP0, 0, key=None, value=b"v")]),
-                               key_deserializer=_refuses_null,
-                               value_deserializer=_refuses_null)
+                               key_deserializer=_caller(_refuses_null),
+                               value_deserializer=_caller(_refuses_null))
     assert result.error is None and result.rewind == []
     (record,) = list(result.records)
     assert record.key() is None
@@ -3077,7 +3273,7 @@ def test_a_tombstone_is_delivered_with_a_null_value() -> None:
     result = deserialize_batch(
         _NativeBatch([_NativeRecord(TP0, 0, key=b"k", value=None),
                       _NativeRecord(TP0, 1, key=None, value=None)]),
-        key_deserializer=_refuses_null, value_deserializer=_refuses_null)
+        key_deserializer=_caller(_refuses_null), value_deserializer=_caller(_refuses_null))
     assert result.error is None
     tombstone, empty = list(result.records)
     assert (tombstone.key(), tombstone.value()) == ("k", None)
@@ -3090,14 +3286,14 @@ def test_a_failing_deserializer_still_fails_on_non_null_bytes() -> None:
     from confluent_kafka.common.errors import RecordDeserializationError
     from confluent_kafka.consumer._poll import deserialize_batch
 
-    def failing(topic: str, data: memoryview | None, headers: Any = None) -> str:
+    def failing(*, topic: str, data: memoryview | None, headers: Any = None, **kwargs: Any) -> str:
         assert data is not None
         raise ValueError("bad value")
 
     result = deserialize_batch(
         _NativeBatch([_NativeRecord(TP0, 0, key=None, value=None),
                       _NativeRecord(TP0, 1, key=None, value=b"x")]),
-        key_deserializer=_refuses_null, value_deserializer=failing)
+        key_deserializer=_caller(_refuses_null), value_deserializer=_caller(failing))
     (record,) = list(result.records)
     assert record.offset() == 0 and record.value() is None
     assert isinstance(result.error, RecordDeserializationError)
@@ -3198,7 +3394,7 @@ def test_ctrl_c_during_a_poll_returning_records_seeks_them_back(
         assert _fetched(consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
         assert core.positions == {TP0: 5, TP1: 8}
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_ctrl_c_during_the_seek_back_of_a_failed_deserialization_seeks_every_record_back(
@@ -3207,7 +3403,7 @@ def test_ctrl_c_during_the_seek_back_of_a_failed_deserialization_seeks_every_rec
     # TP0's 3 and TP1's 7 and seek TP0 back to 4. Ctrl+C during that seek lets
     # it end; the poll then raises KeyboardInterrupt instead of returning the
     # records, so each partition goes back to its first record not returned.
-    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+    def value_deserializer(*, topic: str, data: Any, headers: Any = None, **kwargs: Any) -> bytes:
         if bytes(data) == b"0:4":
             raise ValueError("bad value")
         return bytes(data)
@@ -3223,7 +3419,7 @@ def test_ctrl_c_during_the_seek_back_of_a_failed_deserialization_seeks_every_rec
         assert core.seeks == [(TOPIC, 0, 4), (TOPIC, 0, 3), (TOPIC, 1, 7)]
         assert core.positions == {TP0: 3, TP1: 7}
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_cancelling_an_async_poll_returning_records_seeks_them_back(
@@ -3246,7 +3442,7 @@ def test_cancelling_an_async_poll_returning_records_seeks_them_back(
         assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
         assert core.positions == {TP0: 3, TP1: 7}
         assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -3256,7 +3452,7 @@ def _interrupting_value_deserializer(raised: BaseException) -> Callable[..., byt
     a cancellation) landing while the poll deserializes its batch."""
     calls = {"n": 0}
 
-    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+    def value_deserializer(*, topic: str, data: Any, headers: Any = None, **kwargs: Any) -> bytes:
         calls["n"] += 1
         if calls["n"] == 2:
             raise raised
@@ -3286,7 +3482,7 @@ def test_ctrl_c_while_a_poll_deserializes_its_records_seeks_them_back(
         assert core.positions == {TP0: 3, TP1: 7}
         assert _fetched(consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt, asyncio.CancelledError])
@@ -3305,7 +3501,7 @@ def test_an_async_poll_interrupted_while_it_deserializes_seeks_its_records_back(
         assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
         assert core.positions == {TP0: 3, TP1: 7}
         assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -3346,7 +3542,7 @@ def test_a_cancelled_async_poll_keeps_a_coroutine_commit_callback_error_for_the_
                 await consumer.poll(timeout=30)
             assert wrapped.value.__cause__ is raised
         assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
-        await consumer.close(option=CloseOptions.timeout(0))
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
 
     asyncio.run(main())
 
@@ -3409,7 +3605,7 @@ def test_ctrl_c_once_the_completion_is_queued_does_not_wake(
         assert wakeups == []
         assert consumer.poll(timeout=0).is_empty()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 def test_sigint_while_polling_wakes_up_once_then_reraises_and_consumer_reusable(
@@ -3447,4 +3643,137 @@ def test_sigint_while_polling_wakes_up_once_then_reraises_and_consumer_reusable(
         assert consumer.subscription() == {TOPIC}
         assert consumer.poll(timeout=0).is_empty()
     finally:
-        consumer.close(option=CloseOptions.timeout(0))
+        consumer.close(option=CloseOptions.timeout(timeout=0))
+
+
+# ---- the one-loop binding (N7; as AsyncKafkaProducer's and AsyncKafkaAdminClient's) ----
+def test_an_async_call_from_another_loop_is_refused_before_it_has_any_effect() -> None:
+    # By rule 3 the async consumer is bound to one event loop
+    # (_async.LoopBinding): the loop of its first waiting call here, as it
+    # was built outside any loop. A waiting call from another loop raises
+    # RuntimeError before anything else, and the consumer stays usable on its
+    # own loop.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+
+    async def main() -> None:
+        await consumer.assign(partitions=[TP0])
+        loop = asyncio.get_running_loop()
+        for call in (lambda: consumer.assign(partitions=[TP1]),
+                     lambda: consumer.position(partition=TP0, timeout=0),
+                     lambda: consumer.poll(timeout=0),
+                     lambda: consumer.close()):
+            with pytest.raises(RuntimeError) as e:
+                await loop.run_in_executor(None, lambda c=call: asyncio.run(c()))
+            assert str(e.value) == BOUND_ELSEWHERE
+        assert consumer.assignment() == {TP0}
+        assert not consumer._is_closed()  # noqa: SLF001
+        await consumer.assign(partitions=[TP1])
+        assert consumer.assignment() == {TP1}
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
+
+
+def test_an_async_consumer_built_on_a_loop_is_bound_to_it() -> None:
+    # Built while a loop runs, the consumer is bound to that loop before any
+    # call, so even its first waiting call from another loop is refused.
+    async def build() -> AsyncKafkaConsumer[bytes, bytes]:
+        return AsyncKafkaConsumer(configs=configs())
+
+    loop = asyncio.new_event_loop()
+    try:
+        consumer = loop.run_until_complete(build())
+        with pytest.raises(RuntimeError) as e:
+            asyncio.run(consumer.assign(partitions=[TP0]))
+        assert str(e.value) == BOUND_ELSEWHERE
+        assert consumer.assignment() == set()
+        loop.run_until_complete(consumer.close(option=CloseOptions.timeout(timeout=0)))
+    finally:
+        loop.close()
+
+
+def test_the_async_mock_consumer_is_not_bound_to_a_loop() -> None:
+    # AsyncMockConsumer is pure Python, as AsyncMockProducer: no callback
+    # queue to drain, so no binding.
+    consumer: AsyncMockConsumer[bytes, bytes] = AsyncMockConsumer(offset_reset_strategy="earliest")
+    asyncio.run(consumer.assign(partitions=[TP0]))
+    asyncio.run(consumer.assign(partitions=[TP1]))
+    assert consumer.assignment() == {TP1}
+    asyncio.run(consumer.close())
+
+
+def test_an_async_timed_call_inside_a_callback_goes_through_the_handle() -> None:
+    # AsyncKafkaConsumer runs the callback on its loop, inside the delivering
+    # call; a timed call and partitions_for there go through the handle's
+    # forms, as on the sync consumer.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs=configs(**{"default.api.timeout.ms": 300}))
+        await consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        async def callback(**kwargs: Any) -> None:
+            for call in (lambda: consumer.end_offsets(partitions=[TP0], timeout=0.2),
+                         lambda: consumer.partitions_for(topic=TOPIC, timeout=0)):
+                try:
+                    await call()
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    raised.append(exc)
+
+        await consumer.commit_nowait(offsets={}, callback=callback)
+        await consumer.commit(offsets={})
+        timed_out, zero = raised
+        assert isinstance(timed_out, KafkaTimeoutError)
+        assert str(timed_out) == TIMED["end_offsets"][1].format(200)
+        assert isinstance(zero, KafkaTimeoutError)
+        assert str(zero) == METADATA["partitions_for"][1]
+        await consumer.close(option=CloseOptions.timeout(timeout=0))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("method", ["committed", "position", "partitions_for", "list_topics"])
+def test_the_consumers_own_leftover_wakeup_is_not_raised_inside_a_callback(method: str) -> None:
+    # Critic 103 item 4: the consumer may leave its own wakeup armed after a
+    # call it woke (Ctrl+C, cancellation; _own_wake_left). Inside a callback a
+    # wakeable handle call that meets it is made again, so the user sees no
+    # WakeupError they did not ask for. partitions_for and list_topics are
+    # wakeable, as Java's (AsyncKafkaConsumer.java:1324, :1352).
+    calls: dict[str, Callable[[Any], Any]] = {
+        "committed": lambda c: c.committed(partitions={TP0}, timeout=0.3),
+        "position": lambda c: c.position(partition=TP0, timeout=0.3),
+        "partitions_for": lambda c: c.partitions_for(topic="other", timeout=0.3),
+        "list_topics": lambda c: c.list_topics(timeout=0.3),
+    }
+    with new_consumer(**{"default.api.timeout.ms": 60_000}) as consumer:
+        consumer.assign(partitions=[TP0])
+        raised: list[BaseException] = []
+
+        def callback(**kwargs: Any) -> None:
+            with consumer._use() as h:  # noqa: SLF001
+                consumer._own_wake_left = True  # noqa: SLF001
+                _lib.Consumer_wakeup(h)  # what _own_wake sends
+            try:
+                calls[method](consumer)
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                raised.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert [type(e) for e in raised] == [KafkaTimeoutError]
+
+
+def test_an_async_consumer_whose_loop_ended_can_still_be_closed() -> None:
+    # The real path the gap 39-41 recovery serves: use the consumer on a loop
+    # that ends, then close() it from another loop, which the binding allows
+    # once the bound loop is closed (LoopBinding.bind_for_close), as Java's
+    # close() always works. Any other call from there stays refused.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+
+    async def use() -> None:
+        await consumer.assign(partitions=[TP0])
+
+    asyncio.run(use())
+    _refused_from_another_loop(lambda: consumer.poll(timeout=0))
+    asyncio.run(consumer.close(option=CloseOptions.timeout(timeout=0)))
+    assert consumer._is_closed()  # noqa: SLF001

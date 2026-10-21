@@ -42,12 +42,12 @@ rest of the 53), with the same adaptations: the Rust tests seed the feature leve
 through the ``Builder``'s three feature-level setters, as Python does; the five
 ``mock_update_features_rejects_*`` tests are one parametrized test; a describe of
 every token passes ``owners=[]``, as Java's default ``null`` owners raise
-``NullPointerError()`` (its own test); with no renewer
+``TypeError`` (its own test); with no renewer
 ``create_delegation_token`` raises ``IndexError`` from the call (Java's
 ``renewers().get(0)``), and a negative seeded offset raises ``IllegalArgumentError``
 from the call (Java's ``new OffsetAndMetadata(-1)``), where the Rust core fails the
 future; that test's spec lists ``[]`` partitions, as Java's default spec (``null``)
-raises ``NullPointerError()`` once an offset is stored. Last, the binding's own checks
+raises ``TypeError`` once an offset is stored. Last, the binding's own checks
 of the other methods.
 """
 
@@ -56,6 +56,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
+from confluent_kafka import IllegalStateError
 
 from confluent_kafka import ExecutionError
 
@@ -116,11 +118,10 @@ from confluent_kafka.common.errors.unknown_topic_id_error import UnknownTopicIdE
 from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
     UnknownTopicOrPartitionError,
 )
+from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.consumer import OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
-from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
 from .admin_futures import WAIT, assert_future_throws, failure
 
@@ -730,7 +731,9 @@ def test_describe_configs_other_resources() -> None:
         resources=[bad_broker, unknown_metrics, group, logger]).values()
     error = error_of(values[bad_broker])
     assert isinstance(error, IllegalArgumentError) and str(error) == 'For input string: "x"'
-    assert isinstance(error_of(values[unknown_metrics]), NullPointerError)
+    unknown_error = error_of(values[unknown_metrics])
+    assert isinstance(unknown_error, IllegalStateError)
+    assert str(unknown_error).startswith("MockAdminClient has no configs for ConfigResource(type=CLIENT_METRICS")
     entry = value_of(values[group]).get(name="g.k")
     assert entry is not None and entry.value() == "d"
     error = error_of(values[logger])
@@ -786,7 +789,7 @@ def test_describe_log_dirs() -> None:
     assert description.total_bytes() is None
     assert value_of(values[2]) == {}
     # A replica on a broker not asked for: Java's NullPointerException.
-    with pytest.raises(NullPointerError):
+    with pytest.raises(IllegalStateError, match="^MockAdminClient has no log dirs for broker "):
         client.describe_log_dirs(brokers=[0])
 
 
@@ -818,8 +821,9 @@ def test_list_offsets() -> None:
         client.list_offsets(topic_partition_offsets={tp: OffsetSpec.for_timestamp(timestamp=1)})
     assert str(e.value) == "Not implement yet"
     other = TopicPartition(topic="t", partition=1)
-    with pytest.raises(NullPointerError):
+    with pytest.raises(IllegalStateError) as missing:
         client.list_offsets(topic_partition_offsets={other: OffsetSpec.latest()})
+    assert str(missing.value) == "MockAdminClient has no end offset for t-1"
 
 
 def test_list_config_resources_forms() -> None:
@@ -1049,8 +1053,9 @@ def test_describe_features_missing_supported_range_is_null_pointer() -> None:
     # Java unboxes minSupportedFeatureLevels.get(feature): null for a feature with
     # no supported range.
     mock = MockAdminClient.create().feature_levels(feature_levels={"f": 1}).build()
-    with pytest.raises(NullPointerError):
+    with pytest.raises(IllegalStateError) as missing:
         mock.describe_features()
+    assert str(missing.value) == "MockAdminClient has no supported version range for feature f"
 
 
 # ---- delegation tokens (Rust: user, *_delegation_token_*) --------------------
@@ -1164,10 +1169,12 @@ def test_describe_delegation_token_owners_filter() -> None:
 def test_describe_delegation_token_default_owners_is_null_pointer() -> None:
     # Java's options.owners().isEmpty() on the default null owners.
     client = admin()
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         client.describe_delegation_token()
-    with pytest.raises(NullPointerError):
+    assert str(none.value) == "DescribeDelegationTokenOptions.owners must not be None"
+    with pytest.raises(TypeError) as none:
         client.describe_delegation_token(options=DescribeDelegationTokenOptions(owners=None))
+    assert str(none.value) == "DescribeDelegationTokenOptions.owners must not be None"
 
 
 # ---- consumer groups ---------------------------------------------------------
@@ -1218,8 +1225,9 @@ def test_list_consumer_group_offsets_java_mock_quirks() -> None:
     mock.update_consumer_group_offsets(new_offsets={tp: 3})
     # Java's listConsumerGroupOffsets(groupId) passes new ListConsumerGroupOffsetsSpec(),
     # whose null partitions the filter dereferences.
-    with pytest.raises(NullPointerError):
+    with pytest.raises(TypeError) as none:
         mock.list_consumer_group_offsets(group_id="g")
+    assert str(none.value) == "ListConsumerGroupOffsetsSpec.topic_partitions must not be None"
     with pytest.raises(UnsupportedOperationError) as e:
         mock.list_consumer_group_offsets(group_specs={})
     assert str(e.value) == "Not implemented yet"

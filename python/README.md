@@ -30,7 +30,7 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
-    MetricName, Metric, KafkaMetric, TimestampType, Headers,
+    MetricName, Metric, KafkaMetric, TimestampType, Header, Headers,
     KafkaError,  # Java's org.apache.kafka.common.KafkaException
     KafkaFuture, AsyncKafkaFuture,  # every future the package hands out
 )
@@ -43,13 +43,49 @@ from confluent_kafka.common.serialization import (
 # package root:
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
-    TimeoutError, NoSuchElementError, NullPointerError, ExecutionError,
-    UnsupportedOperationError, Duration,
+    TimeoutError, NoSuchElementError, ExecutionError, UnsupportedOperationError,
+    Duration,
 )
 ```
 
 The native extension is `_confluentkafka` (private): the package imports it; it
 is never a public import path.
+
+## `None` is Java's `null`
+
+Every keyword-only parameter mirrors a Java argument, and `None` is Java's
+`null`, never "not given": leaving a parameter out is the only way to choose the
+Java overload without it (`CLAUDE.md`, Python Binding Conventions, Signatures).
+`consumer.close()` is Java's `close()`, while `consumer.close(option=None)` is
+`close(null)` and raises `TypeError("option must not be None")`, as Java's
+`NullPointerException`; `producer.send(record=r, callback=None)` is Java's
+`send(record, null)`. Where Java gives `null` a meaning, `None` keeps it
+(`ProducerRecord(topic=…, partition=None, key=None, value=…)`, an
+`Optional` parameter's `Optional.empty()`). Code written against kafka-python or
+confluent-kafka-python that passes `None` to skip an argument must leave the
+argument out instead; its positional callbacks and serdes take the keyword form
+(Serdes and callbacks), and an `except UnsupportedVersionError` meant for a mock's
+unimplemented method becomes `except UnsupportedOperationError` (Errors). The
+signatures show the private default `MISSING`
+(`help()`, `inspect.signature`): it only marks a parameter some overload omits
+and is never a value to pass.
+
+## Headers
+
+A record's headers are Java's: `record.headers()` returns a `Headers`
+(`confluent_kafka.common`), never `None` and empty when there are none, holding
+`Header` objects with `key()` and `value()`, a `memoryview` or `None` (for a
+fetched record, a view into the fetch batch, never a copy). `Headers` has
+Java's `add(header=…)` / `add(key=…, value=…)`, `remove(key=…)`,
+`last_header(key=…)`, `headers(key=…)` and `to_array()`, and iterates with
+`for h in record.headers()`. A record's headers can be changed until it is sent
+(by `KafkaProducer.send`, once the serializers ran); then `add` and `remove`
+raise `IllegalStateError("RecordHeaders has been closed.")`, as Java's
+`KafkaProducer` seals them. A polled record's headers stay writable, as Java's
+`CompletedFetch` leaves them. Where headers are taken (`ProducerRecord(headers=…)`,
+`ConsumerRecord(headers=…)`), each element is a `Header(key=…, value=…)` or a
+`(key, value)` pair. Code that read headers as `(key, value)` tuples
+(`for k, v in record.headers()`) reads `h.key()`, `h.value()` instead.
 
 ## Async peers
 
@@ -90,13 +126,43 @@ A `get(timeout=…)` that runs out raises `TimeoutError`. A future's
 runs: on the producer's completion thread or the sync admin client's pump
 thread, on the event loop for an async client.
 
+## Serdes and callbacks take keyword arguments
+
+A serializer, a deserializer, a `send()` callback and a `commit_nowait()`
+callback are called with keyword arguments named after Java's parameters, and
+each must accept `**kwargs`:
+
+```python
+def on_done(*, metadata, exception, **kwargs): ...          # Java's Callback
+def on_commit(*, offsets, exception, **kwargs): ...         # OffsetCommitCallback
+def serializer(*, topic, data, headers=None, **kwargs): ...     # Serializer
+def deserializer(*, topic, data, headers=None, **kwargs): ...   # Deserializer
+
+producer.send(record=r, callback=lambda *, metadata, exception, **_: ...)
+```
+
+Java adds a parameter to such an interface as a `default` overload, which old
+implementations never see; in Python the binding passes it as one more keyword,
+which `**kwargs` takes, so a parameter Java adds later breaks no existing
+callable. A callable without `**kwargs` is rejected where it is given, with
+`IllegalArgumentError("<param> must accept **kwargs")` (`callback`,
+`key_serializer`, … or the config key `value.deserializer`, …), and the
+`Callback`, `OffsetCommitCallback`, `Serializer` and `Deserializer` protocols
+make `mypy` reject it too. The parameters may be declared positional-or-keyword
+in Java's order (`def ser(topic, data, headers=None, **kwargs)`), which the
+client then calls positionally, a little faster. The `ConsumerRebalanceListener`
+methods, which you override on a subclass, are called positionally, as before.
+Code written against the earlier positional callbacks
+(`lambda md, exc: ...`, `def deserializer(topic, data, headers)`) must be
+rewritten in this form.
+
 ## Producer
 
 - `send(record=…, callback=cb)` returns a `KafkaFuture` for the record's
   `RecordMetadata` (`.get()` waits for it); like Java's, it cannot be cancelled,
   and a send failure reaches `get()` as `ExecutionError`. A serializer is called
-  with a `None` key or value as given and decides what null maps to. `cb(metadata,
-  exception)` is Java's `Callback`: it runs on the producer's background
+  with a `None` key or value as given and decides what null maps to.
+  `cb(metadata=…, exception=…)` is Java's `Callback`: it runs on the producer's background
   completion thread (`KafkaProducer`) or on the event loop
   (`AsyncKafkaProducer`), one at a time in completion order, before the future
   completes; a raising callback fails nothing, and the client's core logs its
@@ -112,12 +178,21 @@ thread, on the event loop for an async client.
 
 ## Consumer
 
+- Set `group.protocol` to `consumer`: this client implements only the KIP-848
+  consumer group protocol, and Java's default, `classic`, is rejected by the
+  client's core when the consumer is built, with
+  `UnsupportedVersionError("Classic group protocol is not yet supported in this
+  client; set group.protocol=consumer (KIP-848).")`.
+- The share consumer (KIP-932: `ShareConsumer`, `KafkaShareConsumer`,
+  `MockShareConsumer`) is not generated yet: the C FFI has no entry point for
+  it.
 - The calls that wait take Java's `Duration` overloads as an optional keyword:
   `commit(timeout=…)`, `position(…, timeout=…)`, `committed(…, timeout=…)`,
   `partitions_for(…, timeout=…)`, `list_topics(timeout=…)`,
   `offsets_for_times(…, timeout=…)`, `beginning_offsets(…, timeout=…)` and
-  `end_offsets(…, timeout=…)`; omitted or `None` calls the overload without it
-  (`default.api.timeout.ms` applies). A negative timeout raises
+  `end_offsets(…, timeout=…)`; left out calls the overload without it
+  (`default.api.timeout.ms` applies), and `None` is Java's null `Duration`
+  (`TypeError("timeout must not be None")`). A negative timeout raises
   `IllegalArgumentError`.
 - `poll(timeout=…)` runs the deserializers on the caller's thread. A null key or
   value is not deserialized: the record's field is `None`. A failing one
@@ -125,7 +200,7 @@ thread, on the event loop for an async client.
   returned) and leaves the position at the record:
   `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
 - `commit()` is Java's `commitSync` and waits; `commit_nowait(callback=cb)` is
-  Java's `commitAsync`. `cb(offsets, exception)` is Java's
+  Java's `commitAsync`. `cb(offsets=…, exception=…)` is Java's
   `OffsetCommitCallback`; `offsets` is `None` when the commit failed and for
   an explicit empty `offsets`, as Java passes `null`.
 - The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
@@ -142,7 +217,7 @@ thread, on the event loop for an async client.
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
   raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
   thread, it makes the waiting call raise `WakeupError`.
-- `close()` closes with Java's default timeout; `close(option=CloseOptions.timeout(…))`
+- `close()` closes with Java's default timeout; `close(option=CloseOptions(timeout=…))`
   bounds it. Java's deprecated `close(Duration)` is not generated.
 - A deserializer defaults to the `key.deserializer` / `value.deserializer`
   config key, else to `bytes_deserializer()`; the consumer closes both when it
@@ -195,7 +270,9 @@ with Admin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
 - Errors are classes: `isinstance(e.__cause__, RetriableError)`.
 - `MockAdminClient` (and `AsyncMockAdminClient`) is Java's `MockAdminClient`, for tests: no
   broker, in-memory state, `MockAdminClient.create()...build()` (`MockAdminClient()` has one `Node.no_node()` broker, as Java's, so topic calls need real brokers). Where Java's mock
-  throws "Not implemented yet", it raises `UnsupportedOperationError`.
+  throws "Not implemented yet", it raises `UnsupportedOperationError` (Java's
+  `UnsupportedOperationException`, a `RuntimeError` at the package root, not a
+  `KafkaError`).
 - Overloads whose entry point the core lacks (streams and share groups, metadata quorum, …)
   are not generated; they are listed in the docstring of `confluent_kafka.admin.admin`.
 
@@ -207,9 +284,12 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `NullPointerError`, `ExecutionError`, `UnsupportedOperationError`) live
-at the package root; `UnsupportedOperationError` subclasses `NotImplementedError`, as
-`TimeoutError` subclasses `builtins.TimeoutError`.
+`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`) live at the
+package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
+which the mocks raise for what Java's mocks do not implement
+(`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"), and the
+client's core for what this client does not support yet; it is not a `KafkaError`, so
+`except KafkaError` does not catch it, as in Java.
 
 ## Directory Structure
 
