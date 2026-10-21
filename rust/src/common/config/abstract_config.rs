@@ -31,7 +31,8 @@
 //!
 //! - Config providers and variable resolution (`resolveConfigVariables`,
 //!   `config.providers`, `AUTOMATIC_CONFIG_PROVIDERS_PROPERTY`): the client
-//!   configs do not define `config.providers`.
+//!   configs define and validate `config.providers`, but no provider is
+//!   instantiated and no `${provider:path:key}` variable is resolved.
 //! - `originals*()`, `values*()` and `nonInternalValues()`: Java returns a
 //!   `RecordingMap`, which marks the keys read through it as used; the
 //!   crate reads [`AbstractConfig::originals_map`] and
