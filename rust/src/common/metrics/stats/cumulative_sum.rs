@@ -77,9 +77,29 @@ impl Measurable for CumulativeSum {
     }
 }
 
+impl std::fmt::Display for CumulativeSum {
+    /// Java's `toString()`, the total as Java's `Double.toString`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = f64::from_bits(self.total.load(Ordering::SeqCst));
+        write!(
+            f,
+            "CumulativeSum(total={})",
+            crate::common::config::config_def::java_double_to_string(total)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        let sum = CumulativeSum::new();
+        sum.record(&MetricConfig::new(), 1.5, 0);
+        assert_eq!(sum.to_string(), "CumulativeSum(total=1.5)");
+        assert_eq!(CumulativeSum::with_value(1e8).to_string(), "CumulativeSum(total=1.0E8)");
+    }
 
     #[test]
     fn test_cumulative_sum() {

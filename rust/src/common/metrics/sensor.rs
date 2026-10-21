@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::common::Metric;
 use crate::common::metrics::MetricsShared;
@@ -31,7 +31,7 @@ use crate::common::{Error, MetricName};
 ///
 /// Mirrors `Sensor.RecordingLevel`. The numeric ids are part of the protocol and
 /// must not change: INFO=0, DEBUG=1, TRACE=2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel")]
 pub enum RecordingLevel {
@@ -41,6 +41,13 @@ pub enum RecordingLevel {
     Debug,
     /// TRACE level (id 2).
     Trace,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for RecordingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 impl RecordingLevel {
@@ -152,7 +159,16 @@ impl StatAndConfig {
 /// metrics about request sizes such as the average or max.
 #[doc(alias = "org.apache.kafka.common.metrics.Sensor")]
 pub struct Sensor {
-    registry: Option<Arc<MetricsShared>>,
+    /// Java's `registry`, held weakly: the registry's metrics map holds the
+    /// providers of every metric, and a provider may capture an object that
+    /// holds this sensor (`BufferPool`'s gauges capture the pool, which holds
+    /// its `bufferpool-wait-time` sensor), so a strong reference would be an
+    /// `Arc` cycle keeping the registry and everything its providers capture
+    /// allocated forever. Java's garbage collector frees the same graph. The
+    /// registry is owned by its [`Metrics`](crate::common::metrics::Metrics);
+    /// once that is dropped no one can read the map, and `add` keeps the
+    /// metric on the sensor only, as for a standalone sensor.
+    registry: Option<Weak<MetricsShared>>,
     name: String,
     parents: Vec<Arc<Sensor>>,
     inner: Mutex<SensorInner>,
@@ -170,6 +186,13 @@ struct SensorInner {
     metrics: indexmap::IndexMap<MetricName, Arc<KafkaMetric>>,
 }
 
+impl std::fmt::Debug for Sensor {
+    /// The sensor's name, its identifier in the registry.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sensor").field("name", &self.name).finish_non_exhaustive()
+    }
+}
+
 impl Sensor {
     /// Create a sensor.
     ///
@@ -178,7 +201,7 @@ impl Sensor {
     /// in a global repository.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#Sensor")]
     pub(crate) fn new(
-        registry: Option<Arc<MetricsShared>>,
+        registry: Option<Weak<MetricsShared>>,
         name: impl Into<String>,
         parents: Vec<Arc<Sensor>>,
         config: Arc<MetricConfig>,
@@ -419,7 +442,7 @@ impl Sensor {
             Arc::clone(&self.time),
         ));
 
-        if let Some(registry) = &self.registry {
+        if let Some(registry) = self.registry.as_ref().and_then(Weak::upgrade) {
             let existing = registry.register_metric(Arc::clone(&metric));
             if existing.is_some() {
                 return Err(Error::local_illegal_argument(format!(
@@ -481,7 +504,7 @@ impl Sensor {
                 Arc::clone(&self.time),
             ));
             if !inner.metrics.contains_key(child.name()) {
-                if let Some(registry) = &self.registry {
+                if let Some(registry) = self.registry.as_ref().and_then(Weak::upgrade) {
                     let existing = registry.register_metric(Arc::clone(&metric));
                     if existing.is_some() {
                         return Err(Error::local_illegal_argument(format!(

@@ -46,7 +46,13 @@ from confluent_kafka import (
 from confluent_kafka import TimeoutError as RootTimeoutError
 from confluent_kafka import _errors as errmod
 from confluent_kafka._error_registry import ERRORS
-from confluent_kafka._errors import class_for_ffi_id, error_classes, from_ffi_error, to_ffi_id
+from confluent_kafka._errors import (
+    class_for_ffi_id,
+    error_classes,
+    from_borrowed_ffi_error,
+    from_ffi_error,
+    to_ffi_id,
+)
 from confluent_kafka.common import (
     Headers,
     InvalidRecordError,
@@ -158,7 +164,7 @@ def _bridge() -> dict[str, str]:
     body = text[text.index("const BRIDGE:"):]
     body = body[:body.index("];")]
     rows = re.findall(r'\(\s*"([A-Z0-9_]+)"\s*,\s*"([\w.]+)"\s*,?\s*\)', body)
-    assert len(rows) == 165
+    assert len(rows) == 166
     return dict(rows)
 
 
@@ -262,6 +268,10 @@ def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
         "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
         "IllegalStateError", "NoSuchElementError", "TimeoutError", "UnsupportedOperationError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
+    # A Java built-in Python has a builtin for subclasses that builtin (CLAUDE.md, Types).
+    assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert issubclass(UnsupportedOperationError, RuntimeError)
+    assert not issubclass(UnsupportedOperationError, KafkaError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
                 NoSuchElementError, UnsupportedOperationError):
         assert issubclass(cls, RuntimeError)
@@ -312,7 +322,7 @@ def test_every_ffi_id_is_the_enum_value_of_its_bridge_row() -> None:
         # id -> class -> id round-trips.
         assert class_for_ffi_id(enum[constant]) is cls
         assert to_ffi_id(_instance(cls)) == enum[constant]
-    assert len(ids) == 165
+    assert len(ids) == 166
 
 
 def test_the_base_carries_unknown_server_error_which_unknown_server_error_owns() -> None:
@@ -322,9 +332,10 @@ def test_the_base_carries_unknown_server_error_which_unknown_server_error_owns()
 
 
 def test_built_ins_the_core_does_not_model_have_no_id() -> None:
-    for cls in (NoSuchElementError, UnsupportedOperationError):
-        assert not hasattr(cls, "_ffi_id")
-        assert to_ffi_id(cls(message="x")) == -1
+    # UnsupportedOperationError has the core's LOCAL_UNSUPPORTED_OPERATION id
+    # (test_unsupported_operation_error_is_java_unsupported_operation_exception).
+    assert not hasattr(NoSuchElementError, "_ffi_id")
+    assert to_ffi_id(NoSuchElementError(message="x")) == -1
     assert not hasattr(ExecutionError, "_ffi_id")
     assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
     assert to_ffi_id(ValueError("not ours")) == -1
@@ -384,6 +395,7 @@ def test_message_is_the_keyword_message() -> None:
         KafkaError("positional")  # type: ignore[call-arg]
     assert str(IllegalStateError(message="s")) == "s"
     assert str(RootTimeoutError(message="t")) == "t"
+    assert str(UnsupportedOperationError()) == ""
 
 
 def test_topic_authorization_constructors() -> None:
@@ -855,6 +867,41 @@ def test_real_native_round_trip() -> None:
     err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
     assert type(err) is TopicAuthorizationError
     assert str(err) == "no access"
+
+
+def test_unsupported_operation_error_is_java_unsupported_operation_exception() -> None:
+    # Java's java.lang.UnsupportedOperationException: the core's
+    # LOCAL_UNSUPPORTED_OPERATION, a root class subclassing NotImplementedError.
+    ffi_id = _ffi_enum()["LOCAL_UNSUPPORTED_OPERATION"]
+    assert UnsupportedOperationError._ffi_id == ffi_id
+    assert class_for_ffi_id(ffi_id) is UnsupportedOperationError
+    assert issubclass(UnsupportedOperationError, NotImplementedError)
+    assert str(UnsupportedOperationError()) == ""
+    assert str(UnsupportedOperationError(message="m")) == "m"
+    cause = ValueError("v")
+    e = UnsupportedOperationError(message="m", cause=cause)
+    assert e.__cause__ is cause
+    # Java's UnsupportedOperationException(Throwable cause): the message is cause.toString().
+    assert str(UnsupportedOperationError(cause=cause)) == "builtins.ValueError: v"
+    # A bare NotImplementedError is not the Kafka class: it crosses as a foreign one.
+    assert to_ffi_id(NotImplementedError("x")) == -1
+
+
+def test_unsupported_operation_error_from_the_core() -> None:
+    ffi_id = _ffi_enum()["LOCAL_UNSUPPORTED_OPERATION"]
+    err = from_borrowed_ffi_error((ffi_id, "m", False, False, None, False, None))
+    assert type(err) is UnsupportedOperationError
+    assert str(err) == "m"
+
+
+def test_real_native_unsupported_operation_error_round_trip() -> None:
+    # Python -> core -> Python: the class's id builds the core's
+    # LocalUnsupportedOperationError, which comes back as the same class.
+    lib = pytest.importorskip("_confluentkafka")
+    injected = UnsupportedOperationError(message="x")
+    err = from_ffi_error(lib.KafkaError_new(to_ffi_id(injected), "x"))
+    assert type(err) is UnsupportedOperationError
+    assert str(err) == "x"
 
 
 def test_real_native_payload_is_read_through_the_sub_handle() -> None:

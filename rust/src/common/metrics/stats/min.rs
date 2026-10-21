@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that gives the min over its samples.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Min")]
 pub struct Min {
     inner: SampledStat,
@@ -69,9 +70,24 @@ impl Measurable for Min {
     }
 }
 
+impl std::fmt::Display for Min {
+    /// Java's `SampledStat.toString()`, which `Min` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Min::new().to_string(),
+            "SampledStat(initialValue=1.7976931348623157E308, current=0, samples=[])"
+        );
+    }
 
     #[test]
     fn min_of_records() {

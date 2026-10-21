@@ -74,14 +74,14 @@ semaphore:
     - name: bump-version
       branch: master
       pipeline_file: .semaphore/bump-version.yml
-      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
+      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Python versions only move up, so PYTHON_VERSION is required whenever that PEP 440 form is below the current Python version (python/pyproject.toml). Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
       parameters:
         - name: VERSION
           required: true
           description: The new version, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-dev.N, X.Y.Z-rc.N (e.g. "0.3.0-rc.1"). It must not be below the current one.
         - name: PYTHON_VERSION
           required: false
-          description: A PEP 440 version in normal form for the Python packages instead of VERSION's, e.g. "0.3.0.post1" for a Python-only release. Ignored if not set.
+          description: A PEP 440 version in normal form for the Python packages instead of VERSION's, e.g. "4.4.0" or "4.4.0.post1". Required whenever VERSION's PEP 440 form is below the current Python version (python/pyproject.toml), since Python versions only move up; ignored if not set.
         - name: BASE_BRANCH
           required: true
           default_value: master

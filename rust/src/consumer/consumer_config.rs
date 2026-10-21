@@ -14,33 +14,56 @@
 
 //! Configuration for the Kafka Consumer.
 //!
-//! Translated from `org.apache.kafka.clients.consumer.ConsumerConfig`.
+//! Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`: the keys
+//! are defined on a `ConfigDef` in Java's order (`ConsumerConfig.java:440-745`)
+//! and parsed and validated by it, `postProcessParsedConfig` runs Java's steps
+//! (`ConsumerConfig.java:748-757`), and the configuration answers Java's
+//! `AbstractConfig` getters.
 //!
-//! This is a Rust struct with named fields rather than the Java `ConfigDef`
-//! reflection framework. The config-key string constants match Java's, and
-//! the default values mirror Java's `ConfigDef.define(...)` arguments.
+//! Per `consumer-threading.md` §20 only the KIP-848 `consumer` group protocol
+//! is implemented. The default still matches Java (`classic`), so users opt
+//! in explicitly; `KafkaConsumer::new` rejects `classic`.
 //!
-//! Per `consumer-threading.md` §20, Milestone-8 only supports the KIP-848
-//! `consumer` group protocol. The default still matches Java
-//! (`classic`) so users opt in explicitly; classic-protocol-only fields
-//! such as `partition.assignment.strategy` are accepted silently per §20.
+//! Not defined, and so reported by [`ConsumerConfig::unused`] and the
+//! client's [`ConsumerConfig::log_unused`] line when set:
 //!
-//! Runtime cross-field validation (`postProcessParsedConfig` in Java) is
-//! out of scope for Phase 1 — it lives wherever `AsyncKafkaConsumer`
-//! constructs its config.
+//! - `partition.assignment.strategy`, `key.deserializer`, `value.deserializer`,
+//!   `metric.reporters` and `interceptor.classes`: lists of classes, which a
+//!   configuration never takes (CLAUDE.md §2), and the client-side assignors
+//!   are out of scope (`consumer-threading.md` §20). Setting
+//!   `partition.assignment.strategy` with `group.protocol=consumer` is still
+//!   rejected, as Java rejects it.
+//! - `security.providers`: Java's JCA security providers have no counterpart.
+//! - `config.providers`: config providers are not translated, so the key is
+//!   left undefined and a value set for it is reported as unused, rather than
+//!   accepted and ignored.
+//! - `enable.metrics.push`: KIP-714 client telemetry is not implemented, so
+//!   the key is left undefined and a value set for it is reported as unused,
+//!   rather than accepted and ignored.
+//!
+//! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
+//! are not translated yet: each needs a public type the crate does not have
+//! (`Password`, `ConfigDef.Type`, Java's `RecordingMap`). See `CHANGELOG.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::LazyLock;
 use std::sync::atomic::{self, AtomicI32};
 
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::config_def::ValidList;
-use crate::common::config::types::Password;
+use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
+use crate::common::config::config_def::{
+    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, LambdaValidator, NonEmptyString, ParsedValue,
+    Range, Type, ValidList, ValidString, as_string, config_error,
+};
 use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::errors::InvalidConfigurationError;
 use crate::common::requests::JoinGroupRequest;
 use crate::common::security::auth::SecurityProtocol;
-use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::common::utils::Utils;
+use crate::consumer::internals::{AutoOffsetResetStrategy, auto_offset_reset_strategy};
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
@@ -51,27 +74,419 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// distinct ids.
 static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
+/// Java's `ConsumerConfig.CLASSIC_PROTOCOL_UNSUPPORTED_CONFIGS`: the keys not
+/// supported for the `CLASSIC` protocol.
+const CLASSIC_PROTOCOL_UNSUPPORTED_CONFIGS: [&str; 3] = [
+    ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG,
+    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+];
+
+/// Java's `ConsumerConfig.CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS`: the keys
+/// not supported for the `CONSUMER` protocol.
+const CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS: [&str; 5] = [
+    ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
+    ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG,
+    ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG,
+    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+];
+
+/// Java's `ConsumerConfig.CONFIG`, built in its static initializer.
+static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
+    ConfigDef::new()
+        .define_with_validator(
+            ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG,
+            Type::List,
+            ConfigDef::NO_DEFAULT_VALUE,
+            ValidList::any_non_duplicate_values(false, false),
+            Importance::High,
+        )
+        .define_with_validator(
+            ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG,
+            Type::String,
+            ClientDnsLookup::UseAllDnsIps.config_value(),
+            ValidString::r#in(&[
+                ClientDnsLookup::UseAllDnsIps.config_value(),
+                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly.config_value(),
+            ]),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
+            Range::at_least(0_i64),
+            Importance::High,
+        )
+        .define(
+            ConsumerConfig::GROUP_ID_CONFIG,
+            Type::String,
+            DefaultValue::Null,
+            Importance::High,
+        )
+        .define_with_validator(
+            ConsumerConfig::GROUP_INSTANCE_ID_CONFIG,
+            Type::String,
+            DefaultValue::Null,
+            NonEmptyString,
+            Importance::Medium,
+        )
+        .define(ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG, Type::Int, 45000, Importance::High)
+        .define(ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG, Type::Int, 3000, Importance::High)
+        // `partition.assignment.strategy` is a list of classes (CLAUDE.md §2)
+        // and the client-side assignors are out of scope: not defined.
+        .define_with_validator(
+            ConsumerConfig::METADATA_MAX_AGE_CONFIG,
+            Type::Long,
+            5 * 60 * 1000_i64,
+            Range::at_least(0),
+            Importance::Low,
+        )
+        .define(
+            ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG,
+            Type::Boolean,
+            true,
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::AUTO_COMMIT_INTERVAL_MS_CONFIG,
+            Type::Int,
+            5000,
+            Range::at_least(0),
+            Importance::Low,
+        )
+        .define(ConsumerConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Low)
+        .define(
+            ConsumerConfig::CLIENT_RACK_CONFIG,
+            Type::String,
+            ConsumerConfig::DEFAULT_CLIENT_RACK,
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::MAX_PARTITION_FETCH_BYTES_CONFIG,
+            Type::Int,
+            ConsumerConfig::DEFAULT_MAX_PARTITION_FETCH_BYTES,
+            Range::at_least(0),
+            Importance::High,
+        )
+        .define_with_validator(
+            ConsumerConfig::SEND_BUFFER_CONFIG,
+            Type::Int,
+            128 * 1024,
+            Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::RECEIVE_BUFFER_CONFIG,
+            Type::Int,
+            64 * 1024,
+            Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::FETCH_MIN_BYTES_CONFIG,
+            Type::Int,
+            ConsumerConfig::DEFAULT_FETCH_MIN_BYTES,
+            Range::at_least(0),
+            Importance::High,
+        )
+        .define_with_validator(
+            ConsumerConfig::FETCH_MAX_BYTES_CONFIG,
+            Type::Int,
+            ConsumerConfig::DEFAULT_FETCH_MAX_BYTES,
+            Range::at_least(0),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::FETCH_MAX_WAIT_MS_CONFIG,
+            Type::Int,
+            ConsumerConfig::DEFAULT_FETCH_MAX_WAIT_MS,
+            Range::at_least(0),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::RECONNECT_BACKOFF_MS_CONFIG,
+            Type::Long,
+            50_i64,
+            Range::at_least(0_i64),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG,
+            Type::Long,
+            1000_i64,
+            Range::at_least(0_i64),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::RETRY_BACKOFF_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MS,
+            Range::at_least(0_i64),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::RETRY_BACKOFF_MAX_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_RETRY_BACKOFF_MAX_MS,
+            Range::at_least(0_i64),
+            Importance::Low,
+        )
+        // Java defines `enable.metrics.push` here (`ConsumerConfig.java:570-574`);
+        // it is left undefined until KIP-714 client telemetry is implemented.
+        .define_with_validator(
+            ConsumerConfig::AUTO_OFFSET_RESET_CONFIG,
+            Type::String,
+            AutoOffsetResetStrategy::LATEST.name(),
+            auto_offset_reset_strategy::Validator,
+            Importance::Medium,
+        )
+        .define(ConsumerConfig::CHECK_CRCS_CONFIG, Type::Boolean, true, Importance::Low)
+        .define_with_validator(
+            ConsumerConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG,
+            Type::Long,
+            30000_i64,
+            Range::at_least(0),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::METRICS_NUM_SAMPLES_CONFIG,
+            Type::Int,
+            2,
+            Range::at_least(1),
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG,
+            Type::String,
+            "INFO",
+            ValidString::r#in(&["INFO", "DEBUG", "TRACE"]),
+            Importance::Low,
+        )
+        // `metric.reporters`, `key.deserializer` and `value.deserializer` are
+        // classes (CLAUDE.md §2): not defined.
+        .define_with_validator(
+            ConsumerConfig::REQUEST_TIMEOUT_MS_CONFIG,
+            Type::Int,
+            30000,
+            Range::at_least(0),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
+            Type::Int,
+            60000,
+            Range::at_least(0),
+            Importance::Medium,
+        )
+        .define(
+            ConsumerConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
+            Importance::Medium,
+        )
+        .define(
+            ConsumerConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            Importance::Medium,
+        )
+        .define(
+            ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG,
+            Type::Long,
+            9 * 60 * 1000_i64,
+            Importance::Medium,
+        )
+        // `interceptor.classes` is a list of classes (CLAUDE.md §2): not defined.
+        .define_with_validator(
+            ConsumerConfig::MAX_POLL_RECORDS_CONFIG,
+            Type::Int,
+            ConsumerConfig::DEFAULT_MAX_POLL_RECORDS,
+            Range::at_least(1),
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG,
+            Type::Int,
+            300000,
+            Range::at_least(1),
+            Importance::Medium,
+        )
+        .define(
+            ConsumerConfig::EXCLUDE_INTERNAL_TOPICS_CONFIG,
+            Type::Boolean,
+            ConsumerConfig::DEFAULT_EXCLUDE_INTERNAL_TOPICS,
+            Importance::Medium,
+        )
+        .define_internal(
+            ConsumerConfig::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
+            Type::Boolean,
+            false,
+            Importance::Low,
+        )
+        .define_with_validator(
+            ConsumerConfig::ISOLATION_LEVEL_CONFIG,
+            Type::String,
+            ConsumerConfig::DEFAULT_ISOLATION_LEVEL,
+            ValidString::r#in(&["read_committed", "read_uncommitted"]),
+            Importance::Medium,
+        )
+        .define(
+            ConsumerConfig::ALLOW_AUTO_CREATE_TOPICS_CONFIG,
+            Type::Boolean,
+            ConsumerConfig::DEFAULT_ALLOW_AUTO_CREATE_TOPICS,
+            Importance::Medium,
+        )
+        .define_with_validator(
+            ConsumerConfig::GROUP_PROTOCOL_CONFIG,
+            Type::String,
+            ConsumerConfig::DEFAULT_GROUP_PROTOCOL,
+            CaseInsensitiveValidString::r#in(&["CLASSIC", "CONSUMER"]),
+            Importance::High,
+        )
+        .define(
+            ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG,
+            Type::String,
+            DefaultValue::Null,
+            Importance::Medium,
+        )
+        // security support; `security.providers` (JCA providers) is not defined.
+        .define_with_validator(
+            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG,
+            Type::String,
+            CommonClientConfigs::DEFAULT_SECURITY_PROTOCOL,
+            CaseInsensitiveValidString::r#in(&SecurityProtocol::names()),
+            Importance::Medium,
+        )
+        .with_client_ssl_support()
+        .with_client_sasl_support()
+        .define_with_validator(
+            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG,
+            Type::String,
+            CommonClientConfigs::DEFAULT_METADATA_RECOVERY_STRATEGY,
+            CaseInsensitiveValidString::r#in(&["NONE", "REBOOTSTRAP"]),
+            Importance::Low,
+        )
+        .define_with_validator(
+            CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG,
+            Type::Long,
+            CommonClientConfigs::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
+            Range::at_least(0),
+            Importance::Low,
+        )
+        .define(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
+            Type::Boolean,
+            true,
+            Importance::Low,
+        )
+        // Java validates the two share keys with `ShareAcknowledgementMode.Validator`
+        // and `ShareAcquireMode.Validator`, translated below. The share consumer
+        // is out of scope (`consumer-threading.md` §20), so a valid non-blank
+        // value is then rejected under either group protocol by
+        // `checkUnsupportedConfigsPostProcess`, which skips a blank value: the
+        // validators are what reject a blank one, as in Java.
+        .define_with_validator(
+            ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+            Type::String,
+            "implicit",
+            share_acknowledgement_mode_validator(),
+            Importance::Medium,
+        )
+        // Java's `DEFAULT_SHARE_ACQUIRE_MODE` is `ShareAcquireMode.BATCH_OPTIMIZED.name()`,
+        // the enum constant's name, not its lower-case `toString()`.
+        .define_with_validator(
+            ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+            Type::String,
+            "BATCH_OPTIMIZED",
+            share_acquire_mode_validator(),
+            Importance::Medium,
+        )
+    // Java ends the chain with `config.providers` (`ConsumerConfig.java`
+    // 740-745); it is left undefined until config providers are translated.
+});
+
+/// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
+/// `implicit` or `explicit`, matched exactly (`ShareAcknowledgementMode.fromString`
+/// checks it against `Utils.enumOptions`, the constants' lower-case
+/// `toString()`).
+fn share_acknowledgement_mode_validator() -> LambdaValidator {
+    LambdaValidator::with(
+        |name, value| {
+            let acknowledgement_mode = as_string(value)?;
+            if acknowledgement_mode.is_some_and(|mode| ["implicit", "explicit"].contains(&mode)) {
+                return Ok(());
+            }
+            Err(config_error(
+                name,
+                value,
+                format!(
+                    "Invalid value `{}` for configuration {name}. The value must either be 'implicit' or 'explicit'.",
+                    acknowledgement_mode.unwrap_or("null")
+                ),
+            ))
+        },
+        || "[implicit, explicit]".to_owned(),
+    )
+}
+
+/// Java's `ShareAcquireMode.Validator`: the value must name one of the
+/// `ShareAcquireMode` constants, case-insensitively (`ShareAcquireMode.of`
+/// upper-cases it before `valueOf`).
+fn share_acquire_mode_validator() -> LambdaValidator {
+    LambdaValidator::with(
+        |name, value| {
+            let acquire_mode = as_string(value)?;
+            if acquire_mode
+                .is_some_and(|mode| ["BATCH_OPTIMIZED", "RECORD_LIMIT"].contains(&mode.to_uppercase().as_str()))
+            {
+                return Ok(());
+            }
+            Err(config_error(
+                name,
+                value,
+                format!(
+                    "Invalid value `{}` for configuration {name}. The value must either be 'batch_optimized' or 'record_limit'.",
+                    acquire_mode.unwrap_or("null")
+                ),
+            ))
+        },
+        || "[batch_optimized, record_limit]".to_owned(),
+    )
+}
+
 /// Configuration for the Kafka Consumer.
 ///
 /// Documentation for the underlying keys can be found in the
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
-/// As in Java, the configuration is built from the string map, by
-/// [`ConsumerConfig::new`], which validates every key as Java's `ConfigDef`
-/// does. There are no typed getters or setters: a key's type and validators
-/// change across Kafka releases, so a getter would freeze the type and a
-/// setter would skip the validation.
+/// As in Java, the configuration is built from the property map by
+/// [`ConsumerConfig::new`], which parses every key to its `ConfigDef` type,
+/// applies its validator and runs Java's `postProcessParsedConfig`. Values are
+/// read back with Java's `AbstractConfig` getters ([`Self::get_int`],
+/// [`Self::get_string`], ...). Keys it does not define are accepted, as Java
+/// accepts them; the consumer reports them, with the defined keys it does not
+/// read, in one line when it is built ([`Self::log_unused`]).
+///
+/// Equality and hashing are Java's `equals` / `hashCode`: two configurations
+/// are equal when they were built from equal properties.
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
-// `Debug` is derived: every secret this struct holds is a `Password` inside
-// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
-// ever gains a map of the raw user properties (Java's `originals()`), replace
-// the derive with a hand-written `Debug` that renders that map as its key set
-// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
-// does not parse, and Java never prints a raw `originals` value.
-#[derive(Clone, Debug)]
+// `Debug` is derived: every secret the typed fields hold is a `Password`
+// inside `sasl_config` / `ssl_config`, which renders as `[hidden]`, and
+// `AbstractConfig`'s `Debug` renders the properties as their key set only: the
+// map also holds keys this client does not define, and Java never prints a raw
+// original value.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
+    /// The originals, the parsed values and the keys used so far.
+    pub(crate) config: AbstractConfig,
+    /// The keys the typed fields below were read from, which the consumer
+    /// marks used when it is built from this configuration (`ValuesReader`).
+    pub(crate) read_keys: Vec<&'static str>,
+
     // --- Group ---
     /// `group.id` — the consumer group identifier. `None` means no group.
     pub(crate) group_id: Option<String>,
@@ -88,17 +503,13 @@ pub struct ConsumerConfig {
     pub(crate) max_poll_records: i32,
     /// `max.poll.interval.ms` — the maximum interval between `poll()` calls.
     pub(crate) max_poll_interval_ms: i32,
-    /// `session.timeout.ms` — group session timeout.
-    pub(crate) session_timeout_ms: i32,
-    /// `heartbeat.interval.ms` — heartbeat interval inside the session.
-    pub(crate) heartbeat_interval_ms: i32,
 
     // --- Connection ---
     /// `bootstrap.servers` — initial connection list.
     pub(crate) bootstrap_servers: Vec<String>,
     /// `client.dns.lookup` — DNS lookup behavior.
     pub(crate) client_dns_lookup: ClientDnsLookup,
-    /// `client.id` — the client identifier. Empty by default.
+    /// `client.id` — the client identifier, derived by `new` when unset.
     pub(crate) client_id: String,
     /// `client.rack` — the rack identifier for rack-aware fetching.
     pub(crate) client_rack: String,
@@ -109,10 +520,7 @@ pub struct ConsumerConfig {
     /// `auto.commit.interval.ms` — frequency of auto-commits.
     pub(crate) auto_commit_interval_ms: i32,
 
-    // --- Assignment / Offsets ---
-    /// `partition.assignment.strategy` — list of class names for classic
-    /// protocol assignors. Accepted silently per scope.
-    pub(crate) partition_assignment_strategy: Vec<String>,
+    // --- Offsets ---
     /// `auto.offset.reset` — the reset strategy when no offset is found.
     pub(crate) auto_offset_reset: String,
 
@@ -179,8 +587,6 @@ pub struct ConsumerConfig {
     pub(crate) allow_auto_create_topics: bool,
 
     // --- Metrics ---
-    /// `enable.metrics.push`
-    pub(crate) enable_metrics_push: bool,
     /// `metrics.sample.window.ms`
     pub(crate) metrics_sample_window_ms: i64,
     /// `metrics.num.samples`
@@ -188,15 +594,7 @@ pub struct ConsumerConfig {
     /// `metrics.recording.level`
     pub(crate) metrics_recording_level: String,
 
-    // --- Share consumer (accepted silently per scope §20) ---
-    /// `share.acknowledgement.mode`
-    pub(crate) share_acknowledgement_mode: String,
-    /// `share.acquire.mode`
-    pub(crate) share_acquire_mode: String,
-
     // --- Security ---
-    /// `security.providers`
-    pub(crate) security_providers: Option<String>,
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
     pub(crate) security_protocol: SecurityProtocol,
@@ -206,84 +604,173 @@ pub struct ConsumerConfig {
 
     /// SSL/TLS configuration.
     pub(crate) ssl_config: SslConfigs,
-
-    // --- Config providers ---
-    /// `config.providers`
-    pub(crate) config_providers: Vec<String>,
 }
 
-impl Default for ConsumerConfig {
-    /// Default values match Java's `ConfigDef.define(...)` second argument
-    /// for every key.
-    fn default() -> Self {
-        Self {
-            group_id: None,
-            group_instance_id: None,
-            group_protocol: "classic".to_string(),
-            group_remote_assignor: None,
+impl PartialEq for ConsumerConfig {
+    /// Java's `AbstractConfig.equals`: the originals are equal.
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config
+    }
+}
 
-            max_poll_records: 500,
-            max_poll_interval_ms: 300_000,
-            session_timeout_ms: 45_000,
-            heartbeat_interval_ms: 3_000,
+impl Eq for ConsumerConfig {}
 
-            bootstrap_servers: Vec::new(),
-            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
-            client_id: String::new(),
-            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
+impl Hash for ConsumerConfig {
+    /// Java's `AbstractConfig.hashCode`, over the originals.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.config.hash(state);
+    }
+}
 
-            enable_auto_commit: true,
-            auto_commit_interval_ms: 5_000,
+impl ConsumerConfig {
+    /// A configuration holding every key's `ConfigDef` default, for the
+    /// crate's own tests, which then write the fields they need.
+    ///
+    /// It is parsed from `bootstrap.servers` alone, without
+    /// `postProcessParsedConfig`, so `client.id` stays empty and
+    /// `enable.auto.commit` keeps its `true` default; `bootstrap_servers` is
+    /// then emptied.
+    ///
+    /// Crate-private, and not `Default`: Java builds a configuration only
+    /// through its constructor, and a public default would hand out one that
+    /// skipped `new`'s validation, including the required `bootstrap.servers`.
+    #[cfg(test)]
+    pub(crate) fn defaults() -> Self {
+        let props = HashMap::from([(Self::BOOTSTRAP_SERVERS_CONFIG.to_string(), "localhost:9092".to_string())]);
+        let config =
+            AbstractConfig::new(&CONFIG, string_originals(&props), false).expect("the ConfigDef defaults are valid");
+        let mut defaults = Self::from_abstract(config).expect("the ConfigDef defaults are valid");
+        defaults.bootstrap_servers = Vec::new();
+        defaults
+    }
 
-            partition_assignment_strategy: Vec::new(),
-            auto_offset_reset: AutoOffsetResetStrategy::LATEST.name(),
+    /// Reads the typed fields from the parsed values, recording the keys read
+    /// in `read_keys`.
+    fn from_abstract(config: AbstractConfig) -> Result<Self, Error> {
+        let mut values = ValuesReader::new(&config);
+        let bootstrap_servers = values.list(Self::BOOTSTRAP_SERVERS_CONFIG)?.to_vec();
+        let client_dns_lookup = ClientDnsLookup::parse_config_value(values.string(Self::CLIENT_DNS_LOOKUP_CONFIG)?)?;
+        let client_id = values.string(Self::CLIENT_ID_CONFIG)?.to_string();
+        let client_rack = values.string(Self::CLIENT_RACK_CONFIG)?.to_string();
+        // An empty `group.id` is kept, not coerced to `None`: Java's `ConfigDef`
+        // does not coerce `""` to null, and
+        // `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
+        // (`AsyncKafkaConsumer.java:839-844`). Coercing it here would turn
+        // that configuration error into a groupless consumer.
+        let group_id = values.string_or_null(Self::GROUP_ID_CONFIG)?.map(str::to_string);
+        let group_instance_id = values.string_or_null(Self::GROUP_INSTANCE_ID_CONFIG)?.map(str::to_string);
+        let group_protocol = values.string(Self::GROUP_PROTOCOL_CONFIG)?.to_string();
+        let group_remote_assignor = values
+            .string_or_null(Self::GROUP_REMOTE_ASSIGNOR_CONFIG)?
+            .filter(|assignor| !assignor.is_empty())
+            .map(str::to_string);
+        let max_poll_records = values.int(Self::MAX_POLL_RECORDS_CONFIG)?;
+        let max_poll_interval_ms = values.int(Self::MAX_POLL_INTERVAL_MS_CONFIG)?;
+        let enable_auto_commit = values.boolean(Self::ENABLE_AUTO_COMMIT_CONFIG)?;
+        let auto_commit_interval_ms = values.int(Self::AUTO_COMMIT_INTERVAL_MS_CONFIG)?;
+        let auto_offset_reset = values.string(Self::AUTO_OFFSET_RESET_CONFIG)?.to_string();
+        let fetch_min_bytes = values.int(Self::FETCH_MIN_BYTES_CONFIG)?;
+        let fetch_max_bytes = values.int(Self::FETCH_MAX_BYTES_CONFIG)?;
+        let fetch_max_wait_ms = values.int(Self::FETCH_MAX_WAIT_MS_CONFIG)?;
+        let max_partition_fetch_bytes = values.int(Self::MAX_PARTITION_FETCH_BYTES_CONFIG)?;
+        let check_crcs = values.boolean(Self::CHECK_CRCS_CONFIG)?;
+        let send_buffer_bytes = values.int(Self::SEND_BUFFER_CONFIG)?;
+        let receive_buffer_bytes = values.int(Self::RECEIVE_BUFFER_CONFIG)?;
+        let socket_connection_setup_timeout_ms = values.long(Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG)?;
+        let socket_connection_setup_timeout_max_ms =
+            values.long(Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?;
+        let connections_max_idle_ms = values.long(Self::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
+        let reconnect_backoff_ms = values.long(Self::RECONNECT_BACKOFF_MS_CONFIG)?;
+        let reconnect_backoff_max_ms = values.long(Self::RECONNECT_BACKOFF_MAX_MS_CONFIG)?;
+        let retry_backoff_ms = values.long(Self::RETRY_BACKOFF_MS_CONFIG)?;
+        let retry_backoff_max_ms = values.long(Self::RETRY_BACKOFF_MAX_MS_CONFIG)?;
+        let bootstrap_resolve_timeout_ms = values.long(Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG)?;
+        let request_timeout_ms = values.int(Self::REQUEST_TIMEOUT_MS_CONFIG)?;
+        let default_api_timeout_ms = values.int(Self::DEFAULT_API_TIMEOUT_MS_CONFIG)?;
+        let metadata_max_age_ms = values.long(Self::METADATA_MAX_AGE_CONFIG)?;
+        let metadata_recovery_strategy = values
+            .string(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG)?
+            .to_string();
+        let metadata_recovery_rebootstrap_trigger_ms =
+            values.long(CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG)?;
+        let metadata_cluster_check_enable =
+            values.boolean(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG)?;
+        let exclude_internal_topics = values.boolean(Self::EXCLUDE_INTERNAL_TOPICS_CONFIG)?;
+        let throw_on_fetch_stable_offset_unsupported =
+            values.boolean(Self::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED)?;
+        let isolation_level = values.string(Self::ISOLATION_LEVEL_CONFIG)?.to_string();
+        let allow_auto_create_topics = values.boolean(Self::ALLOW_AUTO_CREATE_TOPICS_CONFIG)?;
+        let metrics_sample_window_ms = values.long(Self::METRICS_SAMPLE_WINDOW_MS_CONFIG)?;
+        let metrics_num_samples = values.int(Self::METRICS_NUM_SAMPLES_CONFIG)?;
+        let metrics_recording_level = values.string(Self::METRICS_RECORDING_LEVEL_CONFIG)?.to_string();
+        let protocol = values.string(CommonClientConfigs::SECURITY_PROTOCOL_CONFIG)?;
+        // The validator accepted `protocol` case-insensitively.
+        let security_protocol = SecurityProtocol::for_name(protocol)
+            .ok_or_else(|| Error::local_illegal_state(format!("Unknown security protocol {protocol}")))?;
 
-            fetch_min_bytes: 1,
-            fetch_max_bytes: 50 * 1024 * 1024,
-            fetch_max_wait_ms: 500,
-            max_partition_fetch_bytes: 1024 * 1024,
-            check_crcs: true,
-
-            send_buffer_bytes: 128 * 1024,
-            receive_buffer_bytes: 64 * 1024,
-            socket_connection_setup_timeout_ms: 10_000,
-            socket_connection_setup_timeout_max_ms: 30_000,
-            connections_max_idle_ms: 9 * 60 * 1000,
-
-            reconnect_backoff_ms: 50,
-            reconnect_backoff_max_ms: 1_000,
-            retry_backoff_ms: 100,
-            retry_backoff_max_ms: 1_000,
-            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
-
-            request_timeout_ms: 30_000,
-            default_api_timeout_ms: 60_000,
-
-            metadata_max_age_ms: 5 * 60 * 1000,
-            metadata_recovery_strategy: "rebootstrap".to_string(),
-            metadata_recovery_rebootstrap_trigger_ms: 5 * 60 * 1000,
-            metadata_cluster_check_enable: true,
-
-            exclude_internal_topics: true,
-            throw_on_fetch_stable_offset_unsupported: false,
-            isolation_level: "read_uncommitted".to_string(),
-            allow_auto_create_topics: true,
-
-            enable_metrics_push: true,
-            metrics_sample_window_ms: 30_000,
-            metrics_num_samples: 2,
-            metrics_recording_level: "INFO".to_string(),
-
-            share_acknowledgement_mode: "implicit".to_string(),
-            share_acquire_mode: "batch_optimized".to_string(),
-
-            security_providers: None,
-            security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfigs::default(),
-            ssl_config: SslConfigs::default(),
-
-            config_providers: Vec::new(),
+        // The `ssl.*` and `sasl.*` keys are read by Java's channel builder only
+        // for a protocol that uses them (`ChannelBuilders.clientChannelBuilder`),
+        // so only then are they marked used.
+        let mut ssl_values = ValuesReader::new(&config);
+        let ssl_config = SslConfigs::from_values(&mut ssl_values)?;
+        if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
+            values.append(ssl_values);
         }
+        let mut sasl_values = ValuesReader::new(&config);
+        let sasl_config = SaslConfigs::from_values(&mut sasl_values)?;
+        if matches!(security_protocol, SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl) {
+            values.append(sasl_values);
+        }
+        let read_keys = values.into_read_keys();
+
+        Ok(Self {
+            config,
+            read_keys,
+            group_id,
+            group_instance_id,
+            group_protocol,
+            group_remote_assignor,
+            max_poll_records,
+            max_poll_interval_ms,
+            bootstrap_servers,
+            client_dns_lookup,
+            client_id,
+            client_rack,
+            enable_auto_commit,
+            auto_commit_interval_ms,
+            auto_offset_reset,
+            fetch_min_bytes,
+            fetch_max_bytes,
+            fetch_max_wait_ms,
+            max_partition_fetch_bytes,
+            check_crcs,
+            send_buffer_bytes,
+            receive_buffer_bytes,
+            socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms,
+            connections_max_idle_ms,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            bootstrap_resolve_timeout_ms,
+            request_timeout_ms,
+            default_api_timeout_ms,
+            metadata_max_age_ms,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
+            metadata_cluster_check_enable,
+            exclude_internal_topics,
+            throw_on_fetch_stable_offset_unsupported,
+            isolation_level,
+            allow_auto_create_topics,
+            metrics_sample_window_ms,
+            metrics_num_samples,
+            metrics_recording_level,
+            security_protocol,
+            sasl_config,
+            ssl_config,
+        })
     }
 }
 
@@ -453,13 +940,19 @@ impl ConsumerConfig {
         "internal.throw.on.fetch.stable.offset.unsupported";
     /// Config key: `isolation.level`.
     pub const ISOLATION_LEVEL_CONFIG: &'static str = "isolation.level";
+    /// Default for `isolation.level`: `read_committed`, so a consumer returns
+    /// only the transactional records that were committed.
+    ///
+    /// This deviates from Java, whose `DEFAULT_ISOLATION_LEVEL` is
+    /// `read_uncommitted` (`ConsumerConfig.java:382`); `read_committed` is
+    /// librdkafka's default, which users of the other Confluent clients
+    /// expect. Set `isolation.level=read_uncommitted` for Java's behaviour.
+    pub const DEFAULT_ISOLATION_LEVEL: &'static str = "read_committed";
     /// Config key: `allow.auto.create.topics`.
     pub const ALLOW_AUTO_CREATE_TOPICS_CONFIG: &'static str = "allow.auto.create.topics";
     /// Default value of `allow.auto.create.topics`.
     pub const DEFAULT_ALLOW_AUTO_CREATE_TOPICS: bool = true;
 
-    /// Config key: `enable.metrics.push`.
-    pub const ENABLE_METRICS_PUSH_CONFIG: &'static str = "enable.metrics.push";
     /// Config key: `metrics.sample.window.ms`.
     pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &'static str = "metrics.sample.window.ms";
     /// Config key: `metrics.num.samples`.
@@ -472,51 +965,391 @@ impl ConsumerConfig {
     /// Config key: `share.acquire.mode`.
     pub const SHARE_ACQUIRE_MODE_CONFIG: &'static str = "share.acquire.mode";
 
-    /// Config key: `security.providers`.
-    pub const SECURITY_PROVIDERS_CONFIG: &'static str = "security.providers";
-
-    /// Config key: `config.providers`.
-    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
-
-    // -------- Typed getters (crate-internal) --------
-    //
-    // Java reads a key through `AbstractConfig`'s keyed lookups
-    // (`getInt(REQUEST_TIMEOUT_MS_CONFIG)`); the client's own readers get a
-    // typed getter per key instead. They are `pub(crate)`, not public: a key's
-    // Java type changes across releases (`linger.ms` was a `long`, an `int`,
-    // then a `long` again) and a public getter would freeze it, so users
-    // configure through the string map only, which `new` validates.
-
-    /// The value of the `STRING`-typed configuration `key`, trimmed, or `None`
-    /// when it has no value (Java's `null`, e.g. an unset `group.id`).
+    /// Creates a config from a property map: Java's `ConsumerConfig(Map)`.
     ///
-    /// `client.id` answers the resolved id: when the property is unset, `new`
-    /// derives it the way Java's `maybeOverrideClientId` does, so this is the
-    /// id the consumer reports to the brokers.
+    /// Every value is parsed to its `ConfigDef` type and checked by its
+    /// validator, then Java's `postProcessParsedConfig`
+    /// (`ConsumerConfig.java:748-757`) runs: `postValidateSaslMechanismConfig`,
+    /// `warnDisablingExponentialBackoff`, `postProcessReconnectBackoffConfigs`,
+    /// `maybeOverrideClientId` (an unset or empty `client.id` becomes
+    /// `consumer-<group.id>-<group.instance.id or a process-wide sequence>`),
+    /// `maybeOverrideEnableAutoCommit` (`enable.auto.commit` defaults to
+    /// `false` without a `group.id`), `checkUnsupportedConfigsPostProcess` and
+    /// the `connections.max.idle.ms` warning.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`] with Java's `Unknown configuration '<key>'`
-    /// when `key` is not a `STRING`-typed `ConsumerConfig` key.
+    /// - [`Error::Config`] when a value fails to parse or validate, with
+    ///   `ConfigDef`'s message; when `bootstrap.servers` is missing; when a SASL
+    ///   `security.protocol` has an empty `sasl.mechanism`; when a key the
+    ///   `group.protocol` does not support is set (`group.remote.assignor`,
+    ///   `share.acknowledgement.mode` or `share.acquire.mode` with `classic`;
+    ///   `partition.assignment.strategy`, `heartbeat.interval.ms`,
+    ///   `session.timeout.ms` or the two share keys with `consumer`).
+    /// - [`Error::InvalidConfiguration`] when `enable.auto.commit` is `true`
+    ///   without a `group.id`.
+    /// - The error of `JoinGroupRequest.validateGroupInstanceId` for an invalid
+    ///   `group.instance.id` when `client.id` is derived from it.
+    /// - A
+    ///   [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
+    ///   ([`Error::local_unsupported_operation`]) when a SASL
+    ///   `security.protocol` has a `sasl.mechanism` other than `PLAIN`: Java
+    ///   accepts any mechanism name, but this client implements only PLAIN,
+    ///   and a client built with another mechanism would fail only later, at
+    ///   authentication.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
+    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
+        Self::build(string_originals(props), None)
+    }
+
+    /// The configuration of one more client given this one: the same
+    /// properties and this configuration's resolved `client.id`, with its
+    /// own record of the keys used, as [`Self::new`] leaves it.
+    ///
+    /// Java hands each client the `ConsumerConfig` it is given, which took
+    /// its one number from the `client.id` sequence when it was built
+    /// (`AsyncKafkaConsumer.java:476` reads it), so clients given one
+    /// configuration share its id. Building the configuration again would
+    /// take a second number; this copy does not. It is not `Clone`
+    /// (CLAUDE.md §3).
+    ///
+    /// Java's client logs nothing about the configuration it is given, so the
+    /// copy logs none of the warnings [`Self::new`] logs: it makes the same
+    /// parse and the same reads, marking the same keys used and failing the
+    /// same way, but logs neither the parse's warning that a list's duplicate
+    /// values are removed, nor the post-processing's warnings (the reconnect
+    /// and retry backoff, the connection setup timeout,
+    /// `connections.max.idle.ms` below `max.poll.interval.ms`). The client given the copy logs its
+    /// one unused-keys line
+    /// ([`Self::log_unused`]), as Java's client constructor does.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::new`] does; this configuration's properties already
+    /// passed it, so it does not in practice.
+    #[cfg_attr(
+        not(any(feature = "ffi", test)),
+        expect(dead_code, reason = "only the C config handle copies a configuration")
+    )]
+    pub(crate) fn copy_for_client(&self) -> Result<Self, Error> {
+        Self::build(self.config.originals_map().clone(), Some(&self.client_id))
+    }
+
+    /// Java's `ConsumerConfig(Map)` without its logging: parses `originals`
+    /// and post-processes them, `resolved_client_id` standing in for the
+    /// sequence number `client.id` would take. With a `resolved_client_id`
+    /// (a copy) nothing is logged: not the parse's duplicate-values warning,
+    /// not the post-processing's lines.
+    fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
+        let log_warnings = resolved_client_id.is_none();
+        let config = AbstractConfig::with_hooks_and_log_warnings(
+            &CONFIG,
+            originals,
+            false,
+            log_warnings,
+            "ConsumerConfig",
+            |originals| originals,
+            |config| Self::post_process_parsed_config(config, resolved_client_id),
+        )?;
+        Self::from_abstract(config)
+    }
+
+    /// Java's `ConsumerConfig.postProcessParsedConfig`: the values that
+    /// replace the parsed ones. A `resolved_client_id` is the id a derived
+    /// `client.id` takes, in place of a new one; it marks a copy for one more
+    /// client ([`Self::copy_for_client`]), whose reads are the same but which
+    /// logs none of the warnings: its original logged them once.
+    fn post_process_parsed_config(
+        config: &AbstractConfig,
+        resolved_client_id: Option<&str>,
+    ) -> Result<ConfigMap, Error> {
+        let log_warnings = resolved_client_id.is_none();
+        CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
+        CommonClientConfigs::post_validate_supported_sasl_mechanism(config)?;
+        CommonClientConfigs::warn_disabling_exponential_backoff(config, log_warnings)?;
+        let mut refined_configs =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values(), log_warnings);
+        Self::maybe_override_client_id_with_configs(config, &mut refined_configs, resolved_client_id)?;
+        Self::maybe_override_enable_auto_commit(config, &mut refined_configs)?;
+        Self::check_unsupported_configs_post_process(config)?;
+        Self::warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config, log_warnings)?;
+        Ok(refined_configs)
+    }
+
+    /// Java's `warnIfConnectionsMaxIdleMsLowerThanMaxPollIntervalMs`. With
+    /// `log_warnings` false it makes the same reads but logs nothing.
+    fn warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(
+        config: &AbstractConfig,
+        log_warnings: bool,
+    ) -> Result<(), Error> {
+        let group_protocol = config.get_string(Self::GROUP_PROTOCOL_CONFIG)?;
+        if !group_protocol.is_some_and(|protocol| protocol.eq_ignore_ascii_case("CLASSIC")) {
+            return Ok(());
+        }
+        let connections_max_idle_ms = config.get_long(Self::CONNECTIONS_MAX_IDLE_MS_CONFIG)?.unwrap_or_default();
+        let max_poll_interval_ms = config.get_int(Self::MAX_POLL_INTERVAL_MS_CONFIG)?.unwrap_or_default();
+        if log_warnings && connections_max_idle_ms >= 0 && connections_max_idle_ms < i64::from(max_poll_interval_ms) {
+            warn!(
+                "Configuration '{}' with value '{}' is lower than configuration '{}' with value '{}'. This may cause \
+                 the connection to the group coordinator to be closed during an ongoing rebalance, which can \
+                 prolong or disrupt group rejoin.",
+                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG,
+                connections_max_idle_ms,
+                Self::MAX_POLL_INTERVAL_MS_CONFIG,
+                max_poll_interval_ms
+            );
+        }
+        Ok(())
+    }
+
+    /// Java's private `maybeOverrideClientId(Map)`: when `client.id` is unset
+    /// or empty, derives `consumer-<group.id>-<group.instance.id>` for a static
+    /// member, otherwise `consumer-<group.id>-<n>` from the process-wide
+    /// sequence, and puts it in `configs`.
+    ///
+    /// Java formats a missing `group.id` with `String.format("%s", null)`,
+    /// which yields the literal `null`; that is preserved (`consumer-null-1`) so
+    /// the wire `client_id` matches a Java consumer with the same
+    /// configuration.
+    ///
+    /// A `resolved_client_id` (the id of the configuration this one copies)
+    /// is put in `configs` instead of a derived one, after the same reads and
+    /// checks.
+    fn maybe_override_client_id_with_configs(
+        config: &AbstractConfig,
+        configs: &mut ConfigMap,
+        resolved_client_id: Option<&str>,
+    ) -> Result<(), Error> {
+        let client_id = config.get_string(Self::CLIENT_ID_CONFIG)?;
+        if client_id.is_none_or(str::is_empty) {
+            let group_id = config.get_string(Self::GROUP_ID_CONFIG)?;
+            let group_instance_id = config.get_string(Self::GROUP_INSTANCE_ID_CONFIG)?;
+            if let Some(group_instance_id) = group_instance_id {
+                JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
+            }
+            let generated_client_id = match resolved_client_id {
+                Some(resolved_client_id) => resolved_client_id.to_string(),
+                None => {
+                    let group_instance_id_part = match group_instance_id {
+                        Some(group_instance_id) => group_instance_id.to_string(),
+                        None => CONSUMER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed).to_string(),
+                    };
+                    format!("consumer-{}-{group_instance_id_part}", group_id.unwrap_or("null"))
+                },
+            };
+            configs.insert(
+                Self::CLIENT_ID_CONFIG.to_string(),
+                Some(ParsedValue::String(generated_client_id)),
+            );
+        }
+        Ok(())
+    }
+
+    /// Java's `maybeOverrideEnableAutoCommit`: without a `group.id`,
+    /// `enable.auto.commit` becomes `false` unless it was set, and setting it
+    /// to `true` is an error.
+    fn maybe_override_enable_auto_commit(config: &AbstractConfig, configs: &mut ConfigMap) -> Result<(), Error> {
+        let group_id = config.get_string(Self::GROUP_ID_CONFIG)?;
+        let auto_commit_set = config.originals_map().contains_key(Self::ENABLE_AUTO_COMMIT_CONFIG);
+        let enable_auto_commit = if auto_commit_set {
+            config.get_boolean(Self::ENABLE_AUTO_COMMIT_CONFIG)?.unwrap_or_default()
+        } else {
+            false
+        };
+        if group_id.is_none() {
+            // overwrite in case of default group id where the config is not explicitly provided
+            if !auto_commit_set {
+                configs.insert(Self::ENABLE_AUTO_COMMIT_CONFIG.to_string(), Some(ParsedValue::Boolean(false)));
+            } else if enable_auto_commit {
+                return Err(Error::InvalidConfiguration(InvalidConfigurationError::new(format!(
+                    "{} cannot be set to true when default group id (null) is used.",
+                    Self::ENABLE_AUTO_COMMIT_CONFIG
+                ))));
+            }
+        }
+        Ok(())
+    }
+
+    /// Java's `checkUnsupportedConfigsPostProcess`: the keys the configured
+    /// `group.protocol` does not support must not be set.
+    fn check_unsupported_configs_post_process(config: &AbstractConfig) -> Result<(), Error> {
+        let group_protocol = config.get_string(Self::GROUP_PROTOCOL_CONFIG)?.unwrap_or_default();
+        if group_protocol.eq_ignore_ascii_case("CLASSIC") {
+            Self::check_unsupported_configs(config, "CLASSIC", &CLASSIC_PROTOCOL_UNSUPPORTED_CONFIGS)
+        } else if group_protocol.eq_ignore_ascii_case("CONSUMER") {
+            Self::check_unsupported_configs(config, "CONSUMER", &CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Java's private `checkUnsupportedConfigsPostProcess(GroupProtocol, List)`.
+    fn check_unsupported_configs(
+        config: &AbstractConfig,
+        group_protocol: &str,
+        unsupported_configs: &[&str],
+    ) -> Result<(), Error> {
+        let mut invalid_configs = Vec::new();
+        for &config_name in unsupported_configs {
+            // Java reads the key through `originals()`, a `RecordingMap`
+            // whose `get` marks it used.
+            config.ignore(config_name);
+            if let Some(Some(value)) = config.originals_map().get(config_name)
+                && !Utils::is_blank(Some(&value.to_string()))
+            {
+                invalid_configs.push(config_name);
+            }
+        }
+        if invalid_configs.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::config_message(format!(
+                "{} cannot be set when {}={group_protocol}",
+                invalid_configs.join(", "),
+                Self::GROUP_PROTOCOL_CONFIG
+            )))
+        }
+    }
+
+    /// The `SHORT` configuration `key`, `None` for Java's `null`. Reading a
+    /// key marks it used ([`Self::unused`]).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'` when
+    ///   `key` is not a configuration this class defines.
+    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
+    ///   another type, where Java's cast fails with a `ClassCastException`.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getShort")]
+    pub fn get_short(&self, key: &str) -> Result<Option<i16>, Error> {
+        self.config.get_short(key)
+    }
+
+    /// The `INT` configuration `key`, `None` for Java's `null`. Reading a key
+    /// marks it used ([`Self::unused`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_short`].
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getInt")]
+    pub fn get_int(&self, key: &str) -> Result<Option<i32>, Error> {
+        self.config.get_int(key)
+    }
+
+    /// The `LONG` configuration `key`, `None` for Java's `null`. Reading a key
+    /// marks it used ([`Self::unused`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_short`].
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getLong")]
+    pub fn get_long(&self, key: &str) -> Result<Option<i64>, Error> {
+        self.config.get_long(key)
+    }
+
+    /// The `DOUBLE` configuration `key`, `None` for Java's `null`. Reading a
+    /// key marks it used ([`Self::unused`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_short`].
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getDouble")]
+    pub fn get_double(&self, key: &str) -> Result<Option<f64>, Error> {
+        self.config.get_double(key)
+    }
+
+    /// The `LIST` configuration `key`, borrowed from the parsed values, `None`
+    /// for Java's `null`. Reading a key marks it used ([`Self::unused`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_short`].
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getList")]
+    pub fn get_list(&self, key: &str) -> Result<Option<&[String]>, Error> {
+        self.config.get_list(key)
+    }
+
+    /// The `BOOLEAN` configuration `key`, `None` for Java's `null`. Reading a
+    /// key marks it used ([`Self::unused`]).
+    ///
+    /// `enable.auto.commit` answers the value `postProcessParsedConfig`
+    /// settled on: `false` without a `group.id` when it was not set.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_short`].
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getBoolean")]
+    pub fn get_boolean(&self, key: &str) -> Result<Option<bool>, Error> {
+        self.config.get_boolean(key)
+    }
+
+    /// The `STRING` configuration `key`, trimmed, or `None` when it has no
+    /// value (Java's `null`, e.g. an unset `group.id`). Reading a key marks it
+    /// used ([`Self::unused`]).
+    ///
+    /// `client.id` answers the resolved id: when the property is unset, `new`
+    /// derives it the way Java's `maybeOverrideClientId` does, so this is the
+    /// id the consumer reports to the brokers. `security.protocol` answers the
+    /// value as written, trimmed (`"sasl_ssl"`), as Java's does: its validator
+    /// accepts it case-insensitively without changing it. A `PASSWORD`
+    /// configuration that is not set answers `None`, as Java's `null`
+    /// default casts to `String` (`SslConfigs.java:135-142`,
+    /// `SaslConfigs.java:398`).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
+    ///   another type (`max.poll.records`, a set `ssl.keystore.key`). Java's
+    ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
+    ///   and fails with a `ClassCastException`, which, like
+    ///   `IllegalArgumentException`, is not a `KafkaException`.
+    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'`
+    ///   (`AbstractConfig.java:176-181`) when `key` is not a configuration this
+    ///   class defines.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
-        let value = match key {
-            Self::GROUP_ID_CONFIG => self.group_id.as_deref(),
-            Self::GROUP_INSTANCE_ID_CONFIG => self.group_instance_id.as_deref(),
-            Self::GROUP_PROTOCOL_CONFIG => Some(self.group_protocol.as_str()),
-            Self::GROUP_REMOTE_ASSIGNOR_CONFIG => self.group_remote_assignor.as_deref(),
-            Self::CLIENT_ID_CONFIG => Some(self.client_id.as_str()),
-            Self::CLIENT_RACK_CONFIG => Some(self.client_rack.as_str()),
-            Self::AUTO_OFFSET_RESET_CONFIG => Some(self.auto_offset_reset.as_str()),
-            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => Some(self.metadata_recovery_strategy.as_str()),
-            Self::ISOLATION_LEVEL_CONFIG => Some(self.isolation_level.as_str()),
-            Self::METRICS_RECORDING_LEVEL_CONFIG => Some(self.metrics_recording_level.as_str()),
-            Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => Some(self.share_acknowledgement_mode.as_str()),
-            Self::SHARE_ACQUIRE_MODE_CONFIG => Some(self.share_acquire_mode.as_str()),
-            Self::SECURITY_PROVIDERS_CONFIG => self.security_providers.as_deref(),
-            _ => return Err(Error::config_message(format!("Unknown configuration '{key}'"))),
-        };
-        Ok(value.map(str::trim))
+        self.config.get_string(key)
+    }
+
+    /// The keys of the properties this configuration was built from that were
+    /// never read: through a getter, or by the consumer built from it.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#unused")]
+    pub fn unused(&self) -> HashSet<String> {
+        self.config.unused()
+    }
+
+    /// Marks the configuration `key` used without reading it.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#ignore")]
+    pub fn ignore(&self, key: &str) {
+        self.config.ignore(key);
+    }
+
+    /// Info level log for any unused configurations: one line,
+    /// `These configurations '[a, b]' were supplied but are not used yet.`,
+    /// and nothing when every key was used.
+    #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#logUnused")]
+    pub fn log_unused(&self) {
+        self.config.log_unused();
+    }
+
+    /// The names of the configurations this class defines.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#configNames")]
+    pub fn config_names() -> HashSet<String> {
+        CONFIG.names()
+    }
+
+    /// Marks used the keys the typed settings were read from, as the consumer
+    /// does where Java's reads them through the getters.
+    pub(crate) fn mark_read_keys_used(&self) {
+        for key in &self.read_keys {
+            self.config.ignore(key);
+        }
+    }
+
+    /// Java's `logAll()`, which Java runs when the consumer builds the
+    /// configuration with `doLog = true`: every parsed value at INFO.
+    pub(crate) fn log_values(&self) {
+        self.config.log_all("ConsumerConfig");
     }
 
     /// `bootstrap.servers`.
@@ -593,358 +1426,11 @@ impl ConsumerConfig {
         self.bootstrap_resolve_timeout_ms
     }
 
-    /// Parses a string-typed property map into a typed `ConsumerConfig`.
+    /// Derives `client.id` on a configuration whose `client.id` is empty.
     ///
-    /// Mirrors Java's `new ConsumerConfig(Map<String, String>)`. Unknown keys
-    /// are logged as warnings and ignored, matching Java's behavior.
-    ///
-    /// Construction-time validation matches the Java `ConfigDef` validators
-    /// that we have translated so far. Cross-field validation (e.g.
-    /// `partition.assignment.strategy` being forbidden under
-    /// `group.protocol=consumer`) is deferred until a later phase per
-    /// `consumer-threading.md` §20.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
-    /// for its expected type, or fails its validator.
-    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
-    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        // NOTE: 13 of Java's per-field `atLeast(..)` numeric validators
-        // (ConsumerConfig.java lines 415-710) are intentionally deferred to
-        // Phase 11, when `post_process_parsed_config` is translated. Until
-        // that lands, negative / out-of-range values are silently accepted
-        // for the following keys (Java line numbers in parentheses):
-        // (Phase M7 added the `metrics.num.samples` >= 1 and
-        //  `metrics.sample.window.ms` >= 0 validators — see below — so they
-        //  are no longer in this deferred list.)
-        //   - `max.poll.interval.ms`                          atLeast(1)  (632)
-        //   - `metadata.max.age.ms`                           atLeast(0)  (455)
-        //   - `auto.commit.interval.ms`                       atLeast(0)  (466)
-        //   - `max.partition.fetch.bytes`                     atLeast(0)  (482)
-        //   - `send.buffer.bytes`         atLeast(SEND_BUFFER_LOWER_BOUND) (488)
-        //   - `receive.buffer.bytes`   atLeast(RECEIVE_BUFFER_LOWER_BOUND) (494)
-        //   - `fetch.min.bytes`                               atLeast(0)  (500)
-        //   - `fetch.max.bytes`                               atLeast(0)  (506)
-        //   - `fetch.max.wait.ms`                             atLeast(0)  (512)
-        //   - `reconnect.backoff.ms`                          atLeast(0L) (518)
-        //   - `reconnect.backoff.max.ms`                      atLeast(0L) (524)
-        //   - `retry.backoff.ms`                              atLeast(0L) (530)
-        //   - `retry.backoff.max.ms`                          atLeast(0L) (536)
-        //   - `request.timeout.ms`                            atLeast(0)  (590)
-        //   - `default.api.timeout.ms`                        atLeast(0)  (596)
-        // The currently-translated validators are `max.poll.records >= 1`,
-        // `metrics.num.samples >= 1`, `metrics.sample.window.ms >= 0`,
-        // `metadata.recovery.rebootstrap.trigger.ms >= 0`,
-        // and the string-enum keys.
-        let mut config = Self::default();
-
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so
-        // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
-        // check runs before any other value is parsed, as in Java.
-        if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
-            return Err(Error::config_message(format!(
-                "Missing required configuration \"{}\" which has no default value.",
-                Self::BOOTSTRAP_SERVERS_CONFIG
-            )));
-        }
-
-        for (key, value) in props {
-            match key.as_str() {
-                Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`).
-                    config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
-                },
-                Self::CLIENT_DNS_LOOKUP_CONFIG => {
-                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
-                },
-                Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
-                    config.client_id = value.trim().to_string();
-                },
-                Self::CLIENT_RACK_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
-                    config.client_rack = value.trim().to_string();
-                },
-                Self::GROUP_ID_CONFIG => {
-                    // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
-                    // value (`ConfigDef.java:731-733`), so `" "` becomes `""`.
-                    // The empty string is then kept, not coerced to `None`. Java's
-                    // `ConfigDef` defines `group.id` as `Type.STRING` with a
-                    // `null` default and does not coerce `""` to null, so
-                    // `config.getString(GROUP_ID_CONFIG)` returns `""` and
-                    // `AsyncKafkaConsumer.initializeGroupMetadata` is what
-                    // rejects it — `throw new InvalidGroupIdException("The
-                    // configured group.id should not be an empty string or
-                    // whitespace.")` (`AsyncKafkaConsumer.java:839-844`).
-                    // Coercing to `None` here silently turned that hard
-                    // configuration error into "no group", so a consumer
-                    // configured with an empty `group.id` became a groupless
-                    // consumer instead of failing fast.
-                    config.group_id = Some(value.trim().to_string());
-                },
-                Self::GROUP_INSTANCE_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:731-733`)
-                    // before `NonEmptyString.ensureValid` runs on it (`:1226-1231`).
-                    let value = value.trim();
-                    if value.is_empty() {
-                        return Err(Error::config_name_value_message(
-                            Self::GROUP_INSTANCE_ID_CONFIG,
-                            value,
-                            "String must be non-empty",
-                        ));
-                    }
-                    config.group_instance_id = Some(value.to_string());
-                },
-                Self::GROUP_PROTOCOL_CONFIG => {
-                    // Case-insensitive validation against the enum's lower-case names.
-                    let lc = value.to_ascii_lowercase();
-                    if lc != "classic" && lc != "consumer" {
-                        return Err(Error::config_name_value(Self::GROUP_PROTOCOL_CONFIG, value));
-                    }
-                    // Java's `getString` returns the original-case value; preserve it.
-                    config.group_protocol = value.clone();
-                },
-                Self::GROUP_REMOTE_ASSIGNOR_CONFIG => {
-                    config.group_remote_assignor = if value.is_empty() { None } else { Some(value.clone()) };
-                },
-                Self::MAX_POLL_RECORDS_CONFIG => {
-                    let v = parse_i32(key, value)?;
-                    if v < 1 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
-                    }
-                    config.max_poll_records = v;
-                },
-                Self::MAX_POLL_INTERVAL_MS_CONFIG => {
-                    config.max_poll_interval_ms = parse_i32(key, value)?;
-                },
-                Self::SESSION_TIMEOUT_MS_CONFIG => {
-                    config.session_timeout_ms = parse_i32(key, value)?;
-                },
-                Self::HEARTBEAT_INTERVAL_MS_CONFIG => {
-                    config.heartbeat_interval_ms = parse_i32(key, value)?;
-                },
-                Self::ENABLE_AUTO_COMMIT_CONFIG => {
-                    config.enable_auto_commit = parse_bool(key, value)?;
-                },
-                Self::AUTO_COMMIT_INTERVAL_MS_CONFIG => {
-                    config.auto_commit_interval_ms = parse_i32(key, value)?;
-                },
-                Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG => {
-                    // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:480`).
-                    config.partition_assignment_strategy = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
-                Self::AUTO_OFFSET_RESET_CONFIG => {
-                    // Java attaches `new AutoOffsetResetStrategy.Validator()` to
-                    // this key's `ConfigDef` entry, so an invalid value is
-                    // rejected here with a `ConfigException` naming the key and
-                    // listing the legal values — NOT with the bare
-                    // `IllegalArgumentException` that `fromString` raises.
-                    AutoOffsetResetStrategy::ensure_valid(Self::AUTO_OFFSET_RESET_CONFIG, value)?;
-                    config.auto_offset_reset = value.clone();
-                },
-                Self::FETCH_MIN_BYTES_CONFIG => {
-                    config.fetch_min_bytes = parse_i32(key, value)?;
-                },
-                Self::FETCH_MAX_BYTES_CONFIG => {
-                    config.fetch_max_bytes = parse_i32(key, value)?;
-                },
-                Self::FETCH_MAX_WAIT_MS_CONFIG => {
-                    config.fetch_max_wait_ms = parse_i32(key, value)?;
-                },
-                Self::MAX_PARTITION_FETCH_BYTES_CONFIG => {
-                    config.max_partition_fetch_bytes = parse_i32(key, value)?;
-                },
-                Self::CHECK_CRCS_CONFIG => {
-                    config.check_crcs = parse_bool(key, value)?;
-                },
-                Self::SEND_BUFFER_CONFIG => {
-                    config.send_buffer_bytes = parse_i32(key, value)?;
-                },
-                Self::RECEIVE_BUFFER_CONFIG => {
-                    config.receive_buffer_bytes = parse_i32(key, value)?;
-                },
-                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
-                    config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
-                },
-                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG => {
-                    config.socket_connection_setup_timeout_max_ms = parse_i64(key, value)?;
-                },
-                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => {
-                    config.connections_max_idle_ms = parse_i64(key, value)?;
-                },
-                Self::RECONNECT_BACKOFF_MS_CONFIG => {
-                    config.reconnect_backoff_ms = parse_i64(key, value)?;
-                },
-                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => {
-                    config.reconnect_backoff_max_ms = parse_i64(key, value)?;
-                },
-                Self::RETRY_BACKOFF_MS_CONFIG => {
-                    config.retry_backoff_ms = parse_i64(key, value)?;
-                },
-                Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
-                    config.retry_backoff_max_ms = parse_i64(key, value)?;
-                },
-                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
-                    // Java `ConsumerConfig` (`:454-459`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
-                    let v = parse_i64(key, value)?;
-                    if v < 0 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
-                    }
-                    config.bootstrap_resolve_timeout_ms = v;
-                },
-                Self::REQUEST_TIMEOUT_MS_CONFIG => {
-                    config.request_timeout_ms = parse_i32(key, value)?;
-                },
-                Self::DEFAULT_API_TIMEOUT_MS_CONFIG => {
-                    config.default_api_timeout_ms = parse_i32(key, value)?;
-                },
-                Self::METADATA_MAX_AGE_CONFIG => {
-                    config.metadata_max_age_ms = parse_i64(key, value)?;
-                },
-                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG => {
-                    let lc = value.to_ascii_lowercase();
-                    if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_name_value(
-                            CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG,
-                            value,
-                        ));
-                    }
-                    config.metadata_recovery_strategy = value.clone();
-                },
-                CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    // Java `ConsumerConfig` (`:717-721`):
-                    // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
-                    let v = parse_i64(key, value)?;
-                    if v < 0 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
-                    }
-                    config.metadata_recovery_rebootstrap_trigger_ms = v;
-                },
-                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
-                    // Java `ConsumerConfig` (`:723-727`): `Type.BOOLEAN`, default `true`.
-                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
-                },
-                Self::EXCLUDE_INTERNAL_TOPICS_CONFIG => {
-                    config.exclude_internal_topics = parse_bool(key, value)?;
-                },
-                Self::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED => {
-                    config.throw_on_fetch_stable_offset_unsupported = parse_bool(key, value)?;
-                },
-                Self::ISOLATION_LEVEL_CONFIG => {
-                    let lc = value.to_ascii_lowercase();
-                    if lc != "read_committed" && lc != "read_uncommitted" {
-                        return Err(Error::config_name_value(Self::ISOLATION_LEVEL_CONFIG, value));
-                    }
-                    config.isolation_level = value.clone();
-                },
-                Self::ALLOW_AUTO_CREATE_TOPICS_CONFIG => {
-                    config.allow_auto_create_topics = parse_bool(key, value)?;
-                },
-                Self::ENABLE_METRICS_PUSH_CONFIG => {
-                    config.enable_metrics_push = parse_bool(key, value)?;
-                },
-                Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => {
-                    // Java `ConsumerConfig` / `CommonClientConfigs`:
-                    // `metrics.sample.window.ms` is `atLeast(0)`.
-                    let v = parse_i64(key, value)?;
-                    if v < 0 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
-                    }
-                    config.metrics_sample_window_ms = v;
-                },
-                Self::METRICS_NUM_SAMPLES_CONFIG => {
-                    // Java `ConsumerConfig` / `CommonClientConfigs`:
-                    // `metrics.num.samples` is `atLeast(1)`.
-                    let v = parse_i32(key, value)?;
-                    if v < 1 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
-                    }
-                    config.metrics_num_samples = v;
-                },
-                Self::METRICS_RECORDING_LEVEL_CONFIG => {
-                    // Java `ConsumerConfig` / `CommonClientConfigs`:
-                    // `.define(METRICS_RECORDING_LEVEL_CONFIG, ..., in("INFO", "DEBUG", "TRACE"), ...)`.
-                    // `ConfigDef.ValidString.in(...)` does an exact, case-sensitive
-                    // membership check, throwing `ConfigException` for any other value
-                    // (including lower/mixed case such as `debug`).
-                    if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(Error::config_name_value_message(
-                            Self::METRICS_RECORDING_LEVEL_CONFIG,
-                            value,
-                            "String must be one of: INFO, DEBUG, TRACE",
-                        ));
-                    }
-                    config.metrics_recording_level = value.clone();
-                },
-                Self::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG => {
-                    // Accepted silently per scope §20.
-                    config.share_acknowledgement_mode = value.clone();
-                },
-                Self::SHARE_ACQUIRE_MODE_CONFIG => {
-                    // Accepted silently per scope §20.
-                    config.share_acquire_mode = value.clone();
-                },
-                Self::SECURITY_PROVIDERS_CONFIG => {
-                    config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
-                },
-                CommonClientConfigs::SECURITY_PROTOCOL_CONFIG => {
-                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_name_value_message(
-                            CommonClientConfigs::SECURITY_PROTOCOL_CONFIG,
-                            value,
-                            format!("Valid values are: {:?}", SecurityProtocol::names()),
-                        )
-                    })?;
-                },
-                SaslConfigs::SASL_MECHANISM => {
-                    config.sasl_config.mechanism = value.clone();
-                },
-                SaslConfigs::SASL_JAAS_CONFIG => {
-                    config.sasl_config.jaas_config = if value.is_empty() {
-                        None
-                    } else {
-                        Some(Password::new(value))
-                    };
-                },
-                key if key.starts_with("ssl.") => {
-                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
-                },
-                Self::CONFIG_PROVIDERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:743`).
-                    config.config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
-                },
-                _ => {
-                    warn!("Unknown consumer configuration key: {key}");
-                },
-            }
-        }
-
-        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:753`),
-        // i.e. after every key has been parsed.
-        config.maybe_override_client_id()?;
-
-        config
-            .client_dns_lookup
-            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
-        Ok(config)
-    }
-
-    /// Derives `client.id` when the user did not set one.
-    ///
-    /// Translated from `ConsumerConfig.maybeOverrideClientId`
-    /// (`ConsumerConfig.java:776-788`). The derived form is
-    /// `consumer-<group.id>-<group.instance.id>` for a static member, otherwise
-    /// `consumer-<group.id>-<n>` from a process-wide counter starting at 1 —
-    /// matching Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`. When a
-    /// `group.instance.id` is present it is validated first with
-    /// `JoinGroupRequest.validateGroupInstanceId`, exactly where Java does it.
-    ///
-    /// Java formats a missing `group.id` with `String.format("%s", null)`, which
-    /// yields the literal `null`; that is preserved here (`consumer-null-1`) so
-    /// the wire `client_id` matches a Java consumer with the same configuration.
+    /// `new` already derives it (`maybeOverrideClientId`, run by
+    /// `postProcessParsedConfig`), so this only acts on a configuration built
+    /// by the crate's tests from [`Self::defaults`], with the same derivation.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#maybeOverrideClientId")]
     pub(crate) fn maybe_override_client_id(&mut self) -> Result<(), Error> {
         if !self.client_id.is_empty() {
@@ -963,38 +1449,12 @@ impl ConsumerConfig {
     }
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
-}
-
-fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
-}
-
-/// Parses a string value as `bool`.
-///
-/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
-/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
-/// throws `ConfigException(name, value, "Expected value to be either true or
-/// false")`, where `value` is the **original, untrimmed** string.
-fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if trimmed.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        Err(Error::config_name_value_message(
-            key,
-            value,
-            "Expected value to be either true or false",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::types::Password;
+    use crate::test_log_capture::capture_logs;
+    use log::Level;
 
     /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
     /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
@@ -1004,11 +1464,11 @@ mod tests {
 
     #[test]
     fn test_default_values() {
-        let c = ConsumerConfig::default();
+        let c = ConsumerConfig::defaults();
         assert_eq!(c.max_poll_records, 500);
         assert_eq!(c.max_poll_interval_ms(), 300_000);
-        assert_eq!(c.session_timeout_ms, 45_000);
-        assert_eq!(c.heartbeat_interval_ms, 3_000);
+        assert_eq!(c.get_int(ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG).unwrap(), Some(45_000));
+        assert_eq!(c.get_int(ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG).unwrap(), Some(3_000));
         assert!(c.enable_auto_commit());
         assert_eq!(c.auto_commit_interval_ms(), 5_000);
         assert_eq!(c.auto_offset_reset(), "latest");
@@ -1049,8 +1509,10 @@ mod tests {
     #[test]
     fn test_parse_bool_matches_java_boolean() {
         let props_with = |raw: &str| {
+            // A `group.id`, without which `enable.auto.commit=true` is rejected.
             HashMap::from([
                 ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("group.id".to_string(), "g".to_string()),
                 ("enable.auto.commit".to_string(), raw.to_string()),
             ])
         };
@@ -1242,6 +1704,7 @@ mod tests {
         ] {
             let mut props = base_props();
             props.insert("security.protocol".to_string(), input.to_string());
+            props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
             let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.security_protocol, expected, "for input {input}");
         }
@@ -1253,6 +1716,8 @@ mod tests {
     fn test_case_insensitive_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        // Only `PLAIN` is accepted under a SASL protocol (`post_validate_supported_sasl_mechanism`).
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.security_protocol, SecurityProtocol::SaslSsl);
     }
@@ -1329,10 +1794,70 @@ mod tests {
         assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
     }
 
+    /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
+    /// a SASL `security.protocol` needs `sasl.mechanism=PLAIN`; any other
+    /// mechanism, the `GSSAPI` default included, fails the build with
+    /// `LocalUnsupportedOperationError`, while an empty one keeps Java's
+    /// `ConfigError`. Under `PLAINTEXT` the mechanism is inert, as in Java.
+    #[test]
+    fn test_unsupported_sasl_mechanism_rejected() {
+        let jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password=\"p\";";
+        let build = |extra: &[(&str, &str)]| {
+            let mut props = base_props();
+            for (k, v) in extra {
+                props.insert((*k).to_string(), (*v).to_string());
+            }
+            ConsumerConfig::new(&props)
+        };
+
+        let err = build(&[
+            ("security.protocol", "SASL_PLAINTEXT"),
+            ("sasl.mechanism", "SCRAM-SHA-256"),
+            ("sasl.jaas.config", jaas),
+        ])
+        .unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "LocalUnsupportedOperationError: SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only \
+             PLAIN is"
+        );
+
+        // The default mechanism is Java's `GSSAPI`.
+        let err = build(&[("security.protocol", "SASL_SSL")]).unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "LocalUnsupportedOperationError: SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is"
+        );
+
+        // Case-sensitive, as Java's mechanism names are.
+        let err = build(&[("security.protocol", "SASL_PLAINTEXT"), ("sasl.mechanism", "plain")]).unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+
+        build(&[("security.protocol", "PLAINTEXT")]).unwrap();
+        build(&[
+            ("security.protocol", "SASL_PLAINTEXT"),
+            ("sasl.mechanism", "PLAIN"),
+            ("sasl.jaas.config", jaas),
+        ])
+        .unwrap();
+
+        // An empty mechanism fails Java's check first.
+        let err = build(&[("security.protocol", "SASL_PLAINTEXT"), ("sasl.mechanism", "")]).unwrap_err();
+        assert!(err.is_config_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "ConfigError: Invalid value null for configuration sasl.mechanism: When the security.protocol \
+             configuration enables SASL, mechanism must be non-null and non-empty string."
+        );
+    }
+
     /// `{:?}` of a config built from every `Type.PASSWORD` key the client
-    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// parses (`sasl.jaas.config` and the three SSL keys) renders none of their
     /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
-    /// and `SslConfigs` hold those values as `Password`s.
+    /// and `SslConfigs` hold those values as `Password`s. The three SSL
+    /// password keys this client does not define render as key names only.
     #[test]
     fn test_debug_redacts_password_configs() {
         let secrets = [
@@ -1341,15 +1866,19 @@ mod tests {
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
                  username=\"jaas-user\" password=\"jaas-S3cr3t\";",
             ),
-            ("ssl.truststore.password", "truststore-S3cr3t"),
             ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
-            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
             ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+        ];
+        // Not defined (`SslConfigs` module docs), so held only in the originals.
+        let undefined = [
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.key.password", "key-S3cr3t"),
         ];
         let mut props: HashMap<String, String> = secrets
             .iter()
+            .chain(&undefined)
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
@@ -1360,10 +1889,13 @@ mod tests {
 
         // The secrets did reach the config; they are only hidden from `Debug`.
         assert_eq!(c.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
-        assert_eq!(c.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
+        assert_eq!(
+            c.ssl_config.keystore_key.as_ref().map(Password::value),
+            Some("KEYSTORE-KEY-PEM")
+        );
 
         for rendered in [format!("{c:?}"), format!("{c:#?}")] {
-            for (key, value) in secrets {
+            for (key, value) in secrets.iter().chain(&undefined) {
                 assert!(!rendered.contains(value), "{key} leaked: {rendered}");
             }
             for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
@@ -1556,38 +2088,6 @@ mod tests {
         );
     }
 
-    /// The consumer's other list keys use
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
-    /// 449, 707): empty elements are rejected, duplicates are removed, and an
-    /// empty list is allowed.
-    #[test]
-    fn test_other_list_configs_valid_list() {
-        for key in [
-            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
-            ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
-        ] {
-            let with = |value: &str| {
-                HashMap::from([
-                    ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
-                    (key.to_string(), value.to_string()),
-                ])
-            };
-            for (value, expected) in [
-                ("a,,b", format!("Configuration '{key}' values must not be empty.")),
-                (",,", format!("Configuration '{key}' values must not be empty.")),
-            ] {
-                match ConsumerConfig::new(&with(value)) {
-                    Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{key}={value:?}"),
-                    other => panic!("expected a ConfigError for {key}={value:?}, got {other:?}"),
-                }
-            }
-            assert!(ConsumerConfig::new(&with("")).is_ok(), "{key}");
-            assert!(ConsumerConfig::new(&with("a, b")).is_ok(), "{key}");
-            // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
-            assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
-        }
-    }
-
     /// Props with `bootstrap.servers` plus the given extra keys.
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
         let mut props = base_props();
@@ -1618,6 +2118,91 @@ mod tests {
         // Other tests may draw from the shared sequence concurrently, so only
         // the direction is fixed, not the gap.
         assert!(n2 > n1, "{} then {}", first.client_id(), second.client_id());
+    }
+
+    /// A copy keeps the configuration's resolved `client.id` and takes no
+    /// sequence number, while the next configuration built takes the next
+    /// one, as Java's next `new ConsumerConfig(props)` does. The copy's used
+    /// set is its own, as `new` leaves it.
+    #[test]
+    fn test_copy_for_client_keeps_the_resolved_client_id() {
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:9092".to_string(),
+            ),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "copy-group".to_string()),
+        ]);
+        let first = ConsumerConfig::new(&props).unwrap();
+        let copy = first.copy_for_client().unwrap();
+        let second_copy = first.copy_for_client().unwrap();
+        let next = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(copy.client_id(), first.client_id());
+        assert_eq!(second_copy.client_id(), first.client_id());
+        assert_eq!(
+            copy.config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap(),
+            Some(first.client_id())
+        );
+        let n1: i32 = sequence_suffix(first.client_id(), "consumer-copy-group-").parse().unwrap();
+        let n2: i32 = sequence_suffix(next.client_id(), "consumer-copy-group-").parse().unwrap();
+        // Other tests take numbers concurrently, so the next one is only later.
+        assert!(n2 > n1, "{} then {}", first.client_id(), next.client_id());
+        assert_eq!(copy.unused(), first.unused());
+        first.config.ignore(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG);
+        assert!(copy.unused().contains(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG));
+
+        let explicit = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:9092".to_string(),
+            ),
+            (ConsumerConfig::CLIENT_ID_CONFIG.to_string(), "mine".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&explicit).unwrap();
+        assert_eq!(config.copy_for_client().unwrap().client_id(), "mine");
+    }
+
+    /// `new` logs each configuration warning once (the parse's duplicate
+    /// values and the post-processing's); a copy
+    /// for one more client logs none of them, as Java's client logs nothing
+    /// about the config it is given, but makes the same reads, so its used set
+    /// is `new`'s.
+    #[test]
+    fn test_copy_for_client_logs_no_configuration_warning() {
+        let props = props_with(&[
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
+            (ConsumerConfig::GROUP_ID_CONFIG, "copy-log-group"),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "classic"),
+            (ConsumerConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
+            (ConsumerConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "1000"),
+            (ConsumerConfig::RECONNECT_BACKOFF_MS_CONFIG, "100"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, "40000"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, "30000"),
+            (ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG, "1000"),
+            (ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG, "300000"),
+        ]);
+        let (config, new_lines) = capture_logs(|| ConsumerConfig::new(&props).unwrap());
+        let warnings = |lines: &[(Level, String)]| {
+            lines
+                .iter()
+                .filter(|(level, _)| *level == Level::Warn)
+                .map(|(_, line)| line.split(' ').take(3).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            warnings(&new_lines),
+            [
+                "Configuration key \"bootstrap.servers\"",
+                "Configuration 'retry.backoff.ms' with",
+                "Configuration 'socket.connection.setup.timeout.ms' with",
+                "Disabling exponential reconnect",
+                "Configuration 'connections.max.idle.ms' with",
+            ],
+            "{new_lines:?}"
+        );
+        let (copy, copy_lines) = capture_logs(|| config.copy_for_client().unwrap());
+        assert!(copy_lines.is_empty(), "{copy_lines:?}");
+        assert_eq!(copy.unused(), ConsumerConfig::new(&props).unwrap().unused());
     }
 
     /// A static member uses its `group.instance.id` instead of the sequence.
@@ -1694,8 +2279,9 @@ mod tests {
     }
 
     /// `getString` answers a `STRING` key's value, `null` for an unset
-    /// nullable one, the generated `client.id` when the property is unset, and
-    /// `Unknown configuration` for a key that is not a `STRING` key.
+    /// nullable one, the generated `client.id` when the property is unset, a
+    /// cast failure for a key of another type, and `Unknown configuration` for
+    /// a key the configuration does not hold.
     #[test]
     fn test_get_string() {
         let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_ID_CONFIG, "test-group")])).unwrap();
@@ -1704,8 +2290,116 @@ mod tests {
         let client_id = config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap().unwrap();
         assert_eq!(config.client_id(), client_id);
         sequence_suffix(client_id, "consumer-test-group-");
-        match config.get_string(ConsumerConfig::MAX_POLL_RECORDS_CONFIG) {
-            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'max.poll.records'", e.message()),
+
+        // Every other `STRING` key, at its Java default.
+        let defaults: &[(&str, Option<&str>)] = &[
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, Some("classic")),
+            (ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, None),
+            (ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG, Some("use_all_dns_ips")),
+            (ConsumerConfig::CLIENT_RACK_CONFIG, Some("")),
+            (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, Some("latest")),
+            (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, Some("rebootstrap")),
+            (
+                ConsumerConfig::ISOLATION_LEVEL_CONFIG,
+                Some(ConsumerConfig::DEFAULT_ISOLATION_LEVEL),
+            ),
+            (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, Some("INFO")),
+            (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, Some("implicit")),
+            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, Some("BATCH_OPTIMIZED")),
+            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, Some("PLAINTEXT")),
+            (SaslConfigs::SASL_MECHANISM, Some("GSSAPI")),
+            (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, None),
+            (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, Some("PEM")),
+            (SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, None),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, Some("PEM")),
+            (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, Some("https")),
+        ];
+        for (key, expected) in defaults {
+            assert_eq!(*expected, config.get_string(key).unwrap(), "for {key}");
+        }
+
+        // An unset `PASSWORD` key is Java's `null` default, which casts to
+        // `String`; only a set one fails the cast (below).
+        for key in [
+            SaslConfigs::SASL_JAAS_CONFIG,
+            SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
+            SslConfigs::SSL_KEYSTORE_KEY_CONFIG,
+            SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
+        ] {
+            assert_eq!(None, config.get_string(key).unwrap(), "for {key}");
+        }
+
+        // Every other `STRING` key, set (padded, as `getString` trims).
+        let set: &[(&str, &str, &str)] = &[
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "consumer", "consumer"),
+            (ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, " uniform ", "uniform"),
+            (
+                ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG,
+                "resolve_canonical_bootstrap_servers_only",
+                "resolve_canonical_bootstrap_servers_only",
+            ),
+            (ConsumerConfig::CLIENT_RACK_CONFIG, " rack-1 ", "rack-1"),
+            (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG, "earliest", "earliest"),
+            (CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG, "none", "none"),
+            (ConsumerConfig::ISOLATION_LEVEL_CONFIG, "read_uncommitted", "read_uncommitted"),
+            (ConsumerConfig::METRICS_RECORDING_LEVEL_CONFIG, "DEBUG", "DEBUG"),
+            (CommonClientConfigs::SECURITY_PROTOCOL_CONFIG, " sasl_ssl ", "sasl_ssl"),
+            (SaslConfigs::SASL_MECHANISM, " PLAIN ", "PLAIN"),
+            (SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, " /trust.pem ", "/trust.pem"),
+            (SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG, "JKS", "JKS"),
+            (SslConfigs::SSL_KEYSTORE_LOCATION_CONFIG, "/key.pem", "/key.pem"),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "PKCS12", "PKCS12"),
+            (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "", ""),
+        ];
+        for (key, value, expected) in set {
+            let mut extra = vec![(*key, *value)];
+            // `group.remote.assignor` cannot be set with the `classic` protocol.
+            if *key == ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG {
+                extra.push((ConsumerConfig::GROUP_PROTOCOL_CONFIG, "consumer"));
+            }
+            // A SASL protocol accepts only the `PLAIN` mechanism.
+            if *key == CommonClientConfigs::SECURITY_PROTOCOL_CONFIG {
+                extra.push((SaslConfigs::SASL_MECHANISM, "PLAIN"));
+            }
+            let config = ConsumerConfig::new(&props_with(&extra)).unwrap();
+            assert_eq!(Some(*expected), config.get_string(key).unwrap(), "for {key}={value:?}");
+        }
+
+        // A key of another type fails the cast, outside the `KafkaException`
+        // hierarchy as Java's `ClassCastException` is.
+        let other_types: &[(&str, &str)] = &[
+            (ConsumerConfig::MAX_POLL_RECORDS_CONFIG, "INT"),
+            (ConsumerConfig::METADATA_MAX_AGE_CONFIG, "LONG"),
+            (ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG, "BOOLEAN"),
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "LIST"),
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "PASSWORD"),
+            (SaslConfigs::SASL_JAAS_CONFIG, "PASSWORD"),
+        ];
+        let passwords = ConsumerConfig::new(&props_with(&[
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "secret"),
+            (SaslConfigs::SASL_JAAS_CONFIG, "x required;"),
+        ]))
+        .unwrap();
+        for (key, config_type) in other_types {
+            let config = if *config_type == "PASSWORD" {
+                &passwords
+            } else {
+                &config
+            };
+            match config.get_string(key) {
+                Err(e @ Error::LocalIllegalArgument(_)) => {
+                    assert_eq!(
+                        format!("Configuration '{key}' is of type {config_type}, not STRING"),
+                        e.message()
+                    );
+                    assert!(!e.is_kafka_error());
+                },
+                other => panic!("expected an IllegalArgumentError for {key}, got {other:?}"),
+            }
+        }
+
+        match config.get_string("no.such.key") {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'no.such.key'", e.message()),
             other => panic!("expected a ConfigError, got {other:?}"),
         }
     }
@@ -1763,26 +2457,21 @@ mod tests {
 
     // -------- Translated from `org.apache.kafka.clients.consumer.ConsumerConfigTest` --------
     //
-    // Java reads values back through `AbstractConfig`'s keyed getters
-    // (`getString(GROUP_PROTOCOL_CONFIG)`, `getList`, `getBoolean`, `originals()`),
-    // which are not translated; the crate-private getters and fields stand in for
-    // them, which is why these tests live in the crate rather than in
-    // `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
+    // Java reads values back through `AbstractConfig`'s keyed getters. Of
+    // those, `getString` is translated as [`ConsumerConfig::get_string`]; the
+    // others (`getList`, `getBoolean`, `getInt`, `originals()`) are not, and the
+    // crate-private getters and fields stand in for them, which is why these
+    // tests live in the crate rather than in `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
     // every property map (`ConsumerConfigTest.java:60`) because its `ConfigDef`
     // defines them with no default; Rust takes the deserializers as constructor
     // arguments to the consumer, and `ConsumerConfig` holds no deserializer state,
     // so the two keys are absent from `base_props`.
     //
     // Skipped tests:
-    // - `testOverrideEnableAutoCommit` — exercises Java's `postProcessParsedConfig`
-    //   auto-commit override, deferred (PLAN.md "Cross-field validation").
     // - `testAppendDeserializerToConfig`, `testAppendDeserializerToConfigWithException`
     //   — exercise the Java static `appendDeserializerToConfig` helper that mutates a
     //   typed `Map<String, Object>`; there is no equivalent function to test.
-    // - `testRemoteAssignorWithClassicGroupProtocol`,
-    //   `testUnsupportedConfigsWithConsumerGroupProtocol` — cross-field validation,
-    //   deferred (consumer-threading.md §20: classic-protocol-only keys are accepted
-    //   silently for now).
+    // - `testDefaultPartitionAssignor` — see `test_partition_assignment_strategy_is_unknown`.
     // - `testValidateConfigPropertiesFile` — reads `config/consumer.properties` from
     //   the Apache Kafka source tree; not part of the Rust client.
     // `testInvalidSecurityProtocol` and `testCaseInsensitiveSecurityProtocol` are
@@ -1799,18 +2488,38 @@ mod tests {
         assert!(!config.throw_on_fetch_stable_offset_unsupported());
     }
 
-    /// Translated from `ConsumerConfigTest.testDefaultPartitionAssignor`.
-    ///
-    /// `partition.assignment.strategy` is a classic-protocol-only key in Java.
-    /// Per consumer-threading.md §20 it is accepted silently and stored untyped
-    /// (as a list of class-name strings). Its default is empty in the Rust struct
-    /// (Java's default is `[RangeAssignor, CooperativeStickyAssignor]`, class
-    /// objects that are not translated).
+    /// `ConsumerConfigTest.testDefaultPartitionAssignor` is not translated: it
+    /// checks Java's default `[RangeAssignor, CooperativeStickyAssignor]`, and
+    /// the client-side assignors are out of scope (consumer-threading.md §20).
+    /// The key is not a consumer config here: it is accepted and reported by
+    /// [`ConsumerConfig::unused`].
     #[test]
-    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testDefaultPartitionAssignor")]
-    fn test_default_partition_assignor() {
-        let config = ConsumerConfig::new(&base_props()).unwrap();
-        assert!(config.partition_assignment_strategy.is_empty());
+    fn test_partition_assignment_strategy_is_unknown() {
+        let mut props = base_props();
+        props.insert(
+            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG.to_string(),
+            "org.apache.kafka.clients.consumer.RangeAssignor".to_string(),
+        );
+        let config = ConsumerConfig::new(&props).unwrap();
+        match config.get_string(ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG) {
+            Err(Error::Config(e)) => {
+                assert_eq!("Unknown configuration 'partition.assignment.strategy'", e.message())
+            },
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
+    }
+
+    /// `security.providers` names JSSE `SecurityProviderCreator` classes, which
+    /// have no rustls counterpart: the key is not defined.
+    #[test]
+    fn test_security_providers_is_unknown() {
+        let mut props = base_props();
+        props.insert("security.providers".to_string(), "my.Provider".to_string());
+        let config = ConsumerConfig::new(&props).unwrap();
+        match config.get_string("security.providers") {
+            Err(Error::Config(e)) => assert_eq!("Unknown configuration 'security.providers'", e.message()),
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
     }
 
     /// Translated from `ConsumerConfigTest.testOverrideClientId`.
@@ -1920,5 +2629,373 @@ mod tests {
                 );
             }
         }
+    }
+    /// Translated from `ConsumerConfigTest.testOverrideEnableAutoCommit`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testOverrideEnableAutoCommit")]
+    fn test_override_enable_auto_commit() {
+        let enable_auto_commit =
+            |config: &ConsumerConfig| config.get_boolean(ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG).unwrap();
+        // Verify that our default properties (no 'enable.auto.commit' or 'group.id') are valid.
+        let mut props = base_props();
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(Some(false), enable_auto_commit(&config));
+        assert!(!config.enable_auto_commit());
+
+        // Verify that explicitly disabling 'enable.auto.commit' still works.
+        props.insert(ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG.to_string(), "false".to_string());
+        assert_eq!(Some(false), enable_auto_commit(&ConsumerConfig::new(&props).unwrap()));
+
+        // Verify that enabling 'enable.auto.commit' but without 'group.id' fails.
+        props.insert(ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG.to_string(), "true".to_string());
+        let error = ConsumerConfig::new(&props).unwrap_err();
+        assert!(error.is_invalid_configuration_error(), "{error:?}");
+        assert_eq!(
+            "enable.auto.commit cannot be set to true when default group id (null) is used.",
+            error.message()
+        );
+
+        // Verify that then adding 'group.id' to the mix allows it to pass OK.
+        props.insert(ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string());
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(Some(true), enable_auto_commit(&config));
+        assert!(config.enable_auto_commit());
+
+        // Now remove the 'enable.auto.commit' flag and verify that it is set to true (the default).
+        props.remove(ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG);
+        assert_eq!(Some(true), enable_auto_commit(&ConsumerConfig::new(&props).unwrap()));
+    }
+
+    /// Translated from `ConsumerConfigTest.testRemoteAssignorWithClassicGroupProtocol`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testRemoteAssignorWithClassicGroupProtocol")]
+    fn test_remote_assignor_with_classic_group_protocol() {
+        let props = props_with(&[(ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, "SomeAssignor")]);
+        let error = ConsumerConfig::new(&props).unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "{error:?}");
+        assert!(
+            error
+                .message()
+                .contains("group.remote.assignor cannot be set when group.protocol=CLASSIC"),
+            "{}",
+            error.message()
+        );
+    }
+
+    /// Translated from `ConsumerConfigTest.testUnsupportedConfigsWithConsumerGroupProtocol`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testUnsupportedConfigsWithConsumerGroupProtocol"
+    )]
+    fn test_unsupported_configs_with_consumer_group_protocol() {
+        for (config_name, value) in [
+            (ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG, "RoundRobinAssignor"),
+            (ConsumerConfig::HEARTBEAT_INTERVAL_MS_CONFIG, "1000"),
+            (ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG, "30000"),
+        ] {
+            let props = props_with(&[
+                (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "CONSUMER"),
+                (config_name, value),
+            ]);
+            let error = ConsumerConfig::new(&props).unwrap_err();
+            assert!(matches!(error, Error::Config(_)), "{error:?}");
+            assert_eq!(
+                format!("{config_name} cannot be set when group.protocol=CONSUMER"),
+                error.message()
+            );
+        }
+    }
+
+    /// The share-consumer keys are not supported by either group protocol of
+    /// `KafkaConsumer` (`CLASSIC_PROTOCOL_UNSUPPORTED_CONFIGS`,
+    /// `CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS`); every unsupported key set is
+    /// listed, in Java's order, and a blank value is not "set".
+    #[test]
+    fn test_unsupported_configs_are_listed_in_order() {
+        let props = props_with(&[
+            (ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, "record_limit"),
+            (ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, "explicit"),
+            (ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, " "),
+        ]);
+        assert_eq!(
+            "share.acknowledgement.mode, share.acquire.mode cannot be set when group.protocol=CLASSIC",
+            ConsumerConfig::new(&props).unwrap_err().message()
+        );
+        let mut props = props;
+        props.insert(ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string());
+        props.insert(ConsumerConfig::SESSION_TIMEOUT_MS_CONFIG.to_string(), "30000".to_string());
+        assert_eq!(
+            "session.timeout.ms, share.acknowledgement.mode, share.acquire.mode cannot be set when \
+             group.protocol=CONSUMER",
+            ConsumerConfig::new(&props).unwrap_err().message()
+        );
+        // The checked keys are read through Java's `RecordingMap`, so they are used.
+        let config = ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG, " ")])).unwrap();
+        assert!(!config.unused().contains(ConsumerConfig::GROUP_REMOTE_ASSIGNOR_CONFIG));
+    }
+
+    /// Java's `ShareAcquireMode.Validator` and `ShareAcknowledgementMode.Validator`
+    /// reject a blank value at parse time, which the unsupported-config check
+    /// would skip, and an unknown one, with their messages; the acquire mode
+    /// is matched case-insensitively, the acknowledgement mode exactly.
+    #[test]
+    fn test_share_mode_validators() {
+        for group_protocol in ["classic", "consumer"] {
+            for (config_name, value, expected) in [
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "",
+                    "Invalid value  for configuration share.acquire.mode: Invalid value `` for configuration \
+                     share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "  ",
+                    "Invalid value  for configuration share.acquire.mode: Invalid value `` for configuration \
+                     share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+                    "invalid",
+                    "Invalid value invalid for configuration share.acquire.mode: Invalid value `invalid` for \
+                     configuration share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+                    "",
+                    "Invalid value  for configuration share.acknowledgement.mode: Invalid value `` for \
+                     configuration share.acknowledgement.mode. The value must either be 'implicit' or 'explicit'.",
+                ),
+                (
+                    ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
+                    "IMPLICIT",
+                    "Invalid value IMPLICIT for configuration share.acknowledgement.mode: Invalid value `IMPLICIT` \
+                     for configuration share.acknowledgement.mode. The value must either be 'implicit' or \
+                     'explicit'.",
+                ),
+            ] {
+                let error = ConsumerConfig::new(&props_with(&[
+                    (ConsumerConfig::GROUP_PROTOCOL_CONFIG, group_protocol),
+                    (config_name, value),
+                ]))
+                .unwrap_err();
+                assert!(matches!(error, Error::Config(_)), "{error:?}");
+                assert_eq!(expected, error.message(), "{group_protocol} {config_name}={value:?}");
+            }
+        }
+        // A valid value passes the validator (and is then rejected as unsupported).
+        for value in ["record_limit", "Batch_Optimized", "BATCH_OPTIMIZED"] {
+            assert_eq!(
+                "share.acquire.mode cannot be set when group.protocol=CLASSIC",
+                ConsumerConfig::new(&props_with(&[(ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG, value)]))
+                    .unwrap_err()
+                    .message()
+            );
+        }
+    }
+
+    /// The `group.protocol` validator is Java's
+    /// `CaseInsensitiveValidString.in(CLASSIC, CONSUMER)`, with its message,
+    /// which lists the values in the order of Java's `HashSet`.
+    #[test]
+    fn test_group_protocol_validator_message() {
+        let error =
+            ConsumerConfig::new(&props_with(&[(ConsumerConfig::GROUP_PROTOCOL_CONFIG, "invalid")])).unwrap_err();
+        assert_eq!(
+            "Invalid value invalid for configuration group.protocol: String must be one of (case insensitive): \
+             CONSUMER, CLASSIC",
+            error.message()
+        );
+    }
+
+    /// Java's `atLeast` validators (`ConsumerConfig.java:440-745`), each with
+    /// `ConfigDef.Range`'s message.
+    #[test]
+    fn test_at_least_validators() {
+        let cases: &[(&str, &str, &str)] = &[
+            (ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::METADATA_MAX_AGE_CONFIG, "-1", "0"),
+            (ConsumerConfig::AUTO_COMMIT_INTERVAL_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::MAX_PARTITION_FETCH_BYTES_CONFIG, "-1", "0"),
+            (ConsumerConfig::SEND_BUFFER_CONFIG, "-2", "-1"),
+            (ConsumerConfig::RECEIVE_BUFFER_CONFIG, "-2", "-1"),
+            (ConsumerConfig::FETCH_MIN_BYTES_CONFIG, "-1", "0"),
+            (ConsumerConfig::FETCH_MAX_BYTES_CONFIG, "-1", "0"),
+            (ConsumerConfig::FETCH_MAX_WAIT_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::RECONNECT_BACKOFF_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::RETRY_BACKOFF_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::METRICS_NUM_SAMPLES_CONFIG, "0", "1"),
+            (ConsumerConfig::REQUEST_TIMEOUT_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::DEFAULT_API_TIMEOUT_MS_CONFIG, "-1", "0"),
+            (ConsumerConfig::MAX_POLL_RECORDS_CONFIG, "0", "1"),
+            (ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG, "0", "1"),
+            (CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG, "-1", "0"),
+        ];
+        for (key, value, bound) in cases {
+            let error = ConsumerConfig::new(&props_with(&[(key, value)])).unwrap_err();
+            assert!(matches!(error, Error::Config(_)), "{key}: {error:?}");
+            assert_eq!(
+                format!("Invalid value {value} for configuration {key}: Value must be at least {bound}"),
+                error.message()
+            );
+            // The bound itself is accepted.
+            ConsumerConfig::new(&props_with(&[(key, bound)])).unwrap_or_else(|e| panic!("{key}={bound}: {e:?}"));
+        }
+    }
+
+    /// `isolation.level` is Java's case-sensitive `ValidString.in`.
+    #[test]
+    fn test_isolation_level_is_case_sensitive() {
+        let error = ConsumerConfig::new(&props_with(&[(ConsumerConfig::ISOLATION_LEVEL_CONFIG, "READ_COMMITTED")]))
+            .unwrap_err();
+        assert_eq!(
+            "Invalid value READ_COMMITTED for configuration isolation.level: String must be one of: read_committed, \
+             read_uncommitted",
+            error.message()
+        );
+    }
+
+    /// The `connections.max.idle.ms` warning does not fail the configuration.
+    #[test]
+    fn test_connections_max_idle_ms_lower_than_max_poll_interval_ms_only_warns() {
+        let config = ConsumerConfig::new(&props_with(&[
+            (ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG, "1000"),
+            (ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG, "2000"),
+        ]))
+        .unwrap();
+        assert_eq!(1000, config.connections_max_idle_ms);
+    }
+
+    /// `AbstractConfig`'s typed getters answer every key's `ConfigDef` type.
+    #[test]
+    fn test_typed_getters() {
+        let config = ConsumerConfig::new(&props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "g"),
+            (ConsumerConfig::MAX_POLL_RECORDS_CONFIG, "7"),
+        ]))
+        .unwrap();
+        assert_eq!(Some(7), config.get_int(ConsumerConfig::MAX_POLL_RECORDS_CONFIG).unwrap());
+        assert_eq!(
+            Some(540_000),
+            config.get_long(ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG).unwrap()
+        );
+        assert_eq!(Some(true), config.get_boolean(ConsumerConfig::CHECK_CRCS_CONFIG).unwrap());
+        assert_eq!(
+            Some(&["localhost:9092".to_string()][..]),
+            config.get_list(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG).unwrap()
+        );
+        assert_eq!(Some("g"), config.get_string(ConsumerConfig::GROUP_ID_CONFIG).unwrap());
+        assert_eq!(
+            "Configuration 'max.poll.records' is of type INT, not LONG",
+            config.get_long(ConsumerConfig::MAX_POLL_RECORDS_CONFIG).unwrap_err().message()
+        );
+        assert_eq!(
+            "Configuration 'check.crcs' is of type BOOLEAN, not SHORT",
+            config.get_short(ConsumerConfig::CHECK_CRCS_CONFIG).unwrap_err().message()
+        );
+        assert_eq!(
+            "Configuration 'group.id' is of type STRING, not DOUBLE",
+            config.get_double(ConsumerConfig::GROUP_ID_CONFIG).unwrap_err().message()
+        );
+        assert_eq!(
+            "Unknown configuration 'no.such.key'",
+            config.get_int("no.such.key").unwrap_err().message()
+        );
+    }
+
+    /// `configNames`.
+    #[test]
+    fn test_config_names() {
+        let names = ConsumerConfig::config_names();
+        for key in [
+            ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG,
+            ConsumerConfig::GROUP_PROTOCOL_CONFIG,
+            ConsumerConfig::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
+            ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
+            SaslConfigs::SASL_MECHANISM,
+            SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
+            "ssl.cipher.suites",
+        ] {
+            assert!(names.contains(key), "{key}");
+        }
+        for key in [
+            ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
+            "security.providers",
+            "config.providers",
+            "enable.metrics.push",
+            "ssl.keystore.password",
+            "ssl.key.password",
+            "ssl.truststore.password",
+            "key.deserializer",
+            "metric.reporters",
+            "interceptor.classes",
+        ] {
+            assert!(!names.contains(key), "{key}");
+        }
+    }
+
+    /// `unused` reports the supplied keys nobody read; the getters, `ignore`
+    /// and the consumer's own reads mark keys used.
+    #[test]
+    fn test_unused_and_ignore() {
+        let config = ConsumerConfig::new(&props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "g"),
+            (ConsumerConfig::FETCH_MIN_BYTES_CONFIG, "2"),
+            (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "PKCS12"),
+            ("unknown.key", "x"),
+        ]))
+        .unwrap();
+        // `postProcessParsedConfig` read `group.id`; nothing else yet.
+        assert_eq!(
+            HashSet::from([
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                ConsumerConfig::FETCH_MIN_BYTES_CONFIG.to_string(),
+                SslConfigs::SSL_KEYSTORE_TYPE_CONFIG.to_string(),
+                "unknown.key".to_string(),
+            ]),
+            config.unused()
+        );
+        config.get_int(ConsumerConfig::FETCH_MIN_BYTES_CONFIG).unwrap();
+        config.ignore("unknown.key");
+        // The consumer's reads: the `ssl.*` keys only for an SSL protocol.
+        config.mark_read_keys_used();
+        assert_eq!(
+            HashSet::from([SslConfigs::SSL_KEYSTORE_TYPE_CONFIG.to_string()]),
+            config.unused()
+        );
+        config.log_unused();
+    }
+
+    /// `enable.metrics.push` is not defined until KIP-714 client telemetry is
+    /// implemented, so a value set for it is only reported as unused.
+    #[test]
+    fn test_enable_metrics_push_is_unused() {
+        let config = ConsumerConfig::new(&props_with(&[("enable.metrics.push", "true")])).unwrap();
+        config.mark_read_keys_used();
+        assert_eq!(HashSet::from(["enable.metrics.push".to_string()]), config.unused());
+        assert_eq!(
+            "Unknown configuration 'enable.metrics.push'",
+            config.get_boolean("enable.metrics.push").unwrap_err().message()
+        );
+    }
+
+    /// Java's `equals` / `hashCode` compare the originals.
+    #[test]
+    fn test_equals_and_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        let hash = |config: &ConsumerConfig| {
+            let mut hasher = DefaultHasher::new();
+            config.hash(&mut hasher);
+            hasher.finish()
+        };
+        let a = ConsumerConfig::new(&props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, "c")])).unwrap();
+        let b = ConsumerConfig::new(&props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, "c")])).unwrap();
+        let c = ConsumerConfig::new(&props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, "d")])).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+        assert_ne!(a, c);
     }
 }

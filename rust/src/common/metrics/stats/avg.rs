@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that maintains a simple average over its samples.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Avg")]
 pub struct Avg {
     inner: SampledStat,
@@ -64,6 +65,13 @@ impl Stat for Avg {
 impl Measurable for Avg {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         self.inner.measure(config, now)
+    }
+}
+
+impl std::fmt::Display for Avg {
+    /// Java's `SampledStat.toString()`, which `Avg` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
     }
 }
 

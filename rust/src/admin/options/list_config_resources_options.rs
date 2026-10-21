@@ -19,7 +19,7 @@
 /// Options for `Admin::list_config_resources`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConfigResourcesOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesOptions")]
 pub struct ListConfigResourcesOptions {
     timeout_ms: Option<i32>,

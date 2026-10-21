@@ -26,7 +26,7 @@ use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
 use crate::common::utils::internals::LogContext;
 use crate::common::{Cluster, Error, Node, Uuid};
-use crate::kafka_warn;
+use crate::{kafka_info, kafka_warn};
 use std::collections::HashMap;
 
 /// The metadata-refresh state machine, mirroring Java's `State` enum.
@@ -55,6 +55,12 @@ struct Inner {
     last_metadata_update_ms: i64,
     /// The last time we attempted to fetch metadata (epoch ms).
     last_metadata_fetch_attempt_ms: i64,
+    /// The time in wall-clock milliseconds when we started attempts to fetch
+    /// metadata. If `None`, metadata has not been requested. This is the start
+    /// time based on which rebootstrap is triggered if metadata is not obtained
+    /// for the configured rebootstrap trigger interval. Set to `Some(0)` to
+    /// force rebootstrap immediately.
+    metadata_attempt_start_ms: Option<i64>,
     /// A fatal (non-retriable) error to surface from `is_ready`.
     fatal_error: Option<Error>,
     /// If this is set, bootstrap DNS resolution permanently failed (KIP-909).
@@ -77,6 +83,7 @@ impl Inner {
         }
         self.state = State::Quiescent;
         self.fatal_error = None;
+        self.metadata_attempt_start_ms = None;
         // Only update if the metadata succeeded (has nodes). If a metadata
         // request failed we keep the previous cluster.
         if !cluster.nodes().is_empty() {
@@ -89,6 +96,21 @@ impl Inner {
     /// cluster is ever stored in it.
     fn is_bootstrapped(&self) -> bool {
         self.bootstrap_cluster.is_bootstrap_configured()
+    }
+
+    /// Java's `AdminMetadataManager.needsRebootstrap(long, long)`.
+    fn needs_rebootstrap(&self, now: i64, rebootstrap_trigger_ms: i64) -> bool {
+        self.metadata_attempt_start_ms
+            .is_some_and(|start_ms| now - start_ms > rebootstrap_trigger_ms)
+    }
+
+    /// Java's `AdminMetadataManager.rebootstrap(long)`: rebootstrap metadata
+    /// with the cluster previously used for bootstrapping.
+    fn rebootstrap(&mut self, now: i64, log_context: &LogContext) {
+        kafka_info!(log_context, "Rebootstrapping with {}", self.bootstrap_cluster);
+        let bootstrap_cluster = self.bootstrap_cluster.clone();
+        self.update(bootstrap_cluster, now);
+        self.metadata_attempt_start_ms = Some(now);
     }
 }
 
@@ -127,6 +149,7 @@ impl AdminMetadataManager {
                 bootstrap_cluster: Cluster::empty(),
                 last_metadata_update_ms: 0,
                 last_metadata_fetch_attempt_ms: 0,
+                metadata_attempt_start_ms: None,
                 fatal_error: None,
                 bootstrap_fatal_error: None,
             })),
@@ -220,12 +243,43 @@ impl AdminMetadataManager {
         }
     }
 
-    /// Transitions to `UPDATE_PENDING`, recording the attempt time.
+    /// Transitions to `UPDATE_PENDING`, recording the attempt time, and the
+    /// start of the attempts when none is in progress.
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#transitionToUpdatePending")]
     pub(crate) fn transition_to_update_pending(&self, now: i64) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::UpdatePending;
         inner.last_metadata_fetch_attempt_ms = now;
+        if inner.metadata_attempt_start_ms.is_none() {
+            inner.metadata_attempt_start_ms = Some(now);
+        }
+    }
+
+    /// Whether metadata attempts have gone unanswered for longer than
+    /// `rebootstrap_trigger_ms`, or a rebootstrap was requested by
+    /// [`Self::initiate_rebootstrap`].
+    ///
+    /// The `NetworkClient` reads it through [`AdminMetadataUpdater`]'s
+    /// `needs_rebootstrap`, which shares the state; Java's
+    /// `AdminMetadataManager.needsRebootstrap` is called from the same place.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#needsRebootstrap")]
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn needs_rebootstrap(&self, now: i64, rebootstrap_trigger_ms: i64) -> bool {
+        self.inner.lock().unwrap().needs_rebootstrap(now, rebootstrap_trigger_ms)
+    }
+
+    /// Forces a rebootstrap on the next check, on a `REBOOTSTRAP_REQUIRED`
+    /// metadata response.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#initiateRebootstrap")]
+    pub(crate) fn initiate_rebootstrap(&self) {
+        self.inner.lock().unwrap().metadata_attempt_start_ms = Some(0);
+    }
+
+    /// Rebootstraps metadata with the cluster previously used for
+    /// bootstrapping.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#rebootstrap")]
+    pub(crate) fn rebootstrap(&self, now: i64) {
+        self.inner.lock().unwrap().rebootstrap(now, &self.log_context);
     }
 
     /// Applies a successful metadata response's cluster.
@@ -238,11 +292,8 @@ impl AdminMetadataManager {
     /// construction or by the `NetworkClient`'s asynchronous bootstrap
     /// resolution (KIP-909).
     ///
-    /// Java's only caller gates `KafkaAdminClient`'s rebootstrap on it
-    /// (`MetadataUpdateNodeIdProvider.provide()`, `KafkaAdminClient.java:790-797`). The Rust admin client never
-    /// rebootstraps (it runs with `MetadataRecoveryStrategy::None`), so that
-    /// gate has no counterpart and this is translated for completeness (DoD #2).
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// It gates `KafkaAdminClient`'s rebootstrap
+    /// (`MetadataUpdateNodeIdProvider.provide()`, `KafkaAdminClient.java:790-797`).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#isBootstrapped")]
     pub(crate) fn is_bootstrapped(&self) -> bool {
         self.inner.lock().unwrap().is_bootstrapped()
@@ -359,7 +410,6 @@ impl MetadataUpdater for AdminMetadataUpdater {
         _metadata_response: &MetadataResponse,
     ) {
         // Not used; the metadata `Call`'s handle_response applies the cluster.
-        let _ = &self.log_context;
     }
 
     fn bootstrap_failed(&mut self, error: Error) {
@@ -371,6 +421,14 @@ impl MetadataUpdater for AdminMetadataUpdater {
 
     fn is_bootstrapped(&self) -> bool {
         self.inner.lock().unwrap().is_bootstrapped()
+    }
+
+    fn needs_rebootstrap(&self, now: i64, rebootstrap_trigger_ms: i64) -> bool {
+        self.inner.lock().unwrap().needs_rebootstrap(now, rebootstrap_trigger_ms)
+    }
+
+    fn rebootstrap(&mut self, now: i64) {
+        self.inner.lock().unwrap().rebootstrap(now, &self.log_context);
     }
 
     fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
@@ -386,6 +444,7 @@ impl MetadataUpdater for AdminMetadataUpdater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn new_manager() -> AdminMetadataManager {
         AdminMetadataManager::new(100, 300_000, false, LogContext::empty())
@@ -430,5 +489,94 @@ mod tests {
         updater.bootstrap_failed(Error::BootstrapResolution(BootstrapResolutionError::new("dns")));
         manager.update(Cluster::bootstrap(&[address()]), 0);
         assert_eq!(manager.bootstrap_fatal_error().expect("recorded").message(), "dns");
+    }
+
+    /// Java's `mockCluster()` in `AdminMetadataManagerTest`.
+    fn mock_cluster() -> Cluster {
+        let nodes = vec![
+            Node::new(0, "localhost".to_string(), 8121),
+            Node::new(1, "localhost".to_string(), 8122),
+            Node::new(2, "localhost".to_string(), 8123),
+        ];
+        let controller = Some(nodes[0].clone());
+        Cluster::with_invalid_topics_controller(
+            Some("mockClusterId".to_string()),
+            nodes,
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            controller,
+        )
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testNeedsRebootstrap`. Java's
+    /// `MockTime` becomes a plain millisecond counter: the manager never reads a
+    /// clock, every method takes `now`.
+    #[test]
+    fn test_needs_rebootstrap() {
+        let mgr = AdminMetadataManager::new(100, 60_000, false, LogContext::empty());
+        let mut time: i64 = 1_000_000;
+        let rebootstrap_trigger_ms = 1000;
+        mgr.update(
+            Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:9999".parse().unwrap())]),
+            time,
+        );
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(!mgr.needs_rebootstrap(time + 2000, rebootstrap_trigger_ms));
+
+        mgr.transition_to_update_pending(time);
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(mgr.needs_rebootstrap(time + 1001, rebootstrap_trigger_ms));
+
+        time += 100;
+        mgr.update_failed(Error::kafka_message(""));
+        assert!(!mgr.needs_rebootstrap(time + 900, rebootstrap_trigger_ms));
+        assert!(mgr.needs_rebootstrap(time + 901, rebootstrap_trigger_ms));
+
+        time += 1000;
+        mgr.update(mock_cluster(), time);
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(!mgr.needs_rebootstrap(time + 2000, rebootstrap_trigger_ms));
+
+        time += 1000;
+        mgr.transition_to_update_pending(time);
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(mgr.needs_rebootstrap(time + 1001, rebootstrap_trigger_ms));
+
+        time += 1001;
+        assert!(mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        mgr.rebootstrap(time);
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(!mgr.needs_rebootstrap(time + 1000, rebootstrap_trigger_ms));
+        assert!(mgr.needs_rebootstrap(time + 1001, rebootstrap_trigger_ms));
+
+        mgr.initiate_rebootstrap();
+        assert!(mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        mgr.rebootstrap(time);
+        assert!(!mgr.needs_rebootstrap(time, rebootstrap_trigger_ms));
+        assert!(!mgr.needs_rebootstrap(time + 1000, rebootstrap_trigger_ms));
+        assert!(mgr.needs_rebootstrap(time + 1001, rebootstrap_trigger_ms));
+    }
+
+    /// Beyond Java's test: `rebootstrap` puts the bootstrap cluster back as the
+    /// current one, and the updater the `NetworkClient` consults answers from
+    /// the same state as the manager.
+    #[test]
+    fn test_rebootstrap_restores_the_bootstrap_cluster_and_is_shared_with_the_updater() {
+        let mgr = AdminMetadataManager::new(100, 60_000, false, LogContext::empty());
+        let mut updater = mgr.updater();
+        mgr.update(Cluster::bootstrap(&[address()]), 0);
+        mgr.update(mock_cluster(), 10);
+        assert_eq!(updater.fetch_nodes().len(), 3);
+
+        mgr.initiate_rebootstrap();
+        assert!(updater.needs_rebootstrap(10, 5));
+        updater.rebootstrap(20);
+        assert!(!mgr.needs_rebootstrap(20, 1000));
+        assert!(mgr.needs_rebootstrap(1021, 1000));
+        let nodes = updater.fetch_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert!(mgr.inner.lock().unwrap().cluster.is_bootstrap_configured());
     }
 }

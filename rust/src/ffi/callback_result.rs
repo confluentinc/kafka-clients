@@ -60,7 +60,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 use tokio::sync::Notify;
@@ -79,6 +79,12 @@ pub(crate) type ResultSink = Box<dyn FnOnce(Result<*mut c_void, Error>) + Send>;
 pub(crate) fn void_sink(deliver: impl FnOnce(Result<(), Error>) + Send + 'static) -> ResultSink {
     Box::new(move |result| deliver(result.map(|_| ())))
 }
+
+/// The allocation that holds a registry, which a waiting registration whose
+/// future was dropped keeps alive until its report
+/// ([`CallbackResults::set_owner`]): a serde handle, the pointer C reports
+/// on.
+pub(crate) type Owner = Arc<dyn Send + Sync>;
 
 /// What a waiting registration ([`CallbackResults::register_waiting`]) keeps
 /// alive for the C implementation until it reports: the arguments it was
@@ -141,6 +147,10 @@ struct WaitingSlot<K> {
     outcome: Option<Result<SendPtr, Error>>,
     /// The future was dropped before the report: the report frees the slot.
     abandoned: bool,
+    /// The registry's owner, held from the moment the future was dropped
+    /// until the report, so the handle C reports on outlives what dropped
+    /// the future (a client, or the runtime of a failed constructor).
+    kept: Option<Owner>,
     convert: Convert<K>,
 }
 
@@ -286,6 +296,9 @@ pub(crate) struct CallbackResults<K = ()> {
     /// only when there is one.
     waiters: AtomicUsize,
     reported: Notify,
+    /// The allocation holding this registry, if it was set
+    /// ([`Self::set_owner`]).
+    owner: OnceLock<Weak<dyn Send + Sync>>,
 }
 
 impl CallbackResults {
@@ -323,7 +336,19 @@ impl<K: KeepAlive> CallbackResults<K> {
             in_sink: AtomicUsize::new(0),
             waiters: AtomicUsize::new(0),
             reported: Notify::new(),
+            owner: OnceLock::new(),
         }
+    }
+
+    /// Sets the allocation that holds this registry: a waiting registration
+    /// whose future is dropped before its report keeps a strong reference to
+    /// it until the report arrives, so the report never reaches a freed
+    /// handle, whoever dropped the future. A registration that is never
+    /// reported then leaks the owner, as the C implementation still holds an
+    /// id for it. Set once; a later call is ignored. Such a registry is
+    /// reported through [`Self::complete_owned`].
+    pub(crate) fn set_owner(&self, owner: Weak<dyn Send + Sync>) {
+        let _ = self.owner.set(owner);
     }
 
     /// The registry's state. No critical section can panic midway short of
@@ -365,6 +390,7 @@ impl<K: KeepAlive> CallbackResults<K> {
             waker: None,
             outcome: None,
             abandoned: false,
+            kept: None,
             convert,
         }));
         (slab.id(index, self.tag), filled)
@@ -383,19 +409,35 @@ impl<K: KeepAlive> CallbackResults<K> {
     /// Returns `false` for an id this registry did not issue, or whose report
     /// already arrived (or was drained): nothing is delivered, `error` is
     /// dropped and `result` is not taken.
+    ///
+    /// For a registry with no owner ([`Self::set_owner`]); one with an owner
+    /// is reported through [`Self::complete_owned`].
     pub(crate) fn complete(&self, id: i64, result: *mut c_void, error: Option<Error>) -> bool {
+        let (delivered, kept) = self.complete_owned(id, result, error);
+        // Never set without an owner, which is the only case this is for.
+        debug_assert!(kept.is_none(), "a registry with an owner is reported through complete_owned");
+        drop(kept);
+        delivered
+    }
+
+    /// [`Self::complete`] for a registry with an owner: also returns the
+    /// owner reference that an abandoned registration kept until this report.
+    /// The caller drops it after its last use of the registry, since it may
+    /// be the last reference to the allocation holding the registry.
+    pub(crate) fn complete_owned(&self, id: i64, result: *mut c_void, error: Option<Error>) -> (bool, Option<Owner>) {
         let mut slab = self.lock();
         let Some(index) = slab.find(id, self.tag) else {
-            return false;
+            return (false, None);
         };
         if let Some((waiting, keep_alive)) = slab.waiting(index) {
             if waiting.outcome.is_some() {
                 // A second report.
-                return false;
+                return (false, None);
             }
             if waiting.abandoned {
+                let kept = waiting.kept.take();
                 slab.release(index);
-                return true;
+                return (true, kept);
             }
             let outcome = match error {
                 Some(error) => Err(error),
@@ -410,7 +452,7 @@ impl<K: KeepAlive> CallbackResults<K> {
             if let Some(waker) = waker {
                 waker.wake();
             }
-            return true;
+            return (true, None);
         }
         let sink = slab.take(id, self.tag);
         if sink.is_some() {
@@ -420,11 +462,11 @@ impl<K: KeepAlive> CallbackResults<K> {
         }
         drop(slab);
         let Some(sink) = sink else {
-            return false;
+            return (false, None);
         };
         let _running = SinkRunning(self);
         sink(error.map_or(Ok(result), Err));
-        true
+        (true, None)
     }
 
     /// Polls the waiting registration `id`: once reported, `finish` takes
@@ -464,7 +506,9 @@ impl<K: KeepAlive> CallbackResults<K> {
 
     /// The future waiting for registration `id` was dropped: a report that
     /// already arrived frees the slot now, otherwise the report will, and
-    /// until then the slot keeps alive what the C implementation reads.
+    /// until then the slot keeps alive what the C implementation reads, and
+    /// the registry's owner, if it has one ([`Self::set_owner`]). The owner
+    /// is alive here: the future borrowed the registry until now.
     fn abandon(&self, id: i64) {
         let mut slab = self.lock();
         let Some(index) = slab.find(id, self.tag) else {
@@ -478,6 +522,7 @@ impl<K: KeepAlive> CallbackResults<K> {
         } else {
             waiting.abandoned = true;
             waiting.waker = None;
+            waiting.kept = self.owner.get().and_then(Weak::upgrade);
         }
     }
 
@@ -1018,6 +1063,48 @@ mod tests {
             assert_eq!(keep_alive.cleared, 1);
         });
         assert_ne!(again, id, "a reused slot gets a new generation");
+    }
+
+    /// A registry with an owner: a waiting registration whose future is
+    /// dropped before the report keeps the owner alive until the report,
+    /// which hands the last reference back to the caller; one reported first
+    /// keeps nothing.
+    #[test]
+    fn an_abandoned_waiting_slot_keeps_the_owner_until_the_report() {
+        struct Holder {
+            results: CallbackResults<TestKeepAlive>,
+        }
+        let holder = Arc::new(Holder { results: CallbackResults::with_keep_alive() });
+        let owner: Weak<Holder> = Arc::downgrade(&holder);
+        holder.results.set_owner(owner.clone());
+
+        // Reported before its future is dropped: nothing is kept.
+        let (reported, _) = register_input(&holder.results, b"x");
+        let mut value = 4_i32;
+        assert_eq!((true, true), {
+            let (delivered, kept) =
+                holder
+                    .results
+                    .complete_owned(reported, ptr::addr_of_mut!(value) as *mut c_void, None);
+            (delivered, kept.is_none())
+        });
+        drop(WaitReport::new(&holder.results, reported, finish_i32));
+
+        let (id, _) = register_input(&holder.results, b"keep");
+        {
+            let mut wait = pin!(WaitReport::new(&holder.results, id, finish_i32));
+            assert!(poll_once(wait.as_mut()).is_pending());
+        }
+        let raw = Arc::as_ptr(&holder);
+        drop(holder);
+        assert!(owner.upgrade().is_some(), "the abandoned slot keeps its owner");
+        // SAFETY: Test code: the abandoned slot holds a strong reference to the holder until this
+        // report, so `raw` is live for the call; `kept` is dropped after it.
+        let (delivered, kept) = unsafe { &(*raw).results }.complete_owned(id, ptr::null_mut(), None);
+        assert!(delivered);
+        assert!(kept.is_some(), "the report hands the kept reference back");
+        drop(kept);
+        assert!(owner.upgrade().is_none(), "the last reference was the slot's");
     }
 
     #[test]

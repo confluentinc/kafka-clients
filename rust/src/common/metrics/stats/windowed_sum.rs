@@ -23,6 +23,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 ///
 /// See also [`crate::common::metrics::stats::WindowedCount`] if you want to
 /// increment the value by 1 on each recording.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedSum")]
 pub struct WindowedSum {
     inner: SampledStat,
@@ -85,9 +86,24 @@ impl Measurable for WindowedSum {
     }
 }
 
+impl std::fmt::Display for WindowedSum {
+    /// Java's `SampledStat.toString()`, which `WindowedSum` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            WindowedSum::new().to_string(),
+            "SampledStat(initialValue=0.0, current=0, samples=[])"
+        );
+    }
 
     #[test]
     fn sums_over_window() {

@@ -25,11 +25,22 @@
 //! per key and once per value of every record, so a box per call would be an
 //! allocation per record on the send path (CLAUDE.md §13).
 //!
+//! Unlike `DynProducer` it is crate-private: the crate only takes serializers
+//! in, through the `impl Serializer<K> + 'static` parameters of
+//! `KafkaProducer::new` and `MockProducerOptionsBuilder::set_key_serializer` /
+//! `set_value_serializer`, which box them once, and never hands one out, so no
+//! caller needs to name the companion, and keeping it private leaves the
+//! dispatch free to change (`check-dyn-compatible`). The C binding, whose
+//! serializers are trait objects already, passes its boxes to the
+//! crate-private `KafkaProducer::with_boxed_serializers` instead of boxing
+//! them again.
+//!
 //! A method added to [`Serializer`] goes in three places here: the trait, the
 //! blanket impl and the impl on `dyn DynSerializer`. `cargo xtask lint-custom`
 //! (`check-dyn-forwarding`) fails until all three forward it.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -37,8 +48,9 @@ use crate::common::serialization::InlineFuture;
 use crate::common::serialization::Serializer;
 
 mod private {
-    // Deliberately unnameable: it seals `DynSerializer` to `Serializer` implementors.
-    #[expect(unnameable_types)]
+    // Seals `DynSerializer` to `Serializer` implementors. Nothing outside this
+    // module can name it, which `unnameable_types` would report if the
+    // companion were public; it is crate-private, so the lint stays quiet.
     pub trait Sealed<T: ?Sized> {}
 }
 
@@ -64,20 +76,7 @@ impl<T: ?Sized, S: super::Serializer<T>> private::Sealed<T> for S {}
 /// ambiguous, since both define it; call it as
 /// `DynSerializer::serialize(&*serializer, topic, data)`, or import only one of
 /// the two traits.
-///
-/// ```
-/// use confluent_kafka::common::serialization::{DynSerializer, StringSerializer};
-///
-/// # #[tokio::main(flavor = "current_thread")]
-/// # async fn main() {
-/// let serializer: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
-/// let bytes = DynSerializer::serialize(&*serializer, "topic", Some("value")).await.unwrap();
-/// assert_eq!(Some(&b"value"[..]), bytes.as_deref());
-/// # }
-/// ```
-// the dyn-compatible companion of the `Serializer` trait (CLAUDE.md §3)
-#[doc(alias = "rust-only")]
-pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
+pub(crate) trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
     /// See [`Serializer::serialize`].
     ///
     /// # Errors
@@ -94,12 +93,20 @@ pub trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
     /// # Errors
     ///
     /// As [`Serializer::serialize_with_headers`].
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>>;
+    ) -> InlineFuture<'h, Result<Option<Cow<'a, [u8]>>, Error>>
+    where
+        'a: 'h;
+
+    /// See [`Serializer::configure`].
+    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>;
+
+    /// See [`Serializer::close`].
+    fn close(&self) -> InlineFuture<'_, ()>;
 }
 
 impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
@@ -111,13 +118,24 @@ impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
         InlineFuture::new(Serializer::serialize(self, topic, data))
     }
 
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> InlineFuture<'a, Result<Option<Cow<'a, [u8]>>, Error>> {
+    ) -> InlineFuture<'h, Result<Option<Cow<'a, [u8]>>, Error>>
+    where
+        'a: 'h,
+    {
         InlineFuture::new(Serializer::serialize_with_headers(self, topic, headers, data))
+    }
+
+    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()> {
+        InlineFuture::new(Serializer::configure(self, configs, is_key))
+    }
+
+    fn close(&self) -> InlineFuture<'_, ()> {
+        InlineFuture::new(Serializer::close(self))
     }
 }
 
@@ -134,13 +152,28 @@ impl<T: ?Sized> Serializer<T> for dyn DynSerializer<T> + '_ {
         DynSerializer::serialize(self, topic, data)
     }
 
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send
+    where
+        'a: 'h,
+    {
         DynSerializer::serialize_with_headers(self, topic, headers, data)
+    }
+
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        DynSerializer::configure(self, configs, is_key)
+    }
+
+    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+        DynSerializer::close(self)
     }
 }
 
@@ -168,15 +201,24 @@ mod tests {
         assert_eq!(b"value".to_vec(), through_generic(&*boxed, "value").await);
     }
 
+    /// A direct call through the companion, named in full to avoid the
+    /// ambiguity with `Serializer::serialize`.
+    #[tokio::test]
+    async fn test_call_through_the_companion() {
+        let serializer: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        let bytes = DynSerializer::serialize(&*serializer, "topic", Some("value")).await.unwrap();
+        assert_eq!(Some(&b"value"[..]), bytes.as_deref());
+    }
+
     #[test]
     fn test_dyn_call_on_a_built_in_is_ready_and_borrows() {
         let boxed: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
         let data = [1u8, 2, 3];
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
             &*boxed,
             "topic",
-            &headers,
+            &mut headers,
             Some(&data[..])
         ));
         match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
@@ -192,7 +234,7 @@ mod tests {
     fn test_dyn_call_allocates_nothing() {
         let string: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
         let array: Box<dyn DynSerializer<[u8]>> = Box::new(ByteArraySerializer::new());
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let data = [1u8, 2, 3];
         let mut cx = Context::from_waker(Waker::noop());
         let count = {
@@ -201,7 +243,7 @@ mod tests {
             let mut future = std::pin::pin!(DynSerializer::serialize_with_headers(
                 &*string,
                 "topic",
-                &headers,
+                &mut headers,
                 Some("value")
             ));
             assert!(matches!(
@@ -213,6 +255,47 @@ mod tests {
             crate::AllocTrackingGuard::count()
         };
         assert_eq!(0, count, "a dyn serializer call must not allocate");
+    }
+
+    #[tokio::test]
+    async fn test_configure_and_close_forward_through_dyn() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(Arc<AtomicUsize>, Arc<AtomicUsize>);
+        impl Serializer<str> for Counting {
+            async fn serialize<'a>(
+                &'a self,
+                _topic: &'a str,
+                _data: Option<&'a str>,
+            ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+                Ok(None)
+            }
+            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+                assert!(is_key);
+                self.0.fetch_add(configs.len(), Ordering::SeqCst);
+            }
+            async fn close(&self) {
+                self.1.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (configured, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut boxed: Box<dyn DynSerializer<str>> = Box::new(Counting(configured.clone(), closed.clone()));
+        let configs = HashMap::from([("a".to_string(), "b".to_string())]);
+        DynSerializer::configure(&mut *boxed, &configs, true).await;
+        DynSerializer::close(&*boxed).await;
+        // And through the `Serializer` impl on the trait object.
+        Serializer::close(&*boxed).await;
+        assert_eq!(1, configured.load(Ordering::SeqCst));
+        assert_eq!(2, closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_configure_and_close_default_to_no_ops() {
+        let mut boxed: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
+        DynSerializer::configure(&mut *boxed, &HashMap::new(), false).await;
+        DynSerializer::close(&*boxed).await;
+        assert_eq!(b"v".to_vec(), through_generic(&*boxed, "v").await);
     }
 
     #[test]

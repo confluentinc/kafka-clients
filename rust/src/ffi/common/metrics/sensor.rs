@@ -24,6 +24,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
 
@@ -133,6 +134,22 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
     enum_of(unsafe { recording_level_of(self_) })
+}
+
+/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
+/// with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_to_string(
+    self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `recording_level_of` requires; the value is copied out and its name copied into an owned string.
+    into_c_string(&unsafe { recording_level_of(self_) }.to_string())
 }
 
 /// `id`: the wire value, `0` for `INFO`, `1` for `DEBUG`, `2` for `TRACE`.

@@ -29,7 +29,7 @@ use crate::common::Uuid;
 /// `instanceof` and read the topics through the subclass's getter. Keeping the
 /// subclass behind the variant, rather than its `Vec`, lets a field Java adds
 /// to the subclass arrive without changing the variant's shape.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.TopicCollection")]
 pub enum TopicCollection {
@@ -65,7 +65,7 @@ impl TopicCollection {
 /// Corresponds to `org.apache.kafka.common.TopicCollection.TopicIdCollection`.
 /// Built only by [`TopicCollection::of_topic_ids`], as Java's constructor is
 /// private.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicIdCollection")]
 pub struct TopicIdCollection {
     topic_ids: Vec<Uuid>,
@@ -94,7 +94,7 @@ impl TopicIdCollection {
 /// Corresponds to `org.apache.kafka.common.TopicCollection.TopicNameCollection`.
 /// Built only by [`TopicCollection::of_topic_names`], as Java's constructor is
 /// private.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicNameCollection")]
 pub struct TopicNameCollection {
     topic_names: Vec<String>,
@@ -129,7 +129,6 @@ mod tests {
             panic!("ofTopicIds builds a TopicIdCollection, got {collection:?}");
         };
         assert_eq!(by_id.topic_ids(), ids.as_slice());
-        assert_eq!(collection, TopicCollection::of_topic_ids(ids));
     }
 
     #[test]
@@ -140,7 +139,6 @@ mod tests {
             panic!("ofTopicNames builds a TopicNameCollection, got {collection:?}");
         };
         assert_eq!(by_name.topic_names(), names.as_slice());
-        assert_eq!(collection, TopicCollection::of_topic_names(names));
     }
 
     /// Translated from `TopicCollectionTest.testTopicCollection`
@@ -160,17 +158,5 @@ mod tests {
 
         assert!(topic_ids.iter().all(|id| id_collection.topic_ids().contains(id)));
         assert!(topic_names.iter().all(|name| name_collection.topic_names().contains(name)));
-    }
-
-    #[test]
-    fn collections_differ_by_kind_and_content() {
-        assert_ne!(
-            TopicCollection::of_topic_names(vec!["a".to_string()]),
-            TopicCollection::of_topic_names(vec!["b".to_string()])
-        );
-        assert_ne!(
-            TopicCollection::of_topic_ids(vec![Uuid::new(1, 2)]),
-            TopicCollection::of_topic_names(Vec::new())
-        );
     }
 }

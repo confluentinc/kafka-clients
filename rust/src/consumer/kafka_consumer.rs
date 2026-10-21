@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::metrics::KafkaMetric;
-use crate::common::serialization::DynDeserializer;
+use crate::common::serialization::{Deserializer, DynDeserializer};
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AsyncKafkaConsumer;
 use crate::consumer::{
@@ -103,28 +103,44 @@ where
     not_sync: PhantomData<Cell<()>>,
 }
 
+impl<K, V> std::fmt::Debug for KafkaConsumer<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// The delegate's client id and group id, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaConsumer")
+            .field("delegate", &self.delegate)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<K, V> KafkaConsumer<K, V>
 where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
     /// Constructs a new consumer from a configuration and explicit key/value
-    /// deserializers, any [`Deserializer`](crate::common::serialization::Deserializer)
-    /// boxed as a [`DynDeserializer`].
+    /// deserializers, any [`Deserializer`] each.
     ///
     /// For `group.protocol=consumer` (KIP-848), the delegate is
     /// `AsyncKafkaConsumer::new(...)` — the production consumer built
     /// end-to-end with `SubscriptionState`, `ConsumerMetadata`,
     /// `NetworkClient`, every `RequestManager`, and a single bg task
     /// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
-    /// [`Error::unsupported_version`] per `consumer-threading.md` §20
-    /// (classic protocol deferred to a later milestone).
+    /// [`Error::local_unsupported_operation`] per `consumer-threading.md` §20
+    /// (classic protocol deferred to a later milestone), the class Java's
+    /// `ClassicKafkaConsumer` throws for a protocol feature it does not support
+    /// (`ClassicKafkaConsumer.java:544,550`).
     ///
     /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
-    /// them as explicit `Box<dyn DynDeserializer>` parameters (Phase 1
-    /// decision not to translate reflection machinery). The consumer hands
-    /// them to its `FetchCollector`, which calls them for every fetched
-    /// record, and closes them when the consumer closes.
+    /// them as explicit parameters (Phase 1 decision not to translate
+    /// reflection machinery) and boxes each once behind the crate-private
+    /// dyn-compatible `DynDeserializer`, so the consumer's type carries only
+    /// the record types `K` and `V`. The consumer hands them to its
+    /// `FetchCollector`, which calls them for every fetched record, and closes
+    /// them when the consumer closes.
     ///
     /// `MockConsumer` does NOT come through this constructor — it has its own.
     ///
@@ -134,6 +150,20 @@ where
     /// delegate cannot be constructed from `config`.
     #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new(
+        config: ConsumerConfig,
+        key_deserializer: impl Deserializer<K>,
+        value_deserializer: impl Deserializer<V>,
+    ) -> Result<Self, Error> {
+        Self::with_boxed_deserializers(config, Box::new(key_deserializer), Box::new(value_deserializer))
+    }
+
+    /// [`new`](Self::new) over deserializers already boxed as `dyn`.
+    ///
+    /// For the C binding, whose deserializers are trait objects before they
+    /// reach the consumer: boxing them as `dyn` a second time would nest one
+    /// `InlineFuture` in another, which no longer fits its buffer, so every
+    /// fetched record would allocate (`consumer-threading.md` §27).
+    pub(crate) fn with_boxed_deserializers(
         config: ConsumerConfig,
         key_deserializer: Box<dyn DynDeserializer<K>>,
         value_deserializer: Box<dyn DynDeserializer<V>>,
@@ -148,7 +178,7 @@ where
         // `AsyncKafkaConsumer::with_components` so the Phase-11 test seam is
         // preserved.
         //
-        // `GroupProtocol::Classic` remains an `unsupported_version` error
+        // `GroupProtocol::Classic` remains a `local_unsupported_operation` error
         // per `consumer-threading.md` §20 (classic protocol deferred to a
         // later milestone).
         let protocol = GroupProtocol::of(config.group_protocol())?;
@@ -157,7 +187,7 @@ where
                 delegate: AsyncKafkaConsumer::<K, V>::new(config, key_deserializer, value_deserializer)?,
                 not_sync: PhantomData,
             }),
-            GroupProtocol::Classic => Err(Error::unsupported_version(
+            GroupProtocol::Classic => Err(Error::local_unsupported_operation(
                 "Classic group protocol is not yet supported in this client; \
                  set group.protocol=consumer (KIP-848).",
             )),
@@ -480,11 +510,13 @@ mod tests {
             ("bootstrap.servers".to_string(), broker.bootstrap()),
             ("group.protocol".to_string(), "consumer".to_string()),
             ("auto.offset.reset".to_string(), "earliest".to_string()),
+            // Java's `newConsumer` sets it too (`KafkaConsumerTest.java:3626`).
+            ("isolation.level".to_string(), "read_uncommitted".to_string()),
         ]);
         KafkaConsumer::new(
             ConsumerConfig::new(&props).expect("config validates"),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("constructs against the fake broker")
     }
@@ -775,6 +807,114 @@ mod tests {
                 "ConsumerMetadata / SubscriptionState still referenced (query_offsets = {query_offsets})"
             );
         }
+    }
+
+    /// A closed and dropped group consumer frees its subscription state. The
+    /// rebalance metrics' `assigned-partitions` gauge captures it; before the
+    /// registry's "count" gauge held the registry weakly, the registry kept
+    /// that gauge, and so the state, allocated for the life of the process.
+    /// Java's garbage collector frees the same graph.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_closed_group_consumer_is_freed() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("group.id".to_string(), "freed-group".to_string()),
+        ]);
+        let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            StringDeserializer,
+            StringDeserializer,
+        )
+        .expect("constructs against the fake broker");
+        let (metadata, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(500)))
+            .await
+            .expect("close");
+        drop(consumer);
+
+        // Spawned tasks holding a clone end shortly after the close.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (metadata.strong_count() > 0 || subscriptions.strong_count() > 0) && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            (0, 0),
+            (metadata.strong_count(), subscriptions.strong_count()),
+            "ConsumerMetadata / SubscriptionState still referenced"
+        );
+    }
+
+    /// A listener that captured `consumer.handle()` holds the handle state, and
+    /// through it the `SubscriptionState` that stores the listener. `close()`
+    /// releases the listener once its last callback has run, so a closed and
+    /// dropped consumer frees the listener and the subscription state. A
+    /// consumer dropped without `close()` keeps the cycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_closed_consumer_frees_a_listener_capturing_the_handle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use async_trait::async_trait;
+
+        use crate::consumer::{ConsumerHandle, ConsumerRebalanceListener};
+
+        struct Sentinel(Arc<AtomicBool>);
+        impl Drop for Sentinel {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct HandleListener {
+            _handle: ConsumerHandle,
+            _sentinel: Sentinel,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for HandleListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("group.id".to_string(), "listener-group".to_string()),
+        ]);
+        let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            StringDeserializer,
+            StringDeserializer,
+        )
+        .expect("constructs against the fake broker");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let listener = HandleListener { _handle: consumer.handle(), _sentinel: Sentinel(Arc::clone(&dropped)) };
+        consumer
+            .subscribe_with_topics_listener(vec![TOPIC.to_string()], Arc::new(listener))
+            .await
+            .expect("subscribe");
+        let (_, subscriptions) = consumer.delegate.metadata_and_subscriptions_for_test();
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(500)))
+            .await
+            .expect("close");
+        drop(consumer);
+
+        // Spawned tasks holding a clone end shortly after the close.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (!dropped.load(Ordering::SeqCst) || subscriptions.strong_count() > 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(dropped.load(Ordering::SeqCst), "listener still referenced");
+        assert_eq!(0, subscriptions.strong_count(), "SubscriptionState still referenced");
     }
 
     /// `KafkaConsumer` can move to another task but not be shared between

@@ -19,8 +19,11 @@
 //! handle in place, so `set_x(self, x)` on the handle is Java's
 //! `options.x(x)` with the result stored back.
 
+use std::ffi::c_char;
+
 use crate::admin::AbortTransactionOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`AbortTransactionOptions`], owned by the caller and freed with
 /// [`kafka_admin_AbortTransactionOptions_destroy`].
@@ -105,6 +108,22 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionOptions_timeout_ms(
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `abort_transaction_options_ref` requires.
     unsafe { abort_transaction_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AbortTransactionOptions_to_string(
+    self_: *const kafka_admin_AbortTransactionOptions_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `abort_transaction_options_ref` requires.
+    into_c_string(&unsafe { abort_transaction_options_ref(self_) }.to_string())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

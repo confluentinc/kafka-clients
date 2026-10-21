@@ -21,7 +21,7 @@
 ///
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions")]
 pub struct AlterPartitionReassignmentsOptions {
     timeout_ms: Option<i32>,

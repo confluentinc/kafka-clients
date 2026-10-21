@@ -347,7 +347,7 @@ mod tests {
     fn topic_metadata_manager() -> TopicMetadataRequestManager {
         let config = crate::consumer::ConsumerConfig {
             bootstrap_servers: vec!["localhost:9092".to_string()],
-            ..Default::default()
+            ..crate::consumer::ConsumerConfig::defaults()
         };
         TopicMetadataRequestManager::new(&config)
     }
@@ -355,7 +355,7 @@ mod tests {
     fn commit_manager() -> Arc<CommitRequestManager> {
         let config = crate::consumer::ConsumerConfig {
             bootstrap_servers: vec!["localhost:9092".to_string()],
-            ..Default::default()
+            ..crate::consumer::ConsumerConfig::defaults()
         };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
@@ -377,7 +377,7 @@ mod tests {
     fn offsets_manager() -> OffsetsRequestManager {
         let config = crate::consumer::ConsumerConfig {
             bootstrap_servers: vec!["localhost:9092".to_string()],
-            ..Default::default()
+            ..crate::consumer::ConsumerConfig::defaults()
         };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(

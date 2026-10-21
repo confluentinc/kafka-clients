@@ -22,7 +22,7 @@ use crate::common::Error;
 /// `Admin::alter_partition_reassignments`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.NewPartitionReassignment`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment")]
 pub struct NewPartitionReassignment {
     target_replicas: Vec<i32>,

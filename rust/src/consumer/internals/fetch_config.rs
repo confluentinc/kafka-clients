@@ -166,7 +166,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfigTest#testBasicFromConsumerConfig")]
     fn test_basic_from_consumer_config() {
-        let consumer_config = ConsumerConfig::default();
+        let consumer_config = ConsumerConfig::defaults();
         let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         // Same as the explicit-values test — defaults agree.
         assert_eq!(1, fetch_config.min_bytes);
@@ -176,23 +176,24 @@ mod tests {
         assert_eq!(500, fetch_config.max_poll_records);
         assert!(fetch_config.check_crcs);
         assert_eq!("", fetch_config.client_rack_id);
-        assert_eq!(IsolationLevel::ReadUncommitted, fetch_config.isolation_level);
+        // `ConsumerConfig::DEFAULT_ISOLATION_LEVEL`, not Java's `read_uncommitted`.
+        assert_eq!(IsolationLevel::ReadCommitted, fetch_config.isolation_level);
     }
 
     /// `from_consumer_config` honors a non-default isolation level.
     #[test]
-    fn test_new_consumer_config_read_committed() {
+    fn test_new_consumer_config_read_uncommitted() {
         let consumer_config =
-            ConsumerConfig { isolation_level: "read_committed".to_string(), ..ConsumerConfig::default() };
+            ConsumerConfig { isolation_level: "read_uncommitted".to_string(), ..ConsumerConfig::defaults() };
         let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
-        assert_eq!(IsolationLevel::ReadCommitted, fetch_config.isolation_level);
+        assert_eq!(IsolationLevel::ReadUncommitted, fetch_config.isolation_level);
     }
 
     /// `from_consumer_config` rejects unknown isolation levels.
     #[test]
     fn test_new_consumer_config_rejects_unknown_isolation_level() {
         let consumer_config =
-            ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::default() };
+            ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::defaults() };
         let err = FetchConfig::with_consumer_config(&consumer_config).unwrap_err();
         let msg = err.message();
         assert!(msg.contains("isolation.level"), "{msg}");

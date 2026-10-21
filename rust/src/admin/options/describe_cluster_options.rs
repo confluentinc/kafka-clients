@@ -19,7 +19,7 @@
 /// Options for `Admin::describe_cluster`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions")]
 pub struct DescribeClusterOptions {
     timeout_ms: Option<i32>,

@@ -21,7 +21,7 @@ use crate::common::Error;
 /// The timestamp type of the records.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 // `NoTimestampType` repeats the enum name because that is Java's constant
 // (`TimestampType.NO_TIMESTAMP_TYPE`) and also its wire-visible `name()`;

@@ -1628,7 +1628,10 @@ mod tests {
     }
 
     fn make_metadata(subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         Arc::new(ConsumerMetadata::with_config(&config, subs, ClusterResourceListeners::new()))
     }
 
@@ -1654,7 +1657,10 @@ mod tests {
         let subscriptions = make_subscriptions();
         let metadata = make_metadata(Arc::clone(&subscriptions));
 
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let coordinator = if with_group_id {
             Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")))
         } else {

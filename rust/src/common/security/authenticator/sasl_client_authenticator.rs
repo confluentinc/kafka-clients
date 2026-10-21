@@ -25,7 +25,10 @@
 //!   → ClientComplete (if using SaslAuthenticate header) → Complete
 //! ```
 //!
-//! Currently supports PLAIN mechanism only (RFC 4616). The state machine is
+//! Currently supports PLAIN mechanism only (RFC 4616); the client
+//! configurations reject any other `sasl.mechanism` when they are built
+//! (`CommonClientConfigs::post_validate_supported_sasl_mechanism`), so no other
+//! mechanism reaches this authenticator through a client. The state machine is
 //! designed for extensibility to SCRAM and other challenge-response mechanisms.
 //!
 //! # Non-blocking Design
@@ -98,7 +101,9 @@ pub enum SaslState {
 /// Translated from `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`.
 ///
 /// This implementation supports PLAIN mechanism only (RFC 4616). The token format
-/// is `\0username\0password`.
+/// is `\0username\0password`. The client configurations reject any other
+/// `sasl.mechanism` when they are built, so a client never sends this token
+/// under another mechanism's name.
 ///
 /// # Re-authentication
 ///

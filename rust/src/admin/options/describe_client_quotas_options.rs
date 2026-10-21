@@ -19,7 +19,7 @@
 /// Options for `Admin::describe_client_quotas`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClientQuotasOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasOptions")]
 pub struct DescribeClientQuotasOptions {
     timeout_ms: Option<i32>,
