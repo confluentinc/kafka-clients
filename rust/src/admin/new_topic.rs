@@ -29,7 +29,7 @@ use crate::create_topics_request_data::{CreatableReplicaAssignment, CreatableTop
 /// so that conversion to the wire request is deterministically ordered — Java
 /// iterates its `Map` in unspecified order, but a stable order simplifies
 /// wire-byte comparison and testing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
 pub struct NewTopic {
     name: String,

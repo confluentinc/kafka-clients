@@ -19,7 +19,7 @@
 /// Options for `Admin::list_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions")]
 pub struct ListTopicsOptions {
     timeout_ms: Option<i32>,

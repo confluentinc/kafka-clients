@@ -26,7 +26,7 @@ use crate::common::Node;
 /// `leader` is `None` when there is no leader (Java `null`); `elr` and
 /// `last_known_elr` are `None` when the information is unavailable (the Java
 /// short constructor leaves them `null`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo")]
 pub struct TopicPartitionInfo {
     partition: i32,

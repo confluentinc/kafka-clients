@@ -37,7 +37,7 @@ use crate::producer::Partitioner;
 /// A single instance is shared by the producer across tasks, so the per-topic
 /// counter is an [`AtomicI32`] inside a concurrent map — the direct translation
 /// of Java's `ConcurrentMap<String, AtomicInteger>`.
-#[derive(Default)]
+#[derive(Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitioner")]
 pub struct RoundRobinPartitioner {
     /// Per-topic round-robin counter. Java: `topicCounterMap`.

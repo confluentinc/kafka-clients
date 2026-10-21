@@ -23,6 +23,7 @@
 use std::ffi::{CStr, c_char};
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -80,12 +81,15 @@ impl Serializer<GenericValue> for GenericStringSerializer {
         Serializer::<str>::serialize(&self.0, topic, data).await
     }
 
-    async fn serialize_with_headers<'a>(
+    async fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+    ) -> Result<Option<Cow<'a, [u8]>>, Error>
+    where
+        'a: 'h,
+    {
         // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
         // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
         // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer`
@@ -95,6 +99,13 @@ impl Serializer<GenericValue> for GenericStringSerializer {
         // the invoker copies them out before it returns.
         let data: Option<&'a str> = unsafe { string(data) }?;
         Serializer::<str>::serialize_with_headers(&self.0, topic, headers, data).await
+    }
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        Serializer::<str>::configure(&mut self.0, configs, is_key).await;
+    }
+
+    async fn close(&self) {
+        Serializer::<str>::close(&self.0).await;
     }
 }
 
@@ -130,13 +141,13 @@ pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafk
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Serializer(
-    self_: *const kafka_common_serialization_StringSerializer_t,
-) -> *const kafka_common_serialization_Serializer_t {
+    self_: *mut kafka_common_serialization_StringSerializer_t,
+) -> *mut kafka_common_serialization_Serializer_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-serializer handle, as
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_serializer()
+    unsafe { handle(self_) }.as_serializer().cast_mut()
 }
 
 /// Frees an owned handle; null is a no-op.

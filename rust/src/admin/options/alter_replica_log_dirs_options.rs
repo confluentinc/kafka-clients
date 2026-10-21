@@ -20,7 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions`. In Java this class only
 /// extends `AbstractOptions` (a `timeout_ms` field) with no additional fields.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions")]
 pub struct AlterReplicaLogDirsOptions {
     timeout_ms: Option<i32>,

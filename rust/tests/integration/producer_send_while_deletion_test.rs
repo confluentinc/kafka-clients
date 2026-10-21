@@ -127,8 +127,8 @@ fn create_producer(bootstrap_servers: &str) -> TestProducer {
     ]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("valid producer config"),
-        Box::new(StringSerializer::new()),
-        Box::new(ByteArraySerializer::default()),
+        StringSerializer::new(),
+        ByteArraySerializer::default(),
     )
     .expect("producer")
 }

@@ -1266,7 +1266,10 @@ mod tests {
         Arc<ConsumerMembershipManager>,
         mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1335,7 +1338,10 @@ mod tests {
         Arc<ConsumerMembershipManager>,
         Arc<Mutex<SubscriptionState>>,
     ) {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1637,7 +1643,7 @@ mod tests {
         let mut config = ConsumerConfig {
             bootstrap_servers: bootstrap_servers.clone(),
             group_id: Some(DEFAULT_GROUP_ID.to_string()),
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         };
         config.retry_backoff_ms = DEFAULT_RETRY_BACKOFF_MS;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));

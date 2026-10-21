@@ -39,6 +39,20 @@ fn mock_consumer_is_consumer_trait_object() {
         Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
 }
 
+/// What identifies a record: Java's `assertEquals(rec1, iter.next())` holds
+/// because the mock hands back the instance it was given (`ConsumerRecord`
+/// does not override `equals`); Rust moves the record in, so the tests
+/// compare these fields.
+fn fields(record: &ConsumerRecord<String, String>) -> (String, i32, i64, Option<String>, Option<String>) {
+    (
+        record.topic().to_string(),
+        record.partition(),
+        record.offset(),
+        record.key().cloned(),
+        record.value().cloned(),
+    )
+}
+
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
 /// offset, ts, tsType, sizeK, sizeV, key, value, headers, leaderEpoch)`.
 fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str) -> ConsumerRecord<String, String> {
@@ -98,8 +112,8 @@ async fn test_simple_mock() {
 
     let recs = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     let mut iter = (&recs).into_iter();
-    assert_eq!(Some(&expected1), iter.next());
-    assert_eq!(Some(&expected2), iter.next());
+    assert_eq!(Some(fields(&expected1)), iter.next().map(fields));
+    assert_eq!(Some(fields(&expected2)), iter.next().map(fields));
     assert!(iter.next().is_none());
 
     let tp = TopicPartition::new("test".to_string(), 0);
@@ -225,8 +239,8 @@ async fn test_duration_based_offset_reset() {
 
     let records = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     let mut iter = (&records).into_iter();
-    assert_eq!(Some(&expected1), iter.next());
-    assert_eq!(Some(&expected2), iter.next());
+    assert_eq!(Some(fields(&expected1)), iter.next().map(fields));
+    assert_eq!(Some(fields(&expected2)), iter.next().map(fields));
     assert!(iter.next().is_none());
 }
 

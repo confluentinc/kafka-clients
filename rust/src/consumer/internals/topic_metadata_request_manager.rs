@@ -540,7 +540,7 @@ mod tests {
         let mut config = ConsumerConfig {
             bootstrap_servers: vec!["localhost:9092".to_string()],
             retry_backoff_ms: RETRY_BACKOFF_MS,
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         };
         // Java's `ALLOW_AUTO_CREATE_TOPICS_CONFIG = false` matches Java's
         // `testSetup` properties. The field is `pub(crate)` so we set it

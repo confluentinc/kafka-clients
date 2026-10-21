@@ -19,7 +19,7 @@
 /// Options for `Admin::create_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreateTopicsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions")]
 pub struct CreateTopicsOptions {
     timeout_ms: Option<i32>,

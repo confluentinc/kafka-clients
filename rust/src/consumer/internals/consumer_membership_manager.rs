@@ -2120,7 +2120,10 @@ mod tests {
                 .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
@@ -2165,7 +2168,10 @@ mod tests {
         let time = Arc::new(MockTime::new());
         let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
         let metrics_manager = Arc::new(ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subs)));
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
@@ -2271,7 +2277,10 @@ mod tests {
                 .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),

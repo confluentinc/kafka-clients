@@ -194,8 +194,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer")
 }
@@ -425,8 +425,8 @@ async fn test_async_consumer_fetch_invalid_offset() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -514,8 +514,8 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
             // reset immediately
             &[("fetch.max.wait.ms", "0")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -564,8 +564,8 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
                 ("fetch.max.wait.ms", "0"),
             ],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -655,8 +655,8 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
             &group_id_1,
             &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new (consumer1) should succeed");
 
@@ -689,8 +689,8 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
             &group_id_2,
             &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new (consumer2) should succeed");
 
@@ -782,8 +782,8 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -867,8 +867,8 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -973,8 +973,8 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
                 ("max.poll.interval.ms", "20000"),
             ],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 

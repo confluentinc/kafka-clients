@@ -139,5 +139,5 @@ fn create_kafka_consumer() -> Result<KafkaConsumer<String, String>, Error> {
     println!("Kafka consumer properties: {props:?}");
 
     let config = ConsumerConfig::new(&props)?;
-    KafkaConsumer::new(config, Box::new(StringDeserializer::new()), Box::new(StringDeserializer::new()))
+    KafkaConsumer::new(config, StringDeserializer::new(), StringDeserializer::new())
 }

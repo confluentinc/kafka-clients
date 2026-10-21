@@ -25,7 +25,7 @@ use crate::common::record::TimestampType;
 ///
 /// Corresponds to Java's nested
 /// `RecordDeserializationException.DeserializationExceptionOrigin`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException$DeserializationExceptionOrigin")]
 pub enum DeserializationErrorOrigin {
@@ -33,6 +33,16 @@ pub enum DeserializationErrorOrigin {
     Key,
     /// The value could not be deserialized.
     Value,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for DeserializationErrorOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Key => "KEY",
+            Self::Value => "VALUE",
+        })
+    }
 }
 
 /// A record could not be deserialized, carrying the location and raw bytes of

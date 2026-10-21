@@ -100,8 +100,8 @@ impl ChunkedRecordAccumulator {
     /// # Errors
     ///
     /// - [`Error::LocalIllegalArgument`] if `buffer_pool` serves [`AllocationMode::Full`];
-    /// - [`Error::UnsupportedVersion`] (Java's `UnsupportedOperationException`, which has no Rust
-    ///   variant; the same mapping `MockAdminClient` uses) if `compression` is not `none`.
+    /// - [`Error::LocalUnsupportedOperation`] (Java's `UnsupportedOperationException`,
+    ///   `ChunkedRecordAccumulator.java:85-86`) if `compression` is not `none`.
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedRecordAccumulator#ChunkedRecordAccumulator")]
     pub(crate) fn new(
@@ -130,7 +130,7 @@ impl ChunkedRecordAccumulator {
         // accumulator from registering the base's pool gauges. Java's `TODO: drop this once the
         // incremental strategy supports compressed data` is KAFKA-20579.
         if compression.compression_type() != CompressionType::None {
-            return Err(Error::unsupported_version(
+            return Err(Error::local_unsupported_operation(
                 "Compression is not yet supported with the incremental buffer.memory allocation strategy",
             ));
         }
@@ -2819,7 +2819,7 @@ mod tests {
             .accumulator_with_pool(16384, Compression::gzip().build(), fx.pool(1024 * 1024, 16384))
             .err()
             .unwrap();
-        assert!(matches!(error, Error::UnsupportedVersion(_)), "{error:?}");
+        assert!(error.is_local_unsupported_operation_error(), "{error:?}");
         assert_eq!(
             "Compression is not yet supported with the incremental buffer.memory allocation strategy",
             error.message()

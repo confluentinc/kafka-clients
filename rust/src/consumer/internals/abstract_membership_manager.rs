@@ -1146,7 +1146,10 @@ mod tests {
             .unwrap()
             .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
             .unwrap();
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
@@ -1325,7 +1328,10 @@ mod tests {
     async fn invoke_rebalance_callback_no_listener_short_circuits() {
         // Build a subscription state WITHOUT a registered listener.
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),

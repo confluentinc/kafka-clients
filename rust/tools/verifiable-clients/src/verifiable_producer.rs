@@ -655,11 +655,7 @@ pub async fn create_from_args(args: &[String]) -> Result<VerifiableProducer<Kafk
     }
 
     let config = ProducerConfig::new(&props)?;
-    let producer = KafkaProducer::<String, String>::new(
-        config,
-        Box::new(StringSerializer::new()),
-        Box::new(StringSerializer::new()),
-    )?;
+    let producer = KafkaProducer::<String, String>::new(config, StringSerializer::new(), StringSerializer::new())?;
 
     Ok(VerifiableProducer::new(
         producer,

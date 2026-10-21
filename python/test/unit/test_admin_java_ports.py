@@ -75,8 +75,8 @@ KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient
   testAdminClientFailureWhenClosed | ported before | test_admin_client.py::test_admin_client_failure_when_closed
   testTimeoutWithoutMetadata | ported before | test_admin_client.py::test_timeout_without_metadata
   testConnectionFailureOnMetadataUpdate | skipped | drives MockClient; core: no same-named core test
-  testUnreachableBootstrapServer | skipped | drives MockClient; core: no same-named core test
-  testUnreachableBootstrapServerNoRebootstrap | skipped | drives MockClient; core: no same-named core test
+  testUnreachableBootstrapServer | skipped | drives MockClient; core: test_unreachable_bootstrap_server
+  testUnreachableBootstrapServerNoRebootstrap | skipped | drives MockClient; core: test_unreachable_bootstrap_server_no_rebootstrap
   testPropagatedMetadataFetchException | skipped | drives MockClient; core: no same-named core test
   testAdminClientApisAuthenticationFailure | skipped | drives MockClient; core: no same-named core test
   testDescribeCluster | skipped | drives MockClient; core: test_describe_cluster
@@ -408,9 +408,6 @@ def test_valid_metadata_recovery_strategy(strategy: str) -> None:
     _admin(**{"metadata.recovery.strategy": strategy}).close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "product bug: Admin.create accepts metadata.recovery.strategy=abc; Java's "
-    "ConfigDef (ValidString) raises ConfigException naming the key"))
 def test_invalid_metadata_recovery_strategy() -> None:
     """``testInvalidMetadataRecoveryStrategy``: ``ConfigException`` whose message
     names the key."""

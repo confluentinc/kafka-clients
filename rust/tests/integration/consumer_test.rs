@@ -161,8 +161,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 async fn produce_deterministic_records(ctx: &TestContext, topic: &str, count: usize) {
     let producer: KafkaProducer<String, String> = KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(StringSerializer::default()),
-        Box::new(StringSerializer::default()),
+        StringSerializer::default(),
+        StringSerializer::default(),
     )
     .expect("Failed to build test producer");
 
@@ -191,8 +191,8 @@ async fn test_subscribe_and_poll_records() {
 
     let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -267,8 +267,8 @@ async fn test_assign_partitions_and_poll() {
 
     let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config_groupless(&ctx),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed for groupless consumer");
 
@@ -328,12 +328,9 @@ async fn test_commit_sync_then_resume_in_same_group() {
         ctx.apply_security(&mut consumer1_props);
         let consumer1_config = ConsumerConfig::new(&consumer1_props).expect("invalid test config");
 
-        let mut consumer1 = KafkaConsumer::<String, String>::new(
-            consumer1_config,
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
-        )
-        .expect("consumer1 ctor should succeed");
+        let mut consumer1 =
+            KafkaConsumer::<String, String>::new(consumer1_config, StringDeserializer, StringDeserializer)
+                .expect("consumer1 ctor should succeed");
 
         consumer1
             .subscribe_with_topics(vec![topic.clone()])
@@ -363,8 +360,8 @@ async fn test_commit_sync_then_resume_in_same_group() {
     {
         let mut consumer2 = KafkaConsumer::<String, String>::new(
             make_consumer_config(&ctx, &group_id),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("consumer2 ctor should succeed");
 
@@ -413,8 +410,8 @@ async fn test_seek_to_beginning_re_reads_records() {
 
     let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -523,8 +520,8 @@ async fn test_fetch_partitions_after_failed_listener() {
 
     let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -606,8 +603,8 @@ async fn test_fetch_partitions_with_always_failed_listener() {
 
     let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -727,8 +724,8 @@ async fn test_async_consumer_with_consumer_protocol_disabled() {
     ]);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
     consumer
@@ -776,8 +773,8 @@ async fn send_msg(bootstrap: &str, topic: &str, send_msg_num: usize) {
     ]);
     let producer: KafkaProducer<String, String> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("valid producer config"),
-        Box::new(StringSerializer::default()),
-        Box::new(StringSerializer::default()),
+        StringSerializer::default(),
+        StringSerializer::default(),
     )
     .expect("Failed to build test producer");
     for i in 0..send_msg_num {
@@ -872,8 +869,8 @@ async fn test_leader_epoch() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config(&ctx, &ctx.group_id("group")),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("KafkaConsumer::new should succeed");
     let target_topic_partition = TopicPartition::new(topic.clone(), 0);
@@ -934,8 +931,8 @@ async fn test_client_rack_reaches_the_broker() {
     ctx.apply_security(&mut props);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("invalid test config"),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
     consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");

@@ -104,13 +104,13 @@ mod tests {
     #[tokio::test]
     async fn test_serialize_borrows_the_input() {
         let serializer = ByteArraySerializer::new();
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let data = vec![7u8, 8, 9];
         for result in [
             Serializer::<[u8]>::serialize(&serializer, "topic", Some(&data[..])).await,
-            Serializer::<[u8]>::serialize_with_headers(&serializer, "topic", &headers, Some(&data[..])).await,
+            Serializer::<[u8]>::serialize_with_headers(&serializer, "topic", &mut headers, Some(&data[..])).await,
             Serializer::<Vec<u8>>::serialize(&serializer, "topic", Some(&data)).await,
-            Serializer::<Vec<u8>>::serialize_with_headers(&serializer, "topic", &headers, Some(&data)).await,
+            Serializer::<Vec<u8>>::serialize_with_headers(&serializer, "topic", &mut headers, Some(&data)).await,
         ] {
             match result.unwrap() {
                 Some(Cow::Borrowed(bytes)) => assert_eq!(data.as_ptr(), bytes.as_ptr()),

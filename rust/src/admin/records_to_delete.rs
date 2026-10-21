@@ -19,7 +19,7 @@
 /// Describe records to delete in a call to `Admin::delete_records`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.RecordsToDelete`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete")]
 pub struct RecordsToDelete {
     offset: i64,
