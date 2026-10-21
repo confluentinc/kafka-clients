@@ -18,15 +18,15 @@ base: "KafkaError (struct) — Java KafkaException\ncommon/kafka_error.rs:84\n{ 
   style.fill: "#eef6ff"
 }
 
-enum: "Error (enum, #[non_exhaustive]) — common/error.rs:864\n166 variants, the one type every fallible API returns" {
+enum: "Error (enum, #[non_exhaustive]) — common/error.rs:2378\n168 variants, the one type every fallible API returns" {
   style.fill: "#fff7e6"
 
   kafka: "Kafka variants — one per Java exception class\nTopicAuthorization(TopicAuthorizationError), Timeout(..), ...\npayload files: common/errors/, consumer/consumer_*_error.rs,\nproducer/producer_buffer_exhausted_error.rs"
   bare: "KafkaError(KafkaError)\nJava's bare KafkaException"
-  local: "Local* variants — java.lang / java.util exceptions\nbeside KafkaException, no wire code:\nLocalIllegalArgument, LocalIllegalState,\nLocalConcurrentModification, LocalTimeout"
+  local: "Local* variants — java.lang / java.util exceptions\nbeside KafkaException, no wire code:\nLocalIllegalArgument, LocalIllegalState,\nLocalUnsupportedOperation,\nLocalConcurrentModification, LocalTimeout"
 }
 
-hier: "ErrorHierarchy (pub(crate) trait, common/error.rs:161)\nis_kafka_error / is_api_error / is_retriable_error /\nis_refresh_retriable_error / is_invalid_metadata_error /\nis_authentication_error / is_authorization_error / ..." {
+hier: "ErrorHierarchy (pub(crate) trait, common/error.rs:167)\nis_kafka_error / is_api_error / is_retriable_error /\nis_refresh_retriable_error / is_invalid_metadata_error /\nis_authentication_error / is_authorization_error / ..." {
   style.fill: "#e8f5e9"
 }
 

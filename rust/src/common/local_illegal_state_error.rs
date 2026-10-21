@@ -15,7 +15,7 @@
 //! Translated from `java.lang.IllegalStateException`.
 //!
 //! See [`LocalIllegalArgumentError`](crate::common::LocalIllegalArgumentError)
-//! for why the four JDK classes carry the `Local` prefix and no wire code.
+//! for why the five JDK classes carry the `Local` prefix and no wire code.
 
 use crate::common::error::message_only_error;
 

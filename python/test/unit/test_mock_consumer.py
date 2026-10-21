@@ -602,8 +602,9 @@ def test_the_async_duration_overloads_ignore_the_timeout() -> None:
         assert await consumer.beginning_offsets(partitions=[partition], timeout=-1) == {
             partition: 2}
         assert await consumer.end_offsets(partitions=[partition], timeout=-1) == {partition: 7}
-        with pytest.raises(UnsupportedOperationError):
+        with pytest.raises(UnsupportedOperationError) as e:
             await consumer.offsets_for_times(timestamps_to_search={partition: 0}, timeout=-1)
+        assert str(e.value) == "Not implemented yet."
 
     asyncio.run(main())
 
@@ -618,6 +619,9 @@ def test_current_lag() -> None:
     consumer.update_end_offsets(new_offsets={partition: 10})
     consumer.seek(partition=partition, offset=4)
     assert consumer.current_lag(topic_partition=partition) == 6
+    # Past the log end the lag is negative and still present (end - position).
+    consumer.seek(partition=partition, offset=13)
+    assert consumer.current_lag(topic_partition=partition) == -3
 
 
 def test_async_current_lag() -> None:
@@ -633,6 +637,8 @@ def test_async_current_lag() -> None:
         consumer.update_end_offsets(new_offsets={partition: 10})
         await consumer.seek(partition=partition, offset=4)
         assert await consumer.current_lag(topic_partition=partition) == 6
+        await consumer.seek(partition=partition, offset=13)
+        assert await consumer.current_lag(topic_partition=partition) == -3
 
     asyncio.run(main())
 
@@ -1066,8 +1072,9 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
         consumer.wakeup()
         with pytest.raises(WakeupError):
             await consumer.poll(timeout=0)
-        with pytest.raises(UnsupportedOperationError):
+        with pytest.raises(UnsupportedOperationError) as e:
             await consumer.offsets_for_times(timestamps_to_search={partition: 0})
+        assert str(e.value) == "Not implemented yet."
         assert await consumer.current_lag(topic_partition=partition) == 0
         async with consumer:
             pass

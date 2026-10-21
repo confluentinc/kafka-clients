@@ -19,6 +19,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
 
@@ -117,6 +118,22 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `scram_mechanism_value_of` requires.
     enum_of(unsafe { scram_mechanism_value_of(self_) })
+}
+
+/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
+/// with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ScramMechanism_to_string(
+    self_: *const kafka_admin_ScramMechanism_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `scram_mechanism_value_of` requires; the value is copied out and its name copied into an owned string.
+    into_c_string(&unsafe { scram_mechanism_value_of(self_) }.to_string())
 }
 
 /// `ScramMechanism.fromType(byte type)`: the borrowed singleton with that

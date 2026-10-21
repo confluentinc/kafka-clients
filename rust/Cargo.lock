@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "confluent-kafka"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "ambassador",
  "apache-avro",
@@ -674,6 +674,7 @@ dependencies = [
  "crc32c",
  "crc32fast",
  "dashmap 6.1.0",
+ "dns-lookup",
  "env_logger",
  "ffi-macros",
  "flate2",
@@ -707,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "consumer-perf"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "confluent-kafka",
  "env_logger",
@@ -959,6 +960,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dns-lookup"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263c0ccfc6b3b6a93e959edad4f985779e76c0b36dbb2e13e3d27c690974adf1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "socket2 0.6.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1285,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "generator"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "regex",
  "serde",
@@ -2075,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "multilanguage-test-server"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -4145,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "verifiable-clients"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "async-trait",
  "confluent-kafka",
@@ -4701,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "anyhow",
  "quote",

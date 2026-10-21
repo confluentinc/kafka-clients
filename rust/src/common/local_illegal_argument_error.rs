@@ -14,7 +14,7 @@
 
 //! Translated from `java.lang.IllegalArgumentException`.
 //!
-//! One of the four JDK classes the client raises directly. They carry the
+//! One of the five JDK classes the client raises directly. They carry the
 //! `Local` prefix per CLAUDE.md §2 — every `java.*` error does, independently of
 //! its subpackage — and they have no wire code, because a broker never reports
 //! them.

@@ -691,8 +691,10 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
      * blocking form answers outside a listener. */
     const kafka_common_TopicPartition_t *assigned = (const kafka_common_TopicPartition_t *)kafka_List_get(list, 0);
     update_beginning_offset(f.mock, "test", 0);
-    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &err));
+    int64_t handle_lag = -1;
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &handle_lag, &err));
     assert_ok(err, "ConsumerHandle_current_lag");
+    TEST_ASSERT_EQUAL_INT64(0, handle_lag);
     int64_t ten = 10;
     kafka_Map_t *ends = kafka_Map_new();
     kafka_Map_put(ends, (void *)assigned, &ten);
@@ -700,8 +702,9 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     kafka_Map_destroy(ends);
     kafka_consumer_Consumer_seek_with_offset(f.consumer, assigned, 4, &err);
     assert_ok(err, "Consumer_seek_with_offset");
-    TEST_ASSERT_EQUAL_INT64(6, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &err));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &handle_lag, &err));
     assert_ok(err, "ConsumerHandle_current_lag");
+    TEST_ASSERT_EQUAL_INT64(6, handle_lag);
 
     /* The `_cb` twin delivers the same lag through the consumer's queue. */
     lag_completion_t lag_done;
@@ -709,16 +712,33 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     kafka_consumer_ConsumerHandle_current_lag_cb(h, assigned, on_lag, &lag_done);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &lag_done.fired, 1));
     TEST_ASSERT_NULL(lag_done.error);
+    TEST_ASSERT_EQUAL_INT8(1, lag_done.present);
     TEST_ASSERT_EQUAL_INT64(6, lag_done.value);
 
+    /* Past the log end the lag is negative and still present. */
+    kafka_consumer_Consumer_seek_with_offset(f.consumer, assigned, 13, &err);
+    assert_ok(err, "Consumer_seek_with_offset");
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_ConsumerHandle_current_lag(h, assigned, &handle_lag, &err));
+    assert_ok(err, "ConsumerHandle_current_lag");
+    TEST_ASSERT_EQUAL_INT64(-3, handle_lag);
+    lag_completion_init(&lag_done);
+    kafka_consumer_ConsumerHandle_current_lag_cb(h, assigned, on_lag, &lag_done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &lag_done.fired, 1));
+    TEST_ASSERT_NULL(lag_done.error);
+    TEST_ASSERT_EQUAL_INT8(1, lag_done.present);
+    TEST_ASSERT_EQUAL_INT64(-3, lag_done.value);
+
     /* An unassigned partition with an end offset reaches Java's position(tp),
-     * which throws IllegalArgumentException: -1 beside the error. */
+     * which throws IllegalArgumentException: 0 beside the error, *out_lag
+     * unwritten. */
     kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("other", 0);
     ends = kafka_Map_new();
     kafka_Map_put(ends, other, &ten);
     kafka_consumer_MockConsumer_update_end_offsets(f.mock, ends);
     kafka_Map_destroy(ends);
-    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_ConsumerHandle_current_lag(h, other, &err));
+    handle_lag = 7;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_ConsumerHandle_current_lag(h, other, &handle_lag, &err));
+    TEST_ASSERT_EQUAL_INT64(7, handle_lag);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
@@ -734,7 +754,7 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
 
 static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_unsupported_operation_error(err));
     TEST_ASSERT_EQUAL_STRING("ConsumerHandle async operations are not supported on a MockConsumer handle; "
                              "drive the MockConsumer directly.",
                              kafka_common_Error_message(err));
@@ -742,7 +762,7 @@ static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
 }
 
 // Every async handle operation but the commits fails on a mock handle with
-// UnsupportedVersion and returns its failure value.
+// LocalUnsupportedOperation and returns its failure value.
 static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
@@ -1057,10 +1077,12 @@ static void test_consumer_handle_outside_a_callback_is_concurrent_modification(v
     TEST_ASSERT_NULL(committed);
     /* current_lag waits for the background task (Java's CurrentLagEvent), so
      * it is gated like the other async operations. */
-    int64_t lag = kafka_consumer_ConsumerHandle_current_lag(h, tp, &err);
+    int64_t lag = 7;
+    int8_t lag_present = kafka_consumer_ConsumerHandle_current_lag(h, tp, &lag, &err);
     assert_handle_outside_callback(err);
     err = NULL;
-    TEST_ASSERT_EQUAL_INT64(-1, lag); /* the failure value */
+    TEST_ASSERT_EQUAL_INT8(0, lag_present); /* the failure value */
+    TEST_ASSERT_EQUAL_INT64(7, lag);        /* left unwritten */
 
     /* Not gated: the state reads and the cross-thread wakeup. */
     kafka_List_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
@@ -1082,7 +1104,8 @@ static void test_consumer_handle_outside_a_callback_is_concurrent_modification(v
     lag_completion_init(&lag_done);
     kafka_consumer_ConsumerHandle_current_lag_cb(h, tp, on_lag, &lag_done);
     TEST_ASSERT_TRUE(callback_pump_until(&pump, &lag_done.fired, 1));
-    TEST_ASSERT_EQUAL_INT64(-1, lag_done.value);
+    TEST_ASSERT_EQUAL_INT8(0, lag_done.present);
+    TEST_ASSERT_EQUAL_INT64(0, lag_done.value);
     assert_handle_outside_callback(lag_done.error);
 
     tp_list_destroy(list);

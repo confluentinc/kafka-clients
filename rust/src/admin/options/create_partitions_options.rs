@@ -19,7 +19,7 @@
 /// Options for `Admin::create_partitions`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsOptions")]
 pub struct CreatePartitionsOptions {
     timeout_ms: Option<i32>,

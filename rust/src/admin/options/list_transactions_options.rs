@@ -33,6 +33,18 @@ pub struct ListTransactionsOptions {
     filtered_transactional_id_pattern: Option<String>,
 }
 
+impl std::hash::Hash for ListTransactionsOptions {
+    /// Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of its
+    /// fields; the two filter sets hash independently of their order.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.timeout_ms.hash(state);
+        crate::common::utils::Utils::hash_unordered(&self.filtered_states, state);
+        crate::common::utils::Utils::hash_unordered(&self.filtered_producer_ids, state);
+        self.filtered_duration_ms.hash(state);
+        self.filtered_transactional_id_pattern.hash(state);
+    }
+}
+
 impl ListTransactionsOptions {
     /// Creates default options: no filters, and `filtered_duration_ms == -1`
     /// (no duration filtering), matching Java's defaults.
@@ -131,9 +143,56 @@ impl ListTransactionsOptions {
     }
 }
 
+impl std::fmt::Display for ListTransactionsOptions {
+    /// Java's `toString()`, the sets as Java's `[a, b]` and an unset timeout or
+    /// pattern as `null`.
+    ///
+    /// Java prints its `HashSet`s in hash order. That order is unspecified for
+    /// the states, since an enum's hash is its identity hash, so they print in
+    /// declaration order. The producer ids print in ascending order, which is
+    /// Java's order for non-negative ids below the table size.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut states: Vec<_> = self.filtered_states.iter().collect();
+        states.sort();
+        let mut producer_ids: Vec<_> = self.filtered_producer_ids.iter().collect();
+        producer_ids.sort();
+        let join = |items: Vec<String>| format!("[{}]", items.join(", "));
+        write!(
+            f,
+            "ListTransactionsOptions(filteredStates={}, filteredProducerIds={}, filteredDuration={}, \
+             filteredTransactionalIdPattern={}, timeoutMs={})",
+            join(states.iter().map(ToString::to_string).collect()),
+            join(producer_ids.iter().map(ToString::to_string).collect()),
+            self.filtered_duration_ms,
+            self.filtered_transactional_id_pattern.as_deref().unwrap_or("null"),
+            self.timeout_ms.map_or_else(|| "null".to_string(), |t| t.to_string()),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            ListTransactionsOptions::new().to_string(),
+            "ListTransactionsOptions(filteredStates=[], filteredProducerIds=[], filteredDuration=-1, \
+             filteredTransactionalIdPattern=null, timeoutMs=null)"
+        );
+        let options = ListTransactionsOptions::new()
+            .filter_states([TransactionState::PrepareCommit, TransactionState::Ongoing])
+            .filter_producer_ids([12, 3])
+            .filter_on_duration(10)
+            .filter_on_transactional_id_pattern(Some("^special-.*".to_string()))
+            .set_timeout_ms(Some(500));
+        assert_eq!(
+            options.to_string(),
+            "ListTransactionsOptions(filteredStates=[Ongoing, PrepareCommit], filteredProducerIds=[3, 12], \
+             filteredDuration=10, filteredTransactionalIdPattern=^special-.*, timeoutMs=500)"
+        );
+    }
 
     #[test]
     fn defaults_match_java() {

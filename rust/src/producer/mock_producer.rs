@@ -57,7 +57,7 @@ use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::DynSerializer;
+use crate::common::serialization::{DynSerializer, Serializer};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 
@@ -190,6 +190,18 @@ pub struct MockProducer<K, V> {
     /// Java `valueSerializer` (`MockProducer.java:66`), or `None`. Outside the
     /// mutex, as `key_serializer`.
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
+}
+
+impl<K, V> std::fmt::Debug for MockProducer<K, V> {
+    /// The mock's flags and how many records it holds, not the records.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().unwrap();
+        f.debug_struct("MockProducer")
+            .field("auto_complete", &inner.auto_complete)
+            .field("closed", &inner.closed)
+            .field("sent", &inner.sent.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The offsets one transaction contributed, grouped by consumer group id.
@@ -482,6 +494,20 @@ pub struct MockProducerOptions<K, V> {
     pub(crate) value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
+impl<K, V> std::fmt::Debug for MockProducerOptions<K, V> {
+    /// The partitioner and the serializers are trait objects, so only whether
+    /// they are set is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockProducerOptions")
+            .field("cluster", &self.cluster)
+            .field("auto_complete", &self.auto_complete)
+            .field("has_partitioner", &self.partitioner.is_some())
+            .field("has_key_serializer", &self.key_serializer.is_some())
+            .field("has_value_serializer", &self.value_serializer.is_some())
+            .finish()
+    }
+}
+
 /// Fluent builder for [`MockProducerOptions`].
 ///
 /// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
@@ -497,6 +523,20 @@ pub struct MockProducerOptionsBuilder<K, V> {
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
     key_serializer: Option<Box<dyn DynSerializer<K>>>,
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
+}
+
+impl<K, V> std::fmt::Debug for MockProducerOptionsBuilder<K, V> {
+    /// The partitioner and the serializers are trait objects, so only whether
+    /// they are set is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockProducerOptionsBuilder")
+            .field("cluster", &self.cluster)
+            .field("auto_complete", &self.auto_complete)
+            .field("has_partitioner", &self.partitioner.is_some())
+            .field("has_key_serializer", &self.key_serializer.is_some())
+            .field("has_value_serializer", &self.value_serializer.is_some())
+            .finish()
+    }
 }
 
 impl<K, V> Default for MockProducerOptionsBuilder<K, V> {
@@ -534,14 +574,17 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
         self.partitioner = partitioner;
         self
     }
-    /// Sets `MockProducerOptions::key_serializer`.
-    pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn DynSerializer<K>>>) -> Self {
-        self.key_serializer = key_serializer;
+    /// Sets `MockProducerOptions::key_serializer`, any [`Serializer<K>`];
+    /// unset is Java's `null`, which `MockProducer()` passes
+    /// (`MockProducer.java:149`).
+    pub fn set_key_serializer(mut self, key_serializer: impl Serializer<K> + 'static) -> Self {
+        self.key_serializer = Some(Box::new(key_serializer));
         self
     }
-    /// Sets `MockProducerOptions::value_serializer`.
-    pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn DynSerializer<V>>>) -> Self {
-        self.value_serializer = value_serializer;
+    /// Sets `MockProducerOptions::value_serializer`, any [`Serializer<V>`];
+    /// unset is Java's `null`.
+    pub fn set_value_serializer(mut self, value_serializer: impl Serializer<V> + 'static) -> Self {
+        self.value_serializer = Some(Box::new(value_serializer));
         self
     }
 
@@ -1239,24 +1282,35 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         // `record.partition()` before falling back to 0 so the C FFI
         // empty-cluster mock keeps working
         // (`c/tests/test_mock_producer.c:133,600,640,735,1637`).
-        let fresh_headers = RecordHeaders::new();
-        let headers = if has_partitions {
-            record.headers()
+        // The serializers may add to the headers they are given (Java's
+        // `Serializer.serialize(String, Headers, T)`): the record's own ones are
+        // kept with the record in `history()`, the fresh ones dropped. Java's
+        // mock does not make them read-only afterwards, unlike `KafkaProducer`.
+        // The record's headers are moved out while the serializers borrow its
+        // key and value (a move of the `Vec`, no copy), and moved back once the
+        // serialized bytes are no longer needed.
+        let mut record = record;
+        let mut headers = if has_partitions {
+            std::mem::take(record.headers_mut())
         } else {
-            &fresh_headers
+            RecordHeaders::new()
         };
         let mut key_bytes = None;
         let mut value_bytes = None;
         if explicit_partition.is_none() {
             if let Some(key_serializer) = self.key_serializer.as_deref() {
                 key_bytes =
-                    DynSerializer::serialize_with_headers(key_serializer, record.topic(), headers, record.key())
+                    DynSerializer::serialize_with_headers(key_serializer, record.topic(), &mut headers, record.key())
                         .await?;
             }
             if let Some(value_serializer) = self.value_serializer.as_deref() {
-                value_bytes =
-                    DynSerializer::serialize_with_headers(value_serializer, record.topic(), headers, record.value())
-                        .await?;
+                value_bytes = DynSerializer::serialize_with_headers(
+                    value_serializer,
+                    record.topic(),
+                    &mut headers,
+                    record.value(),
+                )
+                .await?;
             }
         }
 
@@ -1267,6 +1321,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             None if has_partitions => inner.partition(&record, key_bytes.as_deref(), value_bytes.as_deref()),
             None => record.partition().unwrap_or(0),
         };
+        drop((key_bytes, value_bytes));
+        if has_partitions {
+            *record.headers_mut() = headers;
+        }
         let tp = TopicPartition::new(record.topic().to_string(), partition);
 
         let result = Arc::new(ProduceRequestResult::new(tp.clone()));
@@ -1365,6 +1423,10 @@ fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+
+    use crate::common::header::Headers;
+    use crate::common::serialization::Serializer;
     use crate::common::serialization::StringSerializer;
     use crate::consumer::ConsumerGroupMetadataImpl;
     use crate::producer::RoundRobinPartitioner;
@@ -1517,8 +1579,8 @@ mod tests {
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
                 .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
-                .set_key_serializer(Some(Box::new(StringSerializer)))
-                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .set_key_serializer(StringSerializer)
+                .set_value_serializer(StringSerializer)
                 .build()
                 .expect("every mandatory parameter is set above"),
         );
@@ -1531,6 +1593,91 @@ mod tests {
         producer.clear();
         assert_eq!(0, producer.history().len(), "Clear should erase our history");
         producer.close().await.unwrap();
+    }
+
+    /// A `String` serializer that adds a header named `name`, with the data as
+    /// its value.
+    struct HeaderAddingSerializer {
+        name: &'static str,
+    }
+
+    impl Serializer<String> for HeaderAddingSerializer {
+        async fn serialize<'a>(
+            &'a self,
+            _topic: &'a str,
+            data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+            Ok(data.map(|data| Cow::Borrowed(data.as_bytes())))
+        }
+
+        async fn serialize_with_headers<'a, 'h>(
+            &'a self,
+            topic: &'a str,
+            headers: &'h mut RecordHeaders,
+            data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error>
+        where
+            'a: 'h,
+        {
+            headers
+                .add_with_key_value(self.name, data.map(|data| data.as_bytes()))
+                .map_err(Error::LocalIllegalState)?;
+            Serializer::serialize(self, topic, data).await
+        }
+    }
+
+    fn header_adding_producer(cluster: Cluster) -> MockProducer<String, String> {
+        MockProducer::with_options(
+            MockProducerOptionsBuilder::new()
+                .set_cluster(cluster)
+                .set_auto_complete(true)
+                .set_key_serializer(HeaderAddingSerializer { name: "key-header" })
+                .set_value_serializer(HeaderAddingSerializer { name: "value-header" })
+                .build()
+                .expect("every mandatory parameter is set above"),
+        )
+    }
+
+    fn header_entries(record: &ProducerRecord<String, String>) -> Vec<(String, Option<Vec<u8>>)> {
+        use crate::common::header::Header;
+        record
+            .headers()
+            .iter()
+            .map(|header| (header.key().to_string(), header.value().map(<[u8]>::to_vec)))
+            .collect()
+    }
+
+    /// Java's mock serializes through `partition()` with the record's own
+    /// headers (`MockProducer.java:612-613`), so a header a serializer adds is
+    /// on the record `history()` returns; the mock does not make them
+    /// read-only, unlike `KafkaProducer`.
+    #[tokio::test]
+    async fn test_serializer_added_headers_are_kept_with_the_record() {
+        let producer = header_adding_producer(two_partition_cluster());
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        producer.send(record).await.unwrap().get().await.unwrap();
+
+        let history = producer.history();
+        assert_eq!(
+            header_entries(&history[0]),
+            [
+                ("key-header".to_string(), Some(b"key".to_vec())),
+                ("value-header".to_string(), Some(b"value".to_vec())),
+            ]
+        );
+        assert!(!history[0].headers().is_read_only());
+    }
+
+    /// With no partitions for the topic, Java's mock serializes with fresh
+    /// headers (`MockProducer.java:316-317`), so what a serializer adds there
+    /// does not reach the record.
+    #[tokio::test]
+    async fn test_serializer_added_headers_are_dropped_on_an_empty_cluster() {
+        let producer = header_adding_producer(Cluster::empty());
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        producer.send(record).await.unwrap().get().await.unwrap();
+
+        assert!(header_entries(&producer.history()[0]).is_empty());
     }
 
     /// Rust-only: an explicit record partition outside `[0, numPartitions)` is
@@ -1572,8 +1719,8 @@ mod tests {
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
                 .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
-                .set_key_serializer(Some(Box::new(StringSerializer)))
-                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .set_key_serializer(StringSerializer)
+                .set_value_serializer(StringSerializer)
                 .build()
                 .expect("every mandatory parameter is set above"),
         );

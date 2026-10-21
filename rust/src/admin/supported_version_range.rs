@@ -22,7 +22,7 @@ use crate::common::Error;
 /// feature.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.SupportedVersionRange`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange")]
 pub struct SupportedVersionRange {
     min_version: i16,

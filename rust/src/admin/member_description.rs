@@ -26,7 +26,7 @@ use crate::admin::MemberAssignment;
 /// (which only supply default values already expressible through [`new`](Self::new)) are
 /// omitted; the full-field [`new`](Self::new) constructor is the sole entry point and no
 /// in-scope caller or test uses the deprecated overloads.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription")]
 pub struct MemberDescription {
     member_id: String,

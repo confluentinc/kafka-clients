@@ -35,8 +35,9 @@ use crate::integration_tests::common::test_context::TestContext;
 /// cross-checks the crate's `ApiKeys` listener table against a real broker.
 ///
 /// The second half of the Java test builds a `bootstrap.controllers` admin and
-/// expects only CONTROLLER-listener APIs; it is not translated, because this
-/// client still rejects `bootstrap.controllers` in `AdminClientConfig`.
+/// expects only CONTROLLER-listener APIs; it is not translated, because
+/// `AdminClientConfig` leaves `bootstrap.controllers` undefined until KIP-919
+/// controller bootstrap is implemented.
 #[tokio::test]
 async fn test_api_versions() {
     let ctx = TestContext::new(ClusterConfig::default()).await;

@@ -57,6 +57,14 @@ impl Config {
     }
 }
 
+impl std::hash::Hash for Config {
+    /// Java's `Config.hashCode()` is `entries.hashCode()`, the order-independent
+    /// sum of a `HashMap`'s entry hashes.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::common::utils::Utils::hash_unordered(&self.entries, state);
+    }
+}
+
 impl std::fmt::Display for Config {
     /// Mirrors Java's `toString()` (`Config.java:74-75`), which renders each entry
     /// through `ConfigEntry.toString()`, the redacting rendering.

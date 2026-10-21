@@ -20,6 +20,12 @@
 //! scope for the current milestone). For SASL PLAIN we only need a minimal
 //! subset.
 //!
+//! `sasl.mechanism` keeps Java's definition and its `GSSAPI` default, but PLAIN
+//! is the only mechanism this client implements: under a SASL
+//! `security.protocol` the client configurations reject any other value when
+//! they are built (`CommonClientConfigs::post_validate_supported_sasl_mechanism`),
+//! so `sasl.mechanism=PLAIN` must be set explicitly.
+//!
 //! **Excluded Java constants (out of scope):**
 //! - All `SASL_KERBEROS_*` — Kerberos not supported
 //! - All `SASL_OAUTHBEARER_*` — OAuth not supported
@@ -27,6 +33,11 @@
 //! - `SASL_CLIENT_CALLBACK_HANDLER_CLASS` — No pluggable callback handlers
 //! - `SASL_LOGIN_CLASS` — No pluggable login implementations
 
+use crate::common::Error;
+use crate::common::config::abstract_config::ValuesReader;
+use crate::common::config::config_def::{
+    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, Range, Type, ValidList,
+};
 use crate::common::config::types::Password;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +79,7 @@ impl SaslConfigs {
 /// `sasl.*` properties of a client config, as a Java caller does.
 ///
 /// Currently supports PLAIN mechanism only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SaslConfigs")]
 pub struct SaslConfigs {
@@ -89,7 +100,7 @@ pub struct SaslConfigs {
     /// via [`SaslConfigs::resolve_username`] and [`SaslConfigs::resolve_password`].
     ///
     /// A [`Password`] because Java defines `sasl.jaas.config` as
-    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:380`): the string embeds
+    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:398`): the string embeds
     /// the credentials, so every rendering of it is `[hidden]`.
     pub(crate) jaas_config: Option<Password>,
 
@@ -118,6 +129,27 @@ impl Default for SaslConfigs {
 }
 
 impl SaslConfigs {
+    /// The `sasl.*` settings of a configuration parsed with
+    /// [`Self::add_client_sasl_support`]'s definitions: `sasl.mechanism` and
+    /// `sasl.jaas.config`, the two the client's PLAIN authenticator reads. An
+    /// empty `sasl.jaas.config` counts as unset.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalState`] if a key's definition is missing or of
+    /// another type, a defect of the definition rather than of the input.
+    pub(crate) fn from_values(values: &mut ValuesReader<'_>) -> Result<SaslConfigs, Error> {
+        Ok(SaslConfigs {
+            mechanism: values.string(SaslConfigs::SASL_MECHANISM)?.to_string(),
+            jaas_config: values
+                .password_or_null(SaslConfigs::SASL_JAAS_CONFIG)?
+                .filter(|jaas| !jaas.value().is_empty())
+                .cloned(),
+            username: None,
+            password: None,
+        })
+    }
+
     /// Parses an option value from a JAAS configuration string.
     ///
     /// JAAS config format:
@@ -263,6 +295,217 @@ impl SaslConfigs {
             return SaslConfigs::parse_jaas_option(jaas.value(), "password");
         }
         None
+    }
+}
+
+impl SaslConfigs {
+    /// Defines the client `sasl.*` keys on `config`: Java's
+    /// `SaslConfigs.addClientSaslSupport(ConfigDef)`, in Java's order, except
+    /// the class-valued keys (CLAUDE.md §2): `sasl.client.callback.handler.class`,
+    /// `sasl.login.callback.handler.class`, `sasl.login.class`,
+    /// `sasl.oauthbearer.jwt.retriever.class` and
+    /// `sasl.oauthbearer.jwt.validator.class`.
+    ///
+    /// Java names each key by a public `SaslConfigs` constant; only the ones
+    /// this crate already exports are referenced by name, the others are
+    /// written as literals to add no public constant.
+    pub(crate) fn add_client_sasl_support(config: ConfigDef) -> ConfigDef {
+        config
+            .define(
+                "sasl.kerberos.service.name",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define("sasl.kerberos.kinit.cmd", Type::String, "/usr/bin/kinit", Importance::Low)
+            .define("sasl.kerberos.ticket.renew.window.factor", Type::Double, 0.80, Importance::Low)
+            .define("sasl.kerberos.ticket.renew.jitter", Type::Double, 0.05, Importance::Low)
+            .define("sasl.kerberos.min.time.before.relogin", Type::Long, 60_000i64, Importance::Low)
+            .define_with_validator(
+                "sasl.login.refresh.window.factor",
+                Type::Double,
+                0.80,
+                Range::between(0.5, 1.0),
+                Importance::Low,
+            )
+            .define_with_validator(
+                "sasl.login.refresh.window.jitter",
+                Type::Double,
+                0.05,
+                Range::between(0.0, 0.25),
+                Importance::Low,
+            )
+            .define_with_validator(
+                "sasl.login.refresh.min.period.seconds",
+                Type::Short,
+                60i16,
+                Range::between(0, 900),
+                Importance::Low,
+            )
+            .define_with_validator(
+                "sasl.login.refresh.buffer.seconds",
+                Type::Short,
+                300i16,
+                Range::between(0, 3600),
+                Importance::Low,
+            )
+            .define(
+                SaslConfigs::SASL_MECHANISM,
+                Type::String,
+                SaslConfigs::DEFAULT_SASL_MECHANISM,
+                Importance::Medium,
+            )
+            .define(
+                SaslConfigs::SASL_JAAS_CONFIG,
+                Type::Password,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define("sasl.login.connect.timeout.ms", Type::Int, DefaultValue::Null, Importance::Low)
+            .define("sasl.login.read.timeout.ms", Type::Int, DefaultValue::Null, Importance::Low)
+            .define("sasl.login.retry.backoff.max.ms", Type::Long, 10_000i64, Importance::Low)
+            .define("sasl.login.retry.backoff.ms", Type::Long, 100i64, Importance::Low)
+            .define("sasl.oauthbearer.scope", Type::String, DefaultValue::Null, Importance::Medium)
+            .define(
+                "sasl.oauthbearer.client.credentials.client.id",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.client.credentials.client.secret",
+                Type::Password,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define_with_validator(
+                "sasl.oauthbearer.assertion.algorithm",
+                Type::String,
+                "RS256",
+                CaseInsensitiveValidString::r#in(&["ES256", "RS256"]),
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.claim.aud",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define_with_validator(
+                "sasl.oauthbearer.assertion.claim.exp.seconds",
+                Type::Int,
+                300,
+                Range::between(0, 86400),
+                Importance::Low,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.claim.iss",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.claim.jti.include",
+                Type::Boolean,
+                false,
+                Importance::Medium,
+            )
+            .define_with_validator(
+                "sasl.oauthbearer.assertion.claim.nbf.seconds",
+                Type::Int,
+                60,
+                Range::between(0, 3600),
+                Importance::Low,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.claim.sub",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.file",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.private.key.file",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.private.key.passphrase",
+                Type::Password,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.assertion.template.file",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define("sasl.oauthbearer.scope.claim.name", Type::String, "scope", Importance::Low)
+            .define("sasl.oauthbearer.sub.claim.name", Type::String, "sub", Importance::Low)
+            .define(
+                "sasl.oauthbearer.token.endpoint.url",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.jwks.endpoint.url",
+                Type::String,
+                DefaultValue::Null,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.jwks.endpoint.refresh.ms",
+                Type::Long,
+                3_600_000i64,
+                Importance::Low,
+            )
+            .define(
+                "sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms",
+                Type::Long,
+                10_000i64,
+                Importance::Low,
+            )
+            .define(
+                "sasl.oauthbearer.jwks.endpoint.retry.backoff.ms",
+                Type::Long,
+                100i64,
+                Importance::Low,
+            )
+            .define("sasl.oauthbearer.clock.skew.seconds", Type::Int, 30, Importance::Low)
+            .define(
+                "sasl.oauthbearer.allow.unverified.audience",
+                Type::Boolean,
+                false,
+                Importance::Medium,
+            )
+            .define_with_validator(
+                "sasl.oauthbearer.expected.audience",
+                Type::List,
+                Vec::<String>::new(),
+                ValidList::any_non_duplicate_values(true, false),
+                Importance::High,
+            )
+            .define(
+                "sasl.oauthbearer.allow.unverified.issuer",
+                Type::Boolean,
+                false,
+                Importance::Medium,
+            )
+            .define(
+                "sasl.oauthbearer.expected.issuer",
+                Type::String,
+                DefaultValue::Null,
+                Importance::High,
+            )
+            .define("sasl.oauthbearer.header.urlencode", Type::Boolean, false, Importance::Low)
     }
 }
 
@@ -521,21 +764,6 @@ mod tests {
         assert_eq!(SaslConfigs::SASL_JAAS_CONFIG, "sasl.jaas.config");
         assert_eq!(SaslConfigs::DEFAULT_SASL_MECHANISM, "GSSAPI");
         assert_eq!(SaslConfigs::GSSAPI_MECHANISM, "GSSAPI");
-    }
-
-    #[test]
-    fn test_clone() {
-        let config = SaslConfigs {
-            mechanism: "SCRAM-SHA-256".to_owned(),
-            jaas_config: Some(Password::new("ScramLoginModule required;")),
-            username: Some("user".to_owned()),
-            password: Some(Password::new("pass")),
-        };
-        let cloned = config.clone();
-        assert_eq!(config.mechanism, cloned.mechanism);
-        assert_eq!(config.jaas_config, cloned.jaas_config);
-        assert_eq!(config.username, cloned.username);
-        assert_eq!(config.password, cloned.password);
     }
 
     /// The finding's requested test: `{:?}` of a config holding credentials

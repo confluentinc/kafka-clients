@@ -21,7 +21,7 @@ use std::fmt;
 /// The state of a classic group.
 ///
 /// Corresponds to `org.apache.kafka.common.ClassicGroupState`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ClassicGroupState")]
 pub enum ClassicGroupState {

@@ -201,8 +201,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer")
 }
@@ -414,8 +414,8 @@ async fn test_async_consumer_re2j_pattern_subscription() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -473,8 +473,8 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -522,8 +522,8 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -578,8 +578,8 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -643,8 +643,8 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -699,8 +699,8 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -764,8 +764,8 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -813,8 +813,8 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -865,8 +865,8 @@ async fn test_async_consumer_unsubscribe_topic() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -921,8 +921,8 @@ async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -946,8 +946,8 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 

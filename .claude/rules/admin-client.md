@@ -290,9 +290,13 @@ does for that same method** — not by which tier/phase the method belongs to:
   - **Only** for the methods Java's own `MockAdminClient` leaves as
     `throw new UnsupportedOperationException("Not implemented yet")` (e.g.
     `createPartitions`, and the non-empty `deleteRecords` path) may the Rust
-    mock return an `Error::unsupported_version("Not implemented yet")`
-    (NOT a `panic!` — CLAUDE.md §12.1). This is a faithful translation of the
-    Java behavior, not a scope deferral, and every such site MUST cite the
+    mock return an `Error::local_unsupported_operation("Not implemented yet")`
+    (NOT a `panic!` — CLAUDE.md §12.1), the translation of Java's
+    `UnsupportedOperationException`, keeping Java's message (an empty one where
+    Java passes none). Never `Error::unsupported_version`: that is Java's
+    wire-level `UnsupportedVersionException`, which Java's mock throws only in
+    `unregisterController` and `unregisterBroker`, so only there is it right. This is a faithful
+    translation of the Java behavior, not a scope deferral, and every such site MUST cite the
     exact Java line that throws so the claim is verifiable. Do NOT attach a
     "Java throws unsupported" justification to a method Java actually
     implements — that is a false statement of the Java contract and will be
