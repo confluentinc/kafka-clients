@@ -31,7 +31,7 @@ use crate::MetadataRecoveryStrategy;
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
 use crate::common::config::types::Password;
-use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::config::{ConfigDef, SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::auth::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
@@ -1234,14 +1234,18 @@ impl ProducerConfig {
         Ok(value)
     }
 
-    /// Parses a string value as `i32`.
+    /// Parses a `Type.INT` value as Java's `ConfigDef.parseType` does
+    /// ([`ConfigDef::parse_int`]): a value that is not a number is rejected
+    /// with `Not a number of type INT`.
     fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-        value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
+        ConfigDef::parse_int(key, value)
     }
 
-    /// Parses a string value as `i64`.
+    /// Parses a `Type.LONG` value as Java's `ConfigDef.parseType` does
+    /// ([`ConfigDef::parse_long`]): a value that is not a number is rejected
+    /// with `Not a number of type LONG`.
     fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-        value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
+        ConfigDef::parse_long(key, value)
     }
 
     /// Parses a string value as `bool`.
@@ -1585,6 +1589,23 @@ mod tests {
         props.insert("batch.size".to_string(), "not-a-number".to_string());
         let result = ProducerConfig::new(&props);
         assert!(result.is_err());
+    }
+
+    /// Java's `ConfigDef.parseType` rejects a value that is not a number with
+    /// `Not a number of type INT` / `LONG` after the key (`ConfigDef.java:752-760`,
+    /// `:788-789`), and trims the value before parsing it.
+    #[test]
+    fn test_unparsable_numbers_report_the_java_type() {
+        for (key, java_type) in [("batch.size", "INT"), ("linger.ms", "LONG")] {
+            let err = ProducerConfig::new(&props_with(&[(key, "abc")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value abc for configuration {key}: Not a number of type {java_type}")
+            );
+        }
+        let config = ProducerConfig::new(&props_with(&[("batch.size", " 7 "), ("linger.ms", " 8 ")])).unwrap();
+        assert_eq!((config.batch_size, config.linger_ms), (7, 8));
     }
 
     #[test]
