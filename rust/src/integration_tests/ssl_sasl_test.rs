@@ -21,7 +21,7 @@
 //! 4. SASL authentication failure with wrong credentials
 //! 5. SASL unsupported mechanism rejection
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use crate::admin::AdminClientConfig;
@@ -31,6 +31,7 @@ use crate::common::network::SaslChannelBuilder;
 use crate::common::network::Selectable;
 use crate::common::network::Selector;
 use crate::common::network::SslChannelBuilder;
+use crate::common::network::channel_state::State;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ConcreteResponse;
@@ -254,12 +255,47 @@ async fn test_ssl_connection() {
     selector.close().await;
 }
 
-/// Test: `ssl.protocol=TLSv1.2` and `ssl.cipher.suites` reach the handshake.
+/// Helper: connects `selector` to `addr` and checks that the channel serves an
+/// `ApiVersions` request.
+async fn assert_serves_api_versions(selector: &mut Selector, addr: SocketAddr) {
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_ready(selector, NODE_ID).await;
+    let mut builder = api_versions_request::Builder::new();
+    let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
+    selector.send(send).expect("Failed to queue send");
+    poll_until_receive(selector).await;
+    let receives = selector.completed_receives();
+    assert_eq!(1, receives.len());
+    let response = parse_response(receives[0].payload().unwrap(), &header);
+    let ConcreteResponse::ApiVersions(ref avr) = response else {
+        panic!("Expected ApiVersions response, got: {response}");
+    };
+    assert_eq!(avr.data().error_code(), Errors::None.code());
+}
+
+/// Helper: connects `selector` to `addr` and checks that the TLS handshake
+/// fails: the channel is disconnected in the `AUTHENTICATION_FAILED` state,
+/// never ready, within [`MAX_POLL_ITERATIONS`] polls.
+async fn assert_handshake_fails(selector: &mut Selector, addr: SocketAddr) {
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_disconnected(selector).await;
+    assert!(!selector.is_channel_ready(NODE_ID));
+    let state = selector.disconnected().get(NODE_ID).expect("the channel is disconnected");
+    assert_eq!(state.state(), State::AuthenticationFailed, "{state:?}");
+}
+
+/// Test: `ssl.cipher.suites` reaches the handshake.
 ///
 /// The broker certificate is ECDSA (`rcgen`'s default key), so a TLS 1.2
-/// `ECDHE_ECDSA` suite under the `TLSv1.2` ceiling completes the handshake and
-/// serves a request, while a list holding only an `ECDHE_RSA` suite has no suite
-/// the broker can use with that certificate and the handshake fails.
+/// `ECDHE_ECDSA` suite completes the handshake and serves a request, while a
+/// list holding only an `ECDHE_RSA` suite has no suite the broker can use with
+/// that certificate and the handshake fails.
 #[tokio::test]
 async fn test_ssl_connection_with_protocol_and_cipher_suites() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
@@ -273,22 +309,7 @@ async fn test_ssl_connection_with_protocol_and_cipher_suites() {
             (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
         ],
     );
-    selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
-        .await
-        .expect("Failed to connect");
-    poll_until_ready(&mut selector, NODE_ID).await;
-    let mut builder = api_versions_request::Builder::new();
-    let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
-    selector.send(send).expect("Failed to queue send");
-    poll_until_receive(&mut selector).await;
-    let receives = selector.completed_receives();
-    assert_eq!(1, receives.len());
-    let response = parse_response(receives[0].payload().unwrap(), &header);
-    let ConcreteResponse::ApiVersions(ref avr) = response else {
-        panic!("Expected ApiVersions response, got: {response}");
-    };
-    assert_eq!(avr.data().error_code(), Errors::None.code());
+    assert_serves_api_versions(&mut selector, addr).await;
     selector.close().await;
 
     let mut selector = create_ssl_selector_with(
@@ -298,12 +319,46 @@ async fn test_ssl_connection_with_protocol_and_cipher_suites() {
             (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
         ],
     );
-    selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
-        .await
-        .expect("Failed to connect");
-    poll_until_disconnected(&mut selector).await;
-    assert!(!selector.is_channel_ready(NODE_ID));
+    assert_handshake_fails(&mut selector, addr).await;
+    selector.close().await;
+}
+
+/// Test: `ssl.protocol` selects the default protocols and cipher suites, as
+/// JSSE's `SSLContext.getInstance(ssl.protocol)` does, against a broker whose
+/// SSL listener allows TLS 1.3 only
+/// (`listener.name.tlsonly.ssl.enabled.protocols=TLSv1.3`):
+///
+/// - `TLSv1.2` with the default suites cannot use TLS 1.3, so the handshake
+///   fails (Java: `No appropriate protocol`);
+/// - `TLSv1.2` with a TLS 1.3 suite in `ssl.cipher.suites` uses TLS 1.3 and
+///   connects, as Java does;
+/// - `TLSv1.3` (the default) connects.
+#[tokio::test]
+async fn test_ssl_protocol_against_tls13_only_listener() {
+    let props = BTreeMap::from([(
+        "KAFKA_LISTENER_NAME_TLSONLY_SSL_ENABLED_PROTOCOLS".to_string(),
+        "TLSv1.3".to_string(),
+    )]);
+    let ctx = TestContext::new(ClusterConfig::default().set_server_properties(props)).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
+    let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
+
+    let mut selector = create_ssl_selector_with(ca_cert_pem, &[(SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2")]);
+    assert_handshake_fails(&mut selector, addr).await;
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
+        ],
+    );
+    assert_serves_api_versions(&mut selector, addr).await;
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(ca_cert_pem, &[(SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.3")]);
+    assert_serves_api_versions(&mut selector, addr).await;
     selector.close().await;
 }
 

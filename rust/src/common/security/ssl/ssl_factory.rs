@@ -81,16 +81,18 @@ impl SslFactory {
     /// - No valid certificates are found in the truststore
     /// - The private key cannot be loaded, is encrypted (see
     ///   [`is_encrypted_pem_key`]), or is missing when a client cert is provided
-    /// - `ssl.protocol` is not `TLSv1.3`, `TLSv1.2` or `TLS`, an entry of
-    ///   `ssl.enabled.protocols` is not `TLSv1.3` or `TLSv1.2`, or the
-    ///   `ssl.protocol` ceiling leaves no enabled protocol
+    /// - `ssl.protocol` names no client `SSLContext` of the JDK (`TLSv1.3`,
+    ///   `TLSv1.2`, `TLSv1.1`, `TLSv1`, `SSLv3`, `TLS`, `SSL`), or an entry of
+    ///   `ssl.enabled.protocols` is not `TLSv1.3` or `TLSv1.2`
     /// - an entry of `ssl.cipher.suites` is not a cipher suite of the TLS
-    ///   provider (`Unsupported CipherSuite: <name>`), or none of the
-    ///   configured suites can be used with an enabled protocol
+    ///   provider (`Unsupported CipherSuite: <name>`)
+    /// - no cipher suite is enabled, or no enabled protocol can be used with
+    ///   an enabled suite (see the private `resolve_tls_parameters` for how
+    ///   `ssl.protocol` selects the default lists)
     ///
     /// Java reports an unsupported cipher suite when it creates the first
-    /// `SSLEngine`, and an empty protocol intersection at the handshake; here
-    /// both are reported when the factory is built.
+    /// `SSLEngine`, and the last two at the handshake; here all are reported
+    /// when the factory is built.
     #[doc(alias = "org.apache.kafka.common.security.ssl.SslFactory#SslFactory")]
     pub fn new(ssl_config: &SslConfigs) -> io::Result<Self> {
         // Install the aws-lc-rs crypto provider if not already installed.
@@ -107,23 +109,38 @@ impl SslFactory {
         // Determine hostname verification
         let hostname_verification = !ssl_config.endpoint_identification_algorithm.is_empty();
 
-        // Determine TLS versions: `ssl.enabled.protocols` under the
-        // `ssl.protocol` ceiling.
-        let versions = resolve_tls_versions(&ssl_config.protocol, &ssl_config.enabled_protocols)?;
+        // Determine the TLS versions and cipher suites from `ssl.protocol`,
+        // `ssl.enabled.protocols` and `ssl.cipher.suites`, as JSSE does.
+        let installed = rustls::crypto::CryptoProvider::get_default()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+        let (versions, suites) = resolve_tls_parameters(
+            &ssl_config.protocol,
+            &ssl_config.enabled_protocols,
+            &ssl_config.cipher_suites,
+            &installed.cipher_suites,
+        )?;
 
-        // An empty `ssl.cipher.suites` keeps the installed provider's suites;
-        // otherwise the configured ones, in the configured order.
-        let builder = if ssl_config.cipher_suites.is_empty() {
-            ClientConfig::builder_with_protocol_versions(&versions)
+        // The installed provider when its suites are the enabled ones;
+        // otherwise a per-config provider with the enabled suites, in the
+        // configured order: the aws-lc-rs provider for `ssl.cipher.suites`,
+        // whose suites they name, else the installed one restricted to the
+        // `ssl.protocol` context's default suites.
+        let builder = if suites == installed.cipher_suites {
+            ClientConfig::builder_with_provider(installed).with_protocol_versions(&versions)
         } else {
-            let provider = rustls::crypto::CryptoProvider {
-                cipher_suites: resolve_cipher_suites(&ssl_config.cipher_suites)?,
-                ..rustls::crypto::aws_lc_rs::default_provider()
+            let base = if ssl_config.cipher_suites.is_empty() {
+                (*installed).clone()
+            } else {
+                rustls::crypto::aws_lc_rs::default_provider()
             };
-            ClientConfig::builder_with_provider(Arc::new(provider))
-                .with_protocol_versions(&versions)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
-        };
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::CryptoProvider {
+                cipher_suites: suites,
+                ..base
+            }))
+            .with_protocol_versions(&versions)
+        }
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
         // Server certificate verification
         let builder = if hostname_verification {
@@ -400,74 +417,156 @@ fn load_client_identity(
     }
 }
 
-/// Resolves `ssl.enabled.protocols` under the `ssl.protocol` ceiling to rustls
-/// `SupportedProtocolVersion` references.
+/// The protocols the `SSLContext` of `ssl.protocol` enables by default.
 ///
-/// An empty `enabled_protocols` means the provider's defaults, as in Java:
-/// `DefaultSslEngineFactory.configure` leaves `enabledProtocols` `null` for an
-/// empty `ssl.enabled.protocols`, and `createSslEngine` then skips
-/// `setEnabledProtocols`, so the JSSE provider's default protocols apply. The
-/// rustls counterpart is [`rustls::DEFAULT_VERSIONS`].
+/// `protocol` is the name Kafka passes to `SSLContext.getInstance(protocol)`
+/// (`DefaultSslEngineFactory.java:243-245`), matched ignoring case as JCA
+/// algorithm names are. The names are the client `SSLContext`s of the JDK's
+/// SunJSSE provider (`SunJSSE.java:71-82`), aliases included, and each
+/// context's default client protocols (`SSLContextImpl.java`):
 ///
-/// `protocol` is Java's `SSLContext.getInstance(protocol)`
-/// (`DefaultSslEngineFactory.java:243-245`), the highest version a connection
-/// may use (`SslConfigs.java:35-40`: "If this config is set to 'TLSv1.2',
-/// clients will not use 'TLSv1.3' even if it is one of the values in
-/// ssl.enabled.protocols"). `TLSv1.3` and the JDK's generic `TLS` keep the
-/// enabled versions, `TLSv1.2` drops TLS 1.3 from them. The name is matched
-/// ignoring case, as JCA algorithm names are. Any other name is an error:
-/// rustls has no TLS 1.1 or lower, and Java fails `SSLContext.getInstance` for
-/// an unknown one. When the ceiling leaves no enabled version, the error names
-/// both keys; Java would fail at the handshake instead.
-fn resolve_tls_versions(
+/// | `ssl.protocol` | JSSE context | default protocols | here |
+/// |---|---|---|---|
+/// | `TLS`, `SSL` | `TLSContext` | TLSv1.3, TLSv1.2 | TLS 1.3, TLS 1.2 |
+/// | `TLSv1.3` | `TLS13Context` | TLSv1.3 and lower | TLS 1.3, TLS 1.2 |
+/// | `TLSv1.2` | `TLS12Context` | TLSv1.2 and lower | TLS 1.2 |
+/// | `TLSv1.1` | `TLS11Context` | TLSv1.1 and lower | none |
+/// | `TLSv1`, `SSLv3` | `TLS10Context` | TLSv1, SSLv3 | none |
+///
+/// rustls implements no version below TLS 1.2, and the JDK disables them by
+/// default (`jdk.tls.disabledAlgorithms`), so the last two rows enable no
+/// protocol in either client. Any other name is an error, as
+/// `SSLContext.getInstance` throws `NoSuchAlgorithmException` for it: the DTLS
+/// contexts, which Java's `SSLSocket` and Kafka's TCP transport cannot use, and
+/// `Default`, whose context Java refuses to `init` ("Default SSLContext is
+/// initialized automatically"), included.
+fn context_default_versions(protocol: &str) -> io::Result<&'static [&'static rustls::SupportedProtocolVersion]> {
+    const TLS13_CONTEXT: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13, &rustls::version::TLS12];
+    const TLS12_CONTEXT: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS12];
+    let is = |name: &str| protocol.eq_ignore_ascii_case(name);
+    if is("TLS") || is("SSL") || is("TLSv1.3") {
+        Ok(TLS13_CONTEXT)
+    } else if is("TLSv1.2") {
+        Ok(TLS12_CONTEXT)
+    } else if is("TLSv1.1") || is("TLSv1") || is("SSLv3") {
+        Ok(&[])
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Unsupported TLS protocol: '{protocol}'. \
+                 Supported protocols: TLSv1.3, TLSv1.2, TLSv1.1, TLSv1, SSLv3, TLS, SSL"
+            ),
+        ))
+    }
+}
+
+/// Resolves `ssl.protocol`, `ssl.enabled.protocols` and `ssl.cipher.suites`
+/// to the TLS versions and cipher suites a connection may use, as JSSE does
+/// for the `SSLEngine` Kafka's `DefaultSslEngineFactory` creates.
+///
+/// `ssl.protocol` is not a ceiling of its own. It selects the `SSLContext`
+/// (see [`context_default_versions`]), which supplies only the *default* lists:
+/// its default protocols, and its default cipher suites, the suites usable
+/// with one of those protocols (`SSLContextImpl.java:655-670`). Kafka replaces
+/// the suites when `ssl.cipher.suites` is not empty and the protocols when
+/// `ssl.enabled.protocols` is not empty (`DefaultSslEngineFactory.java:139-151`,
+/// `:191-192`); an empty list leaves the context's default. A protocol is then
+/// used only when an enabled suite can be used with it
+/// (`HandshakeContext.java:258`, `getActiveProtocols`). So `TLSv1.2` keeps TLS
+/// 1.3 out only while its default suites are in use: with the default
+/// `ssl.enabled.protocols` (`TLSv1.2,TLSv1.3`) and a TLS 1.3 suite in
+/// `ssl.cipher.suites`, Java negotiates TLS 1.3, and so does this client. The
+/// documented ceiling of `SslConfigs.java:35-40` is the default-suites case.
+///
+/// `default_suites` are the TLS provider's suites, rustls's counterpart of the
+/// JSSE provider's default-enabled ones. An empty `ssl.enabled.protocols`
+/// gives the context's default protocols (rustls's [`rustls::DEFAULT_VERSIONS`]
+/// under `TLS` and `TLSv1.3`).
+///
+/// Java reports an empty result at the handshake (`No appropriate protocol
+/// (protocol is disabled or cipher suites are inappropriate)`); here the
+/// factory fails to build:
+/// - with no enabled cipher suite, which happens under `TLSv1.1`, `TLSv1` and
+///   `SSLv3` with an empty `ssl.cipher.suites`: their default suites are the
+///   ones usable with TLS 1.1 or lower, and every rustls suite needs TLS 1.2
+///   or higher;
+/// - with no enabled protocol that an enabled suite can be used with.
+///
+/// Each error names the keys involved.
+fn resolve_tls_parameters(
     protocol: &str,
     enabled_protocols: &[String],
-) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
-    let allow_tls13 = if protocol.eq_ignore_ascii_case("TLSv1.3") || protocol.eq_ignore_ascii_case("TLS") {
-        true
-    } else if protocol.eq_ignore_ascii_case("TLSv1.2") {
-        false
+    cipher_suites: &[String],
+    default_suites: &[rustls::SupportedCipherSuite],
+) -> io::Result<(
+    Vec<&'static rustls::SupportedProtocolVersion>,
+    Vec<rustls::SupportedCipherSuite>,
+)> {
+    // Java's order: the context (`SSLContext.getInstance`), then the suites
+    // (`setEnabledCipherSuites`), then the protocols (`setEnabledProtocols`).
+    let context_versions = context_default_versions(protocol)?;
+    let suites: Vec<rustls::SupportedCipherSuite> = if cipher_suites.is_empty() {
+        default_suites
+            .iter()
+            .filter(|suite| context_versions.contains(&suite.version()))
+            .copied()
+            .collect()
     } else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Unsupported TLS protocol: '{protocol}'. Supported protocols: TLSv1.3, TLSv1.2, TLS"),
-        ));
+        resolve_cipher_suites(cipher_suites)?
     };
-    let mut versions = Vec::new();
-    if enabled_protocols.is_empty() {
-        versions.extend_from_slice(rustls::DEFAULT_VERSIONS);
+    let versions = if enabled_protocols.is_empty() {
+        context_versions.to_vec()
     } else {
-        for proto in enabled_protocols {
-            match proto.as_str() {
-                "TLSv1.3" => versions.push(&rustls::version::TLS13),
-                "TLSv1.2" => versions.push(&rustls::version::TLS12),
-                other => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Unsupported TLS protocol version: '{other}'. \
-                             Supported versions: TLSv1.2, TLSv1.3"
-                        ),
-                    ));
-                },
-            }
-        }
-    }
-    if !allow_tls13 {
-        versions.retain(|v| v.version != rustls::ProtocolVersion::TLSv1_3);
-    }
-    if versions.is_empty() {
+        resolve_enabled_protocols(enabled_protocols)?
+    };
+    if suites.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "No TLS protocol of {} = [{}] is allowed by {} = {protocol}",
-                SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
-                enabled_protocols.join(", "),
+                "No cipher suite is enabled: {} is empty and none of the TLS provider's cipher suites can be \
+                 used with the protocols of {} = {protocol} (this client implements TLS 1.2 and TLS 1.3 only)",
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
                 SslConfigs::SSL_PROTOCOL_CONFIG,
             ),
         ));
     }
-    Ok(versions)
+    let active: Vec<_> = versions
+        .into_iter()
+        .filter(|version| suites.iter().any(|suite| suite.version() == *version))
+        .collect();
+    if active.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "No TLS protocol of {} = [{}] can be used with the enabled cipher suites ({} = {protocol}, {} = [{}])",
+                SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
+                enabled_protocols.join(", "),
+                SslConfigs::SSL_PROTOCOL_CONFIG,
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
+                cipher_suites.join(", "),
+            ),
+        ));
+    }
+    Ok((active, suites))
+}
+
+/// Resolves the entries of a non-empty `ssl.enabled.protocols` to rustls
+/// `SupportedProtocolVersion` references.
+fn resolve_enabled_protocols(
+    enabled_protocols: &[String],
+) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
+    enabled_protocols
+        .iter()
+        .map(|proto| match proto.as_str() {
+            "TLSv1.3" => Ok(&rustls::version::TLS13),
+            "TLSv1.2" => Ok(&rustls::version::TLS12),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Unsupported TLS protocol version: '{other}'. Supported versions: TLSv1.2, TLSv1.3"),
+            )),
+        })
+        .collect()
 }
 
 /// Resolves `ssl.cipher.suites` to the TLS provider's cipher suites, in the
@@ -797,11 +896,12 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     /// An empty `ssl.enabled.protocols` passes config validation (Java's
     /// `ValidList.anyNonDuplicateValues(true, false)` allows it) and means
-    /// the provider's default protocols, as Java's `DefaultSslEngineFactory`
-    /// does, rather than failing every TLS connection.
+    /// the `ssl.protocol` context's default protocols, as Java's
+    /// `DefaultSslEngineFactory` does, rather than failing every TLS
+    /// connection.
     #[test]
     fn test_empty_enabled_protocols_uses_provider_defaults() {
-        assert_eq!(resolve_tls_versions("TLSv1.3", &[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
+        assert_eq!(resolve("TLSv1.3", &[], &[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
 
         let config = SslConfigs::parse_for_test(&[("ssl.enabled.protocols", "")]).unwrap();
         assert!(config.enabled_protocols.is_empty());
@@ -812,54 +912,198 @@ B2V9lhUZNk+pRjtJw9unpXsM
         values.iter().map(|v| (*v).to_string()).collect()
     }
 
-    /// `ssl.protocol=TLSv1.2` is a ceiling: TLS 1.3 is dropped from
-    /// `ssl.enabled.protocols` (`SslConfigs.java:35-40`), from the provider's
-    /// defaults too.
+    /// [`resolve_tls_parameters`] over the aws-lc-rs provider's suites, the
+    /// ones [`SslFactory::new`] installs: the TLS versions a connection may use.
+    fn resolve(
+        protocol: &str,
+        enabled: &[&str],
+        suites: &[&str],
+    ) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
+        let defaults = rustls::crypto::aws_lc_rs::default_provider().cipher_suites;
+        resolve_tls_parameters(protocol, &strings(enabled), &strings(suites), &defaults).map(|(versions, _)| versions)
+    }
+
+    const BOTH: &[&str] = &["TLSv1.2", "TLSv1.3"];
+    const T13: &str = "TLS_AES_128_GCM_SHA256";
+    const T12: &str = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256";
+
+    fn tls12() -> Vec<&'static rustls::SupportedProtocolVersion> {
+        vec![&rustls::version::TLS12]
+    }
+
+    fn tls13() -> Vec<&'static rustls::SupportedProtocolVersion> {
+        vec![&rustls::version::TLS13]
+    }
+
+    fn tls12_and_13() -> Vec<&'static rustls::SupportedProtocolVersion> {
+        vec![&rustls::version::TLS12, &rustls::version::TLS13]
+    }
+
+    fn assert_no_protocol(result: io::Result<Vec<&'static rustls::SupportedProtocolVersion>>, message: &str) {
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), message);
+    }
+
+    /// The cases of a JDK 25 (Corretto) probe that builds the client context
+    /// with `SSLContext.getInstance(ssl.protocol)`, sets the cipher suites and
+    /// then the protocols as `DefaultSslEngineFactory.createSslEngine` does
+    /// (`:191-192`), and handshakes with a JSSE server offering TLS 1.2 and TLS
+    /// 1.3 with an RSA certificate. Each comment gives the protocol Java
+    /// negotiated; the versions asserted are the ones this client may use, of
+    /// which rustls negotiates the highest. `T13` is `TLS_AES_128_GCM_SHA256`,
+    /// `T12` `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
     #[test]
-    fn test_tls12_protocol_drops_tls13() {
-        let both = strings(&["TLSv1.2", "TLSv1.3"]);
-        assert_eq!(resolve_tls_versions("TLSv1.2", &both).unwrap(), vec![&rustls::version::TLS12]);
-        assert_eq!(resolve_tls_versions("TLSv1.2", &[]).unwrap(), vec![&rustls::version::TLS12]);
-        // JCA algorithm names ignore case.
-        assert_eq!(resolve_tls_versions("tlsv1.2", &both).unwrap(), vec![&rustls::version::TLS12]);
+    fn test_ssl_protocol_follows_jsse_context_defaults() {
+        // 01: Java negotiates TLSv1.2: the TLSv1.2 context's default suites
+        // leave TLS 1.3 out.
+        assert_eq!(resolve("TLSv1.2", BOTH, &[]).unwrap(), tls12());
+        // 02: the same, the name matched ignoring case.
+        assert_eq!(resolve("tlsv1.2", BOTH, &[]).unwrap(), tls12());
+        // 03, 04: Java negotiates TLSv1.3.
+        assert_eq!(resolve("TLSv1.3", BOTH, &[]).unwrap(), tls12_and_13());
+        assert_eq!(resolve("TLS", BOTH, &[]).unwrap(), tls12_and_13());
+        // 11, 12: Java negotiates TLSv1.3: a TLS 1.3 suite in
+        // `ssl.cipher.suites` replaces the context's defaults, whatever its
+        // position.
+        assert_eq!(resolve("TLSv1.2", BOTH, &[T13, T12]).unwrap(), tls12_and_13());
+        assert_eq!(resolve("TLSv1.2", BOTH, &[T12, T13]).unwrap(), tls12_and_13());
+        // 13: Java negotiates TLSv1.3.
+        assert_eq!(resolve("TLSv1.2", BOTH, &[T13]).unwrap(), tls13());
+        // 15: Java negotiates TLSv1.3: `SSL` is an alias of `TLS`.
+        assert_eq!(resolve("SSL", BOTH, &[]).unwrap(), tls12_and_13());
+        // 27: the same in lower case.
+        assert_eq!(resolve("ssl", BOTH, &[]).unwrap(), tls12_and_13());
+        // 17: Java negotiates TLSv1.3: the TLSv1.1 context's defaults are
+        // both replaced.
+        assert_eq!(resolve("TLSv1.1", BOTH, &[T13, T12]).unwrap(), tls12_and_13());
+        // 23, 24, 31: Java negotiates TLSv1.3; `SSLv3` is an alias of `TLSv1`.
+        assert_eq!(resolve("SSLv3", BOTH, &[T13, T12]).unwrap(), tls12_and_13());
+        assert_eq!(resolve("TLSv1", BOTH, &[T13, T12]).unwrap(), tls12_and_13());
+        assert_eq!(resolve("sslv3", BOTH, &[T13, T12]).unwrap(), tls12_and_13());
+        // 20: Java negotiates TLSv1.2.
+        assert_eq!(resolve("TLSv1.2", BOTH, &[T12]).unwrap(), tls12());
+        // 21: Java negotiates TLSv1.2: the TLSv1.2 context's default protocols.
+        assert_eq!(resolve("TLSv1.2", &[], &[]).unwrap(), tls12());
+        // 22, 30: Java negotiates TLSv1.3.
+        assert_eq!(resolve("TLS", &[], &[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
+        assert_eq!(resolve("TLSv1.3", &[], &[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
+        // 26: Java negotiates TLSv1.3.
+        assert_eq!(resolve("TLSv1.2", &["TLSv1.3"], &[T13]).unwrap(), tls13());
+    }
+
+    /// The probe's failing cases. Java fails each at the handshake with `No
+    /// appropriate protocol (protocol is disabled or cipher suites are
+    /// inappropriate)`; here the factory fails to build, naming the keys.
+    #[test]
+    fn test_ssl_protocol_without_usable_protocol_fails() {
+        // 05: the TLSv1.2 context's default suites cannot be used with TLS 1.3.
+        assert_no_protocol(
+            resolve("TLSv1.2", &["TLSv1.3"], &[]),
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.2, ssl.cipher.suites = [])",
+        );
+        // 06, 29: no enabled suite can be used with the enabled protocol.
+        assert_no_protocol(
+            resolve("TLSv1.3", &["TLSv1.3"], &[T12]),
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.3, ssl.cipher.suites = [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256])",
+        );
+        assert_no_protocol(
+            resolve("TLSv1.3", &["TLSv1.2"], &[T13]),
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.2] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.3, ssl.cipher.suites = [TLS_AES_128_GCM_SHA256])",
+        );
+        // 14: the TLSv1.2 context's default protocols leave TLS 1.3 out.
+        assert_no_protocol(
+            resolve("TLSv1.2", &[], &[T13]),
+            "No TLS protocol of ssl.enabled.protocols = [] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.2, ssl.cipher.suites = [TLS_AES_128_GCM_SHA256])",
+        );
+        // 25: the TLSv1.1 context's default protocols are TLS 1.1 and lower.
+        assert_no_protocol(
+            resolve("TLSv1.1", &[], &[T13, T12]),
+            "No TLS protocol of ssl.enabled.protocols = [] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.1, ssl.cipher.suites = [TLS_AES_128_GCM_SHA256, \
+             TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256])",
+        );
+        // 16, 18, 19: the default suites of these contexts are the ones usable
+        // with TLS 1.1 or lower; rustls has none.
+        for protocol in ["TLSv1.1", "TLSv1", "SSLv3"] {
+            assert_no_protocol(
+                resolve(protocol, BOTH, &[]),
+                &format!(
+                    "No cipher suite is enabled: ssl.cipher.suites is empty and none of the TLS provider's cipher \
+                     suites can be used with the protocols of ssl.protocol = {protocol} (this client implements \
+                     TLS 1.2 and TLS 1.3 only)"
+                ),
+            );
+        }
+    }
+
+    /// The factory applies the resolution: `TLSv1.2` with a TLS 1.3 suite
+    /// keeps TLS 1.3 (case 13), `TLSv1.2` with the default suites restricts
+    /// the provider to its TLS 1.2 suites (case 01), and `SSL` builds (case
+    /// 15).
+    #[test]
+    fn test_factory_applies_ssl_protocol_context_defaults() {
+        let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.2"), ("ssl.cipher.suites", T13)]).unwrap();
+        let factory = SslFactory::new(&config).unwrap();
+        assert_eq!(
+            factory
+                .client_config()
+                .crypto_provider()
+                .cipher_suites
+                .iter()
+                .map(|s| s.suite())
+                .collect::<Vec<_>>(),
+            [rustls::CipherSuite::TLS13_AES_128_GCM_SHA256]
+        );
 
         let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.2")]).unwrap();
+        let factory = SslFactory::new(&config).unwrap();
+        let suites = &factory.client_config().crypto_provider().cipher_suites;
+        assert!(!suites.is_empty());
+        assert!(suites.iter().all(|s| s.version() == &rustls::version::TLS12), "{suites:?}");
+
+        let config = SslConfigs::parse_for_test(&[("ssl.protocol", "SSL")]).unwrap();
         assert!(SslFactory::new(&config).is_ok());
-    }
 
-    /// `TLSv1.3` and the JDK's generic `TLS` context put no ceiling on the
-    /// enabled protocols.
-    #[test]
-    fn test_tls13_and_tls_protocol_keep_enabled_versions() {
-        let both = strings(&["TLSv1.2", "TLSv1.3"]);
-        for protocol in ["TLSv1.3", "TLS"] {
-            assert_eq!(
-                resolve_tls_versions(protocol, &both).unwrap(),
-                vec![&rustls::version::TLS12, &rustls::version::TLS13],
-                "{protocol}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_unsupported_protocol_fails() {
-        for protocol in ["TLSv1.1", "SSLv3", ""] {
-            let err = resolve_tls_versions(protocol, &strings(&["TLSv1.2"])).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(
-                err.to_string(),
-                format!("Unsupported TLS protocol: '{protocol}'. Supported protocols: TLSv1.3, TLSv1.2, TLS")
-            );
-        }
         let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.1")]).unwrap();
         assert_eq!(
             SslFactory::new(&config).unwrap_err().to_string(),
-            "Unsupported TLS protocol: 'TLSv1.1'. Supported protocols: TLSv1.3, TLSv1.2, TLS"
+            "No cipher suite is enabled: ssl.cipher.suites is empty and none of the TLS provider's cipher suites \
+             can be used with the protocols of ssl.protocol = TLSv1.1 (this client implements TLS 1.2 and TLS \
+             1.3 only)"
         );
     }
 
-    /// A ceiling that leaves no enabled protocol fails when the factory is
-    /// built, naming both keys (Java fails at the handshake).
+    /// A name the JDK has no client `SSLContext` for fails, as
+    /// `SSLContext.getInstance` throws `NoSuchAlgorithmException` (probe case
+    /// 10, `TLSv9`). `Default` fails too: Java refuses to `init` it (case
+    /// 09), and the DTLS contexts cannot serve a TCP connection (case 28).
+    #[test]
+    fn test_unsupported_protocol_fails() {
+        for protocol in ["TLSv9", "Default", "DTLS", "DTLSv1.2", ""] {
+            let err = resolve(protocol, &["TLSv1.2"], &[]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Unsupported TLS protocol: '{protocol}'. \
+                     Supported protocols: TLSv1.3, TLSv1.2, TLSv1.1, TLSv1, SSLv3, TLS, SSL"
+                )
+            );
+        }
+        let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv9")]).unwrap();
+        assert_eq!(
+            SslFactory::new(&config).unwrap_err().to_string(),
+            "Unsupported TLS protocol: 'TLSv9'. Supported protocols: TLSv1.3, TLSv1.2, TLSv1.1, TLSv1, SSLv3, TLS, SSL"
+        );
+    }
+
+    /// The factory reports a protocol no enabled suite can be used with when
+    /// it is built (probe case 05; Java fails at the handshake).
     #[test]
     fn test_protocol_ceiling_leaving_no_version_fails() {
         let config =
@@ -868,7 +1112,8 @@ B2V9lhUZNk+pRjtJw9unpXsM
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(
             err.to_string(),
-            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] is allowed by ssl.protocol = TLSv1.2"
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.2, ssl.cipher.suites = [])"
         );
     }
 
@@ -949,8 +1194,8 @@ B2V9lhUZNk+pRjtJw9unpXsM
         }
     }
 
-    /// TLS 1.2-only suites with only TLS 1.3 enabled leave no usable suite:
-    /// rustls's error is reported.
+    /// TLS 1.2-only suites with only TLS 1.3 enabled leave no usable
+    /// protocol (probe case 06; Java fails at the handshake).
     #[test]
     fn test_cipher_suites_unusable_with_enabled_protocols_fail() {
         let config = SslConfigs::parse_for_test(&[
@@ -962,7 +1207,8 @@ B2V9lhUZNk+pRjtJw9unpXsM
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(
             err.to_string(),
-            rustls::Error::General("no usable cipher suites configured".into()).to_string()
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] can be used with the enabled cipher suites \
+             (ssl.protocol = TLSv1.3, ssl.cipher.suites = [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256])"
         );
     }
 

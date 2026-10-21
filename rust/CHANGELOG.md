@@ -294,22 +294,36 @@ breaking changes.
 - **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is honoured. The
   clients offer the configured suites, named as in Java and IANA
   (`TLS_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`), in the
-  configured order; an empty list keeps the TLS provider's defaults. Every
-  suite of the aws-lc-rs provider is accepted. The key used to be read only to
+  configured order; an empty list keeps the TLS provider's defaults, as
+  `ssl.protocol` restricts them (below). Every suite of the aws-lc-rs
+  provider is accepted. The key used to be read only to
   log a warning and then ignored. An unknown name fails the clients'
   constructors with a `ConfigError` cause, `Failed to create channel builder:
   Unsupported CipherSuite: <name>`, where Java fails the first connection with
-  the same message; suites none of which can be used with an enabled protocol
-  fail the same way with the TLS provider's `no usable cipher suites
-  configured`.
-- **Breaking (Rust, C API, Python):** `ssl.protocol` is honoured as Java's
-  ceiling on `ssl.enabled.protocols`: with `TLSv1.2` the clients do not use
-  TLS 1.3 even when it is enabled; `TLSv1.3` (the default) and `TLS` put no
-  ceiling. It used to be defined and ignored. Another value fails the clients'
-  constructors (`Unsupported TLS protocol: '<value>'. Supported protocols:
-  TLSv1.3, TLSv1.2, TLS`), and so does a ceiling that leaves no enabled
-  protocol (`No TLS protocol of ssl.enabled.protocols = [TLSv1.3] is allowed by
-  ssl.protocol = TLSv1.2`), which Java reports at the handshake instead.
+  the same message.
+- **Breaking (Rust, C API, Python):** `ssl.protocol` is honoured as JSSE
+  honours it. It used to be defined and ignored. It selects Java's
+  `SSLContext.getInstance(protocol)`, which supplies only the default lists:
+  its default protocols, used when `ssl.enabled.protocols` is empty, and its
+  default cipher suites (the provider's suites usable with those protocols),
+  used when `ssl.cipher.suites` is empty; a protocol is used only when an
+  enabled suite can be used with it. So with `TLSv1.2` and the default suites
+  the clients do not use TLS 1.3 even when it is enabled, while a TLS 1.3
+  suite in `ssl.cipher.suites` allows it, as in Java. `TLSv1.3` (the default),
+  `TLS` and `SSL` default to TLS 1.3 and TLS 1.2. `TLSv1.1`, `TLSv1` and
+  `SSLv3` default to versions this client does not implement (nor does the
+  JDK enable them), so with an empty `ssl.cipher.suites` they fail the clients'
+  constructors (`No cipher suite is enabled: ssl.cipher.suites is empty and
+  none of the TLS provider's cipher suites can be used with the protocols of
+  ssl.protocol = TLSv1.1 (this client implements TLS 1.2 and TLS 1.3 only)`),
+  and with a list they use it. Names match ignoring case. Another value
+  (`Default`, a DTLS context, an unknown name) fails the constructors
+  (`Unsupported TLS protocol: '<value>'. Supported protocols: TLSv1.3,
+  TLSv1.2, TLSv1.1, TLSv1, SSLv3, TLS, SSL`), and so do enabled protocols none
+  of which an enabled suite can be used with (`No TLS protocol of
+  ssl.enabled.protocols = [TLSv1.3] can be used with the enabled cipher suites
+  (ssl.protocol = TLSv1.2, ssl.cipher.suites = [])`). Java reports these two
+  at the handshake instead (`No appropriate protocol`).
 - `client.dns.lookup=resolve_canonical_bootstrap_servers_only` now resolves
   each bootstrap address to its canonical host name as Java's
   `InetAddress.getCanonicalHostName()` does: a reverse (PTR) lookup through the

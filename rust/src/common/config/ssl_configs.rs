@@ -29,10 +29,12 @@
 //! - `ssl.trustmanager.algorithm` — Java JSSE trust manager
 //!
 //! `ssl.protocol` and `ssl.cipher.suites` are honoured by the
-//! [`SslFactory`](crate::common::security::ssl::SslFactory): `ssl.protocol` is
-//! the ceiling Java's `SSLContext.getInstance(protocol)` puts on
-//! `ssl.enabled.protocols`, and `ssl.cipher.suites` restricts and orders the
-//! TLS provider's cipher suites.
+//! [`SslFactory`](crate::common::security::ssl::SslFactory) as JSSE honours
+//! them: `ssl.protocol` selects Java's `SSLContext.getInstance(protocol)`,
+//! whose default protocols and default cipher suites apply when
+//! `ssl.enabled.protocols` or `ssl.cipher.suites` is empty (so `TLSv1.2` keeps
+//! TLS 1.3 out only with the default suites), and `ssl.cipher.suites`
+//! restricts and orders the TLS provider's cipher suites.
 //!
 //! Four of Java's keys are not defined:
 //! - `ssl.engine.factory.class`, the Java SSLEngine factory: a configuration
@@ -191,8 +193,8 @@ pub struct SslConfigs {
     /// Corresponds to `ssl.enabled.protocols`. Default: `["TLSv1.2", "TLSv1.3"]`.
     pub(crate) enabled_protocols: Vec<String>,
 
-    /// The protocol of Java's `SSLContext`, the highest version a connection
-    /// may use. Corresponds to `ssl.protocol`. Default: `"TLSv1.3"`.
+    /// The protocol of Java's `SSLContext`, which gives the default protocols
+    /// and cipher suites. Corresponds to `ssl.protocol`. Default: `"TLSv1.3"`.
     pub(crate) protocol: String,
 
     /// The enabled cipher suites, in preference order; empty for the TLS
