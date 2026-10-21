@@ -50,7 +50,9 @@
 //!   test, a column per client and a row per metric, with each client's
 //!   change against its librdkafka baseline) and `junit.xml`. With
 //!   `--push-artifacts` they also go to Semaphore: the job's artifacts, and
-//!   `report.md` as the workflow's report (its Report tab).
+//!   `report.md` as the workflow's report (its Report tab). While a test
+//!   runs, `report.md` is the report so far, written every few minutes with
+//!   the running client's numbers so far (see [`live`]).
 //!
 //! The arms are the existing (transactional) producer and consumer
 //! harnesses, driven by the same environment variables (or, for the Rust, C
@@ -75,6 +77,7 @@
 //! gives the cluster's AZ IDs, which the driver reads from the cluster itself
 //! (see [`cluster_zones`]).
 
+mod live;
 mod report;
 
 use std::collections::BTreeMap;
@@ -92,6 +95,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _};
 
+use self::live::{LiveReport, RunningArm};
 use crate::chaos_matrix::{group_running, now_utc, package_root, signal_group, stop_group};
 
 /// The tests that can be named in a run, relative to the repository root.
@@ -116,6 +120,9 @@ const ARM_TIMEOUT_SLACK: Duration = Duration::from_secs(20 * 60);
 /// Grace between SIGINT and SIGKILL when an arm is stopped (short in tests,
 /// whose `sh` background jobs ignore SIGINT and always need the SIGKILL).
 const STOP_GRACE: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+
+/// How long an `artifact push` may take.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Each `kafka-topics.sh` call.
 const TOPIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
@@ -250,7 +257,8 @@ const HELP: &str = "cargo xtask perf-cloud <subcommand>
                            --topic-prefix defaults to perf-local-<Unix time>, new for each
                            run, and its topics must not exist yet;
                            --push-artifacts pushes each finished test's results with
-                           Semaphore's `artifact` CLI, report.md also as the workflow report
+                           Semaphore's `artifact` CLI, report.md also as the workflow report,
+                           which also gets the report so far every 5 min while a test runs
 
   G is `rust` (Rust, librdkafka, Java) or `python` (Rust- and librdkafka-backed
   Python clients, sync and async). C is `all` (the default) or the group's
@@ -1871,11 +1879,10 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     // more than the secret.
     let redactions = Arc::new(vec![credentials.secret.clone(), credentials.key.clone()]);
 
-    let mut info = run_info(options);
+    let live = LiveReport::start(run_info(options), results_dir.clone(), options.push_artifacts, signals_baseline);
     // Read once a test has run: a new API key can take minutes before the
     // cluster accepts it.
     let mut zones_read = false;
-    let mut results: Vec<TestResult> = Vec::new();
     let mut interrupted = false;
     for (i, test) in options.tests.iter().enumerate() {
         println!(
@@ -1885,7 +1892,7 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
             test.id,
             report::scenario(test)
         );
-        let mut arms = Vec::new();
+        live.update(|p| p.begin_test(test.clone()));
         for &arm in &options.arms {
             if crate::signals::count() > signals_baseline {
                 interrupted = true;
@@ -1907,18 +1914,26 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
                 redactions: Arc::clone(&redactions),
                 signals_baseline,
             };
-            let result = run_arm(&ctx)?;
+            live.update(|p| p.begin_arm(RunningArm::new(test, arm, &ctx.dir)));
+            live.publish_now();
+            let result = match run_arm(&ctx) {
+                Ok(result) => result,
+                Err(e) => {
+                    // Not to leave the report so far waiting for a test that
+                    // will not finish.
+                    if let Err(report) = end_test(&live, &results_dir, options, test, false) {
+                        println!("WARNING: could not write the report: {report:#}");
+                    }
+                    return Err(e);
+                },
+            };
             interrupted = matches!(&result.outcome, Outcome::Failed(r) if r == INTERRUPTED);
-            arms.push(result);
+            live.update(|p| p.end_arm(result));
             if interrupted {
                 break;
             }
         }
-        results.push(TestResult { test: test.clone(), arms });
-        if interrupted {
-            break;
-        }
-        if !zones_read {
+        if !interrupted && !zones_read {
             let zones = cluster_zones(
                 &kafka_bin,
                 &options.bootstrap,
@@ -1928,23 +1943,16 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
             );
             if let Some(zones) = zones {
                 zones_read = true;
-                add_cluster_zones(&mut info.facts, &zones);
+                live.update(|p| add_cluster_zones(&mut p.info.facts, &zones));
             }
         }
-        write_reports(&results_dir, &info, &results)?;
-        if options.push_artifacts {
-            push_artifact("job", &results_dir.join(&test.id), &format!("perf-results/{}", test.id));
-            push_reports(&results_dir);
+        // An interrupted test's directory goes with the epilogue's push.
+        end_test(&live, &results_dir, options, test, !interrupted)?;
+        if interrupted {
+            break;
         }
     }
-    // Each finished test already wrote and pushed them; an interrupted one
-    // has not.
-    if interrupted {
-        write_reports(&results_dir, &info, &results)?;
-        if options.push_artifacts {
-            push_reports(&results_dir);
-        }
-    }
+    let results = live.finish();
     println!("\nReport: {}", results_dir.join("report.md").display());
 
     if interrupted {
@@ -2127,23 +2135,57 @@ fn add_cluster_zones(facts: &mut Vec<(String, String)>, zones: &[String]) {
     facts.insert(at, ("Cluster AZ IDs".to_string(), zones.join(", ")));
 }
 
+/// End the running test: its full report replaces the report so far, and
+/// with `--push-artifacts` is pushed, with the test's directory when
+/// `push_dir`.
+fn end_test(
+    live: &LiveReport,
+    results_dir: &Path,
+    options: &RunOptions,
+    test: &PerfTest,
+    push_dir: bool,
+) -> anyhow::Result<()> {
+    live.publish_full(|p| {
+        p.end_test();
+        write_reports(results_dir, &p.info, &p.results)?;
+        if options.push_artifacts {
+            if push_dir {
+                push_artifact("job", &results_dir.join(&test.id), &format!("perf-results/{}", test.id));
+            }
+            push_reports(results_dir);
+        }
+        Ok(())
+    })
+}
+
 fn write_reports(results_dir: &Path, info: &RunInfo, results: &[TestResult]) -> anyhow::Result<()> {
-    fs::write(results_dir.join("report.md"), report::markdown(info, results))?;
+    fs::write(results_dir.join("report.md"), report::markdown(info, results, None))?;
     fs::write(results_dir.join("junit.xml"), report::junit(results))?;
     Ok(())
 }
 
 /// Push to Semaphore's artifacts (`--push-artifacts`) right away, so a job
 /// that later hits its time limit keeps the tests that finished. `level` is
-/// `job` or `workflow`. A failed push is only logged: the epilogue pushes
-/// everything again.
+/// `job` or `workflow`. A push still running after [`PUSH_TIMEOUT`], or when
+/// a signal arrives, is stopped. A failed push is only logged: the epilogue
+/// pushes everything again.
 fn push_artifact(level: &str, path: &Path, destination: &str) {
-    let status = Command::new("artifact")
-        .args(["push", level])
-        .arg(path)
-        .args(["--destination", destination, "--force"])
-        .status();
-    if !status.is_ok_and(|s| s.success()) {
+    let pushed = (|| -> anyhow::Result<bool> {
+        let mut child = Command::new("artifact")
+            .args(["push", level])
+            .arg(path)
+            .args(["--destination", destination, "--force"])
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()?;
+        let pgid = child.id();
+        // An interrupted run still pushes its report: only a signal during
+        // the push stops it.
+        let exit = wait_group(&mut child, pgid, PUSH_TIMEOUT, crate::signals::count(), &mut || Ok(false))?;
+        reap_group(&mut child, pgid)?;
+        Ok(matches!(exit, Exit::Status(status) if status.success()))
+    })();
+    if !pushed.unwrap_or(false) {
         println!("WARNING: could not push {} as a {level} artifact", path.display());
     }
 }
