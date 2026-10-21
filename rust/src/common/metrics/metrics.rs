@@ -300,10 +300,22 @@ impl Metrics {
             children_sensors: Mutex::new(HashMap::new()),
             time,
         };
-        // Java registers a "count" gauge in kafka-metrics-count group.
-        let shared = Arc::clone(&metrics.shared);
+        // Java registers a "count" gauge in kafka-metrics-count group
+        // (`Metrics.java:190-191`, `(config, now) -> metrics.size()`).
+        //
+        // The gauge is stored in `shared.metrics`, so it must hold the registry
+        // only weakly: Java's lambda captures `this` and the garbage collector
+        // frees the cycle, but a strong `Arc` here would make every registry own
+        // itself, so no registered metric (nor anything a gauge captures, such as
+        // the consumer's `SubscriptionState`) would ever be freed. While the
+        // registry is alive the value is exactly Java's; once it is gone (only
+        // reachable by a caller still holding this `KafkaMetric`) the registry
+        // holds no metrics, so the count is 0.
+        let shared = Arc::downgrade(&metrics.shared);
         let count_gauge = gauge::new(move |_config, _now| {
-            let n = shared.metrics.lock().expect("metrics mutex poisoned").len();
+            let n = shared
+                .upgrade()
+                .map_or(0, |shared| shared.metrics.lock().expect("metrics mutex poisoned").len());
             MetricValue::Double(n as f64)
         });
         metrics
@@ -1545,6 +1557,46 @@ mod tests {
             .add_metric_with_measurable(metrics.metric_name("extra", "grp1"), Box::new(Value::new()))
             .unwrap();
         assert_eq!(double_value(&count_metric), 2.0);
+    }
+
+    // Audit finding FC-03: the count gauge lives inside the registry it counts,
+    // so it must not keep that registry alive. Java frees the cycle through the
+    // garbage collector; Rust must free `MetricsShared` when the last `Metrics`
+    // is dropped, and the gauge keeps Java's value while the registry is alive.
+    #[test]
+    fn dropping_metrics_frees_the_registry_and_its_metrics() {
+        let metrics = Metrics::new();
+        let shared = Arc::downgrade(&metrics.shared);
+        let count_name = metrics.metric_name_with_description_tags(
+            "count",
+            "kafka-metrics-count",
+            "total number of registered metrics",
+            BTreeMap::new(),
+        );
+        let extra_name = metrics.metric_name("extra", "grp1");
+        metrics
+            .add_metric_with_measurable(extra_name.clone(), Box::new(Value::new()))
+            .unwrap();
+        let extra = Arc::downgrade(&metrics.metric(&extra_name).expect("extra metric must exist"));
+        let count_metric = metrics.metric(&count_name).expect("count metric must exist");
+        assert_eq!(
+            double_value(&count_metric),
+            2.0,
+            "Java's gauge reports metrics.size() while alive"
+        );
+
+        metrics.close();
+        drop(metrics);
+        assert!(
+            shared.upgrade().is_none(),
+            "MetricsShared must be freed once the Metrics is dropped"
+        );
+        assert!(
+            extra.upgrade().is_none(),
+            "registered metrics must be freed with their registry"
+        );
+        // A caller still holding the count metric sees an empty registry.
+        assert_eq!(double_value(&count_metric), 0.0);
     }
 
     // metric_instance validates tag-key match against the template.

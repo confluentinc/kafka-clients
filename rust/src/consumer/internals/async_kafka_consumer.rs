@@ -8256,6 +8256,105 @@ mod tests {
         consumer.close().await.expect("close should succeed");
     }
 
+    /// Audit finding FC-03: a closed and dropped production consumer is freed,
+    /// together with its metrics registry, subscription state, metadata and the
+    /// rebalance listener it was given. Java's back-references (the
+    /// `kafka-metrics-count` gauge capturing the registry, `Metrics.java:190`;
+    /// `addClusterUpdateListener(this)`, `OffsetsRequestManager.java:148`) are
+    /// collected by the garbage collector once the application drops the
+    /// consumer; translated as strong `Arc`s they formed cycles that kept every
+    /// consumer alive for the life of the process, so a C listener's
+    /// `user_data_destroy` never ran.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closed_and_dropped_consumer_is_freed() {
+        use std::collections::HashMap;
+        use std::sync::Weak;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        struct Fc03Listener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for Fc03Listener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        // A refused localhost port, so the ctor does not block on network IO.
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.id".to_string(), "fc-03-group".to_string()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+        ]);
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(Fc03Listener);
+        let listener_weak = Arc::downgrade(&listener);
+        consumer
+            .subscribe_with_topics_listener(vec!["fc-03-topic".to_string()], listener)
+            .await
+            .expect("subscribe should succeed");
+
+        let subscriptions: Weak<Mutex<SubscriptionState>> = Arc::downgrade(&consumer.subscriptions);
+        let metadata: Weak<ConsumerMetadata> = Arc::downgrade(&consumer.metadata);
+        let metrics: Weak<Metrics> = Arc::downgrade(&consumer.metrics);
+        // Every registered `KafkaMetric` lives in the registry's shared map, so a
+        // metric outliving the consumer means the registry itself leaked.
+        let registered: Vec<(MetricName, Weak<KafkaMetric>)> = consumer
+            .metrics
+            .metrics()
+            .iter()
+            .map(|(name, metric)| (name.clone(), Arc::downgrade(metric)))
+            .collect();
+        assert!(!registered.is_empty(), "precondition: the consumer registers metrics");
+
+        consumer.close().await.expect("close should succeed");
+        drop(consumer);
+
+        // Allow any detached continuation still finishing after close to drop
+        // its clones.
+        let all_freed = || {
+            listener_weak.upgrade().is_none()
+                && subscriptions.upgrade().is_none()
+                && metadata.upgrade().is_none()
+                && metrics.upgrade().is_none()
+                && registered.iter().all(|(_, m)| m.upgrade().is_none())
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !all_freed() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            listener_weak.upgrade().is_none(),
+            "rebalance listener leaked after close + drop"
+        );
+        assert!(subscriptions.upgrade().is_none(), "SubscriptionState leaked after close + drop");
+        assert!(metadata.upgrade().is_none(), "ConsumerMetadata leaked after close + drop");
+        assert!(metrics.upgrade().is_none(), "Metrics leaked after close + drop");
+        let leaked: Vec<String> = registered
+            .iter()
+            .filter(|(_, m)| m.upgrade().is_some())
+            .map(|(name, _)| format!("{}/{}", name.group(), name.name()))
+            .collect();
+        assert!(leaked.is_empty(), "metrics registry leaked after close + drop: {leaked:?}");
+    }
+
     /// `client.rack` reaches the membership manager as Java's
     /// `GroupRebalanceConfig.rackId` (`GroupRebalanceConfig.java:57-58`),
     /// trimmed, and an empty one (the default) is no rack. Before Critic 96 F3
