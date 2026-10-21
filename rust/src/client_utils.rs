@@ -199,7 +199,11 @@ impl ClientUtils {
     /// `Inet4AddressImpl` / `Inet6AddressImpl.getHostByAddr` use, so an address
     /// without a PTR record is an error rather than its textual form; the
     /// forward confirmation is [`Self::system_resolve_all`], Java's
-    /// `getAllByName0`. See [`Self::canonical_host_name_with`] for the rules.
+    /// `getAllByName0`, except that it answers the loopback for an empty name
+    /// where `getAllByName0` asks the name service (`getaddrinfo("")`, which a
+    /// nameless `/etc/hosts` line can satisfy with any address); so an empty
+    /// reverse name is confirmed only for `127.0.0.1`. See
+    /// [`Self::canonical_host_name_with`] for the rules.
     #[doc(alias = "java.net.InetAddress#getCanonicalHostName")]
     fn canonical_host_name(address: IpAddr) -> String {
         Self::canonical_host_name_with(
@@ -397,7 +401,28 @@ impl ClientUtils {
                     // checks the port after resolving the canonical name.
                     let port = check_port(port)?;
                     match resolve_one(&resolved_canonical_name, port) {
-                        Some(address) => addresses.push((resolved_canonical_name, address)),
+                        // The node host is Java's `getHostString()` of the
+                        // resolved `InetSocketAddress`: for an empty canonical
+                        // name (glibc's `getnameinfo` gives `""` for a nameless
+                        // `/etc/hosts` line holding only `127.0.0.1`) that is
+                        // the loopback address's name, `localhost`, as in the
+                        // `UseAllDnsIps` branch below, so the node is never
+                        // empty. Only `127.0.0.1` can get here with `""`: the
+                        // forward confirmation of `""` answers the loopback
+                        // (see `system_resolve_all`), so for any other address
+                        // the name is its textual IP. Java instead confirms
+                        // `""` for any address on such a line and then
+                        // connects to the loopback (`10.0.0.5` alone on a line
+                        // gives `localhost/127.0.0.1`, Critic 6's JDK 21 run);
+                        // keeping the textual IP connects to the right host.
+                        Some(address) => {
+                            let host = if resolved_canonical_name.is_empty() {
+                                DefaultHostResolver::EMPTY_HOST_NAME.to_string()
+                            } else {
+                                resolved_canonical_name
+                            };
+                            addresses.push((host, address));
+                        },
                         None => warn!(
                             "Couldn't resolve server {} from {} as DNS resolution of the canonical hostname {} failed for {}",
                             url,
@@ -1174,10 +1199,70 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         ] {
+            // No non-empty assertion: a nameless `/etc/hosts` line makes the
+            // name of `127.0.0.1` empty, as Java's `getCanonicalHostName()`
+            // is there; `resolve_address` keys that node as `localhost`
+            // (`test_canonical_empty_reverse_name_is_localhost`).
             let name = ClientUtils::canonical_host_name(address);
-            assert!(!name.is_empty(), "{address}");
             assert_canonical_name_of(&name, address);
         }
+    }
+
+    /// Canonical mode: an empty canonical name for `127.0.0.1` (glibc's
+    /// `getnameinfo` for a nameless `/etc/hosts` line) is keyed as
+    /// `localhost`, Java's `getHostString()` of
+    /// `new InetSocketAddress("", port)`, so the bootstrap node is not empty.
+    #[test]
+    fn test_canonical_empty_reverse_name_is_localhost() {
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
+        // As `system_resolve_all`: an empty name is the loopback address.
+        let resolve_all = |host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            if host.is_empty() {
+                return Ok(vec![SocketAddr::new(DefaultHostResolver::EMPTY_HOST_ADDRESS, port)]);
+            }
+            host.parse::<IpAddr>()
+                .map(|ip| vec![SocketAddr::new(ip, port)])
+                .map_err(|_| io::Error::new(io::ErrorKind::NotFound, host.to_string()))
+        };
+        let canonical_host_name = |address: IpAddr| -> String {
+            ClientUtils::canonical_host_name_with(address, |_| Ok(String::new()), resolve_all)
+        };
+        let urls = ["127.0.0.1:9092".to_string()];
+        let expected = vec![("localhost".to_string(), loopback)];
+
+        let addrs = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &urls,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            resolve_all,
+            canonical_host_name,
+        )
+        .unwrap();
+        assert_eq!(addrs, expected);
+        let cluster = crate::common::Cluster::bootstrap(&addrs);
+        assert!(!cluster.nodes()[0].is_empty());
+        assert_eq!(cluster.nodes()[0].host(), "localhost");
+
+        let addrs = ClientUtils::parse_addresses_with_lookup(
+            &urls,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            || false,
+            resolve_all,
+            canonical_host_name,
+        );
+        assert_eq!(addrs, expected);
+
+        // Any other address: the empty name does not forward-resolve back to
+        // it, so it keeps its textual IP (where Java would connect to the
+        // loopback).
+        let other: IpAddr = "10.0.0.5".parse().unwrap();
+        let addrs = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &["10.0.0.5:9092".to_string()],
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            resolve_all,
+            canonical_host_name,
+        )
+        .unwrap();
+        assert_eq!(addrs, vec![("10.0.0.5".to_string(), SocketAddr::new(other, 9092))]);
     }
 
     /// Canonical mode keeps both families, IPv4 first, whatever order the
@@ -1370,7 +1455,9 @@ mod tests {
             if mode == ClientDnsLookup::UseAllDnsIps {
                 assert_eq!(addrs[0].0, "127.0.0.1");
             } else {
-                // The real name service's canonical name of the loopback.
+                // The real name service's canonical name of the loopback,
+                // never an empty node host.
+                assert!(!addrs[0].0.is_empty(), "{mode}: {addrs:?}");
                 assert_canonical_name_of(&addrs[0].0, expected.ip());
             }
             assert!(ClientUtils::parse_addresses(&[], mode, || false).is_empty());

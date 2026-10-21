@@ -283,7 +283,8 @@ breaking changes.
   system resolver, confirmed by a forward lookup that must return the address,
   with the textual IP as the fallback (new dependency `dns-lookup`). Where PTR
   records exist the bootstrap node's host is the FQDN, so TLS hostname
-  verification checks it as in Java, where it used to be the textual IP. The
+  verification checks it as in Java, where it used to be the textual IP; an
+  empty canonical name becomes `localhost`, Java's node host for it. The
   warning these configurations logged for this mode with TLS is removed.
 
 ### C API
