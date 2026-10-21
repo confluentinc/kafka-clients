@@ -332,7 +332,7 @@ pub struct ProducerConfig {
     /// present here (the user did not supply it), matching Java's `originals`
     /// exactly.
     ///
-    /// Two consumers read it:
+    /// Three consumers read it:
     /// - [`user_configured`](Self::user_configured) (`originals.contains_key`)
     ///   drives Java's idempotence validation, which behaves differently
     ///   depending on whether the user *asked* for a setting or merely inherited
@@ -343,6 +343,9 @@ pub struct ProducerConfig {
     ///   these originals (plus the resolved `client.id`) via its `configure`
     ///   method, exactly as Java passes `originals()` to
     ///   `Partitioner.configure(...)`.
+    /// - [`CommonClientConfigs::post_process_reconnect_backoff_configs`] reads
+    ///   which of `reconnect.backoff.ms` and `reconnect.backoff.max.ms` the user
+    ///   set; Java's reads them from `originals()` too.
     ///
     /// `pub(crate)` like every other field on this struct, so in-crate struct
     /// literals using `..Default::default()` still compile.
@@ -1011,9 +1014,11 @@ impl ProducerConfig {
             }
         }
 
-        // Order matters and matches Java's `postProcessParsedConfig`
-        // (`ProducerConfig.java:622-629`): idempotence validation may override
-        // `enable.idempotence`, and the client id derivation reads
+        // The steps of Java's `postProcessParsedConfig`
+        // (`ProducerConfig.java:622-629`), in its order, except
+        // `postValidateSaslMechanismConfig` and `warnDisablingExponentialBackoff`,
+        // which are not translated. Order matters: idempotence validation may
+        // override `enable.idempotence`, and the client id derivation reads
         // `transactional.id`.
         if let Some(reconnect_backoff_max_ms) =
             CommonClientConfigs::post_process_reconnect_backoff_configs(&config.originals, config.reconnect_backoff_ms)
