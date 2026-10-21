@@ -3685,4 +3685,141 @@ mod tests {
             .metadata_arc()
             .update_with_current_request_version(&response, false, 1_000);
     }
+
+    // ─── Background-loop wakes for requests queued by the AsyncPoll task ───
+    //
+    // Java processes an `AsyncPollEvent` on the network thread inside
+    // `ConsumerNetworkThread.runOnce()`: `processApplicationEvents()` runs
+    // before the request managers are polled, so the committed-offsets
+    // OffsetFetch that `process(AsyncPollEvent)` queues through
+    // `updateFetchPositions` (`OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`
+    // → `CommitRequestManager.fetchOffsets`) goes out in that same
+    // `runOnce`. `process_async_poll` queues it from a `tokio::spawn`ed task,
+    // which on the background task's `current_thread` runtime runs only once
+    // the loop is parked in its network poll, after the managers were polled.
+    // The loop parks on the `Notify` production wires into every manager's
+    // `set_completion_notify` (`event_notify`, the selector wakeup handle);
+    // unless the queuing pokes it, the request waits for the poll timeout
+    // (`MAX_POLL_TIMEOUT_MS`, 5 s) or an unrelated wake.
+
+    /// The processor, its subscription state, its commit manager and the
+    /// completion `Notify` its managers share.
+    type SharedNotifyFixture = (
+        ApplicationEventProcessor,
+        Arc<Mutex<SubscriptionState>>,
+        Arc<CommitRequestManager>,
+        Arc<tokio::sync::Notify>,
+    );
+
+    /// A processor whose commit, offsets and fetch managers share one
+    /// completion `Notify`, as `AsyncKafkaConsumer::new` wires `event_notify`
+    /// into all of them; the offsets manager uses the commit manager for
+    /// committed offsets, as in production.
+    fn processor_with_shared_completion_notify() -> SharedNotifyFixture {
+        use crate::common::utils::internals::BufferSupplier;
+        use crate::consumer::internals::FetchBuffer;
+        use crate::consumer::internals::FetchConfig;
+        use crate::consumer::internals::FetchRequestManager;
+
+        let subscriptions = make_subscriptions();
+        let metadata = make_metadata(Arc::clone(&subscriptions));
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            "test-group",
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+            0,
+        ));
+        commit.set_completion_notify(Arc::clone(&notify));
+        let coordinator = Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")));
+        let offsets = OffsetsRequestManager::new(
+            Arc::clone(&subscriptions),
+            Arc::clone(&metadata),
+            IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
+            100,
+            30_000,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            Some(Arc::clone(&commit)),
+            Arc::new(crate::consumer::internals::PositionsValidator::new(
+                Arc::clone(&subscriptions),
+                Arc::clone(&metadata),
+            )),
+        );
+        offsets.set_completion_notify(Arc::clone(&notify));
+        let mut fetch = FetchRequestManager::new(
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            100,
+        );
+        fetch.set_completion_notify(Arc::clone(&notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            coordinator,
+            Some(TopicMetadataRequestManager::new(&config)),
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(offsets),
+            Some(fetch),
+        )));
+        let processor = ApplicationEventProcessor::new(
+            request_managers,
+            metadata,
+            Arc::clone(&subscriptions),
+            Arc::new(Mutex::new(CompletableEventReaper::new())),
+            Arc::new(crate::common::utils::SystemTime),
+        );
+        (processor, subscriptions, commit, notify)
+    }
+
+    /// The committed-offsets OffsetFetch that `updateFetchPositions` queues
+    /// for a newly assigned partition from the AsyncPoll task must wake the
+    /// background loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_committed_offsets_fetch_wakes_background_task() {
+        let (mut processor, subscriptions, commit, notify) = processor_with_shared_completion_notify();
+        // A manually assigned partition with no position: INITIALIZING, so
+        // `updateFetchPositions` fetches its committed offset.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp("topic", 0)]))
+            .expect("assign");
+        let state = Arc::new(super::super::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: i64::MAX,
+            poll_time_ms: 12_345,
+            state: Arc::clone(&state),
+        });
+        assert!(
+            yield_until(|| commit.inner_state_for_test() == 1, std::time::Duration::from_secs(5)).await,
+            "the AsyncPoll task must queue the committed-offsets OffsetFetch"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect(
+                "queuing the committed-offsets OffsetFetch from the spawned AsyncPoll task did not wake the \
+                 background loop, so it waits for the network poll timeout; Java sends it in the runOnce that \
+                 processes the AsyncPollEvent",
+            );
+    }
 }

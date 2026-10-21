@@ -742,6 +742,82 @@ mod tests {
         consumer.close().await.expect("close");
     }
 
+    /// A manually assigned consumer with a group: the first `poll()` fetches
+    /// the committed offset and then the records.
+    async fn time_to_first_records_after_assign(retry_backoff_ms: Option<&str>) -> Duration {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        broker.set_committed_offset(50);
+        broker.answer_fetch(FetchAnswer { log_first_offset: 1, log_last_offset: 99, offset: 50, count: 5 });
+        let mut props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("group.id".to_string(), "first-poll-group".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+            // The fake does not answer OffsetCommit; keep auto-commit out of
+            // the timing and out of close().
+            ("enable.auto.commit".to_string(), "false".to_string()),
+        ]);
+        if let Some(backoff) = retry_backoff_ms {
+            props.insert("retry.backoff.ms".to_string(), backoff.to_string());
+            props.insert("retry.backoff.max.ms".to_string(), backoff.to_string());
+        }
+        let mut consumer = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("constructs against the fake broker");
+        consumer.assign(vec![tp0()]).await.expect("assign");
+        // Let the metadata and the coordinator lookup complete, so what is
+        // timed below is the committed-offset fetch and the FETCH.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let start = std::time::Instant::now();
+        let records = consumer.poll(Duration::from_secs(15)).await.expect("poll");
+        let took = start.elapsed();
+        assert_eq!(1, broker.offset_fetch_requests(), "one OffsetFetch for the committed offset");
+        assert_eq!(
+            5,
+            records.count(),
+            "the first poll() returns the records at the committed offset ({took:?})"
+        );
+        assert_eq!(55, consumer.position(&tp0()).await.expect("position"));
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+        took
+    }
+
+    /// After a manual `assign`, the first `poll()` returns records within a few round
+    /// trips, as Java's does: Java's network thread sends the OffsetFetch that
+    /// `updateFetchPositions` queues while processing the `AsyncPollEvent` in
+    /// the same `runOnce`, and the FETCH as soon as the offset is applied
+    /// (`ApplicationEventProcessor.process(AsyncPollEvent)`,
+    /// `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`,
+    /// `FetchRequestManager.createFetchRequests`). Rust queues the OffsetFetch
+    /// from the spawned AsyncPoll task, so `CommitRequestManager::fetch_offsets`
+    /// must wake the background loop: without that wake the request waited for
+    /// the next unrelated wake, here the application's own wake at the start
+    /// of each `retry.backoff.ms`-bounded wait for the fetch buffer
+    /// (`AsyncKafkaConsumer::poll_for_fetches` → `send_prefetches`), so the
+    /// first `poll()` took one `retry.backoff.ms`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_poll_after_assign_does_not_wait_for_unrelated_wakes() {
+        let with_default = time_to_first_records_after_assign(None).await;
+        let with_slow_backoff = time_to_first_records_after_assign(Some("2000")).await;
+        eprintln!(
+            "time to first records: default retry.backoff.ms {with_default:?}, retry.backoff.ms=2000 {with_slow_backoff:?}"
+        );
+        assert!(
+            with_slow_backoff < Duration::from_secs(1),
+            "with retry.backoff.ms=2000 the first poll() after assign took {with_slow_backoff:?} to return records \
+             (default retry.backoff.ms: {with_default:?}): the OffsetFetch and the FETCH queued by the AsyncPoll \
+             task waited for unrelated wakes of the background loop. Java sends each in the ConsumerNetworkThread \
+             runOnce that queues it, so the time is a few round trips whatever retry.backoff.ms is"
+        );
+    }
+
     /// A closed and dropped consumer frees its state. The offsets manager's
     /// cluster listener, boxed into the consumer's `Metadata`, once held the
     /// manager's shared state, which owns that `Metadata`: an `Arc` cycle that

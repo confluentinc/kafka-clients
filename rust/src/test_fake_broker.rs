@@ -32,7 +32,11 @@
 //! response yet). A `Fetch` is answered with the records the test sets with
 //! [`FakeBroker::answer_fetch`], once; without one it is answered empty after a
 //! short wait, as a broker does when `fetch.max.wait.ms` elapses with no data.
-//! Every other request is read and left unanswered.
+//! `FindCoordinator` names this broker (node 0) the coordinator of every key,
+//! and `OffsetFetch` returns the committed offset the test sets with
+//! [`FakeBroker::set_committed_offset`] (`-1`, no committed offset, until then)
+//! for every partition asked for. Every other request is read and left
+//! unanswered.
 //!
 //! A test can also kill the broker ([`FakeBroker::kill`]), or have SASL/PLAIN
 //! authentication succeed on the first connections and fail
@@ -59,9 +63,13 @@ use tokio::task::JoinHandle;
 use crate::ApiVersionsRequestData;
 use crate::FetchRequestData;
 use crate::FetchResponseData;
+use crate::FindCoordinatorRequestData;
+use crate::FindCoordinatorResponseData;
 use crate::ListOffsetsRequestData;
 use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
+use crate::OffsetFetchRequestData;
+use crate::OffsetFetchResponseData;
 use crate::SaslAuthenticateResponseData;
 use crate::SaslHandshakeResponseData;
 use crate::api_message_type::ListenerType;
@@ -137,6 +145,10 @@ struct Shared {
     /// The serving task of every accepted connection, so [`FakeBroker::kill`]
     /// can close them.
     connections: Mutex<Vec<JoinHandle<()>>>,
+    /// How many `OffsetFetch` requests arrived.
+    offset_fetch_requests: AtomicUsize,
+    /// The committed offset `OffsetFetch` returns for every partition.
+    committed_offset: Mutex<i64>,
 }
 
 /// A request read from a connection, waiting for its turn to be answered.
@@ -179,6 +191,8 @@ impl FakeBroker {
             sasl_handshakes: AtomicUsize::new(0),
             sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
             connections: Mutex::new(Vec::new()),
+            offset_fetch_requests: AtomicUsize::new(0),
+            committed_offset: Mutex::new(-1),
         });
         let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
@@ -254,6 +268,16 @@ impl FakeBroker {
     /// How many `Fetch` requests have arrived so far.
     pub(crate) fn fetch_requests(&self) -> usize {
         self.shared.fetch_requests.load(Ordering::SeqCst)
+    }
+
+    /// Sets the committed offset `OffsetFetch` returns for every partition.
+    pub(crate) fn set_committed_offset(&self, offset: i64) {
+        *self.shared.committed_offset.lock().expect("fake broker mutex poisoned") = offset;
+    }
+
+    /// How many `OffsetFetch` requests have arrived so far.
+    pub(crate) fn offset_fetch_requests(&self) -> usize {
+        self.shared.offset_fetch_requests.load(Ordering::SeqCst)
     }
 
     /// Waits (up to `timeout`) until at least `count` ApiVersions requests have
@@ -402,6 +426,27 @@ async fn read_requests(
                 &mut body,
                 version,
             )))
+        } else if *header.api_key() == ApiKeys::FIND_COORDINATOR {
+            let request =
+                FindCoordinatorRequestData::read(&mut accessor, version).expect("fake broker: FindCoordinator body");
+            let mut body = find_coordinator_response(addr, &request, version);
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::OFFSET_FETCH {
+            let request = OffsetFetchRequestData::read(&mut accessor, version).expect("fake broker: OffsetFetch body");
+            seen.offset_fetch_requests.fetch_add(1, Ordering::SeqCst);
+            let committed = *seen.committed_offset.lock().expect("fake broker mutex poisoned");
+            let mut body = offset_fetch_response(&request, committed);
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else if *header.api_key() == ApiKeys::FETCH {
             let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
             seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
@@ -479,6 +524,88 @@ fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: 
     data.set_controller_id(FAKE_BROKER_NODE_ID);
     data.set_brokers(vec![broker]);
     data.set_topics(vec![topic_metadata]);
+    data
+}
+
+/// Names this broker the coordinator of every key of `request` (v4+), or of
+/// its single key (v0-3).
+fn find_coordinator_response(
+    addr: SocketAddr,
+    request: &FindCoordinatorRequestData,
+    version: i16,
+) -> FindCoordinatorResponseData {
+    use crate::find_coordinator_response_data::Coordinator;
+    let coordinators = request
+        .coordinator_keys()
+        .iter()
+        .map(|key| {
+            let mut coordinator = Coordinator::new();
+            coordinator.set_key(key.clone());
+            coordinator.set_node_id(FAKE_BROKER_NODE_ID);
+            coordinator.set_host(addr.ip().to_string());
+            coordinator.set_port(i32::from(addr.port()));
+            coordinator.set_error_code(Errors::None.code());
+            coordinator.set_error_message(None);
+            coordinator
+        })
+        .collect();
+    let mut data = FindCoordinatorResponseData::new();
+    if version < 4 {
+        data.set_error_code(Errors::None.code());
+        data.set_error_message(None);
+        data.set_node_id(FAKE_BROKER_NODE_ID);
+        data.set_host(addr.ip().to_string());
+        data.set_port(i32::from(addr.port()));
+    } else {
+        data.set_coordinators(coordinators);
+    }
+    data
+}
+
+/// Answers every partition of every group of `request` (v8+) with
+/// `committed`.
+fn offset_fetch_response(request: &OffsetFetchRequestData, committed: i64) -> OffsetFetchResponseData {
+    use crate::offset_fetch_response_data::{
+        OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+    };
+    let groups = request
+        .groups()
+        .iter()
+        .map(|group| {
+            let topics = group
+                .topics()
+                .iter()
+                .flatten()
+                .map(|topic| {
+                    let partitions = topic
+                        .partition_indexes()
+                        .iter()
+                        .map(|partition| {
+                            let mut response = OffsetFetchResponsePartitions::new();
+                            response.set_partition_index(*partition);
+                            response.set_committed_offset(committed);
+                            response.set_committed_leader_epoch(-1);
+                            response.set_metadata(Some(String::new()));
+                            response.set_error_code(Errors::None.code());
+                            response
+                        })
+                        .collect();
+                    let mut response = OffsetFetchResponseTopics::new();
+                    response.set_name(topic.name().clone());
+                    response.set_topic_id(topic.topic_id());
+                    response.set_partitions(partitions);
+                    response
+                })
+                .collect();
+            let mut response = OffsetFetchResponseGroup::new();
+            response.set_group_id(group.group_id().clone());
+            response.set_topics(topics);
+            response.set_error_code(Errors::None.code());
+            response
+        })
+        .collect();
+    let mut data = OffsetFetchResponseData::new();
+    data.set_groups(groups);
     data
 }
 
