@@ -35,7 +35,7 @@ use confluent_kafka::admin::{
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    FenceProducersOptions, FinalizedVersionRange, GroupListing, ListConfigResourcesOptions,
     ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
     ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
     LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
@@ -58,6 +58,11 @@ use crate::common::test_context::TestContext;
 use crate::common::test_utils::{
     DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_error_with_timeout, wait_until_true_with_timeout,
 };
+
+/// One group's offsets, as `ListConsumerGroupOffsetsResult` yields them: Java's
+/// `Map<TopicPartition, OffsetAndMetadata>`, with `None` for Java's `null`. The
+/// crate keeps its own alias for this crate-private, so the tests name it here.
+pub type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
 /// Timeout that stands for Java's no-argument `Admin.close()`, which delegates
 /// to `close(Duration.ofMillis(Long.MAX_VALUE))`. Same convention the C FFI
@@ -86,6 +91,53 @@ impl FencedProducer {
 
     pub fn epoch(&self) -> i16 {
         self.epoch
+    }
+}
+
+/// The offset specification [`AdminBackend::list_offsets`] takes for each
+/// partition: Java's `OffsetSpec`, as the arguments of its static factories.
+///
+/// The production [`OffsetSpec`] cannot cross this trait as it is. Java's
+/// `OffsetSpec.TimestampSpec` keeps its constructor and `timestamp()`
+/// package-private (`OffsetSpec.java`) and the translation keeps them
+/// `pub(crate)` (`src/admin/offset_spec.rs`), so an `Admin` implementation
+/// outside the crate — the gRPC arm, like a Java `Admin` outside
+/// `org.apache.kafka.clients.admin` — cannot read the timestamp back out of
+/// `OffsetSpec::Timestamp`. The backend therefore takes what the factory was
+/// called with, one variant per factory, and each arm builds its own value:
+/// the native arm through the factory ([`Self::to_offset_spec`]), the gRPC arm
+/// as the proto's named kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OffsetSpecArg {
+    /// `OffsetSpec.earliest()`.
+    Earliest,
+    /// `OffsetSpec.latest()`.
+    Latest,
+    /// `OffsetSpec.maxTimestamp()`.
+    MaxTimestamp,
+    /// `OffsetSpec.earliestLocal()`.
+    EarliestLocal,
+    /// `OffsetSpec.latestTiered()`.
+    LatestTiered,
+    /// `OffsetSpec.earliestPendingUpload()`.
+    EarliestPendingUpload,
+    /// `OffsetSpec.forTimestamp(long)`, the timestamp in milliseconds.
+    ForTimestamp(i64),
+}
+
+impl OffsetSpecArg {
+    /// The production value, built through the public `OffsetSpec` factory
+    /// this variant stands for.
+    pub fn to_offset_spec(self) -> OffsetSpec {
+        match self {
+            Self::Earliest => OffsetSpec::earliest(),
+            Self::Latest => OffsetSpec::latest(),
+            Self::MaxTimestamp => OffsetSpec::max_timestamp(),
+            Self::EarliestLocal => OffsetSpec::earliest_local(),
+            Self::LatestTiered => OffsetSpec::latest_tiered(),
+            Self::EarliestPendingUpload => OffsetSpec::earliest_pending_upload(),
+            Self::ForTimestamp(timestamp) => OffsetSpec::for_timestamp(timestamp),
+        }
     }
 }
 
@@ -348,7 +400,9 @@ pub trait AdminBackend {
         options: ListPartitionReassignmentsOptions,
     ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error>;
 
-    /// Look up one offset per partition, each selected by an [`OffsetSpec`].
+    /// Look up one offset per partition, each selected by an [`OffsetSpecArg`]
+    /// (Java's `OffsetSpec`; that type says why the production enum does not
+    /// cross here).
     ///
     /// The only G3 RPC that reaches the broker through the `AdminApiDriver` /
     /// `PartitionLeaderStrategy` multi-step engine (a partition-leader lookup
@@ -356,7 +410,7 @@ pub trait AdminBackend {
     /// `.claude/rules/admin-client.md` §2.
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error>;
 
@@ -520,9 +574,9 @@ pub trait AdminBackend {
     /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
     /// response data and exposes three views (`all()` / `users()` /
     /// `description(user)`); this is the per-user shape that subsumes all three,
-    /// identical to what `src/ffi/admin.rs`'s
-    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
-    /// returns, so all four backends answer with the same key set.
+    /// composed the same way by the C gRPC server (`c/grpc_server/server.cc`)
+    /// and the Python facade's `g_describe_user_scram_credentials` (`python/grpc_translate.py`),
+    /// so every backend answers with the same key set.
     ///
     /// The broker never returns the salted password or the salt, so the value
     /// carries only the mechanism and iteration count per credential.
@@ -1078,7 +1132,7 @@ fn config_view(config: &Config) -> ConfigView {
                 is_sensitive: entry.is_sensitive(),
                 is_read_only: entry.is_read_only(),
                 source: Some(config_source_name(entry.source()).to_string()),
-                config_type: Some(config_type_name(entry.config_type()).to_string()),
+                config_type: Some(config_type_name(entry.r#type()).to_string()),
                 documentation: entry.documentation().map(str::to_string),
                 synonyms: entry
                     .synonyms()
@@ -1374,10 +1428,14 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
-        let result = self.admin.list_offsets_with_options(topic_partition_offsets, options);
+        let specs: HashMap<TopicPartition, OffsetSpec> = topic_partition_offsets
+            .iter()
+            .map(|(tp, spec)| (tp.clone(), spec.to_offset_spec()))
+            .collect();
+        let result = self.admin.list_offsets_with_options(&specs, options);
         // `ListOffsetsResult` exposes its futures through `partitionResult(tp)`
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a
@@ -1436,7 +1494,7 @@ impl AdminBackend for RustNativeAdmin {
         // the same key set.
         let mut outcomes = HashMap::with_capacity(group_specs.len());
         for group_id in group_specs.keys() {
-            let future = result.partitions_to_offset_and_metadata_for_group(group_id)?;
+            let future = result.partitions_to_offset_and_metadata_with_group_id(group_id)?;
             outcomes.insert(group_id.clone(), future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await);
         }
         Ok(outcomes)
@@ -1595,9 +1653,10 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeUserScramCredentialsOptions,
     ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
-        // Java's three views composed into the per-user shape, exactly as
-        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
-        // all four backends answer with the same key set and the same errors.
+        // Java's three views composed into the per-user shape, as the C gRPC
+        // server (`c/grpc_server/server.cc`) and the Python facade's
+        // `g_describe_user_scram_credentials` (`python/grpc_translate.py`) also compose them — so
+        // every backend answers with the same key set and the same errors.
         //
         //   - `all()` succeeds only when every user's error code is NONE or
         //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
@@ -1605,8 +1664,8 @@ impl AdminBackend for RustNativeAdmin {
         //   - when it fails, `users()` still lists every user whose error is not
         //     RESOURCE_NOT_FOUND — necessarily including the one that failed
         //     `all()` — and `description(user)` yields that user's own error.
-        //     The users omitted at that point are exactly the ones Java's `all()`
-        //     also declines to report.
+        //     A requested RESOURCE_NOT_FOUND user is left out here, as in the C and
+        //     Python backends. No integration test reaches this case.
         //   - if the response future itself failed, all three fail with the same
         //     error and it becomes the whole-call `Err`; and if the composition
         //     yields no rows at all, the `all()` error is returned rather than
@@ -1877,7 +1936,7 @@ where
 /// `CreateTopicsResult::futures()` `pub(crate)` (correctly — Java's field is
 /// private too), so the only public route is the four `topicId` /
 /// `numPartitions` / `replicationFactor` / `config` views. Every one of them is
-/// `then_apply_try` over the *same* source object, so they all fail with the same
+/// `then_apply` over the *same* source object, so they all fail with the same
 /// error when the broker reported no usable metadata, which is exactly the
 /// `TopicMetadataAndConfig(KafkaException)` state.
 async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataAndConfig {

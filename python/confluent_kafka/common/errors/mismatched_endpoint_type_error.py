@@ -34,7 +34,7 @@ class MismatchedEndpointTypeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 114  # kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE
+    _ffi_id: ClassVar[int] = 114  # kafka_common_Error_MISMATCHED_ENDPOINT_TYPE
 
     def __init__(
         self,

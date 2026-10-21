@@ -39,7 +39,7 @@ class OffsetOutOfRangeError(InvalidOffsetError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 1  # kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE
+    _ffi_id: ClassVar[int] = 1  # kafka_common_Error_OFFSET_OUT_OF_RANGE
 
     def __init__(
         self,

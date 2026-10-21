@@ -60,7 +60,7 @@ use crate::producer::internals::RecordAccumulator;
 use crate::producer::internals::TransactionManager;
 use crate::producer::internals::buffer_pool::AllocationMode;
 use crate::producer::internals::chunked_producer_batch::ChunkedProducerBatch;
-use crate::producer::internals::record_accumulator::{AppendFailure, RecordAppendResult, TopicInfo};
+use crate::producer::internals::record_accumulator::{AppendFailure, RecordAppendResult, TopicInfo, TryAppendResult};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// A [`RecordAccumulator`] variant that backs each batch with fixed-size chunks drawn from a
@@ -193,7 +193,7 @@ impl ChunkedRecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
@@ -230,7 +230,7 @@ impl ChunkedRecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
@@ -636,12 +636,12 @@ impl ChunkedRecordAccumulator {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         deque: &mut VecDeque<ProducerBatch>,
         topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
-    ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
+    ) -> TryAppendResult {
         if self.base.closed.load(Ordering::Relaxed) {
             return Err(RecordAccumulator::closed_while_send_in_progress(callback));
         }
@@ -1007,7 +1007,7 @@ mod tests {
         }
 
         pub(super) fn buffer_exhausted_total(&self) -> f64 {
-            let name = self.metrics.metric_name_description_tags(
+            let name = self.metrics.metric_name_with_description_tags(
                 "buffer-exhausted-total",
                 "producer-metrics",
                 "",

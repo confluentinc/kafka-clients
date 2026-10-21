@@ -53,7 +53,7 @@ use crate::common::network::Selector;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
-use crate::common::serialization::Serializer;
+use crate::common::serialization::DynSerializer;
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 use crate::consumer::OffsetAndMetadata;
@@ -91,6 +91,78 @@ struct ClusterAndWaitTime {
     waited_on_metadata_ms: i64,
 }
 
+/// Whether a send may block before the record reaches the accumulator.
+///
+/// Java's `KafkaProducer.send` blocks for up to `max.block.ms` at two points
+/// before `RecordAccumulator.append` succeeds: `waitOnMetadata`
+/// (`KafkaProducer.java:1069`) and `BufferPool.allocate`. This enum has no Java
+/// counterpart (DoD #7): it exists so the crate-internal
+/// [`KafkaProducer::try_send`] can share the whole `send` path and differ from
+/// it only at those two points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendWait {
+    /// Block for up to `max.block.ms`, as Java does.
+    MaxBlock,
+    /// Never block: a wait at either point is reported as
+    /// [`TrySendOutcome::WouldBlock`], with the callback un-invoked.
+    Never,
+}
+
+/// The outcome of a non-blocking [`KafkaProducer::try_send`].
+///
+/// There is no Java counterpart (DoD #7). Java's `KafkaProducer.send` always
+/// blocks for up to `max.block.ms` at its two pre-append wait points —
+/// `waitOnMetadata` (`KafkaProducer.java:1069`) and `BufferPool.allocate` inside
+/// `RecordAccumulator.append` — and a caller who cannot afford to block has no
+/// way to ask for anything else. The C FFI's non-blocking send needs exactly
+/// that: it appends on the caller's own thread when the producer is ready and
+/// must fall back to its submission queue, rather than stall that thread,
+/// whenever the producer would have to wait. This enum is how the producer
+/// reports which of the two happened. Crate-internal: the public surface stays
+/// Java's `send`.
+pub(crate) enum TrySendOutcome {
+    /// The record was handed to the producer and resolved the way `send` would
+    /// have resolved it: appended to a batch, or rejected with an `ApiException`
+    /// (a record too large, say) — in which case the future is already failed
+    /// and the callback has already fired, exactly as on `send`.
+    Accepted(KafkaFuture<RecordMetadata>),
+    /// The producer would have had to block — on metadata for the topic, or on
+    /// buffer memory — so it did nothing: no batch was touched, no future was
+    /// created and the callback was **not** invoked. The callback is handed back
+    /// so the caller can retry the record with `send` once it can afford to
+    /// wait.
+    WouldBlock(Option<Box<dyn Callback>>),
+}
+
+impl TrySendOutcome {
+    /// The blocking path's view of an outcome.
+    ///
+    /// [`SendWait::MaxBlock`] never produces [`WouldBlock`](Self::WouldBlock), so
+    /// the second arm is unreachable by construction; it is an `Err` rather than
+    /// a `panic!` per CLAUDE.md §12.1.
+    fn into_accepted_future(self) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        match self {
+            TrySendOutcome::Accepted(future) => Ok(future),
+            TrySendOutcome::WouldBlock(_) => {
+                Err(Error::local_illegal_state("A blocking send reported that it would block"))
+            },
+        }
+    }
+}
+
+impl std::fmt::Debug for TrySendOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrySendOutcome::Accepted(future) => f.debug_tuple("Accepted").field(future).finish(),
+            // `Callback` is a `Box<dyn FnOnce>`, so only its presence is printable.
+            TrySendOutcome::WouldBlock(callback) => f
+                .debug_tuple("WouldBlock")
+                .field(&callback.as_ref().map(|_| "callback"))
+                .finish(),
+        }
+    }
+}
+
 /// A Kafka client that publishes records to the Kafka cluster.
 ///
 /// The producer is thread-safe and sharing a single producer instance across
@@ -112,9 +184,9 @@ pub struct KafkaProducer<K, V> {
     /// The client ID used for this producer.
     client_id: String,
     /// The key serializer.
-    key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer.
-    value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    value_serializer: Box<dyn DynSerializer<V>>,
     /// The maximum size of a request in bytes.
     max_request_size: i32,
     /// The total memory size for the buffer pool.
@@ -239,9 +311,9 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// The producer configuration. Java's `config`.
     pub config: &'a ProducerConfig,
     /// The key serializer. Java's `keySerializer`.
-    pub key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    pub key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer. Java's `valueSerializer`.
-    pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    pub value_serializer: Box<dyn DynSerializer<V>>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
     /// The record accumulator. Java's `accumulator`. A producer built through these options
@@ -288,8 +360,8 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
 /// satisfy that naming rule (DoD #7).
 pub(crate) struct KafkaProducerOptionsBuilder<'a, K, V> {
     config: Option<&'a ProducerConfig>,
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
     running: Option<Arc<AtomicBool>>,
@@ -335,12 +407,12 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
         self
     }
     /// Sets [`KafkaProducerOptions::key_serializer`], a mandatory parameter.
-    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn Serializer<K> + Send + Sync>) -> Self {
+    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn DynSerializer<K>>) -> Self {
         self.key_serializer = Some(key_serializer);
         self
     }
     /// Sets [`KafkaProducerOptions::value_serializer`], a mandatory parameter.
-    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn Serializer<V> + Send + Sync>) -> Self {
+    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn DynSerializer<V>>) -> Self {
         self.value_serializer = Some(value_serializer);
         self
     }
@@ -474,9 +546,9 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     /// The producer configuration. Java's `config`.
     pub config: &'a ProducerConfig,
     /// The key serializer. Java's `keySerializer`.
-    pub key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+    pub key_serializer: Box<dyn DynSerializer<K>>,
     /// The value serializer. Java's `valueSerializer`.
-    pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    pub value_serializer: Box<dyn DynSerializer<V>>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
     /// The record accumulator. Java has no `accumulator` parameter on `:352`;
@@ -513,8 +585,8 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
 /// [`Error::LocalIllegalArgument`] if they were not set.
 pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     config: Option<&'a ProducerConfig>,
-    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    key_serializer: Option<Box<dyn DynSerializer<K>>>,
+    value_serializer: Option<Box<dyn DynSerializer<V>>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
     chunked_accumulator: Option<ChunkedRecordAccumulator>,
@@ -562,12 +634,12 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
         self
     }
     /// Sets [`KafkaProducerClientOptions::key_serializer`], a mandatory parameter.
-    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn Serializer<K> + Send + Sync>) -> Self {
+    pub(crate) fn set_key_serializer(mut self, key_serializer: Box<dyn DynSerializer<K>>) -> Self {
         self.key_serializer = Some(key_serializer);
         self
     }
     /// Sets [`KafkaProducerClientOptions::value_serializer`], a mandatory parameter.
-    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn Serializer<V> + Send + Sync>) -> Self {
+    pub(crate) fn set_value_serializer(mut self, value_serializer: Box<dyn DynSerializer<V>>) -> Self {
         self.value_serializer = Some(value_serializer);
         self
     }
@@ -854,8 +926,8 @@ impl<K, V> KafkaProducer<K, V> {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map,Serializer,Serializer)")]
     pub fn new(
         config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
     ) -> Result<Self, Error>
     where
         K: 'static,
@@ -892,8 +964,8 @@ impl<K, V> KafkaProducer<K, V> {
     /// (`KafkaProducer.java:519-524`).
     fn new_inner(
         mut config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<K>>,
+        value_serializer: Box<dyn DynSerializer<V>>,
     ) -> Result<Self, Error>
     where
         K: 'static,
@@ -1533,31 +1605,33 @@ impl<K, V> KafkaProducer<K, V> {
     /// - [`Error::Timeout`] if initializing the transaction takes longer than
     ///   `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#initTransactions")]
-    pub async fn init_transactions(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:711`), fed to
-        // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:715`) after a
-        // successful await. Timed with the injected `time`, as Java times with its
-        // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager
-                .lock()
-                .unwrap()
-                .initialize_transactions(false, &mut pending_requests)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
-            .await?;
-        // Java records only after a successful await (`:715`), so the `?` above must
-        // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
-        self.producer_metrics.record_init(self.time.nanoseconds() - start);
-        transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
-        Ok(())
+    pub fn init_transactions(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:711`), fed to
+            // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:715`) after a
+            // successful await. Timed with the injected `time`, as Java times with its
+            // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .initialize_transactions(false, &mut pending_requests)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
+                .await?;
+            // Java records only after a successful await (`:715`), so the `?` above must
+            // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
+            self.producer_metrics.record_init(self.time.nanoseconds() - start);
+            transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
+            Ok(())
+        }
     }
 
     /// Should be called before the start of each new transaction. Note that prior
@@ -1649,48 +1723,50 @@ impl<K, V> KafkaProducer<K, V> {
     /// The producer first resolves the metadata for the topics in `offsets`
     /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction")]
-    pub async fn send_offsets_to_transaction(
+    pub fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: &dyn ConsumerGroupMetadata,
-    ) -> Result<(), Error> {
-        Self::throw_if_invalid_group_metadata(group_metadata)?;
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            Self::throw_if_invalid_group_metadata(group_metadata)?;
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
 
-        // Java 800: an empty map is a no-op, and in particular does not consult the
-        // transaction state at all. It is also left unmetered — Java starts the timer
-        // inside the `if (!offsets.isEmpty())` block, after this check.
-        if offsets.is_empty() {
-            return Ok(());
+            // Java 800: an empty map is a no-op, and in particular does not consult the
+            // transaction state at all. It is also left unmetered — Java starts the timer
+            // inside the `if (!offsets.isEmpty())` block, after this check.
+            if offsets.is_empty() {
+                return Ok(());
+            }
+
+            // Java: `long start = time.nanoseconds()` inside the non-empty branch
+            // (`KafkaProducer.java:801`), before the KIP-1319 metadata wait, so that wait
+            // is part of the recorded duration; recorded after a successful await (`:808`).
+            let start = self.time.nanoseconds();
+
+            // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
+            // ids before the manager builds the request. No manager guard is held
+            // across this await (`producer-transactions.md` §4).
+            let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
+            let wait_ms = self.await_topic_metadata(&topics).await?;
+            let remaining_ms = (self.max_block_ms - wait_ms).max(0);
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager.lock().unwrap().send_offsets_to_transaction(
+                    offsets,
+                    ConsumerGroupMetadataImpl::copy_of(group_metadata),
+                    &mut pending_requests,
+                )?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_send_offsets(self.time.nanoseconds() - start);
+            Ok(())
         }
-
-        // Java: `long start = time.nanoseconds()` inside the non-empty branch
-        // (`KafkaProducer.java:801`), before the KIP-1319 metadata wait, so that wait
-        // is part of the recorded duration; recorded after a successful await (`:808`).
-        let start = self.time.nanoseconds();
-
-        // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
-        // ids before the manager builds the request. No manager guard is held
-        // across this await (`producer-transactions.md` §4).
-        let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
-        let wait_ms = self.await_topic_metadata(&topics).await?;
-        let remaining_ms = (self.max_block_ms - wait_ms).max(0);
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager.lock().unwrap().send_offsets_to_transaction(
-                offsets,
-                ConsumerGroupMetadataImpl::copy_of(group_metadata),
-                &mut pending_requests,
-            )?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_send_offsets(self.time.nanoseconds() - start);
-        Ok(())
     }
 
     /// Request a partial metadata refresh for the given topics and await the next
@@ -1765,23 +1841,25 @@ impl<K, V> KafkaProducer<K, V> {
     /// - Any previous fatal or abortable error the producer has encountered
     /// - [`Error::Timeout`] if committing takes longer than `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#commitTransaction")]
-    pub async fn commit_transaction(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:873`),
-        // recorded after a successful await (`:877`).
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::COMMIT_TXN_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_commit_txn(self.time.nanoseconds() - start);
-        Ok(())
+    pub fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:873`),
+            // recorded after a successful await (`:877`).
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::COMMIT_TXN_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_commit_txn(self.time.nanoseconds() - start);
+            Ok(())
+        }
     }
 
     /// Aborts the ongoing transaction. Any unflushed produce messages will be
@@ -1812,28 +1890,30 @@ impl<K, V> KafkaProducer<K, V> {
     /// - Any previous fatal error the producer has encountered
     /// - [`Error::Timeout`] if aborting takes longer than `max.block.ms`
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#abortTransaction")]
-    pub async fn abort_transaction(&self) -> Result<(), Error> {
-        let transaction_manager = self.transaction_manager_or_error()?;
-        self.ensure_not_closed()?;
-        kafka_info!(self.log_context, "Aborting incomplete transaction");
-        // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:908`),
-        // taken after the log line, recorded after a successful await (`:912`).
-        let start = self.time.nanoseconds();
-        let result = {
-            // `pending_requests` before the manager, per the field docs.
-            let mut pending_requests = self.pending_requests.lock().unwrap();
-            // `Caller::App`: this runs on the application task (rules §1).
-            transaction_manager
-                .lock()
-                .unwrap()
-                .begin_abort(&mut pending_requests, Caller::App)?
-        };
-        self.wakeup.notify_one();
-        result
-            .await_result_timeout(self.max_block_timeout(), Self::ABORT_TXN_TIMEOUT_MSG)
-            .await?;
-        self.producer_metrics.record_abort_txn(self.time.nanoseconds() - start);
-        Ok(())
+    pub fn abort_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            let transaction_manager = self.transaction_manager_or_error()?;
+            self.ensure_not_closed()?;
+            kafka_info!(self.log_context, "Aborting incomplete transaction");
+            // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:908`),
+            // taken after the log line, recorded after a successful await (`:912`).
+            let start = self.time.nanoseconds();
+            let result = {
+                // `pending_requests` before the manager, per the field docs.
+                let mut pending_requests = self.pending_requests.lock().unwrap();
+                // `Caller::App`: this runs on the application task (rules §1).
+                transaction_manager
+                    .lock()
+                    .unwrap()
+                    .begin_abort(&mut pending_requests, Caller::App)?
+            };
+            self.wakeup.notify_one();
+            result
+                .await_result_timeout(self.max_block_timeout(), Self::ABORT_TXN_TIMEOUT_MSG)
+                .await?;
+            self.producer_metrics.record_abort_txn(self.time.nanoseconds() - start);
+            Ok(())
+        }
     }
 
     /// The shared [`TransactionManager`], or the error Java's
@@ -1888,6 +1968,16 @@ impl<K, V> KafkaProducer<K, V> {
         Ok(())
     }
 
+    /// The time a send may spend blocked before its record reaches the
+    /// accumulator: `max.block.ms` on the blocking path, nothing at all on the
+    /// non-blocking one.
+    fn max_block_ms_for(&self, wait: SendWait) -> i64 {
+        match wait {
+            SendWait::MaxBlock => self.max_block_ms,
+            SendWait::Never => 0,
+        }
+    }
+
     /// Implementation of asynchronously send a record to a topic.
     ///
     /// Translated from `KafkaProducer.doSend()`.
@@ -1906,33 +1996,59 @@ impl<K, V> KafkaProducer<K, V> {
     /// `KafkaException`s that are not `ApiException`s. `SerializationException` is
     /// one of the latter — it extends `KafkaException` directly — so a
     /// serialization failure is returned as `Err`, not as a failed future.
+    ///
+    /// `wait` decides what happens at the two points where Java blocks for up to
+    /// `max.block.ms` before the record reaches the accumulator — `waitOnMetadata`
+    /// and `BufferPool.allocate`: with [`SendWait::MaxBlock`] this is Java's
+    /// `doSend`; with [`SendWait::Never`] a wait at either point is reported as
+    /// [`TrySendOutcome::WouldBlock`] instead, with the callback handed back
+    /// un-invoked (see [`try_send`](Self::try_send)). The blocking callers never
+    /// see `WouldBlock`.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#doSend")]
     async fn do_send(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        callback: Option<Box<dyn Callback>>,
+        wait: SendWait,
+    ) -> Result<TrySendOutcome, Error> {
         self.ensure_not_closed()?;
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
+        let max_block_ms = self.max_block_ms_for(wait);
         let cluster_and_wait_time = match self
-            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+            .wait_on_metadata(record.topic(), record.partition(), now_ms, max_block_ms)
             .await
         {
             Ok(cwt) => cwt,
             Err(e) => {
                 // Java 1067-1072 relabels a closed-producer race first, then the
-                // outer catches dispatch on the resulting class.
+                // outer catches dispatch on the resulting class. The relabel comes
+                // before the would-block check: a producer closed while the send
+                // was in flight is an `Err` on both paths, not something to retry.
                 let e = self.relabel_if_closed_while_sending(e);
+                // The non-blocking path's first would-block point. With a zero
+                // budget, `wait_on_metadata` fails with a `TimeoutException` exactly
+                // when it would have had to wait — the metadata request it issued
+                // stays in flight, so a later attempt can succeed. Every other error
+                // (`InvalidTopicException`, the topic's own error, a fatal metadata
+                // error) is a real failure and dispatches as it would on `send`.
+                if wait == SendWait::Never && matches!(e, Error::Timeout(_)) {
+                    return Ok(TrySendOutcome::WouldBlock(callback));
+                }
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                    // no partition is computed yet, so the record's own, if it names one.
+                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                    return self
+                        .handle_api_error(e, record.topic(), partition, callback)
+                        .map(TrySendOutcome::Accepted);
                 }
                 return Err(e);
             },
         };
         let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
-        let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
+        let remaining_wait_ms = 0i64.max(max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
         // Destructure the record to take ownership of key/value for serialization.
@@ -1949,42 +2065,62 @@ impl<K, V> KafkaProducer<K, V> {
         // callback and yields a failed future (`:1130`), anything else is returned
         // as `Err` (`:1147` / `:1151`). Rewriting every serializer error as
         // `SerializationException` flipped `is_retriable_error()` for the first
-        // case and skipped its callback entirely. Both branches below — the
-        // custom-partitioner one that serializes by borrowing and the owned
-        // zero-copy one — dispatch the same way.
-        if self.partitioner.is_some() {
-            // A custom partitioner is handed the *typed* key/value
-            // (`KafkaProducer.java:1561-1562` passes `record.key()` / `record.value()`),
-            // so serialize by BORROWING — `serialize_headers` keeps `key`/`value`
-            // alive — and compute the partition here, with the typed references. That
-            // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
-            // short-circuits its own partition step so the partitioner runs EXACTLY
-            // once, even a stateful one such as `RoundRobinPartitioner`.
-            let serialized_key =
-                match self
-                    .key_serializer
-                    .serialize_headers(&record_topic, &record_headers, key.as_ref())
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
-                    },
-                    Err(e) => return Err(e),
-                };
+        // case and skipped its callback entirely.
+        //
+        // The serializers borrow `key` / `value`, so a serializer whose input
+        // already is the bytes (`ByteArraySerializer`, `StringSerializer`) hands
+        // back a borrow of the record's own buffer, and the accumulator's append
+        // is the only copy (CLAUDE.md §14). Each serializer future lives inside
+        // this method's own future, so awaiting one through `dyn` allocates
+        // nothing (`InlineFuture`).
+        let serialized_key = match DynSerializer::serialize_with_headers(
+            &*self.key_serializer,
+            &record_topic,
+            &record_headers,
+            key.as_ref(),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) if e.is_api_error() => {
+                // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                return self
+                    .handle_api_error(e, &record_topic, partition, callback)
+                    .map(TrySendOutcome::Accepted);
+            },
+            Err(e) => return Err(e),
+        };
 
-            let serialized_value =
-                match self
-                    .value_serializer
-                    .serialize_headers(&record_topic, &record_headers, value.as_ref())
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
-                    },
-                    Err(e) => return Err(e),
-                };
+        let serialized_value = match DynSerializer::serialize_with_headers(
+            &*self.value_serializer,
+            &record_topic,
+            &record_headers,
+            value.as_ref(),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) if e.is_api_error() => {
+                // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                return self
+                    .handle_api_error(e, &record_topic, partition, callback)
+                    .map(TrySendOutcome::Accepted);
+            },
+            Err(e) => return Err(e),
+        };
 
-            let partition = self.compute_partition(
+        // A custom partitioner is handed the *typed* key/value
+        // (`KafkaProducer.java:1561-1562` passes `record.key()` / `record.value()`),
+        // so with one the partition is computed here, where the typed references
+        // are still at hand. It is passed to `do_send_bytes` as an explicit
+        // `Some(..)`, which short-circuits that method's own partition step so the
+        // partitioner runs EXACTLY once, even a stateful one such as
+        // `RoundRobinPartitioner`. Without one, `do_send_bytes` runs the built-in
+        // key-hash partitioning on the serialized key.
+        let partition = if self.partitioner.is_some() {
+            Some(self.compute_partition(
                 &record_topic,
                 partition_opt,
                 key.as_ref(),
@@ -1992,65 +2128,64 @@ impl<K, V> KafkaProducer<K, V> {
                 value.as_ref(),
                 serialized_value.as_deref(),
                 &cluster,
-            )?;
-
-            let headers = record_headers.to_array();
-
-            self.do_send_bytes(
-                &record_topic,
-                Some(partition),
-                timestamp_opt,
-                serialized_key.as_deref(),
-                serialized_value.as_deref(),
-                headers,
-                callback,
-                now_ms,
-                remaining_wait_ms,
-                &cluster,
-            )
-            .await
+            )?)
         } else {
-            // No custom partitioner: keep the zero-copy owned path.
-            // `serialize_owned_headers` moves the key/value so a `Vec<u8>` payload
-            // is written into the batch without a copy (CLAUDE.md §14); `do_send_bytes`
-            // then runs the built-in key-hash partitioning via `compute_partition`.
-            let serialized_key = match self.key_serializer.serialize_owned_headers(&record_topic, &record_headers, key)
-            {
-                Ok(bytes) => bytes,
-                Err(e) if e.is_api_error() => {
-                    return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
-                },
-                Err(e) => return Err(e),
-            };
+            partition_opt
+        };
 
-            let serialized_value =
-                match self
-                    .value_serializer
-                    .serialize_owned_headers(&record_topic, &record_headers, value)
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
-                    },
-                    Err(e) => return Err(e),
-                };
+        let headers = record_headers.to_array();
 
-            let headers = record_headers.to_array();
+        self.do_send_bytes(
+            &record_topic,
+            partition,
+            timestamp_opt,
+            serialized_key.as_deref(),
+            serialized_value.as_deref(),
+            headers,
+            callback,
+            now_ms,
+            remaining_wait_ms,
+            &cluster,
+            wait,
+        )
+        .await
+    }
 
-            self.do_send_bytes(
-                &record_topic,
-                partition_opt,
-                timestamp_opt,
-                serialized_key.as_deref(),
-                serialized_value.as_deref(),
-                headers,
-                callback,
-                now_ms,
-                remaining_wait_ms,
-                &cluster,
-            )
-            .await
-        }
+    /// The non-blocking form of `send`: the same path, except that it never waits
+    /// on metadata or on buffer memory. It still awaits the key and value
+    /// serializers, which complete at once when they are built-in but may wait
+    /// for an asynchronous implementation; the C FFI therefore runs it on the
+    /// calling thread only for a producer whose serializers are built-in.
+    ///
+    /// Java's `send` blocks for up to `max.block.ms` at two points before the
+    /// record is appended — `waitOnMetadata` (`KafkaProducer.java:1069`) and
+    /// `BufferPool.allocate` inside `RecordAccumulator.append`. Where `send`
+    /// would wait at either, this returns [`TrySendOutcome::WouldBlock`] at once,
+    /// having done nothing to the record: no batch was touched, no future was
+    /// created and `callback` was **not** invoked (it is handed back in the
+    /// outcome). Everything else is exactly `send`: an appended record is
+    /// [`TrySendOutcome::Accepted`] with its future, and a record `send` would
+    /// have rejected with an `ApiException` — too large, say — is `Accepted` too,
+    /// with the callback already fired and the future already failed, because
+    /// the producer *did* resolve it. The `Err` cases are `send`'s `Err` cases: a
+    /// closed producer, a bad partition, and the failures outside the
+    /// `ApiException` hierarchy, a `SerializationException` among them.
+    ///
+    /// Asking for metadata is a side effect, not a wait, so an unknown topic is
+    /// `WouldBlock` **and** a metadata request has been issued; the next attempt,
+    /// once the response is in, is `Accepted`.
+    ///
+    /// There is no Java counterpart (DoD #7), which is why it is crate-internal:
+    /// the public surface stays Java's `send`. The C FFI's non-blocking send uses
+    /// it as its fast path — append on the caller's own thread when the producer
+    /// is ready and its serializers are built-in, and fall back to the
+    /// submission queue, rather than stall the caller, when it is not.
+    pub(crate) async fn try_send(
+        &self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> Result<TrySendOutcome, Error> {
+        self.do_send(record, callback, SendWait::Never).await
     }
 
     /// Common send path for already-serialized key/value bytes.
@@ -2059,6 +2194,13 @@ impl<K, V> KafkaProducer<K, V> {
     /// [`send`](KafkaProducer::<Vec<u8>, Vec<u8>>::send) (zero-copy borrowed path)
     /// delegate here for partition calculation, size validation, and accumulator
     /// append.
+    ///
+    /// `wait` decides what happens when the append has to wait for buffer memory:
+    /// with [`SendWait::MaxBlock`] the `BufferExhaustedException` of an expired
+    /// `remaining_wait_ms` is dispatched like any other `ApiException`; with
+    /// [`SendWait::Never`] (`remaining_wait_ms` is then zero) it is reported as
+    /// [`TrySendOutcome::WouldBlock`] instead, with the callback handed back
+    /// un-invoked. The blocking callers therefore never see `WouldBlock`.
     #[expect(clippy::too_many_arguments)]
     async fn do_send_bytes(
         &self,
@@ -2068,11 +2210,12 @@ impl<K, V> KafkaProducer<K, V> {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         now_ms: i64,
         remaining_wait_ms: i64,
         cluster: &Cluster,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        wait: SendWait,
+    ) -> Result<TrySendOutcome, Error> {
         // `compute_partition` with `None` typed key/value: this method has only the
         // serialized bytes. When called from `do_send`'s custom-partitioner branch the
         // partition arrives pre-computed as `Some(..)`, so this short-circuits and the
@@ -2089,7 +2232,9 @@ impl<K, V> KafkaProducer<K, V> {
             headers,
         );
         if let Err(err) = self.ensure_valid_record_size(serialized_size) {
-            return self.handle_api_error(err, topic, partition, callback);
+            return self
+                .handle_api_error(err, topic, partition, callback)
+                .map(TrySendOutcome::Accepted);
         }
 
         let timestamp = timestamp.unwrap_or(now_ms);
@@ -2207,7 +2352,9 @@ impl<K, V> KafkaProducer<K, V> {
                             // `KafkaProducer.java:1135`, but keeps it as a reference separate
                             // from the `appendCallbacks` it registered, so Java can fire it
                             // twice on this path; Rust's single-owner model fires it once.)
-                            return self.handle_api_error(error, topic, partition, None);
+                            return self
+                                .handle_api_error(error, topic, partition, None)
+                                .map(TrySendOutcome::Accepted);
                         }
                         return Err(error);
                     }
@@ -2221,7 +2368,18 @@ impl<K, V> KafkaProducer<K, V> {
                     );
                     self.wakeup.notify_one();
                 }
-                Ok(KafkaFuture::new(future))
+                Ok(TrySendOutcome::Accepted(KafkaFuture::new(future)))
+            },
+            // The non-blocking path's second would-block point. `remaining_wait_ms`
+            // is zero here, so the pool gave up at once with `BufferExhaustedException`
+            // (`BufferPool.allocate`, or `try_allocate_chunks` on the incremental
+            // strategy) — on `send` with `max.block.ms = 0` that is an `ApiException`
+            // and takes the arm below; `try_send` instead hands the record (and its
+            // still un-invoked callback) back so the caller can retry it with `send`
+            // when it can afford to block. The pool is untouched: a failed allocation
+            // releases whatever it accumulated before returning.
+            Err(failure) if wait == SendWait::Never && matches!(failure.error, Error::ProducerBufferExhausted(_)) => {
+                Ok(TrySendOutcome::WouldBlock(failure.callback))
             },
             // Java's `catch (ApiException e)` (`KafkaProducer.java:1130-1142`) fires the
             // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
@@ -2229,9 +2387,9 @@ impl<K, V> KafkaProducer<K, V> {
             // callback back (`AppendFailure::callback`) precisely so this arm can honour
             // that obligation exactly once (CLAUDE.md §11.5) — the four sibling arms
             // covering the same Java block all route through `handle_api_error` too.
-            Err(failure) if failure.error.is_api_error() => {
-                self.handle_api_error(failure.error, topic, partition, failure.callback)
-            },
+            Err(failure) if failure.error.is_api_error() => self
+                .handle_api_error(failure.error, topic, partition, failure.callback)
+                .map(TrySendOutcome::Accepted),
             // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1147-1154`)
             // rethrow, and neither invokes the callback. `failure.callback` is dropped
             // here, exactly as Java drops its `appendCallbacks` reference when `send()`
@@ -2306,14 +2464,14 @@ impl<K, V> KafkaProducer<K, V> {
         error: Error,
         topic: &str,
         partition: i32,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         kafka_debug!(self.log_context, "Error occurred during message send: {}", error);
         self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
             let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
-            cb(Some(&null_metadata), Some(&error));
+            cb.on_completion(Some(&null_metadata), Some(&error));
         }
         let tp = TopicPartition::new(topic.to_string(), partition);
         Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, error))))
@@ -2665,50 +2823,57 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     /// (e.g. the C FFI layer). The slices are passed directly through to the
     /// accumulator's batch buffer without any intermediate allocation.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#send")]
-    pub async fn send(
+    pub fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
-        callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.ensure_not_closed()?;
+        callback: Option<Box<dyn Callback>>,
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send {
+        async move {
+            self.ensure_not_closed()?;
 
-        let now_ms = self.now_ms();
-        let cluster_and_wait_time = match self
-            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
-            .await
-        {
-            Ok(cwt) => cwt,
-            Err(e) => {
-                // Java 1067-1072, as in `do_send`.
-                let e = self.relabel_if_closed_while_sending(e);
-                if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
-                }
-                return Err(e);
-            },
-        };
-        let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
-        let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
-        let cluster = cluster_and_wait_time.cluster;
+            let now_ms = self.now_ms();
+            let cluster_and_wait_time = match self
+                .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+                .await
+            {
+                Ok(cwt) => cwt,
+                Err(e) => {
+                    // Java 1067-1072, as in `do_send`.
+                    let e = self.relabel_if_closed_while_sending(e);
+                    if e.is_api_error() {
+                        // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                        // no partition is computed yet, so the record's own, if it names one.
+                        let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, record.topic(), partition, callback);
+                    }
+                    return Err(e);
+                },
+            };
+            let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
+            let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
+            let cluster = cluster_and_wait_time.cluster;
 
-        let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
+            let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
 
-        // Java's `doSend` appends `record.headers().toArray()`
-        // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
-        // written straight into the batch buffer, as on the typed path.
-        self.do_send_bytes(
-            &record_topic,
-            partition,
-            timestamp,
-            key,
-            value,
-            record_headers.to_array(),
-            callback,
-            now_ms,
-            remaining_wait_ms,
-            &cluster,
-        )
-        .await
+            // Java's `doSend` appends `record.headers().toArray()`
+            // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
+            // written straight into the batch buffer, as on the typed path.
+            self.do_send_bytes(
+                &record_topic,
+                partition,
+                timestamp,
+                key,
+                value,
+                record_headers.to_array(),
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+                SendWait::MaxBlock,
+            )
+            .await?
+            .into_accepted_future()
+        }
     }
 }
 
@@ -2752,7 +2917,7 @@ where
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.do_send(record, None).await
+        self.do_send(record, None, SendWait::MaxBlock).await?.into_accepted_future()
     }
 
     /// Asynchronously send a record to a topic and invoke the provided callback
@@ -2760,9 +2925,9 @@ where
     async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.do_send(record, callback).await
+        self.do_send(record, callback, SendWait::MaxBlock).await?.into_accepted_future()
     }
 
     /// Invoking this method makes all buffered records immediately available to
@@ -2894,6 +3059,7 @@ mod tests {
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
+    use crate::common::serialization::Serializer;
     use crate::common::serialization::StringSerializer;
     use crate::common::utils::Utils;
     use crate::producer::MockPartitioner;
@@ -2902,6 +3068,7 @@ mod tests {
     use crate::producer::RoundRobinPartitioner;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+    use std::borrow::Cow;
 
     const TOPIC: &str = "test-topic";
 
@@ -3022,7 +3189,11 @@ mod tests {
     struct FailingSerializer(Error);
 
     impl Serializer<String> for FailingSerializer {
-        fn serialize(&self, _topic: &str, _data: Option<&String>) -> Result<Option<Vec<u8>>, Error> {
+        async fn serialize<'a>(
+            &'a self,
+            _topic: &'a str,
+            _data: Option<&'a String>,
+        ) -> Result<Option<Cow<'a, [u8]>>, Error> {
             Err(self.0.clone())
         }
     }
@@ -3030,7 +3201,7 @@ mod tests {
     fn create_producer_with_key_serializer(
         metadata: Arc<ProducerMetadata>,
         accumulator: Arc<RecordAccumulator>,
-        key_serializer: Box<dyn Serializer<String> + Send + Sync>,
+        key_serializer: Box<dyn DynSerializer<String>>,
     ) -> KafkaProducer<String, String> {
         KafkaProducer::with_options(
             KafkaProducerOptionsBuilder::new()
@@ -3070,7 +3241,7 @@ mod tests {
 
         let callback_error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&callback_error);
-        let callback: Callback = Box::new(move |_metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             *sink.lock().unwrap() = error.cloned();
         });
 
@@ -3089,6 +3260,109 @@ mod tests {
 
         let invoked = callback_error.lock().unwrap().take().expect("the callback must be invoked");
         assert!(invoked.is_timeout_error(), "got {invoked:?}");
+    }
+
+    /// The callback partition of a pre-append API error: Java's `catch (ApiException e)`
+    /// (`KafkaProducer.java:1049-1057`) builds its null metadata from
+    /// `AppendCallbacks.topicPartition()` (`:1613-1621`), which, before a partition is
+    /// computed, names the record's own partition when the record names one, and
+    /// `UNKNOWN_PARTITION` only otherwise. Covers a serializer failure on both
+    /// serialization paths (built-in and custom partitioner) and the metadata wait on both
+    /// `send` paths (typed and borrowed bytes), each with and without a record partition.
+    #[tokio::test]
+    async fn a_pre_append_api_error_reports_the_record_partition() {
+        use crate::common::serialization::ByteArraySerializer;
+
+        fn recording_callback(slot: &Arc<Mutex<Option<(String, i32)>>>) -> Box<dyn Callback> {
+            let slot = Arc::clone(slot);
+            Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                assert!(error.is_some(), "the callback is handed the error");
+                let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+                *slot.lock().unwrap() = Some((metadata.topic().to_string(), metadata.partition()));
+            })
+        }
+
+        // A serializer API error, on the built-in partitioner's zero-copy path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer = create_producer_with_key_serializer(
+                create_metadata_with_topic(TOPIC, 3),
+                create_accumulator(),
+                Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // The same on the custom partitioner's borrowing path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer: KafkaProducer<String, String> = KafkaProducer::with_options(
+                KafkaProducerOptionsBuilder::new()
+                    .set_config(&ProducerConfig::default())
+                    .set_key_serializer(Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))))
+                    .set_value_serializer(Box::new(StringSerializer))
+                    .set_metadata(create_metadata_with_topic(TOPIC, 3))
+                    .set_accumulator(create_accumulator())
+                    .set_time(default_time())
+                    .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                    .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
+                    .build()
+                    .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // A metadata-wait timeout: the record names a partition the topic does not have,
+        // and `max.block.ms = 0` fails the wait at once.
+        let config = || ProducerConfig { max_block_ms: 0, ..Default::default() };
+        let producer =
+            create_producer_with_config(config(), create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some("v".to_string())).unwrap();
+        let future = producer
+            .send_with_callback(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
+
+        // The same on the borrowed byte-slice `send`.
+        let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&config())
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(create_metadata_with_topic(TOPIC, 1))
+                .set_accumulator(create_accumulator())
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some(b"v".as_slice())).unwrap();
+        let future = producer
+            .send(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
     }
 
     /// The other half of the same dispatch: a `SerializationException` — which
@@ -3446,37 +3720,11 @@ mod tests {
     /// `catch (ApiException e)` arm.
     #[tokio::test]
     async fn test_api_error_from_append_fires_the_callback_exactly_once() {
-        const BATCH_SIZE: usize = 16384;
-        let config = ProducerConfig {
-            batch_size: BATCH_SIZE as i32,
-            buffer_memory: BATCH_SIZE as i64,
-            max_block_ms: 0,
-            linger_ms: 0,
-            ..Default::default()
-        };
-        // Two partitions, so the second record needs a *new* batch rather than
-        // appending to the first record's still-roomy one.
-        let metadata = create_metadata_with_topic(TOPIC, 2);
-        let accumulator = Arc::new(RecordAccumulator::new(
-            BATCH_SIZE as i32,
-            Compression::none().build(),
-            0,
-            100,
-            1000,
-            120_000,
-            PartitionerConfig::new(true, 0, false, "").unwrap(),
-            Arc::new(Metrics::new()),
-            KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
-            Arc::new(crate::common::utils::SystemTime),
-            // Room for exactly one batch.
-            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
-            None,
-        ));
-        let producer = create_producer_with_config(config, metadata, accumulator);
+        let producer = create_producer_with_room_for_one_batch(0);
 
         // The first record consumes the pool's only batch.
         producer
-            .do_send(
+            .send_with_callback(
                 ProducerRecord::with_partition_key(TOPIC.to_string(), Some(0), None, Some("first".to_string()))
                     .unwrap(),
                 None,
@@ -3489,7 +3737,7 @@ mod tests {
         // `BufferExhaustedException`.
         let invocations: Arc<Mutex<Vec<(i64, i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&invocations);
-        let callback: Callback = Box::new(move |metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
             let error = error.expect("Java passes the exception here");
             recorder
@@ -3499,7 +3747,7 @@ mod tests {
         });
 
         let future = producer
-            .do_send(
+            .send_with_callback(
                 ProducerRecord::with_partition_key(TOPIC.to_string(), Some(1), None, Some("second".to_string()))
                     .unwrap(),
                 Some(callback),
@@ -3507,7 +3755,7 @@ mod tests {
             .await
             .expect("an ApiException becomes a failed future, not an Err");
 
-        // The callback fired exactly once. `Callback` is a `Box<dyn FnOnce>`, so
+        // The callback fired exactly once. `on_completion` consumes its `Box<dyn Callback>`, so
         // "at most once" is a type-level guarantee; this pins "at least once".
         // The guard is cloned out and dropped before the `await` below (CLAUDE.md §11.6).
         let invocations = invocations.lock().unwrap().clone();
@@ -3547,10 +3795,11 @@ mod tests {
 
         let invoked = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&invoked);
-        let callback: Callback = Box::new(move |_, _| flag.store(true, Ordering::SeqCst));
+        let callback: Box<dyn Callback> =
+            Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| flag.store(true, Ordering::SeqCst));
 
         let error = producer
-            .do_send(
+            .send_with_callback(
                 ProducerRecord::with_partition_key(TOPIC.to_string(), Some(0), None, Some("v".to_string())).unwrap(),
                 Some(callback),
             )
@@ -3561,6 +3810,239 @@ mod tests {
         assert!(
             !invoked.load(Ordering::SeqCst),
             "Java's catch (KafkaException e) block does not invoke the callback"
+        );
+    }
+
+    /// The fixture of `test_api_error_from_append_fires_the_callback_exactly_once`:
+    /// `buffer.memory` sized for exactly one batch, and two partitions, so the
+    /// second record needs a *new* batch rather than appending to the first
+    /// record's still-roomy one — its append has to allocate, and finds the pool
+    /// empty.
+    fn create_producer_with_room_for_one_batch(max_block_ms: i64) -> KafkaProducer<String, String> {
+        const BATCH_SIZE: usize = 16384;
+        let config = ProducerConfig {
+            batch_size: BATCH_SIZE as i32,
+            buffer_memory: BATCH_SIZE as i64,
+            max_block_ms,
+            linger_ms: 0,
+            ..Default::default()
+        };
+        let metadata = create_metadata_with_topic(TOPIC, 2);
+        let accumulator = Arc::new(RecordAccumulator::new(
+            BATCH_SIZE as i32,
+            Compression::none().build(),
+            0,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
+            Arc::new(Metrics::new()),
+            KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::new(crate::common::utils::SystemTime),
+            // Room for exactly one batch.
+            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
+            None,
+        ));
+        create_producer_with_config(config, metadata, accumulator)
+    }
+
+    fn string_record(partition: Option<i32>, value: &str) -> ProducerRecord<String, String> {
+        ProducerRecord::with_partition_key(TOPIC.to_string(), partition, None, Some(value.to_string())).unwrap()
+    }
+
+    /// A callback that records every invocation, plus the recorder to read back.
+    #[expect(clippy::type_complexity)]
+    fn recording_callback() -> (Box<dyn Callback>, Arc<Mutex<Vec<(i32, String)>>>) {
+        let invocations: Arc<Mutex<Vec<(i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&invocations);
+        let callback: Box<dyn Callback> = Box::new(crate::producer::callback::new(move |metadata, error| {
+            let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+            let error = error.expect("Java passes the exception here");
+            recorder
+                .lock()
+                .unwrap()
+                .push((metadata.partition(), error.message().to_string()));
+        }));
+        (callback, invocations)
+    }
+
+    /// `try_send` on a producer that has metadata and memory is `send`: the record
+    /// is appended and its future returned, and the callback waits for the
+    /// broker's answer rather than firing now.
+    #[tokio::test]
+    async fn try_send_accepts_a_record_the_producer_can_take_at_once() {
+        let producer = create_producer_with_room_for_one_batch(0);
+        let (callback, invocations) = recording_callback();
+
+        let outcome = producer
+            .try_send(string_record(Some(0), "first"), Some(callback))
+            .await
+            .expect("a ready producer accepts the record");
+
+        let future = match outcome {
+            TrySendOutcome::Accepted(future) => future,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        assert!(!future.is_done(), "the record is in a batch awaiting the sender, not resolved");
+        assert!(invocations.lock().unwrap().is_empty(), "nothing has completed, so no callback");
+    }
+
+    /// The buffer-memory would-block point. `send` with `max.block.ms = 0` fails the
+    /// same record with `BufferExhaustedException` — callback fired, failed future
+    /// (`test_api_error_from_append_fires_the_callback_exactly_once`). `try_send`
+    /// instead does nothing to it: no callback, no future, the pool's memory
+    /// untouched, and the callback handed back intact for the retry.
+    #[tokio::test]
+    async fn try_send_reports_would_block_on_buffer_exhaustion_without_firing_the_callback() {
+        let producer = create_producer_with_room_for_one_batch(0);
+
+        // The first record consumes the pool's only batch.
+        producer
+            .try_send(string_record(Some(0), "first"), None)
+            .await
+            .expect("the first send has memory");
+        let memory_before = producer.accumulator.buffer_pool_available_memory();
+
+        // The second record targets partition 1, so its append has to allocate.
+        let (callback, invocations) = recording_callback();
+        let outcome = producer
+            .try_send(string_record(Some(1), "second"), Some(callback))
+            .await
+            .expect("would-block is an outcome, not an error");
+
+        let returned = match outcome {
+            TrySendOutcome::WouldBlock(callback) => callback,
+            other => panic!("expected WouldBlock, got {other:?}"),
+        };
+        assert!(
+            invocations.lock().unwrap().is_empty(),
+            "a would-block must not invoke the callback"
+        );
+        assert_eq!(
+            producer.accumulator.buffer_pool_available_memory(),
+            memory_before,
+            "a would-block must leave the pool as it found it"
+        );
+
+        // The very callback that was passed in comes back, still live: firing it
+        // ourselves proves the producer neither invoked nor dropped it.
+        let returned = returned.expect("the caller's callback is handed back");
+        let tp = TopicPartition::new(TOPIC.to_string(), 1);
+        let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
+        returned.on_completion(Some(&null_metadata), Some(&Error::timeout("retry")));
+        assert_eq!(invocations.lock().unwrap().as_slice(), &[(1, "retry".to_string())]);
+    }
+
+    /// The same fixture through the blocking `send`: `SendWait::MaxBlock` dispatches
+    /// `BufferExhaustedException` as the `ApiException` it is — callback fired once
+    /// with the null metadata, failed future — so `send` keeps Java's contract
+    /// while sharing its body with `try_send`.
+    #[tokio::test]
+    async fn send_still_fails_the_record_where_try_send_would_block() {
+        let producer = create_producer_with_room_for_one_batch(0);
+        producer
+            .send_with_callback(string_record(Some(0), "first"), None)
+            .await
+            .expect("the first send has memory");
+
+        let (callback, invocations) = recording_callback();
+        let future = producer
+            .send_with_callback(string_record(Some(1), "second"), Some(callback))
+            .await
+            .expect("an ApiException becomes a failed future, not an Err");
+
+        let invocations = invocations.lock().unwrap().clone();
+        assert_eq!(invocations.len(), 1, "the callback must fire exactly once, got {invocations:?}");
+        assert_eq!(invocations[0].0, 1, "the null metadata names the record's partition");
+        assert!(invocations[0].1.contains("Failed to allocate"), "got: {}", invocations[0].1);
+        let error = future.get().await.expect_err("the future must be failed");
+        assert!(matches!(error, Error::ProducerBufferExhausted(_)), "got {error:?}");
+    }
+
+    /// The metadata would-block point. An unknown topic makes `send` wait for a
+    /// metadata response; `try_send` reports `WouldBlock` with the callback
+    /// un-invoked — and has still asked for the metadata, so the attempt is not
+    /// wasted: the topic is now tracked and an update is requested.
+    #[tokio::test]
+    async fn try_send_reports_would_block_for_an_unknown_topic_and_requests_its_metadata() {
+        const UNKNOWN_TOPIC: &str = "not-in-metadata-yet";
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let producer =
+            create_producer_with_config(ProducerConfig::default(), Arc::clone(&metadata), create_accumulator());
+        assert!(!metadata.contains_topic(UNKNOWN_TOPIC));
+
+        let (callback, invocations) = recording_callback();
+        let record =
+            ProducerRecord::with_partition_key(UNKNOWN_TOPIC.to_string(), None, None, Some("v".to_string())).unwrap();
+        let outcome = producer
+            .try_send(record, Some(callback))
+            .await
+            .expect("would-block is an outcome");
+
+        assert!(matches!(outcome, TrySendOutcome::WouldBlock(Some(_))), "got {outcome:?}");
+        assert!(
+            invocations.lock().unwrap().is_empty(),
+            "a would-block must not invoke the callback"
+        );
+        assert!(
+            metadata.contains_topic(UNKNOWN_TOPIC),
+            "the metadata request is the side effect worth keeping"
+        );
+        assert!(
+            metadata.metadata_arc().update_requested(),
+            "an update was requested for the topic"
+        );
+    }
+
+    /// Only a *wait* is a would-block. A record the producer rejects outright — too
+    /// large for `max.request.size` — is resolved exactly as `send` resolves it:
+    /// `Accepted`, with the callback already fired and the future already failed.
+    #[tokio::test]
+    async fn try_send_resolves_a_rejected_record_as_accepted_with_a_failed_future() {
+        let config = ProducerConfig { max_request_size: 64, ..Default::default() };
+        let producer = create_producer_with_config(config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+
+        let (callback, invocations) = recording_callback();
+        let outcome = producer
+            .try_send(string_record(Some(0), &"x".repeat(1024)), Some(callback))
+            .await
+            .expect("an ApiException becomes a failed future, not an Err");
+
+        let future = match outcome {
+            TrySendOutcome::Accepted(future) => future,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let invocations = invocations.lock().unwrap().clone();
+        assert_eq!(invocations.len(), 1, "the callback fires exactly once, got {invocations:?}");
+        assert!(invocations[0].1.contains("larger than 64"), "got: {}", invocations[0].1);
+        let error = future.get().await.expect_err("the future must be failed");
+        assert!(matches!(error, Error::RecordTooLarge(_)), "got {error:?}");
+    }
+
+    /// `throwIfProducerClosed()` comes before either wait point, so a closed
+    /// producer is an `Err` from `try_send` just as from `send` — never a
+    /// `WouldBlock` that would have the caller queue the record for a producer
+    /// that will not take it.
+    #[tokio::test]
+    async fn try_send_on_a_closed_producer_is_an_error_not_a_would_block() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+        producer.close().await.unwrap();
+
+        let (callback, invocations) = recording_callback();
+        let error = producer
+            .try_send(string_record(Some(0), "v"), Some(callback))
+            .await
+            .expect_err("a closed producer rejects the send");
+
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Cannot perform operation after producer has been closed");
+        assert!(
+            invocations.lock().unwrap().is_empty(),
+            "Java's rethrow path never invokes the callback"
         );
     }
 
@@ -4480,9 +4962,10 @@ mod tests {
 
         let callback_called = Arc::new(AtomicBool::new(false));
         let callback_called_clone = Arc::clone(&callback_called);
-        let callback: Callback = Box::new(move |_metadata, _error| {
-            callback_called_clone.store(true, Ordering::SeqCst);
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                callback_called_clone.store(true, Ordering::SeqCst);
+            });
 
         let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let result = producer.send_with_callback(record, Some(callback)).await;
@@ -4528,15 +5011,16 @@ mod tests {
         let mt = Arc::clone(&metadata_topic);
         let mo = Arc::clone(&metadata_offset);
 
-        let callback: Callback = Box::new(move |record_metadata, error| {
-            inv.store(true, Ordering::SeqCst);
-            *err.lock().unwrap() = error.is_some();
-            if let Some(rm) = record_metadata {
-                *meta.lock().unwrap() = true;
-                *mt.lock().unwrap() = rm.topic().to_string();
-                *mo.lock().unwrap() = rm.offset();
-            }
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |record_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                inv.store(true, Ordering::SeqCst);
+                *err.lock().unwrap() = error.is_some();
+                if let Some(rm) = record_metadata {
+                    *meta.lock().unwrap() = true;
+                    *mt.lock().unwrap() = rm.topic().to_string();
+                    *mo.lock().unwrap() = rm.offset();
+                }
+            });
 
         // Send a record that exceeds max_request_size
         let large_value = "a".repeat(100);
@@ -4618,12 +5102,13 @@ mod tests {
         let inv = Arc::clone(&invoked);
         let err_slot = Arc::clone(&saw_error);
         let meta_slot = Arc::clone(&saw_metadata);
-        let callback: Callback = Box::new(move |record_metadata, exception| {
-            inv.fetch_add(1, Ordering::SeqCst);
-            *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
-            *meta_slot.lock().unwrap() =
-                record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |record_metadata: Option<&RecordMetadata>, exception: Option<&Error>| {
+                inv.fetch_add(1, Ordering::SeqCst);
+                *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
+                *meta_slot.lock().unwrap() =
+                    record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
+            });
 
         let second: ProducerRecord<String, String> =
             ProducerRecord::with_partition_key(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
@@ -4683,7 +5168,7 @@ mod tests {
 
         let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
         let inv = Arc::clone(&invoked);
-        let callback: Callback = Box::new(move |_, _| {
+        let callback: Box<dyn Callback> = Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
             inv.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -4730,7 +5215,7 @@ mod tests {
         // Add a header pre-send
         record
             .headers_mut()
-            .add_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
+            .add_with_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
             .unwrap();
 
         let result = producer.send(record).await;
@@ -4769,9 +5254,9 @@ mod tests {
         );
 
         let mut headers = RecordHeaders::new();
-        headers.add_key_value("trace", Some(b"abc")).unwrap();
-        headers.add_key_value("empty", Some(b"")).unwrap();
-        headers.add_key_value("null", None).unwrap();
+        headers.add_with_key_value("trace", Some(b"abc")).unwrap();
+        headers.add_with_key_value("empty", Some(b"")).unwrap();
+        headers.add_with_key_value("null", None).unwrap();
         let record = ProducerRecord::with_partition_key_headers(
             TOPIC.to_string(),
             Some(0),
@@ -4972,7 +5457,7 @@ mod tests {
         let inv = Arc::clone(&callback_invoked);
         let err = Arc::clone(&got_error);
 
-        let callback: Callback = Box::new(move |_metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             inv.store(true, Ordering::SeqCst);
             err.store(error.is_some(), Ordering::SeqCst);
         });
@@ -5107,7 +5592,19 @@ mod tests {
             // Warm up: create the topic info, the deque and the batch.
             for _ in 0..4 {
                 producer
-                    .do_send_bytes(TOPIC, Some(0), Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .do_send_bytes(
+                        TOPIC,
+                        Some(0),
+                        Some(0),
+                        Some(b"k"),
+                        Some(b"v"),
+                        &[],
+                        None,
+                        0,
+                        0,
+                        &cluster,
+                        SendWait::MaxBlock,
+                    )
                     .await
                     .expect("append should succeed");
             }
@@ -5116,7 +5613,19 @@ mod tests {
                 let _guard = crate::AllocTrackingGuard::new();
                 crate::AllocTrackingGuard::reset();
                 producer
-                    .do_send_bytes(TOPIC, Some(0), Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .do_send_bytes(
+                        TOPIC,
+                        Some(0),
+                        Some(0),
+                        Some(b"k"),
+                        Some(b"v"),
+                        &[],
+                        None,
+                        0,
+                        0,
+                        &cluster,
+                        SendWait::MaxBlock,
+                    )
                     .await
                     .expect("append should succeed");
                 let count = crate::AllocTrackingGuard::count();
@@ -5190,7 +5699,19 @@ mod tests {
             // partitioner case) the RoundRobinPartitioner's per-topic counter entry.
             for _ in 0..4 {
                 producer
-                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .do_send_bytes(
+                        TOPIC,
+                        None,
+                        Some(0),
+                        Some(b"k"),
+                        Some(b"v"),
+                        &[],
+                        None,
+                        0,
+                        0,
+                        &cluster,
+                        SendWait::MaxBlock,
+                    )
                     .await
                     .expect("append should succeed");
             }
@@ -5199,7 +5720,19 @@ mod tests {
                 let _guard = crate::AllocTrackingGuard::new();
                 crate::AllocTrackingGuard::reset();
                 producer
-                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .do_send_bytes(
+                        TOPIC,
+                        None,
+                        Some(0),
+                        Some(b"k"),
+                        Some(b"v"),
+                        &[],
+                        None,
+                        0,
+                        0,
+                        &cluster,
+                        SendWait::MaxBlock,
+                    )
                     .await
                     .expect("append should succeed");
                 let count = crate::AllocTrackingGuard::count();
@@ -5214,6 +5747,112 @@ mod tests {
             without, with,
             "dispatching through a custom Partitioner must add no per-record allocation \
              to the send path; got {without} without a partitioner vs {with} with one"
+        );
+    }
+
+    /// CLAUDE.md §13 / §14: with a custom partitioner, a `Vec<u8>` record goes
+    /// through the serializers (the partitioner needs the typed key and value)
+    /// and still allocates nothing for them: `ByteArraySerializer` borrows the
+    /// record's own buffers, and its future fits the `InlineFuture` buffer. So
+    /// the whole `send` costs exactly what appending the already-serialized
+    /// bytes costs.
+    #[tokio::test]
+    async fn test_vec_send_with_a_custom_partitioner_allocates_nothing_for_the_serializers() {
+        use crate::common::serialization::ByteArraySerializer;
+
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
+            1024 * 1024,
+            Compression::none().build(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
+            None,
+        ));
+        let config = ProducerConfig::default();
+        let partitioner: Option<Box<dyn Partitioner<Vec<u8>, Vec<u8>>>> = Some(Box::new(RoundRobinPartitioner::new()));
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&config)
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(Arc::clone(&metadata))
+                .set_accumulator(accumulator)
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .set_partitioner(partitioner)
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+        let cluster = metadata.fetch();
+        let record = || ProducerRecord::with_key(TOPIC.to_string(), Some(b"k".to_vec()), Some(b"v".to_vec()));
+
+        let send_bytes = || {
+            producer.do_send_bytes(
+                TOPIC,
+                None,
+                None,
+                Some(b"k"),
+                Some(b"v"),
+                &[],
+                None,
+                0,
+                0,
+                &cluster,
+                SendWait::MaxBlock,
+            )
+        };
+
+        // Warm up both paths: the topic info, the deque, the batch and the
+        // partitioner's per-topic counter. Ten records, so the two measured
+        // below (the 11th and 12th) do not land on a doubling of the batch's
+        // per-record vectors, which would charge an amortized growth to one
+        // side only.
+        for _ in 0..5 {
+            producer
+                .do_send(record(), None, SendWait::MaxBlock)
+                .await
+                .expect("append should succeed");
+            send_bytes().await.expect("append should succeed");
+        }
+
+        let through_serializers = {
+            let record = record();
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            producer
+                .do_send(record, None, SendWait::MaxBlock)
+                .await
+                .expect("append should succeed");
+            crate::AllocTrackingGuard::count()
+        };
+        let bytes_only = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            send_bytes().await.expect("append should succeed");
+            crate::AllocTrackingGuard::count()
+        };
+        // `do_send` waits on the metadata before serializing, as Java's
+        // `doSend` does; that step's own cost is not the serializers'.
+        let metadata_wait = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            producer
+                .wait_on_metadata(TOPIC, None, 0, 0)
+                .await
+                .expect("the metadata is cached");
+            crate::AllocTrackingGuard::count()
+        };
+        assert!(bytes_only > 0, "the tracker must actually be measuring");
+        assert_eq!(
+            bytes_only + metadata_wait,
+            through_serializers,
+            "serializing a Vec<u8> record must add no allocation to the send path; got \
+             {through_serializers} through the serializers vs {bytes_only} for the bytes alone \
+             plus {metadata_wait} for the metadata wait"
         );
     }
 
@@ -6285,9 +6924,10 @@ mod tests {
 
             let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let cb_count = Arc::clone(&count);
-            let callback: Callback = Box::new(move |_metadata, _error| {
-                cb_count.fetch_add(1, Ordering::SeqCst);
-            });
+            let callback: Box<dyn Callback> =
+                Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                    cb_count.fetch_add(1, Ordering::SeqCst);
+                });
 
             // The append succeeds; `maybeAddPartition` then raises `ProducerFenced`,
             // taking the `handle_api_error(.., None)` arm.
@@ -6969,10 +7609,15 @@ mod tests {
 
     /// `awaitTopicMetadata` waits at most `max.block.ms` for the refresh it
     /// requests, and reports Java's `awaitUpdate` timeout when none arrives.
+    ///
+    /// `max.block.ms` also bounds the `initTransactions` that precedes the
+    /// wait, and `drive` runs on real time: 500 ms, as the other tests that
+    /// wait a timeout out use, leaves the mock round trips headroom when the
+    /// whole suite runs under load, where 100 ms timed `initTransactions` out.
     #[tokio::test]
     async fn test_send_offsets_to_transaction_times_out_waiting_for_topic_metadata() {
         let mut ctx = TxnProducerContext::with_metadata_seed(
-            &[("transactional.id", "some.id"), ("max.block.ms", "100")],
+            &[("transactional.id", "some.id"), ("max.block.ms", "500")],
             1,
             true,
             false,
@@ -7002,7 +7647,7 @@ mod tests {
         .await
         .expect_err("no metadata update arrives");
         assert!(error.is_timeout_error(), "{error:?}");
-        assert_eq!(error.message(), "Failed to update metadata after 100 ms.");
+        assert_eq!(error.message(), "Failed to update metadata after 500 ms.");
         assert!(
             !ctx.transaction_manager.lock().unwrap().has_pending_offset_commits(),
             "the manager is not reached when the metadata wait fails"

@@ -34,7 +34,7 @@ class InconsistentVoterSetError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 94  # kafka_common_ErrorCode_INCONSISTENT_VOTER_SET
+    _ffi_id: ClassVar[int] = 94  # kafka_common_Error_INCONSISTENT_VOTER_SET
 
     def __init__(
         self,

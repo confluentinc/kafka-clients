@@ -222,22 +222,23 @@ struct PendingFollowupReset {
     initial_partitions: HashSet<TopicPartition>,
 }
 
-/// State shared between the [`OffsetsRequestManager`] and the
-/// [`OffsetsClusterListener`].
+/// State shared between the [`OffsetsRequestManager`], its spawned response
+/// forwarders' completions and the replay of parked requests.
 ///
-/// The cluster listener is registered on
-/// [`crate::Metadata::add_cluster_update_listener`] which gives it
-/// only a `&self` borrow — so any state the listener needs to mutate
-/// (`requests_to_send`, `requests_to_retry`) must live inside an
-/// `Arc<Mutex<...>>`. Read-only fields (metadata, subscription state,
-/// isolation level, timeout, fetcher-utils, completion sender) are wrapped
-/// in `Arc` so the listener can call into [`Self::prepare_fetch_offsets_requests`]
-/// without going through the manager.
+/// The [`OffsetsClusterListener`] does NOT hold this struct: it only sets
+/// [`Self::metadata_updated`], so it captures that flag alone. Holding the
+/// whole struct would close a reference cycle — this struct owns
+/// [`Self::metadata`], whose `Metadata` owns the boxed listener — that
+/// `Arc` reference counting never frees, so every closed consumer would stay
+/// allocated. Java builds the same cycle (`OffsetsRequestManager.java:148`,
+/// `metadata.addClusterUpdateListener(this)`) and its garbage collector frees
+/// it. The replay itself ([`Self::replay_retries_after_metadata_update`]) runs
+/// from [`OffsetsRequestManager::poll`].
 ///
 /// Java carries every one of these as instance fields on
 /// `OffsetsRequestManager` itself; the Rust split is a pure mechanical
-/// consequence of `&self` listener access vs. `&mut self` manager-poll
-/// access.
+/// consequence of the spawned forwarders and the deferred replay needing
+/// `Arc` access vs. `&mut self` manager-poll access.
 pub(crate) struct OffsetsManagerShared {
     pub(crate) subscription_state: Arc<Mutex<SubscriptionState>>,
     pub(crate) metadata: Arc<ConsumerMetadata>,
@@ -269,7 +270,10 @@ pub(crate) struct OffsetsManagerShared {
     /// metadata locks). The observable behaviour matches Java: the
     /// retried requests appear on `requests_to_send` before the next
     /// network poll.
-    pub(crate) metadata_updated: std::sync::atomic::AtomicBool,
+    ///
+    /// An `Arc` so the listener can hold the flag without holding this
+    /// struct (see the struct docs).
+    pub(crate) metadata_updated: Arc<std::sync::atomic::AtomicBool>,
     /// Nodes for which the manager wants the bg task to invoke
     /// `NetworkClientDelegate::try_connect` on its next iteration. Mirrors
     /// Java's `networkClientDelegate.tryConnect(node)` side effect inside
@@ -284,29 +288,33 @@ pub(crate) struct OffsetsManagerShared {
     /// poked whenever work for [`OffsetsRequestManager::poll`] is queued off
     /// the bg loop:
     ///
-    /// - a spawned response forwarder has queued a [`PendingCompletion`]
-    ///   (`ListOffsets` for `fetch_offsets` / the reset path,
-    ///   `OffsetsForLeaderEpoch` for validation);
+    /// - a spawned response forwarder has queued a [`PendingCompletion`] on
+    ///   [`Self::pending_completions_tx`] (`ListOffsets` for `fetch_offsets`
+    ///   / the reset path, `OffsetsForLeaderEpoch` for validation);
     /// - the spawned committed-offsets follow-up of `update_fetch_positions`
-    ///   has queued a [`PendingFollowupReset`];
+    ///   has queued a [`PendingFollowupReset`] on the manager's
+    ///   `pending_followup_tx`;
     /// - `update_fetch_positions`, which the `AsyncPoll` event runs on a
     ///   spawned task, has queued requests or connection attempts.
     ///
-    /// Java needs no equivalent: its `whenComplete` handlers run inside the
-    /// network poll on the network thread, so a `ListOffsets` result is
-    /// applied before the next `runOnce` (and an `AsyncPollEvent`'s requests
-    /// are queued before the same `runOnce` polls the request managers). Here
-    /// the work lands after the bg loop has polled this manager; without the
-    /// poke it waits until something else ends the network poll — up to
-    /// `MAX_POLL_TIMEOUT_MS` (5 s) on an otherwise idle consumer, which made
-    /// every `end_offsets` / `beginning_offsets` / `offsets_for_times` call
-    /// take 5 s. The commit, coordinator, heartbeat and fetch managers wake
-    /// the bg task the same way.
+    /// Java completes the request's future inside `client.poll`
+    /// (`NetworkClientDelegate.java:454-464` → `OffsetsRequestManager.java:686`,
+    /// `:208`, `:851`), so the application's `addAndGet` returns as soon as the
+    /// response is read (and an `AsyncPollEvent`'s requests are queued before
+    /// the same `runOnce` polls the request managers). Here the work lands
+    /// after the bg loop has polled this manager, and only
+    /// [`OffsetsRequestManager::poll`] drains it, so without this poke the
+    /// loop parks in its next network poll for up to `MAX_POLL_TIMEOUT_MS`
+    /// (5 s) before the work is handled — the same gap
+    /// [`FetchRequestManager::set_completion_notify`] closes for fetches.
+    /// `notify_one` stores a permit, so a send that lands before the loop
+    /// parks still wakes it, and a burst of wakes costs at most one extra loop
+    /// iteration. Wired once via
+    /// [`OffsetsRequestManager::set_completion_notify`]; unset in tests that
+    /// drive no bg task.
     ///
-    /// Empty until the production wiring installs it via
-    /// [`OffsetsRequestManager::set_completion_notify`]; unit tests that do
-    /// not drive a real bg task leave it unset.
-    completion_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    /// [`FetchRequestManager::set_completion_notify`]: crate::consumer::internals::FetchRequestManager::set_completion_notify
+    pub(crate) completion_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// Test seam: runs once between the per-partition leader lookup and the
     /// regroup by node in `group_list_offset_requests`, so a test can update
     /// the metadata in that window. It reproduces the race KAFKA-20312 guards
@@ -319,8 +327,8 @@ pub(crate) struct OffsetsManagerShared {
 impl OffsetsManagerShared {
     /// Pokes the bg task's wakeup `Notify`, if installed, so its network poll
     /// returns and the next `run_once` polls this manager. See
-    /// [`Self::completion_notify`]. `Notify` keeps at most one permit, so a
-    /// burst of wakes costs at most one extra loop iteration.
+    /// [`Self::completion_notify`]. For callers on `&self`; a spawned task
+    /// pokes the handle from [`Self::completion_notify_for_task`] instead.
     fn wake_background_task(&self) {
         if let Some(notify) = self.completion_notify.get() {
             notify.notify_one();
@@ -328,12 +336,18 @@ impl OffsetsManagerShared {
     }
 
     /// Queues a response forwarder's [`PendingCompletion`] for the next
-    /// [`OffsetsRequestManager::poll`] and wakes the bg task so that poll
-    /// happens at once. Nothing is woken when the manager (the receiver) is
-    /// gone.
-    fn forward_completion(&self, completion: PendingCompletion) {
-        if self.pending_completions_tx.send(completion).is_ok() {
-            self.wake_background_task();
+    /// [`OffsetsRequestManager::poll`] and pokes `notify` (the forwarder's
+    /// [`Self::completion_notify_for_task`]) so that poll happens at once.
+    /// Nothing is woken when the manager (the receiver) is gone.
+    fn forward_completion(
+        tx: &mpsc::UnboundedSender<PendingCompletion>,
+        notify: Option<&Arc<tokio::sync::Notify>>,
+        completion: PendingCompletion,
+    ) {
+        if tx.send(completion).is_ok()
+            && let Some(notify) = notify
+        {
+            notify.notify_one();
         }
     }
 
@@ -343,6 +357,24 @@ impl OffsetsManagerShared {
         let requests = self.requests_to_send.lock().expect("requests_to_send mutex poisoned").len();
         let try_connect = self.try_connect_queue.lock().expect("try_connect_queue mutex poisoned").len();
         requests + try_connect
+    }
+
+    /// The [`Self::completion_notify`] a spawned forwarder captures and pokes
+    /// after it has queued a completion for [`OffsetsRequestManager::poll`].
+    ///
+    /// The forwarder captures the `Notify`, never the shared state: it awaits
+    /// a oneshot whose sender sits in the `UnsentRequest` on
+    /// [`Self::requests_to_send`], so holding the shared state would keep that
+    /// sender, and with it the forwarder and the shared state, alive after the
+    /// manager is dropped, for as long as the runtime running the forwarder
+    /// lives. A production consumer's dedicated runtime is dropped with the
+    /// manager and drops the forwarder with it; a runtime that outlives the
+    /// manager, as in a unit test, would not.
+    /// The consumer wires the notify right after construction, before any
+    /// request is built, so reading it at spawn time loses nothing. Mirrors
+    /// `FetchRequestManager`'s capture of its `completion_notify`.
+    fn completion_notify_for_task(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.completion_notify.get().cloned()
     }
 
     /// Mirrors Java's `prepareFetchOffsetsRequests(timestampsToSearch,
@@ -428,7 +460,8 @@ impl OffsetsManagerShared {
 
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let shared = Arc::clone(self_arc);
+            let tx = self_arc.pending_completions_tx.clone();
+            let notify_for_task = self_arc.completion_notify_for_task();
             let state_for_task = Arc::clone(state);
             let target_times_for_task = target_times.clone();
             tokio::spawn(async move {
@@ -436,11 +469,15 @@ impl OffsetsManagerShared {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                shared.forward_completion(PendingCompletion::ListOffsetsForFetchOffsets {
-                    state: state_for_task,
-                    node_partitions: target_times_for_task,
-                    result,
-                });
+                OffsetsManagerShared::forward_completion(
+                    &tx,
+                    notify_for_task.as_ref(),
+                    PendingCompletion::ListOffsetsForFetchOffsets {
+                        state: state_for_task,
+                        node_partitions: target_times_for_task,
+                        result,
+                    },
+                );
             });
             unsent_requests.push(unsent);
         }
@@ -700,12 +737,13 @@ fn partial_fetched_for_node<'a>(
 /// Rust translation factors the `ClusterResourceListener` callback into a
 /// separate handle struct ([`OffsetsClusterListener`]) so we can register
 /// the callback with `Metadata::add_cluster_update_listener` without
-/// binding the listener's lifetime to the manager's `&mut`. The
-/// callback-shared state lives in [`OffsetsManagerShared`].
+/// binding the listener's lifetime to the manager's `&mut`. The listener
+/// holds only the `metadata_updated` flag; the state shared with spawned
+/// tasks lives in [`OffsetsManagerShared`].
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager")]
 pub(crate) struct OffsetsRequestManager {
-    /// Shared state accessible to the [`OffsetsClusterListener`] and to
-    /// per-response spawned tasks.
+    /// State shared with the deferred replay of parked requests. The
+    /// [`OffsetsClusterListener`] holds only its `metadata_updated` flag.
     shared: Arc<OffsetsManagerShared>,
     /// Java: `private final Time time`.
     time: Arc<dyn Time>,
@@ -862,7 +900,7 @@ impl OffsetsRequestManager {
             pending_completions_tx,
             requests_to_send: Mutex::new(Vec::new()),
             requests_to_retry: Mutex::new(Vec::new()),
-            metadata_updated: std::sync::atomic::AtomicBool::new(false),
+            metadata_updated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             try_connect_queue: Mutex::new(Vec::new()),
             completion_notify: std::sync::OnceLock::new(),
             #[cfg(test)]
@@ -881,21 +919,25 @@ impl OffsetsRequestManager {
             cached_update_positions_error: Arc::new(Mutex::new(None)),
             closing: false,
         };
-        // Register the cluster metadata update callback. The listener
-        // re-issues any deferred `fetch_offsets` requests on metadata
-        // change (Java: `OffsetsRequestManager.onUpdate`).
+        // Register the cluster metadata update callback. The listener flags
+        // the update and the next `poll` re-issues any deferred
+        // `fetch_offsets` requests (Java: `OffsetsRequestManager.onUpdate`).
+        // It captures only the flag: capturing `shared` would close a cycle
+        // through `shared.metadata`, which owns the listener.
         metadata
             .metadata_arc()
-            .add_cluster_update_listener(Box::new(OffsetsClusterListener { shared }));
+            .add_cluster_update_listener(Box::new(OffsetsClusterListener {
+                metadata_updated: Arc::clone(&shared.metadata_updated),
+            }));
         manager
     }
 
-    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
-    /// the spawned response forwarders and follow-ups can wake the network
-    /// poll once they have queued work for [`RequestManager::poll`]. See
-    /// `OffsetsManagerShared::completion_notify`. Mirrors
-    /// `CommitRequestManager::set_completion_notify`; the first installed
-    /// handle wins (it is wired exactly once, at construction).
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`),
+    /// poked whenever a response forwarder, the committed-offsets follow-up or
+    /// `update_fetch_positions` queues work for [`RequestManager::poll`]. See
+    /// [`OffsetsManagerShared::completion_notify`]. Mirrors
+    /// `CommitRequestManager::set_completion_notify`; the first call wins (it
+    /// is wired exactly once, at construction).
     pub(crate) fn set_completion_notify(&self, notify: Arc<tokio::sync::Notify>) {
         let _ = self.shared.completion_notify.set(notify);
     }
@@ -1214,7 +1256,8 @@ impl OffsetsRequestManager {
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             // Take the receiver and spawn a forwarder.
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let shared = Arc::clone(&self.shared);
+            let tx = self.shared.pending_completions_tx.clone();
+            let notify_for_task = self.shared.completion_notify_for_task();
             let strategies = partition_strategies.clone();
             let timestamps = reset_timestamps.clone();
             tokio::spawn(async move {
@@ -1222,11 +1265,15 @@ impl OffsetsRequestManager {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                shared.forward_completion(PendingCompletion::ListOffsetsForReset {
-                    reset_timestamps: timestamps,
-                    partition_strategies: strategies,
-                    result,
-                });
+                OffsetsManagerShared::forward_completion(
+                    &tx,
+                    notify_for_task.as_ref(),
+                    PendingCompletion::ListOffsetsForReset {
+                        reset_timestamps: timestamps,
+                        partition_strategies: strategies,
+                        result,
+                    },
+                );
             });
             self.shared
                 .requests_to_send
@@ -1288,17 +1335,19 @@ impl OffsetsRequestManager {
             let builder = OffsetsForLeaderEpochClient::prepare_request(&fetch_positions);
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let shared = Arc::clone(&self.shared);
+            let tx = self.shared.pending_completions_tx.clone();
+            let notify_for_task = self.shared.completion_notify_for_task();
             let positions = fetch_positions.clone();
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                shared.forward_completion(PendingCompletion::OffsetsForLeaderEpoch {
-                    fetch_positions: positions,
-                    result,
-                });
+                OffsetsManagerShared::forward_completion(
+                    &tx,
+                    notify_for_task.as_ref(),
+                    PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result },
+                );
             });
             self.shared
                 .requests_to_send
@@ -1658,7 +1707,7 @@ impl OffsetsRequestManager {
     ) {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
-        let shared = Arc::clone(&self.shared);
+        let notify_for_task = self.shared.completion_notify_for_task();
         let cached = Arc::clone(&self.cached_update_positions_error);
         let time = Arc::clone(&self.time);
         tokio::spawn(async move {
@@ -1695,11 +1744,14 @@ impl OffsetsRequestManager {
                             // subscription state, so a subsequent
                             // `reset_positions_if_needed` call will pick them
                             // up.
-                            if pending_followup_tx.send(PendingFollowupReset { initial_partitions }).is_ok() {
-                                // Java sends the ListOffsets requests from
-                                // this `whenComplete` on the network thread;
-                                // wake the bg loop so its next poll does.
-                                shared.wake_background_task();
+                            // Java sends the ListOffsets requests from this
+                            // `whenComplete` on the network thread; wake the bg
+                            // loop so its next poll does. No wake when the
+                            // manager (the receiver) is gone.
+                            if pending_followup_tx.send(PendingFollowupReset { initial_partitions }).is_ok()
+                                && let Some(notify) = &notify_for_task
+                            {
+                                notify.notify_one();
                             }
                             Ok(())
                         },
@@ -2173,8 +2225,12 @@ impl RequestManager for OffsetsRequestManager {
 /// `fetch_offsets` request whose first build attempt failed with stale
 /// metadata or whose responses returned retriable errors. Mirrors Java's
 /// `OffsetsRequestManager.onUpdate(ClusterResource)`.
+///
+/// Holds only the [`OffsetsManagerShared::metadata_updated`] flag, never the
+/// shared state, so the listener boxed into the consumer's `Metadata` does not
+/// keep that state (and the `Metadata` itself) alive in a cycle.
 struct OffsetsClusterListener {
-    shared: Arc<OffsetsManagerShared>,
+    metadata_updated: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ClusterResourceListener for OffsetsClusterListener {
@@ -2184,7 +2240,7 @@ impl ClusterResourceListener for OffsetsClusterListener {
         // to re-acquire `Metadata`'s inner lock, which is held by the
         // `update()` caller invoking this listener (see
         // `OffsetsManagerShared::metadata_updated` docs).
-        self.shared.metadata_updated.store(true, std::sync::atomic::Ordering::Release);
+        self.metadata_updated.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -2265,6 +2321,77 @@ mod tests {
             None,
             positions_validator,
         )
+    }
+
+    /// Waits, yielding to spawned tasks, until `weak` is dead or `tries`
+    /// yields have passed; returns the final strong count.
+    async fn strong_count_after_yields<T>(weak: &std::sync::Weak<T>, tries: usize) -> usize {
+        for _ in 0..tries {
+            if weak.strong_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        weak.strong_count()
+    }
+
+    /// A dropped manager frees its shared state. The cluster listener boxed
+    /// into `shared.metadata` must not hold `shared`, or the two keep each
+    /// other alive (Java's `OffsetsRequestManager.java:148` builds the same
+    /// cycle and relies on its garbage collector).
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_manager_frees_shared_state() {
+        let mgr = new_manager();
+        let shared = Arc::downgrade(&mgr.shared);
+        drop(mgr);
+        assert_eq!(0, strong_count_after_yields(&shared, 16).await);
+    }
+
+    /// A manager dropped with a request still queued frees its shared state,
+    /// for each of the three request kinds whose response forwarder awaits a
+    /// oneshot: the ListOffsets of `fetch_offsets`, the ListOffsets of a
+    /// position reset, and the OffsetsForLeaderEpoch of a position
+    /// validation. Each oneshot's sender sits in `shared.requests_to_send`, so
+    /// each forwarder must capture only the completion `Notify`: capturing
+    /// `shared` would keep the sender, and so the forwarder and the manager's
+    /// state, alive as long as the runtime running the forwarder (here the
+    /// test's) outlives the manager.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_manager_with_queued_request_frees_shared_state() {
+        for kind in ["fetch_offsets", "reset", "validation"] {
+            let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+            mgr.set_completion_notify(Arc::new(tokio::sync::Notify::new()));
+            let tp = TopicPartition::new("t1".to_string(), 1);
+            let mut rx = None;
+            match kind {
+                "fetch_offsets" => {
+                    bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+                    rx = Some(mgr.fetch_offsets(HashMap::from([(tp, ListOffsetsRequest::EARLIEST_TIMESTAMP)]), false));
+                },
+                "reset" => {
+                    bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+                    assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+                    mgr.reset_positions_if_needed(0).expect("ok");
+                },
+                _ => {
+                    bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 3);
+                    seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 3);
+                    mgr.validate_positions_if_needed(0).expect("ok");
+                },
+            }
+            assert_eq!(mgr.requests_to_send_count(), 1, "{kind}: exactly one request expected");
+            // Let the forwarder start awaiting its response.
+            tokio::task::yield_now().await;
+
+            let shared = Arc::downgrade(&mgr.shared);
+            drop(mgr);
+            drop(rx);
+            assert_eq!(
+                0,
+                strong_count_after_yields(&shared, 16).await,
+                "{kind}: shared state still alive"
+            );
+        }
     }
 
     /// Verifies that a freshly-constructed manager has nothing to poll.

@@ -27,7 +27,7 @@
 //! and its methods take only `&self`; the consumer ops exercised inside the
 //! Java callbacks (`assign` / `position` / `beginning_offsets` / `seek` /
 //! `pause` / `resume`) are `async fn(&mut self)` on `AsyncKafkaConsumer`,
-//! and `Box<dyn Consumer>` is not `Clone`. Phase 41 closes this:
+//! and `Box<dyn DynConsumer>` is not `Clone`. Phase 41 closes this:
 //!   1. The user captures a `Clone + Send + Sync` [`ConsumerHandle`]
 //!      (`consumer.handle()`) into the listener struct — the Rust
 //!      equivalent of Java capturing the `consumer` variable. The handle
@@ -47,14 +47,10 @@
 //! Runs:
 //! - `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForAsyncConsumer`
 //!   (line 179) → `test_on_partitions_assigned_called_with_new_partitions_only`
-//! - `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned` (66)
-//!   → `test_rebalance_listener_assign_on_partitions_assigned`
 //! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned` (85)
 //!   → `test_rebalance_listener_assignment_on_partitions_assigned`
 //! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned` (103)
 //!   → `test_rebalance_listener_beginning_offsets_on_partitions_assigned`
-//! - `testAsyncConsumerRebalanceListenerAssignOnPartitionsRevoked` (123)
-//!   → `test_rebalance_listener_assign_on_partitions_revoked`
 //! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked` (142)
 //!   → `test_rebalance_listener_assignment_on_partitions_revoked`
 //! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked` (154)
@@ -63,6 +59,20 @@
 //!   → `test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback`
 //! - `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback` (264)
 //!   → `test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback`
+//!
+//! # SKIPped (no subject on the Rust side)
+//!
+//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned` (66)
+//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsRevoked` (123)
+//!   Java asserts that `consumer.assign(...)` called from inside a rebalance
+//!   callback throws IllegalState "Subscription to topics, partitions and
+//!   pattern are mutually exclusive". In Rust a listener reaches its consumer
+//!   only through [`ConsumerHandle`], whose surface is KIP-1306's
+//!   `RebalanceConsumer` (plus `wakeup`), which has no `assign`: the call the
+//!   Java test makes cannot be written, so there is nothing to assert
+//!   (`cargo xtask lint-custom` `check-consumer-handle` keeps `assign` off the
+//!   handle). The owning `Consumer::assign` is `&mut self`, which the borrow
+//!   checker refuses while `poll()` holds the consumer.
 //!
 //! # SKIPped (classic-protocol-only — `consumer-threading.md` §20)
 //!
@@ -90,10 +100,10 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -103,7 +113,7 @@ use confluent_kafka::producer::ProducerRecord;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config (Java: 3 brokers, KIP-848, no extra serverProperties) ─
 
@@ -119,7 +129,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -143,9 +153,15 @@ fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str) -> ConsumerConf
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
-fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("KafkaConsumer::new should succeed")
+fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            config,
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
+    )
 }
 
 fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
@@ -315,12 +331,6 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
 /// The reentrant action a listener runs against its captured handle, and
 /// where it records the result for the harness to assert.
 enum CallbackAction {
-    /// Java: `assertThrows(IllegalStateException, () -> consumer.assign(...))`
-    /// then assert the exact message. Records the resulting error.
-    Assign {
-        tp: TopicPartition,
-        result: Arc<Mutex<Option<Result<(), Error>>>>,
-    },
     /// Java: `assertTrue(consumer.assignment().contains(tp))`. Records the
     /// `assignment()` set seen from inside the callback.
     Assignment {
@@ -350,10 +360,6 @@ enum CallbackAction {
 impl CallbackAction {
     async fn run(&self, handle: &ConsumerHandle) {
         match self {
-            CallbackAction::Assign { tp, result } => {
-                let r = handle.assign(vec![tp.clone()]).await;
-                *result.lock().expect("result mutex") = Some(r);
-            },
             CallbackAction::Assignment { captured_assignment } => {
                 *captured_assignment.lock().expect("assignment mutex") = Some(handle.assignment());
             },
@@ -522,46 +528,6 @@ async fn poll_until_flag(
     panic!("Timed out before expected rebalance callback ran");
 }
 
-const MUTUALLY_EXCLUSIVE_MSG: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
-
-/// Java `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned`
-/// (line 66): `assign()` inside `onPartitionsAssigned` throws
-/// `LocalIllegalState` "Subscription to topics, partitions and pattern are
-/// mutually exclusive".
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_assign_on_partitions_assigned() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
-    let topic = ctx.topic("topic");
-    let group_id = ctx.group_id("g_assign_on_assigned");
-    let tp = TopicPartition::new(topic.clone(), 0);
-
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_assigned(
-        consumer.as_mut(),
-        &topic,
-        &tp,
-        CallbackAction::Assign { tp: tp.clone(), result: Arc::clone(&result) },
-    )
-    .await;
-
-    let err = result
-        .lock()
-        .unwrap()
-        .take()
-        .expect("action ran")
-        .expect_err("assign() must fail inside callback");
-    assert!(
-        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
-        "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
-    );
-    consumer.close().await.expect("consumer close should succeed");
-}
-
 /// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned`
 /// (line 85): `assignment()` inside the callback contains tp.
 #[tokio::test(flavor = "multi_thread")]
@@ -619,42 +585,6 @@ async fn test_rebalance_listener_beginning_offsets_on_partitions_assigned() {
     let map = captured.lock().unwrap().take().expect("action ran");
     assert!(map.contains_key(&tp), "beginningOffsets must contain {tp}");
     assert_eq!(map.get(&tp), Some(&0), "beginningOffsets({tp}) must be 0");
-    consumer.close().await.expect("consumer close should succeed");
-}
-
-/// Java `testAsyncConsumerRebalanceListenerAssignOnPartitionsRevoked`
-/// (line 123): `assign()` inside `onPartitionsRevoked` throws IllegalState.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_assign_on_partitions_revoked() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
-    let topic = ctx.topic("topic");
-    let group_id = ctx.group_id("g_assign_on_revoked");
-    let tp = TopicPartition::new(topic.clone(), 0);
-
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_revoked(
-        consumer.as_mut(),
-        &topic,
-        &tp,
-        CallbackAction::Assign { tp: tp.clone(), result: Arc::clone(&result) },
-    )
-    .await;
-
-    let err = result
-        .lock()
-        .unwrap()
-        .take()
-        .expect("action ran")
-        .expect_err("assign() must fail inside callback");
-    assert!(
-        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
-        "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
-    );
     consumer.close().await.expect("consumer close should succeed");
 }
 
@@ -810,7 +740,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
         let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
-        for rec in records.records_partition(&tp) {
+        for rec in records.records_with_partition(&tp) {
             assert_eq!(
                 rec.offset(),
                 next_offset,

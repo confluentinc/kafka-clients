@@ -282,10 +282,10 @@ impl TxnOffsetCommitRequest {
     ///
     /// The error is reported per partition — this response has no top-level error
     /// code at any version. Java delegates to the static form
-    /// ([`Self::get_error_response_with_request`]) and then sets the throttle time.
+    /// ([`Self::do_get_error_response`]) and then sets the throttle time.
     #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        let mut response = Self::get_error_response_with_request(&self.data, error);
+        let mut response = Self::do_get_error_response(&self.data, error);
         response.set_throttle_time_ms(throttle_time_ms);
         ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_data(response))
     }
@@ -294,14 +294,11 @@ impl TxnOffsetCommitRequest {
     /// carrying each topic's id **and** name over (KIP-1319).
     ///
     /// Corresponds to Java's static
-    /// `getErrorResponse(TxnOffsetCommitRequestData, Errors)`. It shares its Java
-    /// name with the instance method above, so it takes the `_with_request` suffix
-    /// (CLAUDE.md §2: the parameter that discriminates it is `request`).
+    /// `getErrorResponse(TxnOffsetCommitRequestData, Errors)`. A static that is
+    /// not a factory and shares its Java name with the instance method above, so
+    /// it is `do_get_error_response` (CLAUDE.md §2).
     #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponse")]
-    pub fn get_error_response_with_request(
-        request: &TxnOffsetCommitRequestData,
-        error: &Errors,
-    ) -> TxnOffsetCommitResponseData {
+    pub fn do_get_error_response(request: &TxnOffsetCommitRequestData, error: &Errors) -> TxnOffsetCommitResponseData {
         let topics = request
             .topics
             .iter()
@@ -684,7 +681,7 @@ mod tests {
         expected_response_data.set_topics(response_topics);
 
         assert_eq!(
-            TxnOffsetCommitRequest::get_error_response_with_request(&data, &Errors::UnknownMemberId),
+            TxnOffsetCommitRequest::do_get_error_response(&data, &Errors::UnknownMemberId),
             expected_response_data
         );
 

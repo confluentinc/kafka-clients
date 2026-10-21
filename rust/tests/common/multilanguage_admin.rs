@@ -22,6 +22,10 @@
 //! response carries already-resolved results.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -40,10 +44,10 @@ use confluent_kafka::admin::{
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
     DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
     ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FinalizedVersionRange, GroupListing,
-    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
-    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    NewPartitions, NewTopic, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UnregisterControllerOptions,
@@ -70,7 +74,8 @@ use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
     AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
-    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
+    FencedProducer, FilterResultView, FilterResultsView, GroupOffsets, Listings, OffsetSpecArg, Outcomes,
+    ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -1030,7 +1035,7 @@ fn acl_operations_from_proto(ops: &proto::AclOperationList) -> BTreeSet<AclOpera
 
 fn config_resource_to_proto(resource: &ConfigResource) -> proto::ConfigResource {
     proto::ConfigResource {
-        resource_type: i32::from(resource.resource_type().id()),
+        resource_type: i32::from(resource.r#type().id()),
         name: resource.name().to_string(),
     }
 }
@@ -1093,27 +1098,25 @@ fn optional_partitions_to_proto(partitions: Option<HashSet<TopicPartition>>) -> 
     partitions.map(|set| proto::TopicPartitionList { partitions: set.iter().map(tp_to_proto).collect() })
 }
 
-/// Encodes an [`OffsetSpec`] as the wire's named kind plus, for
+/// Encodes an [`OffsetSpecArg`] as the wire's named kind plus, for
 /// `forTimestamp`, its timestamp.
 ///
 /// The kind is deliberately *not* the `ListOffsets` sentinel the C boundary
 /// takes; see `admin_service.proto`'s `OffsetSpec` for why naming the variant
 /// makes each server's own sentinel table differential instead of merely
 /// forwarding one written here.
-fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
+fn offset_spec_to_proto(spec: OffsetSpecArg) -> proto::OffsetSpec {
+    // `OffsetSpecArg` is the harness's own enum, so the match is exhaustive: a
+    // factory Java adds gets its variant here and its `Kind` in
+    // `admin_service.proto` together, or the harness does not build.
     let (kind, timestamp) = match spec {
-        OffsetSpec::Earliest => (proto::offset_spec::Kind::Earliest, None),
-        OffsetSpec::Latest => (proto::offset_spec::Kind::Latest, None),
-        OffsetSpec::MaxTimestamp => (proto::offset_spec::Kind::MaxTimestamp, None),
-        OffsetSpec::EarliestLocal => (proto::offset_spec::Kind::EarliestLocal, None),
-        OffsetSpec::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
-        OffsetSpec::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
-        OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
-        // `OffsetSpec` is `#[non_exhaustive]`, so this external crate needs a
-        // wildcard arm. `admin_service.proto`'s `OffsetSpec.Kind` has a fixed
-        // variant set, so a spec added upstream cannot be encoded — failing
-        // here beats sending a wrong kind to the C and Python servers.
-        _ => panic!("offset_spec_to_proto has no proto::offset_spec::Kind for {spec:?}"),
+        OffsetSpecArg::Earliest => (proto::offset_spec::Kind::Earliest, None),
+        OffsetSpecArg::Latest => (proto::offset_spec::Kind::Latest, None),
+        OffsetSpecArg::MaxTimestamp => (proto::offset_spec::Kind::MaxTimestamp, None),
+        OffsetSpecArg::EarliestLocal => (proto::offset_spec::Kind::EarliestLocal, None),
+        OffsetSpecArg::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
+        OffsetSpecArg::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
+        OffsetSpecArg::ForTimestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
     };
     proto::OffsetSpec { kind: kind as i32, timestamp }
 }
@@ -1178,7 +1181,7 @@ fn client_quota_entity_to_proto(entity: &ClientQuotaEntity) -> proto::ClientQuot
 /// `ofEntityType`, "match any specified name" — so it carries no name either, and
 /// only the kind separates it from `Default`.
 fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> proto::ClientQuotaFilterComponent {
-    let (kind, match_name) = match component.match_spec() {
+    let (kind, match_name) = match component.r#match() {
         ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
         ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
         ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),
@@ -1762,7 +1765,7 @@ impl AdminBackend for MultilanguageAdmin {
 
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
         let request = proto::ListOffsetsRequest {

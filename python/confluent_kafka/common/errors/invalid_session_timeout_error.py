@@ -34,7 +34,7 @@ class InvalidSessionTimeoutError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 26  # kafka_common_ErrorCode_INVALID_SESSION_TIMEOUT
+    _ffi_id: ClassVar[int] = 26  # kafka_common_Error_INVALID_SESSION_TIMEOUT
 
     def __init__(
         self,

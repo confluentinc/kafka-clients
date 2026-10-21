@@ -186,12 +186,14 @@ fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> Byte
         ("group.id".to_string(), default_group),
     ]);
     props.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::default()),
+            Box::new(ByteArrayDeserializer::default()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// `clusterInstance.producer()`: byte-array serializers, producer defaults.
@@ -811,24 +813,20 @@ async fn test_async_consumer_seek_and_commit_with_broker_failures() {
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
 /// wait until the poller has received exactly `num_records` records.
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
-    test_utils::wait_until_true_with_timeout(
+    test_utils::wait_for_condition_with_timeout(
         || {
             let received = poller.received_messages() == num_records;
             async move { received }
         },
-        &format!("Consumer did not receive expected {num_records}."),
         timeout_ms,
-        100,
+        || {
+            format!(
+                "Consumer did not receive expected {num_records}. It received {}",
+                poller.received_messages()
+            )
+        },
     )
     .await;
-    // Java's lazy message also reports the count; the helper takes a fixed
-    // message, so report it here (the wait above already passed).
-    assert_eq!(
-        poller.received_messages(),
-        num_records,
-        "Consumer did not receive expected {num_records}. It received {}",
-        poller.received_messages()
-    );
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
@@ -837,7 +835,7 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
 /// consume 1000 records; then stop every broker, restart them all, and consume
 /// 1000 more on the same consumer.
 ///
-/// Deviation: `max.poll.interval.ms` is 60000 instead of Java's 6000 (see the
+/// Deviation: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
 /// comment at the config). Everything else, including `metadata.max.age.ms=100`
 /// and the exact-count assertion on the second poller, is Java's.
 #[tokio::test(flavor = "multi_thread")]
@@ -848,20 +846,20 @@ async fn test_async_subscribe_when_topic_unavailable() {
     let new_topic_partition = TopicPartition::new(new_topic.clone(), 0);
     let num_records: usize = 1000;
 
+    // Java sets `max.poll.interval.ms` to 6000, which outlasts its in-process
+    // broker restart below: nothing polls while the brokers are down. Restarting
+    // the Docker brokers one by one takes far longer (about 45 s on CI). With 6000
+    // the member goes stale when the brokers return, loses its partitions and
+    // rejoins, dropping its assignment and positions without a commit (Java's
+    // `AbstractMembershipManager.transitionToStale`; this client auto-commits
+    // only from the application's `poll()`/`assign()`, as Java does). If phase 1
+    // ended before its first auto-commit, it then resets to offset 0 and
+    // receives 2000 records instead of 1000. 120000 covers the
+    // restart, so the consumer survives the outage as Java's does.
     let mut consumer = create_consumer(
         &ctx,
         &HashMap::from([
-            // Deviation: Java sets 6000, which assumes its in-process KRaft
-            // cluster restarts within 6 s. Bouncing every broker of the Docker
-            // harness takes about 8-13 s, during which nothing calls `poll()`.
-            // Letting the poll timer expire would make the member go stale and
-            // drop its assignment and positions without a commit (Java's
-            // `AbstractMembershipManager.transitionToStale`; this client
-            // auto-commits only from the application's `poll()`/`assign()`, as
-            // Java does), so the second poller would re-read all 2000 records
-            // from `earliest`. That is not what this test is about, so allow a
-            // poll gap with clear headroom over the bounce.
-            ("max.poll.interval.ms".to_string(), "60000".to_string()),
+            ("max.poll.interval.ms".to_string(), "120000".to_string()),
             ("metadata.max.age.ms".to_string(), "100".to_string()),
         ]),
     );
@@ -964,7 +962,7 @@ async fn close_and_validate(
     const CLOSE_GRACE_TIME_MS: u64 = 2000;
     let start = std::time::Instant::now();
     eprintln!("Closing consumer with timeout {close_timeout_ms} ms.");
-    let close = consumer.close_with_options(CloseOptions::new_timeout(Duration::from_millis(close_timeout_ms)));
+    let close = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(close_timeout_ms)));
     let result = match max_close_time_ms {
         Some(ms) => tokio::time::timeout(Duration::from_millis(ms + CLOSE_GRACE_TIME_MS), close)
             .await

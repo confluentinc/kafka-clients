@@ -384,7 +384,7 @@ async fn create_topic_with_admin_config(
 ///
 /// Deviation: Java's fixed group id `"group"` becomes a per-test id, because
 /// clusters are pooled across tests here and Java's are not.
-fn send_test_consumer(ctx: &TestContext) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+fn send_test_consumer(ctx: &TestContext) -> Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
@@ -392,12 +392,14 @@ fn send_test_consumer(ctx: &TestContext) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> 
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("enable.auto.commit".to_string(), "true".to_string()),
     ]);
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::new()),
-        Box::new(ByteArrayDeserializer::new()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::new()),
+            Box::new(ByteArrayDeserializer::new()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// The fields of a consumed record the suite asserts on (`ConsumerRecord` is
@@ -416,7 +418,7 @@ struct ConsumedRecord {
 /// `pollRecordsUntilTrue` (`:709-718`): 100 ms polls, 15 s budget
 /// (`DEFAULT_MAX_WAIT_MS`), same failure message.
 async fn poll_until_at_least_num_records(
-    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     num_records: usize,
 ) -> Vec<ConsumedRecord> {
     let deadline = Instant::now() + Duration::from_millis(15_000);
@@ -446,7 +448,10 @@ async fn poll_until_at_least_num_records(
 }
 
 /// `TestUtils.consumeRecords` (`TestUtils.scala:1198-1204`).
-async fn consume_records(consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>, num_records: usize) -> Vec<ConsumedRecord> {
+async fn consume_records(
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
+    num_records: usize,
+) -> Vec<ConsumedRecord> {
     let records = poll_until_at_least_num_records(consumer, num_records).await;
     assert_eq!(num_records, records.len(), "Consumed more records than expected");
     records
@@ -482,8 +487,8 @@ fn send_offset_callback(
     topic: String,
     partition: i32,
     check_serialized_sizes: bool,
-) -> Callback {
-    Box::new(move |metadata, error| {
+) -> Box<dyn Callback> {
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         let mut st = state.lock().unwrap();
         st.invocations += 1;
         // Java: `if (exception == null) ... else fail(...)`.
@@ -953,7 +958,9 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
     // "This consumer close very slowly, which may cause the entire test to time
     // out, and we can't wait for it to auto close" (`ProducerCompressionTest.java:109-111`).
     let _ = consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_secs(1)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(Duration::from_secs(
+            1,
+        )))
         .await;
 }
 
@@ -961,7 +968,7 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
 /// (`ProducerCompressionTest.java:116-154`), with `flagLoop` (`:156-163`)
 /// folded into the record index: record `i` is message `i / 3`, flavour `i % 3`.
 async fn verify_compression_consumer_records(
-    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     messages: &[String],
     now: i64,
     header_arr: &[RecordHeader],
@@ -1805,10 +1812,10 @@ async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
         timestamp_diff: 1,
         failures: Vec::new(),
     }));
-    let callback = || -> Option<Callback> {
+    let callback = || -> Option<Box<dyn Callback>> {
         let state = state.clone();
         let topic = topic.clone();
-        Some(Box::new(move |metadata, error| {
+        Some(Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             let mut st = state.lock().unwrap();
             // Java: `if (exception == null) ... else fail(...)`.
             if let Some(e) = error {
@@ -2925,11 +2932,11 @@ struct FailingSerializer;
 
 #[cfg(feature = "integration-tests")]
 impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSerializer {
-    fn serialize(
-        &self,
-        _topic: &str,
-        _data: Option<&Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, confluent_kafka::common::Error> {
+    async fn serialize<'a>(
+        &'a self,
+        _topic: &'a str,
+        _data: Option<&'a Vec<u8>>,
+    ) -> Result<Option<std::borrow::Cow<'a, [u8]>>, confluent_kafka::common::Error> {
         Err(confluent_kafka::common::Error::serialization("FailingSerializer always fails"))
     }
 }
@@ -3028,9 +3035,9 @@ async fn test_borrowed_send_delivers_the_record_headers() {
     )
     .expect("Failed to create producer");
     let mut headers = RecordHeaders::new();
-    headers.add_key_value("trace", Some(b"abc")).expect("add header");
-    headers.add_key_value("empty", Some(b"")).expect("add header");
-    headers.add_key_value("null", None).expect("add header");
+    headers.add_with_key_value("trace", Some(b"abc")).expect("add header");
+    headers.add_with_key_value("empty", Some(b"")).expect("add header");
+    headers.add_with_key_value("null", None).expect("add header");
     let record = ProducerRecord::with_partition_key_headers(
         topic.clone(),
         Some(0),
@@ -3053,7 +3060,7 @@ async fn test_borrowed_send_delivers_the_record_headers() {
         ("group.id".to_string(), group_id),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&consumer_props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),
@@ -3241,9 +3248,10 @@ where
         let mut responses = Vec::with_capacity(NUM_RECORDS);
         for i in 0..NUM_RECORDS {
             let tx = tx.clone();
-            let callback: Callback = Box::new(move |_metadata, _error| {
-                let _ = tx.send(i == 0);
-            });
+            let callback: Box<dyn Callback> =
+                Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                    let _ = tx.send(i == 0);
+                });
             responses.push(
                 Producer::send_with_callback(producer.as_ref(), record(), Some(callback))
                     .await

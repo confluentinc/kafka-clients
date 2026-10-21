@@ -9,37 +9,96 @@ header = """
  * Panics never cross this API.
  *
  * Every function declared here catches a Rust panic before it can unwind into
- * its caller, which would abort the process. After a caught panic the function
- * returns its failure value instead: NULL, false, -1 (0 for a *_count
- * accessor), NaN for a double, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR for
- * kafka_common_Error_code, or an error handle for a function that returns one.
- * A function with an out_error parameter also stores an error describing the
- * panic there. A function that reports ordinary failures through a completion
- * callback reports the panic through that callback instead, exactly once,
- * unless its documentation says that a synchronous failure does not invoke the
- * callback. Such a function reports the panic as a synchronous failure,
- * through its return value and out_error where it has one, and the guard
- * itself does not invoke the callback. If such a panic is raised after the
- * record or request was already handed to the library's background work, the
- * callback can still fire for it later; on a return that reports a panic, do
- * not release user_data yourself: the callback, or the user_data_destroy hook
- * where there is one, releases it when it runs. The error's code is
- * kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE and its message begins
- * "Rust panic caught at the FFI boundary in <function>".
+ * its caller, which would abort the process, and reports it instead.
+ *
+ * A fallible function takes a trailing kafka_common_Error_t **out_err. It
+ * must not be NULL and *out_err must be NULL on entry; neither is checked. On
+ * failure, a caught panic included, the function stores an owned error in
+ * *out_err, which the caller frees with kafka_common_Error_destroy, and
+ * returns NULL for a pointer, a NULL kafka_Bytes_t, 0 for an int8_t and -1
+ * for another integer; on success it leaves *out_err untouched. Test *out_err,
+ * not the value: NULL and -1 can be valid answers. The function pointers a
+ * caller implements and that can fail (a Serializer's and a Deserializer's
+ * methods, Headers' add and remove, KafkaFuture_BaseFunction's apply) take the
+ * same trailing out_err: they fail by storing an owned error there, and their
+ * return value is then ignored.
+ *
+ * A caught panic's error has the code kafka_common_Error_LOCAL_ILLEGAL_STATE
+ * and a message beginning "Rust panic caught at the FFI boundary in
+ * <function>". Any other function has no out_err: it logs a panic and, unless
+ * it is a _cb function (below), returns the failure value of its return type:
+ *   - a pointer: NULL;
+ *   - an int8_t: 0, false for a boolean. An int8_t carrying a Java byte code
+ *     whose 0 is a valid constant (kafka_common_IsolationLevel_id, say)
+ *     returns -1 instead, as its documentation states;
+ *   - another integer: -1, but 0 for a *_count or *_size accessor, a size
+ *     that returns -1 for a null key or value
+ *     (kafka_consumer_ConsumerRecord_serialized_key_size) included. An
+ *     integer whose Java domain holds that value but leaves out another one
+ *     returns the other instead, as its documentation states
+ *     (kafka_admin_NewTopic_replication_factor returns 0). In particular an
+ *     integer accessor that maps Java's empty Optional, or null, to -1
+ *     returns -2 when its Java domain is that or a value >= 0
+ *     (kafka_consumer_ConsumerRecord_leader_epoch,
+ *     kafka_producer_ProducerRecord_partition), and keeps -1 when Java gives
+ *     -2 a meaning (kafka_admin_MemberDescription_member_epoch, where -2 is a
+ *     static member that left, and the admin options' timeout_ms), or when no
+ *     value is outside its domain (kafka_common_Error_throttle_time_ms, which
+ *     holds any int Java's constructor was given);
+ *   - a double: NaN;
+ *   - a kafka_Bytes_t: a NULL one (Java's null array);
+ *   - kafka_common_Error_e (kafka_common_Error__enum):
+ *     kafka_common_Error_UNKNOWN_SERVER_ERROR; another C enum: the
+ *     enumerator its documentation names, its UNKNOWN one when it has one;
+ *   - a borrowed const kafka_common_Error_t * (kafka_common_Error_source):
+ *     NULL, as for no error.
+ * A function returning nothing only logs the panic.
+ *
+ * The failure value is not always distinct from a real answer: a nullable
+ * pointer or kafka_Bytes_t, a boolean, a double that may be NaN, a C enum
+ * without an UNKNOWN enumerator, and an integer whose -1 (or, for a count or
+ * size, 0) is itself a valid value return a value the function can also
+ * return without a panic. The integers include Java's sentinels:
+ * NO_TIMESTAMP, an unknown offset or partition, the id of Node.noNode(),
+ * kafka_admin_AbortTransactionSpec_producer_epoch, and the empty optional
+ * values whose Java domain holds -2 (a member epoch, a consumer's lag, a log
+ * dir's byte counts, a node id, an admin option's timeout). Such a panic shows
+ * only in the error-level log line every caught panic writes. A language
+ * binding that must tell every panic apart includes
+ * confluent_kafka_bindings.h instead, whose _err twins report it through
+ * out_err.
+ *
+ * A _cb function reports a caught panic the way it reports every other
+ * outcome, exactly once, whether the panic happens on the calling thread or
+ * later on the task running the operation: its completion carries the error
+ * (and a NULL pointer, or -1 for an int64_t, as its value) and the caller's
+ * opaque, queued on the client's callback queue for the client's
+ * __execute_callbacks to run like any other completion. A handle with no
+ * callback queue (a standalone listener or OffsetCommitCallback, a future of
+ * no client, a ConsumerHandle whose consumer is destroyed) runs it on the
+ * calling thread before returning, as it runs every completion. A completion
+ * with no error parameter (kafka_admin_Admin_close_cb,
+ * kafka_admin_Admin_close_with_timeout_cb,
+ * kafka_producer_Callback_on_completion_cb) fires with opaque
+ * alone, the panic showing only in the log. That completion is where opaque
+ * comes back to be released; there is no other release hook.
  *
  * A panic is a bug in this library and may leave the handle it happened on in
  * an inconsistent state: destroy that handle and create a new one. Later calls
- * on it can keep failing, because a poisoned lock is never cleared.
+ * on it can keep failing, because a poisoned lock is never cleared; its
+ * _destroy still frees it and runs its pending callbacks, each exactly once.
  */"""
 include_guard = "CONFLUENT_KAFKA_H"
 no_includes = true
 sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 
 [export]
-# Only export FFI types — no internal Kafka client constants or structs.
-include = ["kafka_producer_Producer_t", "kafka_common_KafkaFuture_RecordMetadata_t", "kafka_producer_RecordMetadata_t", "kafka_producer_ProducerRecord_t", "kafka_common_Error_t", "kafka_producer_Producer_send_callback_t", "kafka_producer_Producer_send_batch_callback_t", "kafka_common_KafkaFuture_RecordMetadata_get_callback_t", "kafka_common_KafkaFuture_RecordMetadata_get_all_callback_t", "kafka_producer_Producer_flush_callback_t", "kafka_producer_Producer_close_callback_t", "kafka_producer_Producer_init_transactions_callback_t", "kafka_producer_Producer_begin_transaction_callback_t", "kafka_producer_Producer_send_offsets_to_transaction_callback_t", "kafka_producer_Producer_commit_transaction_callback_t", "kafka_producer_Producer_abort_transaction_callback_t", "kafka_consumer_Consumer_t", "kafka_consumer_ConsumerHandle_t", "kafka_consumer_ConsumerProperties_t", "kafka_consumer_ConsumerRecords_t", "kafka_consumer_ConsumerRecord_t", "kafka_consumer_PendingCallback_t", "kafka_consumer_Consumer_pending_callback_notify_t", "kafka_consumer_Consumer_poll_callback_t", "kafka_consumer_Consumer_op_callback_t", "kafka_consumer_Consumer_commit_async_callback_t", "kafka_consumer_Consumer_commit_async_user_data_destroy_t", "kafka_consumer_ConsumerRebalanceListener_t", "kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t", "kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_callback_t", "kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_callback_t", "kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t", "kafka_consumer_Consumer_position_callback_t", "kafka_consumer_Consumer_committed_callback_t", "kafka_consumer_Consumer_offsets_for_times_callback_t", "kafka_consumer_Consumer_long_offsets_callback_t", "kafka_consumer_Consumer_partitions_for_callback_t", "kafka_consumer_Consumer_list_topics_callback_t", "kafka_common_TopicPartition_t", "kafka_common_TopicPartitionList_t", "kafka_consumer_StringList_t", "kafka_consumer_OffsetAndMetadata_t", "kafka_consumer_OffsetAndTimestamp_t", "kafka_consumer_ConsumerGroupMetadata_t", "kafka_common_PartitionInfo_t", "kafka_common_PartitionInfoList_t", "kafka_common_Node_t", "kafka_consumer_OffsetMap_t", "kafka_consumer_OffsetAndTimestampMap_t", "kafka_consumer_LongOffsetMap_t", "kafka_common_TopicPartitionInfoMap_t", "kafka_consumer_MetricMap_t", "kafka_producer_MetricMap_t", "kafka_admin_AdminClient_t", "kafka_admin_AdminClientProperties_t", "kafka_admin_AdminClient_close_callback_t", "kafka_admin_NewTopic_t", "kafka_admin_TopicMetadataAndConfig_t", "kafka_common_TopicPartitionInfo_t", "kafka_admin_TopicDescription_t", "kafka_admin_TopicListing_t", "kafka_admin_CreateTopicsResult_t", "kafka_admin_DeleteTopicsResult_t", "kafka_admin_ListTopicsResult_t", "kafka_admin_DescribeTopicsResult_t", "kafka_admin_AdminClient_create_topics_callback_t", "kafka_admin_AdminClient_delete_topics_callback_t", "kafka_admin_AdminClient_list_topics_callback_t", "kafka_admin_AdminClient_describe_topics_callback_t", "kafka_admin_NewPartitions_t", "kafka_admin_CreatePartitionsResult_t", "kafka_admin_DeleteRecordsResult_t", "kafka_admin_AdminClient_create_partitions_callback_t", "kafka_admin_AdminClient_delete_records_callback_t", "kafka_admin_Config_t", "kafka_admin_ConfigEntry_t", "kafka_admin_LogDirDescription_t", "kafka_admin_LogDirDescriptionMap_t", "kafka_admin_ReplicaLogDirInfo_t", "kafka_admin_DescribeClusterResult_t", "kafka_admin_DescribeConfigsResult_t", "kafka_admin_AlterConfigsResult_t", "kafka_admin_ListConfigResourcesResult_t", "kafka_admin_DescribeLogDirsResult_t", "kafka_admin_AlterReplicaLogDirsResult_t", "kafka_admin_DescribeReplicaLogDirsResult_t", "kafka_admin_AdminClient_describe_cluster_callback_t", "kafka_admin_AdminClient_describe_configs_callback_t", "kafka_admin_AdminClient_incremental_alter_configs_callback_t", "kafka_admin_AdminClient_list_config_resources_callback_t", "kafka_admin_AdminClient_describe_log_dirs_callback_t", "kafka_admin_AdminClient_alter_replica_log_dirs_callback_t", "kafka_admin_AdminClient_describe_replica_log_dirs_callback_t", "kafka_admin_PartitionReassignment_t", "kafka_admin_ListOffsetsResultInfo_t", "kafka_admin_ElectLeadersResult_t", "kafka_admin_AlterPartitionReassignmentsResult_t", "kafka_admin_ListPartitionReassignmentsResult_t", "kafka_admin_ListOffsetsResult_t", "kafka_admin_AdminClient_elect_leaders_callback_t", "kafka_admin_AdminClient_alter_partition_reassignments_callback_t", "kafka_admin_AdminClient_list_partition_reassignments_callback_t", "kafka_admin_AdminClient_list_offsets_callback_t", "kafka_admin_GroupListing_t", "kafka_admin_MemberAssignment_t", "kafka_admin_MemberDescription_t", "kafka_admin_ConsumerGroupDescription_t", "kafka_admin_ClassicGroupDescription_t", "kafka_admin_OffsetAndMetadataMap_t", "kafka_admin_ListGroupsResult_t", "kafka_admin_DescribeConsumerGroupsResult_t", "kafka_admin_DescribeClassicGroupsResult_t", "kafka_admin_ListConsumerGroupOffsetsResult_t", "kafka_admin_AlterConsumerGroupOffsetsResult_t", "kafka_admin_DeleteConsumerGroupOffsetsResult_t", "kafka_admin_DeleteConsumerGroupsResult_t", "kafka_admin_RemoveMembersFromConsumerGroupResult_t", "kafka_admin_AdminClient_list_groups_callback_t", "kafka_admin_AdminClient_describe_consumer_groups_callback_t", "kafka_admin_AdminClient_describe_classic_groups_callback_t", "kafka_admin_AdminClient_list_consumer_group_offsets_callback_t", "kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t", "kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t", "kafka_admin_AdminClient_delete_consumer_groups_callback_t", "kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t", "kafka_common_acl_AclBinding_t", "kafka_common_acl_AclBindingFilter_t", "kafka_common_quota_ClientQuotaEntity_t", "kafka_admin_CreateAclsResult_t", "kafka_admin_DescribeAclsResult_t", "kafka_admin_DeleteAclsResult_t", "kafka_admin_DescribeClientQuotasResult_t", "kafka_admin_AlterClientQuotasResult_t", "kafka_admin_AdminClient_create_acls_callback_t", "kafka_admin_AdminClient_describe_acls_callback_t", "kafka_admin_AdminClient_delete_acls_callback_t", "kafka_admin_AdminClient_describe_client_quotas_callback_t", "kafka_admin_AdminClient_alter_client_quotas_callback_t", "kafka_common_security_auth_KafkaPrincipal_t", "kafka_common_security_token_delegation_TokenInformation_t", "kafka_common_security_token_delegation_DelegationToken_t", "kafka_admin_DescribeUserScramCredentialsResult_t", "kafka_admin_AlterUserScramCredentialsResult_t", "kafka_admin_CreateDelegationTokenResult_t", "kafka_admin_RenewDelegationTokenResult_t", "kafka_admin_ExpireDelegationTokenResult_t", "kafka_admin_DescribeDelegationTokenResult_t", "kafka_admin_DescribeFeaturesResult_t", "kafka_admin_UpdateFeaturesResult_t", "kafka_admin_AdminClient_describe_user_scram_credentials_callback_t", "kafka_admin_AdminClient_alter_user_scram_credentials_callback_t", "kafka_admin_AdminClient_create_delegation_token_callback_t", "kafka_admin_AdminClient_renew_delegation_token_callback_t", "kafka_admin_AdminClient_expire_delegation_token_callback_t", "kafka_admin_AdminClient_describe_delegation_token_callback_t", "kafka_admin_AdminClient_describe_features_callback_t", "kafka_admin_AdminClient_update_features_callback_t", "kafka_admin_DescribeProducersResult_t", "kafka_admin_DescribeTransactionsResult_t", "kafka_admin_FenceProducersResult_t", "kafka_admin_ListTransactionsResult_t", "kafka_admin_AdminClient_describe_producers_callback_t", "kafka_admin_AdminClient_describe_transactions_callback_t", "kafka_admin_AdminClient_abort_transaction_callback_t", "kafka_admin_AdminClient_unregister_controller_callback_t", "kafka_admin_AdminClient_force_terminate_transaction_callback_t", "kafka_admin_AdminClient_fence_producers_callback_t", "kafka_admin_AdminClient_list_transactions_callback_t", "kafka_common_ErrorCode_t", "kafka_common_TopicAuthorizationError_t", "kafka_common_GroupAuthorizationError_t", "kafka_common_InvalidTopicError_t", "kafka_common_DuplicateResourceError_t", "kafka_common_ResourceNotFoundError_t", "kafka_common_ThrottlingQuotaExceededError_t", "kafka_common_RecordDeserializationError_t", "kafka_common_QuotaViolationError_t", "kafka_common_ConsumerLogTruncationError_t", "kafka_common_ConsumerNoOffsetForPartitionError_t", "kafka_common_ConsumerOffsetOutOfRangeError_t", "kafka_common_RecordTooLargeError_t"]
-# "enums" is needed for kafka_common_ErrorCode_t; without it cbindgen emits no
-# enum at all, whatever [export] include says.
+# Every `#[repr(C)]` type and `pub type` typedef the `ffi` module declares is
+# exported: the FFI is the only module that defines C-named (`kafka_*`) items,
+# and `item_types` leaves the crate's `pub const`s out. `cargo xtask lint-custom`
+# (`check-ffi-translation`) ties each exported name to its Rust item.
+# "enums" is needed for kafka_common_Error_e; without it cbindgen emits no
+# enum at all.
 item_types = ["functions", "structs", "typedefs", "enums"]
 
 [fn]
@@ -47,7 +106,10 @@ prefix = ""
 args = "Vertical"
 
 [enum]
-# Global default; kafka_common_ErrorCode_t overrides it locally with a
-# `cbindgen:prefix-with-name=false` annotation, because prefixing with the
-# export name would push the `_t` suffix into all 162 enumerators.
-prefix_with_name = true
+# Off for every C enum: CLAUDE.md §4 ("Enums") names an enumerator
+# `<prefix>_<VALUE>` (the enum's prefix without its `_e` suffix, the key in
+# constant case), while cbindgen would prefix with the export name and put the
+# `_e` into every enumerator. The Rust variants are spelled out in full
+# instead, so the Rust identifier is the C name (checked by
+# `cargo xtask lint-custom check-ffi-translation`).
+prefix_with_name = false

@@ -29,6 +29,9 @@
 //! enqueue from BG, dequeue + invoke from app side.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::{Error, TopicPartition};
@@ -57,6 +60,35 @@ struct OffsetCommitCallbackTask {
     /// Optional error captured at enqueue time. `None` for the interceptor
     /// invocation (Java passes `null`).
     error: Option<Error>,
+}
+
+/// Marks a user callback the consumer is running on the caller's task: a
+/// `ConsumerRebalanceListener` method or an [`OffsetCommitCallback`]. The
+/// consumer's callback counter is incremented while the marker lives and
+/// decremented when it drops, on every exit path, so a callback that
+/// returns an error leaves the counter balanced.
+///
+/// Rust-only type (no Java class). It stands in for the thread-identity
+/// check in Java's `KafkaConsumer.acquire()`: Java admits a call from
+/// inside a callback because it comes from the thread already holding the
+/// consumer, and rejects every other thread. A `ConsumerHandle` operation
+/// is admitted only while the consumer runs a callback, which this marker
+/// records; see `ConsumerHandle`'s rustdoc for the contract.
+#[must_use = "the callback scope ends when the marker drops"]
+pub(crate) struct CallbackInProgress(Arc<AtomicUsize>);
+
+impl CallbackInProgress {
+    /// Enters a callback scope on `counter`.
+    pub(crate) fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for CallbackInProgress {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Utility that helps the application thread (Rust: caller task) invoke
@@ -96,6 +128,12 @@ pub(crate) struct OffsetCommitCallbackInvoker<K: 'static, V: 'static> {
     /// expected to change for the lifetime of the invoker (matches Java —
     /// the interceptor list is final).
     interceptors_empty: bool,
+    /// How many user callbacks the consumer is running right now, on the
+    /// caller's task: the commit callbacks this invoker drains and the
+    /// rebalance-listener methods the consumer invokes. Shared with the
+    /// consumer's `ConsumerHandle`, which admits an operation only while
+    /// it is non-zero (see [`CallbackInProgress`]). Rust-only field.
+    callbacks_in_progress: Arc<AtomicUsize>,
 }
 
 /// Type-erased hook for enqueueing an interceptor `on_commit` invocation on
@@ -140,6 +178,57 @@ where
     }
 }
 
+/// Type-erased view of an [`OffsetCommitCallbackInvoker`] for the commit path
+/// a [`ConsumerHandle`](crate::consumer::ConsumerHandle) shares with
+/// its owning consumer.
+///
+/// Rust-only shim (no Java analog as a named type, DoD #7): Java's
+/// `AsyncKafkaConsumer.commit(...)` calls
+/// `offsetCommitCallbackInvoker.executeCallbacks()` and its `commitAsync`
+/// continuation enqueues on the same invoker. In Java a callback reaches that
+/// code by calling back into the `consumer` it captured. In Rust it reaches it
+/// through a `ConsumerHandle`, which is not generic over `<K, V>`, so it holds
+/// the consumer's invoker through this trait. The three methods are the
+/// invoker's own, none of which carries `K` or `V` in its signature.
+pub(crate) trait OffsetCommitCallbackQueue: Send + Sync + 'static {
+    /// [`OffsetCommitCallbackInvoker::enqueue_interceptor_invocation`].
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>);
+
+    /// [`OffsetCommitCallbackInvoker::enqueue_user_callback_invocation`].
+    fn enqueue_user_callback_invocation(
+        &self,
+        callback: Arc<dyn OffsetCommitCallback>,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<Error>,
+    );
+
+    /// [`OffsetCommitCallbackInvoker::invoke_pending_callbacks`].
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
+}
+
+impl<K, V> OffsetCommitCallbackQueue for OffsetCommitCallbackInvoker<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
+        OffsetCommitCallbackInvoker::enqueue_interceptor_invocation(self, offsets);
+    }
+
+    fn enqueue_user_callback_invocation(
+        &self,
+        callback: Arc<dyn OffsetCommitCallback>,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<Error>,
+    ) {
+        OffsetCommitCallbackInvoker::enqueue_user_callback_invocation(self, callback, offsets, error);
+    }
+
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>> {
+        Box::pin(OffsetCommitCallbackInvoker::invoke_pending_callbacks(self))
+    }
+}
+
 impl<K, V> OffsetCommitCallbackInvoker<K, V>
 where
     K: Send + 'static,
@@ -158,7 +247,21 @@ where
             interceptors: Mutex::new(interceptors),
             pending: Mutex::new(VecDeque::new()),
             interceptors_empty,
+            callbacks_in_progress: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The consumer's callback counter (see [`CallbackInProgress`]), shared
+    /// with its `ConsumerHandle`.
+    pub(crate) fn callbacks_in_progress(&self) -> &Arc<AtomicUsize> {
+        &self.callbacks_in_progress
+    }
+
+    /// Enters a callback scope: the consumer calls this around each
+    /// rebalance-listener invocation, and [`Self::invoke_pending_callbacks`]
+    /// around each commit callback.
+    pub(crate) fn enter_callback(&self) -> CallbackInProgress {
+        CallbackInProgress::enter(&self.callbacks_in_progress)
     }
 
     /// Enqueues an `on_commit` invocation on the interceptor chain if any
@@ -210,7 +313,13 @@ where
     /// each `pop_front` and the subsequent `await` so concurrent
     /// `enqueue_*` calls from the BG task are not blocked while a callback
     /// runs.
-    pub(crate) async fn invoke_pending_callbacks(&self) {
+    ///
+    /// # Errors
+    ///
+    /// The first error a user callback returns, as Java's loop lets the
+    /// first exception `onComplete` throws escape: that task has been
+    /// popped, and the tasks behind it stay queued for the next call.
+    pub(crate) async fn invoke_pending_callbacks(&self) -> Result<(), Error> {
         loop {
             // Pop one task with the lock held; release before awaiting.
             let task = {
@@ -221,7 +330,7 @@ where
                 guard.pop_front()
             };
             let Some(task) = task else {
-                return;
+                return Ok(());
             };
             match task.kind {
                 CallbackKind::Interceptor => {
@@ -235,7 +344,11 @@ where
                     drop(guard);
                 },
                 CallbackKind::User { callback } => {
-                    callback.on_complete(&task.offsets, task.error.as_ref()).await;
+                    // The callback may call back into the consumer through
+                    // its `ConsumerHandle` (Java: the same thread re-enters
+                    // `acquire()`); the marker admits it.
+                    let _in_callback = self.enter_callback();
+                    callback.on_complete(&task.offsets, task.error.as_ref()).await?;
                 },
             }
         }
@@ -304,9 +417,14 @@ mod tests {
 
     #[async_trait]
     impl OffsetCommitCallback for RecordingCallback {
-        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        async fn on_complete(
+            &self,
+            offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            error: Option<&Error>,
+        ) -> Result<(), Error> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
             self.recorded.lock().unwrap().push((offsets.clone(), error.cloned()));
+            Ok(())
         }
     }
 
@@ -339,16 +457,62 @@ mod tests {
         assert_eq!(cb1.invocations(), 0);
         assert_eq!(cb2.invocations(), 0);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb2.invocations(), 1);
         assert_eq!(cb1.calls()[0].0, offsets1);
         assert_eq!(cb2.calls()[0].0, offsets2);
 
         // Re-invoking with an empty queue must not double-fire.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb2.invocations(), 1);
+    }
+
+    /// A callback returning an error (Java's `onComplete` throwing).
+    struct RaisingCallback(&'static str);
+
+    #[async_trait]
+    impl OffsetCommitCallback for RaisingCallback {
+        async fn on_complete(
+            &self,
+            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            Err(Error::local_illegal_state(self.0))
+        }
+    }
+
+    /// Java's `executeCallbacks()` has no try/catch: the first exception a
+    /// callback throws escapes, its task already polled, and the tasks
+    /// behind it stay queued for the next drain.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_callback_error_stops_the_drain_and_keeps_the_rest_queued() {
+        let tp = TopicPartition::new("t0".to_string(), 2);
+        let offsets = singleton_offset(tp, 10);
+        let before = Arc::new(RecordingCallback::new());
+        let after = Arc::new(RecordingCallback::new());
+        let interceptors: ConsumerInterceptors<String, String> = ConsumerInterceptors::new(Vec::new());
+        let invoker = OffsetCommitCallbackInvoker::new(interceptors);
+
+        invoker.enqueue_user_callback_invocation(before.clone(), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(Arc::new(RaisingCallback("first")), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(Arc::new(RaisingCallback("second")), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(after.clone(), offsets.clone(), None);
+
+        let err = invoker.invoke_pending_callbacks().await.expect_err("first error escapes");
+        assert!(err.is_local_illegal_state_error(), "unexpected error: {err:?}");
+        assert_eq!(err.message(), "first");
+        assert_eq!(before.invocations(), 1);
+        assert_eq!(after.invocations(), 0, "the tasks behind the error stay queued");
+
+        let err = invoker.invoke_pending_callbacks().await.expect_err("second error escapes");
+        assert_eq!(err.message(), "second");
+        assert_eq!(after.invocations(), 0);
+
+        invoker.invoke_pending_callbacks().await.expect("the rest run");
+        assert_eq!(before.invocations(), 1);
+        assert_eq!(after.invocations(), 1);
     }
 
     /// Translated from
@@ -381,14 +545,14 @@ mod tests {
         let cb = Arc::new(RecordingCallback::new());
         invoker.enqueue_user_callback_invocation(cb.clone(), singleton_offset(tp, 30), None);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         // User callback fired exactly once after passing through the
         // no-op interceptor entries.
         assert_eq!(cb.invocations(), 1);
 
         // Re-draining should produce no additional invocations — the
         // empty-interceptor entries did not leave stale work behind.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb.invocations(), 1);
     }
 
@@ -413,14 +577,14 @@ mod tests {
         invoker.enqueue_interceptor_invocation(offsets2.clone());
         assert!(recording.calls().is_empty());
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         let calls = recording.calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0], offsets1);
         assert_eq!(calls[1], offsets2);
 
         // Subsequent calls don't re-invoke.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(recording.calls().len(), 2);
     }
 
@@ -448,7 +612,7 @@ mod tests {
         assert!(recording.calls().is_empty());
         assert_eq!(cb1.invocations(), 0);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         let intercept_calls = recording.calls();
         assert_eq!(intercept_calls.len(), 2);
         assert_eq!(intercept_calls[0], offsets1);
@@ -456,7 +620,7 @@ mod tests {
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb1.calls()[0].0, offsets1);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(recording.calls().len(), 2);
         assert_eq!(cb1.invocations(), 1);
     }
@@ -471,5 +635,68 @@ mod tests {
         fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
             <RecordingInterceptor as ConsumerInterceptor<K, V>>::on_commit(&self.0, offsets);
         }
+    }
+
+    /// A callback that records the invoker's callback counter as seen from
+    /// inside `on_complete`, then returns `outcome`.
+    struct CounterReadingCallback {
+        counter: Arc<AtomicUsize>,
+        seen: AtomicUsize,
+        outcome: Result<(), &'static str>,
+    }
+
+    #[async_trait]
+    impl OffsetCommitCallback for CounterReadingCallback {
+        async fn on_complete(
+            &self,
+            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            self.seen.store(self.counter.load(Ordering::SeqCst), Ordering::SeqCst);
+            self.outcome.map_err(Error::local_illegal_state)
+        }
+    }
+
+    /// Rust-only: the callback counter a `ConsumerHandle` consults is
+    /// non-zero exactly while a user callback runs, and is balanced again
+    /// after the callback returns — whether it succeeds or fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn callback_counter_is_set_only_while_a_user_callback_runs() {
+        let tp = TopicPartition::new("t0".to_string(), 0);
+        let interceptors: ConsumerInterceptors<String, String> = ConsumerInterceptors::new(Vec::new());
+        let invoker = OffsetCommitCallbackInvoker::new(interceptors);
+        let counter = Arc::clone(invoker.callbacks_in_progress());
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        let ok = Arc::new(CounterReadingCallback {
+            counter: Arc::clone(&counter),
+            seen: AtomicUsize::new(usize::MAX),
+            outcome: Ok(()),
+        });
+        invoker.enqueue_user_callback_invocation(ok.clone(), singleton_offset(tp.clone(), 1), None);
+        invoker.invoke_pending_callbacks().await.unwrap();
+        assert_eq!(ok.seen.load(Ordering::SeqCst), 1, "inside the callback the counter is 1");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "balanced after the callback returns");
+
+        let failing = Arc::new(CounterReadingCallback {
+            counter: Arc::clone(&counter),
+            seen: AtomicUsize::new(usize::MAX),
+            outcome: Err("boom"),
+        });
+        invoker.enqueue_user_callback_invocation(failing.clone(), singleton_offset(tp, 2), None);
+        let err = invoker.invoke_pending_callbacks().await.unwrap_err();
+        assert_eq!(err.message(), "boom");
+        assert_eq!(failing.seen.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "balanced after a failing callback too");
+
+        // Nested scopes (a listener whose commit drains the queue) count up
+        // and back down.
+        let outer = invoker.enter_callback();
+        let inner = invoker.enter_callback();
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        drop(inner);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        drop(outer);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }

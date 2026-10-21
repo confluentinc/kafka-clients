@@ -16,7 +16,7 @@
 //! Kafka 4.2.0 broker.
 //!
 //! These tests exercise the production constructor wired in Phase 12
-//! (commit 4/N): `KafkaConsumer::new::<K, V>(...)` returns a real
+//! (commit 4/N): `KafkaConsumer::<K, V>::new(...)` returns a real
 //! `AsyncKafkaConsumer` that spawns its bg task, opens a `NetworkClient`
 //! against the broker, and runs the KIP-848 group-protocol membership
 //! state machine end-to-end.
@@ -69,6 +69,7 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::serialization::StringSerializer;
+use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::KafkaConsumer;
@@ -106,7 +107,7 @@ fn cluster_config_with_kip848() -> ClusterConfig {
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
     }
 }
@@ -188,7 +189,7 @@ async fn test_subscribe_and_poll_records() {
 
     produce_deterministic_records(&ctx, &topic, 10).await;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -264,7 +265,7 @@ async fn test_assign_partitions_and_poll() {
 
     produce_deterministic_records(&ctx, &topic, 5).await;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config_groupless(&ctx),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -327,7 +328,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         ctx.apply_security(&mut consumer1_props);
         let consumer1_config = ConsumerConfig::new(&consumer1_props).expect("invalid test config");
 
-        let mut consumer1 = KafkaConsumer::new::<String, String>(
+        let mut consumer1 = KafkaConsumer::<String, String>::new(
             consumer1_config,
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
@@ -360,7 +361,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
 
     // Consumer 2: same group, polls only the remaining records.
     {
-        let mut consumer2 = KafkaConsumer::new::<String, String>(
+        let mut consumer2 = KafkaConsumer::<String, String>::new(
             make_consumer_config(&ctx, &group_id),
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
@@ -410,7 +411,7 @@ async fn test_seek_to_beginning_re_reads_records() {
 
     produce_deterministic_records(&ctx, &topic, 5).await;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -520,7 +521,7 @@ async fn test_fetch_partitions_after_failed_listener() {
 
     produce_deterministic_records(&ctx, &topic, 1).await;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -603,7 +604,7 @@ async fn test_fetch_partitions_with_always_failed_listener() {
 
     produce_deterministic_records(&ctx, &topic, 1).await;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -724,7 +725,7 @@ async fn test_async_consumer_with_consumer_protocol_disabled() {
         ("group.id".to_string(), ctx.group_id("test-group")),
         ("group.protocol".to_string(), "CONSUMER".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -814,7 +815,7 @@ async fn leader_broker_id(admin: &dyn confluent_kafka::admin::Admin, tp: &TopicP
 /// Java loops `while (consumed < msgNum)` with no bound; the Rust loop is
 /// bounded at 60 s so a regression fails instead of hanging the suite.
 async fn consume_asserting_leader_epoch(
-    consumer: &mut dyn confluent_kafka::consumer::Consumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     msg_num: usize,
     expected_epoch: i32,
 ) {
@@ -869,7 +870,7 @@ async fn test_leader_epoch() {
     let msg_num = 10;
     send_msg(&bootstrap, &topic, msg_num).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config(&ctx, &ctx.group_id("group")),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),
@@ -885,7 +886,7 @@ async fn test_leader_epoch() {
         .await
         .expect("seekToBeginning should succeed");
 
-    consume_asserting_leader_epoch(consumer.as_mut(), msg_num, 0).await;
+    consume_asserting_leader_epoch(&mut consumer, msg_num, 0).await;
 
     // make the leader epoch increment by shutdown the leader broker
     let leader = leader_broker_id(admin.as_ref(), &target_topic_partition).await;
@@ -893,7 +894,7 @@ async fn test_leader_epoch() {
 
     send_msg(&bootstrap, &topic, msg_num).await;
 
-    consume_asserting_leader_epoch(consumer.as_mut(), msg_num, 1).await;
+    consume_asserting_leader_epoch(&mut consumer, msg_num, 1).await;
 
     consumer.close().await.expect("consumer close should succeed");
     admin.close_with_timeout(Duration::from_secs(5)).await;
@@ -931,7 +932,7 @@ async fn test_client_rack_reaches_the_broker() {
         (ConsumerConfig::CLIENT_RACK_CONFIG.to_string(), "rack0".to_string()),
     ]);
     ctx.apply_security(&mut props);
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("invalid test config"),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),

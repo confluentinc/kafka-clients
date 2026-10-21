@@ -41,62 +41,41 @@ from confluent_kafka.common.config import ConfigError
 
 
 def test_basic_types() -> None:
-    assert _config.coerce("a", "1   ", "INT") == 1
-    assert _config.coerce("b", 2, "LONG") == 2
-    assert _config.coerce("c", "hello", "STRING") == "hello"
-    assert _config.coerce("d", " a , b, c", "LIST") == ["a", "b", "c"]
-    assert _config.coerce("e", 42.5, "DOUBLE") == 42.5
-    assert _config.coerce("f", str, "CLASS") is str
-    assert _config.coerce("g", "true", "BOOLEAN") is True
-    assert _config.coerce("h", "FalSE", "BOOLEAN") is False
-    assert _config.coerce("i", "TRUE", "BOOLEAN") is True
-    assert _config.coerce("j", "password", "PASSWORD") == "password"
-
-
-def test_equivalent_forms() -> None:
-    # "true" equals True, "1000" equals 1000 (CLAUDE.md, Configuration).
-    assert _config.coerce("k", True, "BOOLEAN") is _config.coerce("k", "true", "BOOLEAN")
-    assert _config.coerce("k", 1000, "INT") == _config.coerce("k", "1000", "INT") == 1000
-    assert _config.coerce("k", "+7", "LONG") == 7
-    assert _config.coerce("k", "32767", "SHORT") == 32767
-    assert _config.coerce("k", 3, "DOUBLE") == 3.0
-    assert _config.coerce("k", "1e3", "DOUBLE") == 1000.0
-    assert _config.coerce("k", ("a", "b"), "LIST") == ["a", "b"]
-    assert _config.coerce("k", "", "LIST") == []
-    assert _config.coerce("k", "  x.Y ", "CLASS") == "x.Y"
-    assert _config.coerce("k", None, "INT") is None
+    # Java's testBasicTypes values by Python type; the Python-type check keeps
+    # a value as given, the core parses and trims it.
+    assert _config.check_type("a", "1   ", "INT") == "1   "
+    assert _config.check_type("b", 2, "LONG") == 2
+    assert _config.check_type("c", "hello", "STRING") == "hello"
+    assert _config.check_type("d", [" a ", "b"], "LIST") == [" a ", "b"]
+    assert _config.check_type("e", 42.5, "DOUBLE") == 42.5
+    assert _config.check_type("f", str, "CLASS") is str
+    assert _config.check_type("g", True, "BOOLEAN") is True
+    assert _config.check_type("h", "FalSE", "BOOLEAN") == "FalSE"
+    assert _config.check_type("j", "password", "PASSWORD") == "password"
+    assert _config.check_type("k", None, "INT") is None
+    assert _config.check_type("k", ("a", "b"), "LIST") == ["a", "b"]
+    assert _config.check_type("k", 3, "DOUBLE") == 3
 
 
 # --------------------------------------------------------------------------- #
-# ConfigDefTest.testBadInputs, with Java's messages
+# ConfigDefTest.testBadInputs: the wrong-Python-type cases, with Java's
+# messages. The value checks (number text, ranges, boolean text, class names)
+# are the core's (CLAUDE.md, Implementation over the FFI, exception 2), so a
+# string such as "hello" for an INT passes through here.
 # --------------------------------------------------------------------------- #
 
 _BAD_INPUTS: list[tuple[str, object, str]] = [
-    ("INT", "hello", "Not a number of type INT"),
-    ("INT", "42.5", "Not a number of type INT"),
     ("INT", 42.5, "Expected value to be a 32-bit integer, but it was a builtins.float"),
-    ("INT", 2**63 - 1, "Not a number of type INT"),
-    ("INT", str(2**63 - 1), "Not a number of type INT"),
     ("INT", object(), "Expected value to be a 32-bit integer, but it was a builtins.object"),
     ("INT", True, "Expected value to be a 32-bit integer, but it was a builtins.bool"),
-    ("INT", "1_000", "Not a number of type INT"),
-    ("LONG", "hello", "Not a number of type LONG"),
-    ("LONG", "42.5", "Not a number of type LONG"),
-    ("LONG", str(2**63 - 1) + "00", "Not a number of type LONG"),
     ("LONG", object(), "Expected value to be a 64-bit integer (long), but it was a builtins.object"),
-    ("SHORT", "32768", "Not a number of type SHORT"),
     ("SHORT", 1.5, "Expected value to be a 16-bit integer (short), but it was a builtins.float"),
-    ("DOUBLE", "hello", "Not a number of type DOUBLE"),
-    ("DOUBLE", "inf", "Not a number of type DOUBLE"),
     ("DOUBLE", object(), "Expected value to be a double, but it was a builtins.object"),
     ("DOUBLE", False, "Expected value to be a double, but it was a builtins.bool"),
     ("STRING", object(), "Expected value to be a string, but it was a builtins.object"),
     ("PASSWORD", 5, "Expected value to be a string, but it was a builtins.int"),
     ("LIST", 53, "Expected a comma separated list."),
     ("LIST", object(), "Expected a comma separated list."),
-    ("BOOLEAN", "hello", "Expected value to be either true or false"),
-    ("BOOLEAN", "truee", "Expected value to be either true or false"),
-    ("BOOLEAN", "fals", "Expected value to be either true or false"),
     ("BOOLEAN", 1, "Expected value to be either true or false"),
     ("CLASS", 5, "Expected a Class instance or class name."),
 ]
@@ -105,10 +84,23 @@ _BAD_INPUTS: list[tuple[str, object, str]] = [
 @pytest.mark.parametrize("type_name,value,message", _BAD_INPUTS)
 def test_bad_inputs(type_name: str, value: object, message: str) -> None:
     with pytest.raises(ConfigError) as exc:
-        _config.coerce("name", value, type_name)
+        _config.check_type("name", value, type_name)
     assert str(exc.value) == f"Invalid value {java_str(value)} for configuration name: {message}"
     # ConfigDef.parseType throws a new ConfigException: getCause() is null.
     assert exc.value.__cause__ is None
+
+
+@pytest.mark.parametrize("type_name,value", [
+    ("INT", "hello"), ("INT", "42.5"), ("INT", 2**63 - 1), ("LONG", "xxx"),
+    ("SHORT", "32768"), ("DOUBLE", "inf"), ("BOOLEAN", "truee"), ("LIST", "a,b"),
+    ("CLASS", "ClassDoesNotExist"),
+])
+def test_value_checks_are_the_cores(type_name: str, value: object) -> None:
+    # Ranges, number and boolean text and class names are checked by the core
+    # (Implementation over the FFI, exception 2): Python passes the value on
+    # for the core's ConfigError. Only the Python type is Python's check, so a
+    # str is accepted for every type and an out-of-range int for an INT key.
+    assert _config.check_type("name", value, type_name) == value
 
 
 def test_java_number_parsers_report_java_s_messages() -> None:
@@ -184,14 +176,18 @@ def test_convert_value_to_string() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_prepare_coerces_known_keys_for_the_core() -> None:
+def test_prepare_converts_known_keys_for_the_core() -> None:
     originals, native = _config.prepare(
         {"bootstrap.servers": " a:9092 , b:9092", "linger.ms": 5, "enable.idempotence": "TRUE",
          "sasl.login.refresh.window.factor": 0.8, "acks": " all ", "unknown.key": 1,
          "key.serializer": "x.Y", "transactional.id": None}, client="producer")
-    assert native == {"bootstrap.servers": "a:9092,b:9092", "linger.ms": "5",
-                      "enable.idempotence": "true", "sasl.login.refresh.window.factor": "0.8",
-                      "acks": "all", "unknown.key": "1"}
+    # Strings are passed as given: the core trims and parses them.
+    assert native == {"bootstrap.servers": " a:9092 , b:9092", "linger.ms": "5",
+                      "enable.idempotence": "TRUE", "sasl.login.refresh.window.factor": "0.8",
+                      "acks": " all ", "unknown.key": "1"}
+    _, native = _config.prepare({"bootstrap.servers": ["a:9092", "b:9092"],
+                                 "enable.idempotence": True}, client="producer")
+    assert native == {"bootstrap.servers": "a:9092,b:9092", "enable.idempotence": "true"}
     # The user's configs, as given, for the serde route.
     assert originals["key.serializer"] == "x.Y" and originals["transactional.id"] is None
 
@@ -212,16 +208,38 @@ def test_a_given_serde_argument_replaces_its_config_key() -> None:
         assert native == {} and originals[key] is instance
 
 
+def test_bad_number_text_reaches_the_core() -> None:
+    # The number text is the core's to check (Implementation over the FFI,
+    # exception 2); a real client reaches it at construction, no broker needed.
+    # The core omits Java's ": Not a number of type INT|LONG" suffix (ConfigDef
+    # line 789), so only Java's prefix is asserted.
+    from confluent_kafka.consumer import KafkaConsumer
+    from confluent_kafka.producer import KafkaProducer
+
+    with pytest.raises(ConfigError) as exc:
+        KafkaConsumer(configs={"bootstrap.servers": "localhost:1", "group.id": "g",
+                               "max.poll.records": "many"})
+    assert str(exc.value).startswith("Invalid value many for configuration max.poll.records")
+    with pytest.raises(ConfigError) as exc:
+        KafkaProducer(configs={"bootstrap.servers": "localhost:1", "linger.ms": "abc"})
+    assert str(exc.value).startswith("Invalid value abc for configuration linger.ms")
+
+
 def test_prepare_uses_the_client_config_def() -> None:
     assert "max.poll.records" in _config_types.CONSUMER
     assert "max.poll.records" not in _config_types.PRODUCER
+    # A wrong Python type for a consumer key is Python's ConfigError.
     with pytest.raises(ConfigError) as exc:
-        _config.prepare({"max.poll.records": "many"}, client="consumer")
+        _config.prepare({"max.poll.records": 1.5}, client="consumer")
     assert str(exc.value) == (
-        "Invalid value many for configuration max.poll.records: Not a number of type INT")
-    # Not a producer key: accepted as given.
-    assert _config.prepare({"max.poll.records": "many"}, client="producer")[1] == {
+        "Invalid value 1.5 for configuration max.poll.records: "
+        "Expected value to be a 32-bit integer, but it was a builtins.float")
+    # A bad text is the core's to report: passed as given.
+    assert _config.prepare({"max.poll.records": "many"}, client="consumer")[1] == {
         "max.poll.records": "many"}
+    # Not a producer key: accepted as given.
+    assert _config.prepare({"max.poll.records": 1.5}, client="producer")[1] == {
+        "max.poll.records": "1.5"}
 
 
 def test_key_must_be_a_string() -> None:

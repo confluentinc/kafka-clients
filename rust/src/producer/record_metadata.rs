@@ -44,7 +44,10 @@ pub struct RecordMetadata {
 
 impl RecordMetadata {
     /// Value used when the offset is unknown (i.e., `ProduceResponse.INVALID_OFFSET`).
-    pub const INVALID_OFFSET: i64 = -1;
+    ///
+    /// Not a field of Java's `RecordMetadata`, which reads
+    /// `ProduceResponse.INVALID_OFFSET` directly; users test `has_offset()`.
+    pub(crate) const INVALID_OFFSET: i64 = -1;
 
     /// Partition value for record without partition assigned.
     pub const UNKNOWN_PARTITION: i32 = -1;
@@ -119,11 +122,6 @@ impl RecordMetadata {
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#partition")]
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()
-    }
-
-    /// The topic and partition the record was sent to.
-    pub fn topic_partition(&self) -> &TopicPartition {
-        &self.topic_partition
     }
 }
 

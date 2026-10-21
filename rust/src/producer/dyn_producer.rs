@@ -23,6 +23,10 @@
 //! `DynProducer` restores the Java capability (CLAUDE.md §3, "traits must be
 //! dyn-compatible") by boxing each future, and only callers that go through
 //! `dyn` pay for it.
+//!
+//! A method added to [`Producer`] goes in three places here: the trait, the
+//! blanket impl and the impl on `dyn DynProducer`. `cargo xtask lint-custom`
+//! (`check-dyn-forwarding`) fails until all three forward it.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -38,9 +42,15 @@ use crate::common::metrics::KafkaMetric;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 use crate::producer::Callback;
+#[cfg(feature = "ffi")]
+use crate::producer::KafkaProducer;
+#[cfg(feature = "ffi")]
+use crate::producer::MockProducer;
 use crate::producer::Producer;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
+#[cfg(feature = "ffi")]
+use crate::producer::TrySendOutcome;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -76,6 +86,8 @@ impl<K, V, P: super::Producer<K, V>> private::Sealed<K, V> for P {}
 /// ];
 /// assert_eq!(2, producers.len());
 /// ```
+// the dyn-compatible companion of the `Producer` trait (CLAUDE.md §3)
+#[doc(alias = "rust-only")]
 pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     /// See [`Producer::init_transactions`].
     ///
@@ -146,7 +158,7 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -248,7 +260,7 @@ impl<K, V, P: Producer<K, V>> DynProducer<K, V> for P {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -335,7 +347,7 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send {
         DynProducer::send_with_callback(self, record, callback)
     }
@@ -364,6 +376,79 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
     }
 }
 
+/// The non-blocking send of either producer behind one `dyn` handle: a
+/// [`DynProducer`] with [`KafkaProducer::try_send`] beside its methods.
+///
+/// There is no Java counterpart (DoD #7). [`KafkaProducer::try_send`] has none
+/// either — Java's `send` always blocks for up to `max.block.ms` — and it is an
+/// inherent method rather than a [`Producer`] one, because only `KafkaProducer`
+/// has pre-append wait points to skip. The C FFI, though, reaches the producer
+/// it wraps only through a `dyn` handle (see [`DynProducer`]), and its
+/// non-blocking send entry point needs the fast path of the real producer and
+/// the always-ready `send` of the mock through that same handle. This trait is
+/// that handle's type: [`try_send`](Self::try_send) is the real producer's
+/// `try_send`, and the mock's `send_with_callback`, which never waits, reported
+/// as [`TrySendOutcome::Accepted`]. It cannot be a method of `DynProducer`: that
+/// trait's blanket impl covers every [`Producer`], and a `Producer` has no
+/// `try_send` to forward to. Crate-internal, and only the `ffi` feature names
+/// it.
+#[cfg(feature = "ffi")]
+pub(crate) trait DynTrySend<K, V>: DynProducer<K, V> {
+    /// See [`KafkaProducer::try_send`].
+    fn try_send<'a>(
+        &'a self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
+    where
+        K: 'a,
+        V: 'a;
+}
+
+#[cfg(feature = "ffi")]
+impl<K, V> DynTrySend<K, V> for KafkaProducer<K, V>
+where
+    K: Send + Sync,
+    V: Send + Sync,
+{
+    fn try_send<'a>(
+        &'a self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
+    where
+        K: 'a,
+        V: 'a,
+    {
+        Box::pin(KafkaProducer::try_send(self, record, callback))
+    }
+}
+
+/// The mock never waits — its `send_with_callback` resolves the record at once
+/// under its own lock — so its non-blocking send is its send, always `Accepted`.
+#[cfg(feature = "ffi")]
+impl<K, V> DynTrySend<K, V> for MockProducer<K, V>
+where
+    K: Send + Sync,
+    V: Send + Sync,
+{
+    fn try_send<'a>(
+        &'a self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> BoxFuture<'a, Result<TrySendOutcome, Error>>
+    where
+        K: 'a,
+        V: 'a,
+    {
+        Box::pin(async move {
+            Producer::send_with_callback(self, record, callback)
+                .await
+                .map(TrySendOutcome::Accepted)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +456,24 @@ mod tests {
 
     fn record(value: &str) -> ProducerRecord<String, String> {
         ProducerRecord::with_key("topic".to_string(), Some("key".to_string()), Some(value.to_string()))
+    }
+
+    /// The mock's non-blocking send is its send: it never waits, so through the
+    /// `dyn` handle every record is `Accepted` and lands in its history.
+    #[cfg(feature = "ffi")]
+    #[tokio::test]
+    async fn test_mock_try_send_is_always_accepted() {
+        let mock = MockProducer::<String, String>::with_auto_complete(true);
+        let producer: &dyn DynTrySend<String, String> = &mock;
+
+        let outcome = producer.try_send(record("value"), None).await.expect("try_send");
+
+        let future = match outcome {
+            TrySendOutcome::Accepted(future) => future,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        assert_eq!(future.get().await.expect("metadata").offset(), 0);
+        assert_eq!(mock.history().len(), 1);
     }
 
     async fn send_through_generic<P: Producer<String, String> + ?Sized>(producer: &P, value: &str) -> i64 {

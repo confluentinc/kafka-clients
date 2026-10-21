@@ -240,7 +240,7 @@ impl SaslConfigs {
 
     /// Resolve the effective username, checking the `username` field first,
     /// then parsing from `jaas_config` if present.
-    pub fn resolve_username(&self) -> Option<&str> {
+    pub(crate) fn resolve_username(&self) -> Option<&str> {
         if let Some(ref u) = self.username {
             return Some(u.as_str());
         }
@@ -255,7 +255,7 @@ impl SaslConfigs {
     ///
     /// Returns the **plaintext**: the authenticator must send it, just as
     /// Java's `PlainLoginModule` yields a plain `String`. Never log the result.
-    pub fn resolve_password(&self) -> Option<&str> {
+    pub(crate) fn resolve_password(&self) -> Option<&str> {
         if let Some(ref p) = self.password {
             return Some(p.value());
         }

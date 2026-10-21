@@ -37,6 +37,7 @@ import pytest
 import confluent_kafka
 from confluent_kafka import (
     ConcurrentModificationError,
+    ExecutionError,
     IllegalArgumentError,
     IllegalStateError,
     NoSuchElementError,
@@ -140,6 +141,7 @@ _JDK: dict[str, type[BaseException]] = {
     "java.lang.IllegalArgumentException": RuntimeError,
     "java.util.ConcurrentModificationException": RuntimeError,
     "java.util.concurrent.TimeoutException": builtins.TimeoutError,
+    "java.util.concurrent.ExecutionException": Exception,
     "java.util.NoSuchElementException": RuntimeError,
     "java.lang.NullPointerException": RuntimeError,
 }
@@ -160,7 +162,9 @@ def _bridge() -> dict[str, str]:
 
 
 def _ffi_enum() -> dict[str, int]:
-    """``kafka_common_ErrorCode_t``, from its generated Rust mirror."""
+    """The FFI enum ``kafka_common_Error_e`` (``rust/src/ffi/common.rs``),
+    from its generated Rust mirror, which ``cargo xtask check-generated``
+    keeps in step with it."""
     text = (_REPO_ROOT / "rust/tests/common/error_code.rs").read_text()
     return {n: int(v) for n, v in re.findall(r"pub const (\w+): i32 = (-?\d+);", text)}
 
@@ -202,13 +206,14 @@ def test_every_python_error_class_is_a_java_class() -> None:
 
     defined = walk(KafkaError)
     for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                 RootTimeoutError, NoSuchElementError, NullPointerError):
+                 RootTimeoutError, NoSuchElementError, NullPointerError, ExecutionError):
         defined |= walk(root)
     assert defined == set(error_classes())
     expected = set(_bridge().values()) | {
         "org.apache.kafka.common.KafkaException",
         "java.util.NoSuchElementException",
         "java.lang.NullPointerException",
+        "java.util.concurrent.ExecutionException",
         "org.apache.kafka.common.errors.RetriableException",
         "org.apache.kafka.common.errors.RefreshRetriableException",
         "org.apache.kafka.common.errors.InvalidMetadataException",
@@ -216,7 +221,7 @@ def test_every_python_error_class_is_a_java_class() -> None:
         "org.apache.kafka.clients.consumer.InvalidOffsetException",
     }
     assert set(_BY_JAVA) == expected
-    assert len(_BY_JAVA) == 173
+    assert len(_BY_JAVA) == 174
 
 
 def test_only_an_exception_suffix_becomes_error() -> None:
@@ -252,13 +257,15 @@ def test_each_error_lives_in_the_module_of_its_java_package() -> None:
 
 def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
     assert sorted(confluent_kafka.__all__) == sorted([
-        "Duration", "ConcurrentModificationError", "IllegalArgumentError",
+        "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
         "IllegalStateError", "NoSuchElementError", "NullPointerError", "TimeoutError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
                 NoSuchElementError, NullPointerError):
         assert issubclass(cls, RuntimeError)
         assert not issubclass(cls, KafkaError)
+    # ExecutionException is checked: an Exception, not a RuntimeError.
+    assert ExecutionError.__bases__ == (Exception,)
 
 
 def test_kafka_error_subclasses_runtime_error() -> None:
@@ -316,6 +323,8 @@ def test_built_ins_the_core_does_not_model_have_no_id() -> None:
     for cls in (NoSuchElementError, NullPointerError):
         assert not hasattr(cls, "_ffi_id")
         assert to_ffi_id(cls(message="x")) == -1
+    assert not hasattr(ExecutionError, "_ffi_id")
+    assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
     assert to_ffi_id(ValueError("not ours")) == -1
 
 
@@ -513,9 +522,16 @@ def test_record_deserialization_constructors() -> None:
     # Every Java constructor takes the cause, so a null one is cause=None.
     n = RecordDeserializationError(
         origin=None, partition=_TP, offset=2, timestamp=-1,  # type: ignore[arg-type]
-        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,  # type: ignore[arg-type]
+        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
         headers=(), message="m", cause=None)
     assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+    # A record without a key (CompletedFetch passes record.key(), null) or a
+    # tombstone keeps the other buffer.
+    k = RecordDeserializationError(
+        origin=origin.KEY, partition=_TP, offset=3, timestamp=1,
+        timestamp_type=TimestampType.CREATE_TIME, key_buffer=None, value_buffer=b"v",
+        headers=(), message="m", cause=None)
+    assert k.key_buffer() is None and bytes(k.value_buffer() or b"") == b"v"
 
 
 def test_record_deserialization_has_only_the_full_constructor() -> None:
@@ -763,8 +779,6 @@ _PAYLOADS: list[tuple[type[BaseException], dict[str, Any], str, Any]] = [
     (ThrottlingQuotaExceededError, {"throttle_time_ms": 250}, "throttle_time_ms", 250),
     (DuplicateResourceError, {"resource": "r1"}, "resource", "r1"),
     (ResourceNotFoundError, {"resource": None}, "resource", None),
-    (CorrelationIdMismatchError, {"request_correlation_id": 7, "response_correlation_id": 8},
-     "response_correlation_id", 8),
     (RecordTooLargeError, {"record_too_large_partitions": {("t", 0): 99}},
      "record_too_large_partitions", {_TP: 99}),
     (RecordTooLargeError, {"record_too_large_partitions": None},
@@ -812,6 +826,19 @@ def test_from_ffi_error_keeps_the_message_when_java_needs_more(
     assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
 
 
+def test_a_core_correlation_id_mismatch_reads_unknown_ids(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The core reports no payload for it (no C accessor, CLAUDE.md §4): the
+    # error is still built through its constructor, with -1 for both ids.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(CorrelationIdMismatchError._ffi_id,
+                                                  "mismatch"))
+    err = from_ffi_error(0)
+    assert type(err) is CorrelationIdMismatchError and str(err) == "mismatch"
+    assert (err.request_correlation_id(), err.response_correlation_id()) == (-1, -1)
+    clone = pickle.loads(pickle.dumps(err))
+    assert (clone.request_correlation_id(), clone.response_correlation_id()) == (-1, -1)
+
+
 def test_real_native_plain_error_has_no_payload() -> None:
     lib = pytest.importorskip("_confluentkafka")
     handle = lib.KafkaError_new(-1, "boom")
@@ -826,6 +853,18 @@ def test_real_native_round_trip() -> None:
     err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
     assert type(err) is TopicAuthorizationError
     assert str(err) == "no access"
+
+
+def test_real_native_payload_is_read_through_the_sub_handle() -> None:
+    # Java's TopicAuthorizationException(String message) passes emptySet().
+    lib = pytest.importorskip("_confluentkafka")
+    handle = lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access")
+    try:
+        assert lib.KafkaError_payload(handle) == {"unauthorized_topics": []}
+    finally:
+        lib.KafkaError_destroy(handle)
+    err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
+    assert isinstance(err, TopicAuthorizationError) and err.unauthorized_topics() == set()
 
 
 # ----------------------------------------------------------------------------

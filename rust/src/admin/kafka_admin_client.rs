@@ -1062,7 +1062,7 @@ impl KafkaAdminClient {
                 }
             }
             let mut wire_resource = AlterConfigsResource::new();
-            wire_resource.set_resource_type(resource.resource_type().id());
+            wire_resource.set_resource_type(resource.r#type().id());
             wire_resource.set_resource_name(resource.name().to_string());
             wire_resource.set_configs(alterable_configs);
             wire_resources.push(wire_resource);
@@ -2405,7 +2405,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
-        OffsetSpec::Timestamp(timestamp) => timestamp,
+        OffsetSpec::Timestamp(spec) => spec.timestamp(),
         OffsetSpec::Earliest => ListOffsetsRequest::EARLIEST_TIMESTAMP,
         OffsetSpec::MaxTimestamp => ListOffsetsRequest::MAX_TIMESTAMP,
         OffsetSpec::EarliestLocal => ListOffsetsRequest::EARLIEST_LOCAL_TIMESTAMP,
@@ -2635,8 +2635,8 @@ fn get_list_partition_reassignments_call(
 /// Mirrors `KafkaAdminClient.nodeFor`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
 fn node_for(resource: &ConfigResource) -> Option<i32> {
-    if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
-        || resource.resource_type() == config_resource::Type::BrokerLogger
+    if (resource.r#type() == config_resource::Type::Broker && !resource.is_default())
+        || resource.r#type() == config_resource::Type::BrokerLogger
     {
         // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
         // would throw. Here a parse failure degrades to "any broker" rather
@@ -2696,7 +2696,7 @@ fn get_describe_configs_call(
             .map(|resource| {
                 let mut r = DescribeConfigsResource::new();
                 r.set_resource_name(resource.name().to_string());
-                r.set_resource_type(resource.resource_type().id());
+                r.set_resource_type(resource.r#type().id());
                 r.set_configuration_keys(None);
                 r
             })
@@ -3629,10 +3629,10 @@ impl Admin for KafkaAdminClient {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
                 let mut valid_topic_names: Vec<String> = Vec::new();
-                for name in &names {
+                for name in collection.topic_names() {
                     if topic_name_is_unrepresentable(name) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -3662,10 +3662,10 @@ impl Admin for KafkaAdminClient {
                 }
                 DeleteTopicsResult::of_topic_names(public)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut handles: HashMap<Uuid, KafkaFutureImpl<()>> = HashMap::new();
                 let mut valid_topic_ids: Vec<Uuid> = Vec::new();
-                for id in &ids {
+                for id in collection.topic_ids() {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -3754,16 +3754,19 @@ impl Admin for KafkaAdminClient {
         options: DescribeTopicsOptions,
     ) -> DescribeTopicsResult {
         match topics {
-            TopicCollection::TopicNames(names) => DescribeTopicsResult::of_topic_names(
-                self.handle_describe_topics_by_names_with_describe_topic_partitions_api(&names, &options),
+            TopicCollection::TopicNames(collection) => DescribeTopicsResult::of_topic_names(
+                self.handle_describe_topics_by_names_with_describe_topic_partitions_api(
+                    collection.topic_names(),
+                    &options,
+                ),
             ),
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 // Describing by id uses the Metadata API in Java too
                 // (handleDescribeTopicsByIds → convertTopicIdsToMetadataRequestTopic),
                 // not DescribeTopicPartitions, so it is translated faithfully here.
                 let mut handles: HashMap<Uuid, KafkaFutureImpl<TopicDescription>> = HashMap::new();
                 let mut valid_topic_ids: Vec<Uuid> = Vec::new();
-                for id in &ids {
+                for id in collection.topic_ids() {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                         future.complete_with_error(Error::with_message(
@@ -4071,7 +4074,7 @@ impl Admin for KafkaAdminClient {
         for resource in configs.keys() {
             let mut node = node_for(resource);
             if self.shared.metadata_manager.using_bootstrap_controllers()
-                && resource.resource_type() != config_resource::Type::BrokerLogger
+                && resource.r#type() != config_resource::Type::BrokerLogger
             {
                 node = None;
             }
@@ -4804,7 +4807,7 @@ impl Admin for KafkaAdminClient {
             let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
             handle.complete_with_error(Error::with_message(
                 Errors::InvalidRequest,
-                "The AclBindingFilter must not contain CreateTopicsResult::UNKNOWN elements.",
+                "The AclBindingFilter must not contain UNKNOWN elements.",
             ));
             return DescribeAclsResult::new(handle.future());
         }
@@ -5079,7 +5082,9 @@ impl Admin for KafkaAdminClient {
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
-            if feature.is_empty() {
+            // Java's `Utils.isBlank`: `str.trim().isEmpty()`, and Java's `trim()`
+            // strips every char up to U+0020 (Rust's `trim()` is Unicode white space).
+            if feature.trim_matches(|c: char| c <= ' ').is_empty() {
                 return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
@@ -6240,6 +6245,8 @@ mod tests {
         );
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
+        // Java's text (`KafkaAdminClient.java:2573-2574`).
+        assert_eq!(err.message(), "The AclBindingFilter must not contain UNKNOWN elements.");
     }
 
     /// Translated from `KafkaAdminClientTest.testCreateAcls`.
@@ -7725,7 +7732,7 @@ mod tests {
             &nodes[0],
         );
         let mut records = HashMap::new();
-        records.insert(tp0.clone(), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(tp0.clone(), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
         for _ in 0..40 {
             if result.low_watermarks()[&tp0].is_done() {
@@ -8793,7 +8800,7 @@ mod tests {
         counts.insert("my_topic".to_string(), NewPartitions::increase_to(3));
         counts.insert(
             "other_topic".to_string(),
-            NewPartitions::increase_to_new_assignments(3, vec![vec![2], vec![3]]),
+            NewPartitions::increase_to_with_new_assignments(3, vec![vec![2], vec![3]]),
         );
         counts
     }
@@ -9026,22 +9033,10 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(
-            TopicPartition::new("my_topic", 0),
-            RecordsToDelete::before_offset_with_offset(3),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 1),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 2),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
-        records.insert(
-            TopicPartition::new("my_topic", 3),
-            RecordsToDelete::before_offset_with_offset(10),
-        );
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9075,7 +9070,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9111,8 +9106,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset_with_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset_with_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -10956,10 +10951,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string(), "/data1".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11012,10 +11006,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11039,10 +11032,9 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_replica_log_dirs_negative_partition_does_not_panic() {
         let mock = mock_admin_client::Builder::new()
+            .set_broker_log_dirs(vec![vec!["/data0".to_string()]])
             .build()
             .expect("a fresh builder has one broker");
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
-            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -11102,7 +11094,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTopicTest#testElectLeaders")]
     async fn test_elect_leaders() {
-        for election_type in ElectionType::values() {
+        for &election_type in ElectionType::values() {
             let (admin, mut runnable, time, _nodes) = env();
             let topic1 = TopicPartition::new("topic", 0);
             let topic2 = TopicPartition::new("topic", 2);
@@ -11599,6 +11591,30 @@ mod tests {
             .update_features_with_options(&updates, UpdateFeaturesOptions::new())
             .unwrap_err();
         assert_eq!(err.message(), "Provided feature can not be empty.");
+    }
+
+    /// `testUpdateFeaturesShouldFailRequestForInvalidFeatureName` with a blank name:
+    /// Java's `Utils.isBlank` is `trim().isEmpty()`, and Java's `trim()` strips every
+    /// char up to U+0020, so `" "` and `"\t\n"` are rejected, while a no-break space
+    /// (U+00A0, Unicode white space but above U+0020) is a name.
+    #[tokio::test]
+    async fn test_update_features_should_fail_request_for_blank_feature_name() {
+        let (admin, _runnable, _time, _nodes) = env();
+        for blank in [" ", "\t\n", "\u{0}"] {
+            let mut updates = HashMap::new();
+            updates.insert(blank.to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+            let err = admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .unwrap_err();
+            assert_eq!(err.message(), "Provided feature can not be empty.", "{blank:?}");
+        }
+        let mut updates = HashMap::new();
+        updates.insert("\u{a0}".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+        assert!(
+            admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .is_ok()
+        );
     }
 
     // `testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion`
@@ -13074,7 +13090,7 @@ mod tests {
 
         let description = future.get().await.unwrap();
         assert_eq!(description.group_id(), "g1");
-        assert_eq!(description.group_type(), GroupType::Consumer);
+        assert_eq!(description.r#type(), GroupType::Consumer);
         assert_eq!(description.group_state(), GroupState::Stable);
         assert_eq!(description.partition_assignor(), "uniform");
         // `coordinator()` is the Node the fulfillment request was routed to, and
@@ -13405,7 +13421,7 @@ mod tests {
         let listings = result.valid().get().await.unwrap();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].group_id(), "g1");
-        assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
+        assert_eq!(listings[0].r#type(), Some(GroupType::Consumer));
         assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
     }
 
@@ -13737,7 +13753,7 @@ mod tests {
         assert_eq!(map.len(), 2);
         // Each group's per-partition offsets match the requested spec.
         for group in ["groupA", "groupB"] {
-            let future = result.partitions_to_offset_and_metadata_for_group(group).unwrap();
+            let future = result.partitions_to_offset_and_metadata_with_group_id(group).unwrap();
             assert_eq!(future.get().await.unwrap().len(), 1);
         }
     }
@@ -14297,7 +14313,8 @@ mod tests {
     }
 
     fn members_to_remove(instance_ids: &[&str]) -> RemoveMembersFromConsumerGroupOptions {
-        RemoveMembersFromConsumerGroupOptions::new(instance_ids.iter().map(|id| MemberToRemove::new(*id))).unwrap()
+        RemoveMembersFromConsumerGroupOptions::with_members(instance_ids.iter().map(|id| MemberToRemove::new(*id)))
+            .unwrap()
     }
 
     /// Translated from `testDeleteConsumerGroupsNumRetries`: with `retries=0`, a

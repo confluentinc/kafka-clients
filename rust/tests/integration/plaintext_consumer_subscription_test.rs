@@ -115,8 +115,8 @@ use crate::common::test_utils::wait_for_partition_leaders;
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -149,7 +149,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -412,7 +412,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     create_test_topic(&ctx, &topic3, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -436,7 +436,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
 
     consumer.unsubscribe().await.expect("unsubscribe should succeed");
     assert_eq!(consumer.assignment().len(), 0, "assignment should be empty after unsubscribe");
@@ -452,7 +452,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     let mut expected2: HashSet<TopicPartition> = HashSet::new();
     expected2.insert(TopicPartition::new(topic2.clone(), 0));
     expected2.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expected2, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expected2, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -471,7 +471,7 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     create_test_topic(&ctx, &topic, 2).await;
     create_test_topic(&ctx, &topic1, 2).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -491,7 +491,7 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
 
     let tp = TopicPartition::new(topic1.clone(), 0);
 
@@ -500,7 +500,7 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
     producer.close().await.expect("producer close should succeed");
 
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -520,7 +520,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     create_test_topic(&ctx, &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -537,7 +537,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
 
     consumer.unsubscribe().await.expect("unsubscribe should succeed");
     assert_eq!(consumer.assignment().len(), 0);
@@ -553,7 +553,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     let mut expanded: HashSet<TopicPartition> = expected.clone();
     expanded.insert(TopicPartition::new(topic2.clone(), 0));
     expanded.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expanded, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expanded, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -576,7 +576,7 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     create_test_topic(&ctx, &topic, 2).await;
     create_test_topic(&ctx, &topic1, 2).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -596,14 +596,14 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
 
     let tp = TopicPartition::new(topic1.clone(), 0);
 
     let total_records: usize = 10;
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp).await;
 
     // Provision topic2 (unassigned — does not match the `<prefix>_topic.*`
     // pattern because the per-test prefix is `<prefix>_newTopic2`).
@@ -617,15 +617,8 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
 
     // Fetch records again with the regex subscription.
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
-    consume_and_verify_records_bytes(
-        consumer.as_mut(),
-        &tp,
-        total_records,
-        total_records as i64,
-        0,
-        starting_timestamp,
-    )
-    .await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, total_records as i64, 0, starting_timestamp)
+        .await;
 
     producer.close().await.expect("producer close should succeed");
     consumer.close().await.expect("consumer close should succeed");
@@ -648,7 +641,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     create_test_topic(&ctx, &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -668,7 +661,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     pattern_assignment.insert(TopicPartition::new(topic1.clone(), 1));
     pattern_assignment.insert(TopicPartition::new(topic11.clone(), 0));
     pattern_assignment.insert(TopicPartition::new(topic11.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &pattern_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &pattern_assignment, Duration::from_secs(90)).await;
 
     consumer.unsubscribe().await.expect("unsubscribe should succeed");
     assert_eq!(consumer.assignment().len(), 0);
@@ -682,7 +675,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     let mut topic_assignment: HashSet<TopicPartition> = HashSet::new();
     topic_assignment.insert(TopicPartition::new(topic2.clone(), 0));
     topic_assignment.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &topic_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &topic_assignment, Duration::from_secs(90)).await;
     consumer.unsubscribe().await.expect("unsubscribe should succeed");
 
     // Subscribe to pattern again.
@@ -690,7 +683,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
         .subscribe_with_pattern(pattern)
         .await
         .expect("subscribe_with_pattern (second time) should succeed");
-    await_assignment_with_deadline(consumer.as_mut(), &pattern_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &pattern_assignment, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -704,7 +697,7 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_regex");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -769,7 +762,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     // Note: Java creates the `other` topic AFTER the first
     // `awaitAssignment` call. We mirror that ordering below.
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -784,7 +777,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
         .subscribe_with_topics(vec![topic.clone()])
         .await
         .expect("subscribe should succeed");
-    await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
     create_test_topic(&ctx, &other_topic, 2).await;
@@ -798,7 +791,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
         .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("second subscribe should succeed");
-    await_assignment_with_deadline(consumer.as_mut(), &expanded_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &expanded_assignment, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -818,7 +811,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     create_test_topic(&ctx, &other_topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -835,7 +828,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
         .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("subscribe should succeed");
-    await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &initial_assignment, Duration::from_secs(90)).await;
 
     let mut shrunken_assignment: HashSet<TopicPartition> = HashSet::new();
     shrunken_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -845,7 +838,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
         .subscribe_with_topics(vec![topic.clone()])
         .await
         .expect("second subscribe should succeed");
-    await_assignment_with_deadline(consumer.as_mut(), &shrunken_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &shrunken_assignment, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -870,7 +863,7 @@ async fn test_async_consumer_unsubscribe_topic() {
     create_test_topic(&ctx, &topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -889,7 +882,7 @@ async fn test_async_consumer_unsubscribe_topic() {
     let mut initial: HashSet<TopicPartition> = HashSet::new();
     initial.insert(TopicPartition::new(topic.clone(), 0));
     initial.insert(TopicPartition::new(topic.clone(), 1));
-    await_assignment_with_deadline(consumer.as_mut(), &initial, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut consumer, &initial, Duration::from_secs(90)).await;
 
     // Subscribe to empty list (== unsubscribe).
     consumer
@@ -926,14 +919,14 @@ async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_topic_unsubscribe");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed");
 
-    setup_subscribe_invalid_topic(consumer.as_mut()).await;
+    setup_subscribe_invalid_topic(&mut consumer).await;
     consumer
         .unsubscribe()
         .await
@@ -951,14 +944,14 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_topic_close");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed");
 
-    setup_subscribe_invalid_topic(consumer.as_mut()).await;
+    setup_subscribe_invalid_topic(&mut consumer).await;
     consumer.close().await.expect("close should succeed after invalid topic");
 }
 

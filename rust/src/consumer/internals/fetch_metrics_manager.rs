@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
 use crate::common::metrics::stats::WindowedCount;
-use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, Sensor};
+use crate::common::metrics::{Metrics, Sensor, gauge};
 use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::FetchMetricsRegistry;
 use crate::consumer::internals::SubscriptionState;
@@ -258,11 +258,11 @@ impl FetchMetricsManager {
     /// and, if present, the per-node latency sensor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordLatency")]
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        self.fetch_latency.record_value(request_latency_ms as f64);
+        self.fetch_latency.record_with_value(request_latency_ms as f64);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.inner.metrics().get_sensor(&node_time_name) {
-                node_request_time.record_value(request_latency_ms as f64);
+                node_request_time.record_with_value(request_latency_ms as f64);
             }
         }
     }
@@ -270,13 +270,13 @@ impl FetchMetricsManager {
     /// Records the number of bytes fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordBytesFetched")]
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        self.bytes_fetched.record_value(bytes as f64);
+        self.bytes_fetched.record_with_value(bytes as f64);
     }
 
     /// Records the number of records fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordRecordsFetched")]
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        self.records_fetched.record_value(records as f64);
+        self.records_fetched.record_with_value(records as f64);
     }
 
     /// Records the number of bytes fetched for a single topic.
@@ -299,7 +299,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        bytes_fetched.record_value(bytes as f64);
+        bytes_fetched.record_with_value(bytes as f64);
     }
 
     /// Records the number of records fetched for a single topic.
@@ -322,7 +322,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_fetched.record_value(records as f64);
+        records_fetched.record_with_value(records as f64);
     }
 
     /// Records the lag for a single partition.
@@ -334,7 +334,7 @@ impl FetchMetricsManager {
     /// metric set per partition per poll — the accepted Java-parity cost.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLag")]
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        self.records_lag.record_value(lag as f64);
+        self.records_lag.record_with_value(lag as f64);
 
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
 
@@ -350,7 +350,7 @@ impl FetchMetricsManager {
         let Some(records_lag) = FetchMetricsManager::resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        records_lag.record_value(lag as f64);
+        records_lag.record_with_value(lag as f64);
     }
 
     /// Records the lead for a single partition.
@@ -360,7 +360,7 @@ impl FetchMetricsManager {
     /// as Java does (see [`Self::record_partition_lag`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLead")]
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        self.records_lead.record_value(lead as f64);
+        self.records_lead.record_with_value(lead as f64);
 
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
 
@@ -377,7 +377,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_lead.record_value(lead as f64);
+        records_lead.record_with_value(lead as f64);
     }
 
     /// Called before requesting fetches to update the set of per-partition
@@ -434,14 +434,14 @@ impl FetchMetricsManager {
                 self.inner.metrics().add_metric_if_absent(
                     metric_name,
                     None,
-                    MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
+                    Box::new(gauge::new(move |_config, _now| {
                         let value = subscription
                             .lock()
                             .expect("SubscriptionState mutex poisoned")
                             .preferred_read_replica(&tp_owned, 0)
                             .unwrap_or(-1);
                         MetricValue::Int(value)
-                    }))),
+                    })),
                 );
             }
         }
@@ -518,12 +518,18 @@ mod tests {
     }
 
     fn metric_value_template(f: &Fixture, template: &MetricNameTemplate) -> f64 {
-        let name = f.metrics.metric_instance_key_value(template, &[]).expect("metric instance");
+        let name = f
+            .metrics
+            .metric_instance_with_key_value(template, &[])
+            .expect("metric instance");
         metric_value(f, &name)
     }
 
     fn metric_value_tags(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> f64 {
-        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
+        let name = f
+            .metrics
+            .metric_instance_with_key_value(template, tags)
+            .expect("metric instance");
         metric_value(f, &name)
     }
 
@@ -536,7 +542,10 @@ mod tests {
     }
 
     fn read_replica_metric_value(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> i32 {
-        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
+        let name = f
+            .metrics
+            .metric_instance_with_key_value(template, tags)
+            .expect("metric instance");
         let metric = f.metrics.metric(&name).expect("metric registered");
         match metric.metric_value() {
             MetricValue::Int(v) => v,
@@ -548,10 +557,10 @@ mod tests {
         let node_time_name = format!("node-{connection_id}.latency");
         let node_request_time = f.metrics.sensor(&node_time_name).expect("sensor");
         node_request_time
-            .add_metric_name(avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(avg.clone(), Box::new(Avg::new()))
             .expect("add avg");
         node_request_time
-            .add_metric_name(max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(max.clone(), Box::new(Max::new()))
             .expect("add max");
     }
 
@@ -970,9 +979,9 @@ mod tests {
     fn test_throttle_time_sensor_records() {
         let f = setup();
         let sensor = f.manager.throttle_time_sensor();
-        sensor.record_value(100.0);
+        sensor.record_with_value(100.0);
         f.time.sleep(time_window_ms(&f) + 1);
-        sensor.record_value(200.0);
+        sensor.record_with_value(200.0);
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);

@@ -78,7 +78,7 @@ fn from_final_state(state: FinalState) -> u8 {
 /// A callback and the associated FutureRecordMetadata argument to pass to it.
 #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch$Thunk")]
 pub(crate) struct Thunk {
-    pub callback: Option<Callback>,
+    pub callback: Option<Box<dyn Callback>>,
     pub future: Arc<FutureRecordMetadata>,
 }
 
@@ -235,9 +235,9 @@ impl ProducerBatch {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         now: i64,
-    ) -> Result<Arc<FutureRecordMetadata>, Option<Callback>> {
+    ) -> Result<Arc<FutureRecordMetadata>, Option<Box<dyn Callback>>> {
         // `ChunkedProducerBatch.tryAppend`'s override, folded in (PLAN §2.3). A chunked batch never
         // acquires memory itself: the capacity is arranged before the append, by the accumulator
         // attaching chunks (see `extension_bytes_needed` and `add_buffers`). The capacity is
@@ -500,10 +500,10 @@ impl ProducerBatch {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(ref errors_fn) = record_errors {
                         let error = errors_fn(i as i32);
-                        callback(sentinel_metadata.as_ref(), error.as_ref());
+                        callback.on_completion(sentinel_metadata.as_ref(), error.as_ref());
                     } else {
                         let metadata = thunk.future.value();
-                        callback(Some(&metadata), None);
+                        callback.on_completion(Some(&metadata), None);
                     }
                 }));
                 if let Err(payload) = result {
@@ -1127,7 +1127,7 @@ mod tests {
                 None,
                 Some(&[0u8; 10]),
                 &[],
-                Some(Box::new(move |_, _| {
+                Some(Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
                     first.fetch_add(1, Ordering::SeqCst);
                 })),
                 NOW,
@@ -1140,7 +1140,9 @@ mod tests {
                 None,
                 Some(&[0u8; 10]),
                 &[],
-                Some(Box::new(|_, _| panic!("user callback blew up"))),
+                Some(Box::new(|_: Option<&RecordMetadata>, _: Option<&Error>| {
+                    panic!("user callback blew up")
+                })),
                 NOW,
             )
             .unwrap_or_else(|_| panic!("Append should succeed"));
@@ -1152,7 +1154,7 @@ mod tests {
                 None,
                 Some(&[0u8; 10]),
                 &[],
-                Some(Box::new(move |_, _| {
+                Some(Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
                     third.fetch_add(1, Ordering::SeqCst);
                 })),
                 NOW,
@@ -1652,7 +1654,7 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_sentinel_metadata);
 
-        let callback: Callback = Box::new(move |metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             inv.fetch_add(1, Ordering::SeqCst);
             *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = matches!(metadata, Some(m) if m.offset() == -1);
@@ -1705,11 +1707,12 @@ mod tests {
             let seen: Seen = Arc::new(Mutex::new(Vec::new()));
             for i in 0..count {
                 let seen = Arc::clone(&seen);
-                let callback: Callback = Box::new(move |metadata, error| {
-                    seen.lock()
-                        .unwrap()
-                        .push((metadata.cloned(), error.map(|e| e.message().to_string())));
-                });
+                let callback: Box<dyn Callback> =
+                    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                        seen.lock()
+                            .unwrap()
+                            .push((metadata.cloned(), error.map(|e| e.message().to_string())));
+                    });
                 let key = format!("key-{i}");
                 let value = vec![0u8; 10 + i];
                 batch
@@ -1724,8 +1727,8 @@ mod tests {
                 .as_ref()
                 .expect("callback must receive Some metadata on failure, never None");
             assert_eq!(
-                expected_tp,
-                metadata.topic_partition(),
+                (expected_tp.topic(), expected_tp.partition()),
+                (metadata.topic(), metadata.partition()),
                 "sentinel keeps the batch's real topic-partition"
             );
             assert_eq!(RecordMetadata::INVALID_OFFSET, metadata.offset());
@@ -1788,7 +1791,7 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_metadata);
 
-        let callback: Callback = Box::new(move |metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             inv.fetch_add(1, Ordering::SeqCst);
             *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = metadata.is_some();

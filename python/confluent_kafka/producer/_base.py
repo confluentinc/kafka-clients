@@ -15,18 +15,50 @@
 """State and helpers shared by the FFI-backed producers (private).
 
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
-call the C FFI through the C extension (``_confluentkafka``), whose batching
-engine owns two background threads: the send thread hands accepted records to
-the Rust producer (``kafka_producer_Producer_send_batch``) and the poll thread
-waits on their futures and runs each record's completion. Both families reuse
-the same entry points and differ only in the future type a completion resolves
-and where the user's callback runs (CLAUDE.md, Python Binding Conventions,
-Implementation over the FFI).
+call the C FFI through the C extension (``_confluentkafka``). Every operation
+uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
+methods"): a send is ``kafka_producer_Producer_send_with_callback_cb``,
+which hands the record to the producer on the calling thread when it can take
+it at once and otherwise queues it on the core's submission task, which gives a
+record it still cannot hand over a task of its own to wait on; a flush, close
+or transaction-control call is its ``_cb`` twin. The completions -- the
+``Callback`` of each record, the handover of each record that waited and the
+result of each operation -- are queued in the client's callback vector and run
+by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
+producer's completion thread, or the event loop of the async producer, which
+the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs a
+callback). The handover of a record taken, or refused, at once is reported on
+the calling thread instead, inside the send. Both families reuse the same
+entry points: a record's completion completes the same Python state (a
+``_FutureState``: a ``_KafkaFutureImpl`` on the sync producer, the record's
+own future on the asyncio one), and they differ only in the future ``send()``
+hands out over it (``KafkaFuture`` / ``AsyncKafkaFuture``) and where the
+user's callback
+runs (CLAUDE.md, Python Binding Conventions, Futures, Implementation over the
+FFI and Threads and callbacks).
+
+Backpressure is Java's: ``send()`` returns only once its record is with the
+producer, as Java's returns once ``doSend`` appended it. The C API's send
+runs the producer's ``try_send`` on the calling thread first and takes the
+record at once in the common case (its topic's metadata known, the buffer with
+room). Otherwise the record is queued for the submission task, which hands it
+to the producer on a task of its own, where the metadata wait and the wait for
+``buffer.memory`` space are bounded by ``max.block.ms``, as in Java. ``send()``
+waits for that handover on an internal future, which the handover completion
+resolves, then returns the record's own future, which the record's delivery
+callback completes, or raises what Java's ``doSend`` rethrows. So one caller's
+records reach the producer in sending order, a record not yet in the buffer
+has a caller waiting for it, at most one per sending thread or task, and each
+waits at most ``max.block.ms`` whatever the number of callers, as with Java's
+blocking ``send()``. The wait is on a core task, not in a blocking native
+call: a sync ``send()`` sees Ctrl+C, raising it once the record is handed
+over, and an async one does not block its loop.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +66,11 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+# The slice waits live in the shared ``_wait`` module; re-exported for the producers.
+from confluent_kafka._wait import WAIT_SLICE_S as WAIT_SLICE_S
+from confluent_kafka._wait import result_sliced as result_sliced
+from confluent_kafka._wait import wait_sliced as wait_sliced
+from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.metric_name import MetricName
@@ -47,6 +84,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from confluent_kafka import Duration
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import _FutureState
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -87,7 +125,15 @@ def closed_while_sending() -> KafkaError:
     allocates no error."""
     return KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
 
-_TRANSACTIONAL_ID = "transactional.id"
+# ProducerConfig.MAX_BLOCK_MS_CONFIG and its default (60 s).
+_MAX_BLOCK_MS = "max.block.ms"
+_DEFAULT_MAX_BLOCK_MS = 60000
+
+# The message of a wait from a delivery callback that ran out of max.block.ms:
+# the completion it waits for can only run on the thread the callback blocks.
+CALLBACK_WAIT_TIMEOUT_MESSAGE = ("Timeout expired after {ms}ms while awaiting {operation} from "
+                                 "a send() callback, which blocks the producer's completion "
+                                 "thread")
 
 
 class _SnapshotMetric:
@@ -179,87 +225,96 @@ def serialize(serializer: Serializer[Any], topic: str, data: object,
     raise TypeError(f"a serializer must return bytes or None, not {type(out).__name__}")
 
 
-def await_payload(submit: Callable[[Callable[..., None]], None],
-                  partitions: bool = False) -> tuple[Any, ...]:
-    """Submit an ``_async`` FFI operation and wait for its completion payload
-    on a ``threading.Event``, which releases the GIL (so the dispatcher thread
-    can run the completion) and stays interruptible by Ctrl+C. A payload that
-    arrives after the wait was interrupted has its handles freed (see
-    ``free_payload`` for ``partitions``)."""
-    box: dict[str, tuple[Any, ...]] = {}
-    done = threading.Event()
-    lock = threading.Lock()
-    abandoned = False
-
-    def cb(*payload: Any) -> None:
-        with lock:
-            if abandoned:
-                free_payload(payload, partitions)
-                return
-            box["payload"] = payload
-        done.set()
-
-    submit(cb)
-    try:
-        done.wait()
-    except BaseException:
-        with lock:
-            abandoned = True
-            unclaimed = box.pop("payload", None)
-        if unclaimed is not None:
-            free_payload(unclaimed, partitions)
-        raise
-    return box["payload"]
+def raise_if_error(error: int) -> None:
+    """Raise the typed error of an OWNED FFI error handle (0 is success)."""
+    if error:
+        raise from_ffi_error(error)
 
 
-def free_payload(payload: tuple[Any, ...], partitions: bool) -> None:
-    """Free the handles of a completion payload nobody takes any more: a
-    ``(error,)`` one, or a ``partitions_for`` ``(list, error)`` one."""
-    if partitions:
-        list_handle, error = payload
-        if list_handle:
-            _lib.PartitionInfoList_drain(list_handle)
-    else:
-        (error,) = payload
+def free_error(error: int) -> None:
+    """Free an OWNED FFI error handle nobody raises (0 is none)."""
     if error:
         _lib.KafkaError_destroy(error)
 
 
-def run_sync(submit: Callable[[Callable[..., None]], None]) -> None:
-    """A void ``_async`` FFI operation, waited for; raises its typed error."""
-    (error,) = await_payload(submit)
-    if error:
-        raise from_ffi_error(error)
+def wait_futures(futures: list[_FutureState[Any]]) -> None:
+    """Wait (as :func:`wait_sliced`) until every record future of ``futures``
+    (the Python state under each ``KafkaFuture`` a ``send()`` returned) is
+    done: the internal wait of ``flush()`` and ``commit_transaction()``, never
+    a public ``get()``."""
+    if not futures:
+        return
+    all_done = threading.Event()
+    lock = threading.Lock()
+    remaining = len(futures)
+
+    def one_done(_future: _FutureState[Any]) -> None:
+        nonlocal remaining
+        with lock:
+            remaining -= 1
+            last = remaining == 0
+        if last:
+            all_done.set()
+
+    for future in futures:
+        future._add_listener(one_done)
+    wait_sliced(all_done)
 
 
-def force_close(c_producer: int) -> None:
-    """Java's ``sender.forceClose()`` and the ``ioThread.join()`` after it,
-    for a ``close()`` an interrupt stopped (``KafkaProducer.close(Duration,
-    boolean)``, KafkaProducer.java:1506-1524: the interrupt is kept and the
-    close proceeds to force-close and join). A close with a zero timeout fails
-    the records still pending, which also ends the send thread's metadata
-    waits; a second Ctrl+C meanwhile is dropped, as Java keeps only the first
-    interrupt."""
-    done = threading.Event()
+class Completion:
+    """The completion of one queued (``_cb``) operation, waited for on the
+    calling thread: the extension calls it with the operation's payload (one
+    OWNED error handle, or a list and one) from the thread that runs the
+    producer's callbacks, and :meth:`wait` returns that payload.
 
-    def cb(error: int) -> None:
-        if error:
-            _lib.KafkaError_destroy(error)
-        done.set()
+    ``free`` releases a payload nobody takes: one that arrives after the wait
+    gave up, or that an interrupted wait leaves behind."""
 
-    _lib.Producer_close_with_timeout_async(c_producer, 0, cb)
-    while True:
+    __slots__ = ("_done", "_lock", "_payload", "_abandoned", "_free")
+
+    def __init__(self, free: Callable[[tuple[Any, ...]], None]) -> None:
+        self._done = threading.Event()
+        self._lock = threading.Lock()
+        self._payload: tuple[Any, ...] | None = None
+        self._abandoned = False
+        self._free = free
+
+    def __call__(self, *payload: Any) -> None:
+        with self._lock:
+            if self._abandoned:
+                abandoned = True
+            else:
+                abandoned = False
+                self._payload = payload
+        if abandoned:
+            self._free(payload)
+        else:
+            self._done.set()
+
+    def wait(self, deadline: float | None = None,
+             on_interrupt: Callable[[], None] | None = None) -> tuple[Any, ...] | None:
+        """The payload, waited for in slices (see :func:`wait_sliced`); ``None``
+        when ``deadline`` passed first, the late payload then being freed. A
+        Ctrl+C is raised once the payload is in, which is then freed."""
         try:
-            done.wait()
-            return
+            arrived = wait_sliced(self._done, deadline, on_interrupt)
         except KeyboardInterrupt:
-            continue
+            with self._lock:
+                payload, self._payload = self._payload, None
+            if payload is not None:
+                self._free(payload)
+            raise
+        with self._lock:
+            if not arrived and self._payload is None:
+                self._abandoned = True
+                return None
+            payload, self._payload = self._payload, None
+        return payload
 
 
-def raise_if_error(error: int) -> None:
-    """Raise the typed error of a plain FFI entry point's result handle."""
-    if error:
-        raise from_ffi_error(error)
+def free_error_payload(payload: tuple[Any, ...]) -> None:
+    """Free the ``(error,)`` payload of a void operation."""
+    free_error(payload[-1])
 
 
 class _Use:
@@ -302,7 +357,9 @@ class _ProducerState:
     producer down) and waits for the calls in flight to end before it frees the
     handle. A use covers only the native call itself, never a wait for a
     completion, so a ``close()`` from a delivery callback waits for nothing that
-    the callback's thread must first run.
+    the callback's thread must first run. The one native call that waits in the
+    core is a ``send()`` from a delivery callback (see ``Producer.send``), which
+    the core's close wakes.
     """
 
     def __init__(self) -> None:
@@ -313,24 +370,32 @@ class _ProducerState:
         self._lifecycle_lock = threading.RLock()
         self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
-        # Whether transactional.id is set, and whether a transaction this
-        # producer began is open (begin_transaction() returned; commit / abort
-        # not called since). While a transactional producer has none open,
-        # send() waits for its record to reach the Rust producer and raises
-        # what Java's doSend rethrows (every such send fails there: the
-        # transaction manager is not IN_TRANSACTION). Inside one, records go
-        # through the batching engine without that wait.
-        self._transactional = False
-        self._in_transaction = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
-        self._futures: set[Any] = set()
+        self._futures: set[_FutureState[Any]] = set()
         # Bound once: every completion untracks its record's future with it.
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
         # The use of every send(), built once: a _Use holds no per-use state.
         self._send_use = _Use(self, closed_while_sending)
+        # ProducerConfig max.block.ms: what bounds a wait that cannot be
+        # serviced (see CALLBACK_WAIT_TIMEOUT_MESSAGE).
+        self._max_block_ms = _DEFAULT_MAX_BLOCK_MS
+        # Set (under _lifecycle) once Producer_destroy has run: the callback
+        # pump must not touch the handle after that.
+        self._destroyed = False
+
+    def _notify_hook(self) -> Callable[[], None] | None:
+        """The callable the extension calls from the C API's
+        ``__set_callbacks_notify`` hook (on any thread, with the GIL), or
+        ``None`` for a hook that only signals the condition ``Producer_poll``
+        waits on."""
+        return None
+
+    def _after_start(self) -> None:
+        """Run once the native producer is built (the sync producer starts its
+        completion thread here)."""
 
     def _use(self, error: Callable[[], BaseException] | None = None) -> _Use:
         """A call into the native producer: ``with self._use() as c:`` gives
@@ -380,7 +445,7 @@ class _ProducerState:
             value = cast("Serializer[Any]", resolve_serde(
                 value_serializer, originals, _VALUE_SERIALIZER, is_key=False,
                 default=bytes_serializer()))
-            handle, error = _lib.KafkaProducer_new(native, self)
+            handle, error = _lib.KafkaProducer_new(native, self._notify_hook())
         except BaseException:
             close_if_defined(key)
             if value is not None:
@@ -393,7 +458,51 @@ class _ProducerState:
         self._key_serializer = key
         self._value_serializer = value
         self._c_producer = handle
-        self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
+        max_block_ms = native.get(_MAX_BLOCK_MS)
+        if max_block_ms is not None:
+            self._max_block_ms = int(max_block_ms)
+        self._after_start()
+
+    def _callback_deadline(self) -> float:
+        """The ``time.monotonic()`` deadline of a wait from a delivery
+        callback: ``max.block.ms`` from now, the bound Java's own wait has
+        there (its completion would need the blocked I/O thread)."""
+        return time.monotonic() + self._max_block_ms / 1000.0
+
+    def _callback_wait_timeout(self, operation: str) -> KafkaTimeoutError:
+        return KafkaTimeoutError(message=CALLBACK_WAIT_TIMEOUT_MESSAGE.format(
+            ms=self._max_block_ms, operation=operation))
+
+    def _destroy(self) -> None:
+        """Wait until no call into the native producer is in flight, then
+        ``Producer_destroy`` it (which runs the callbacks still pending, on
+        this thread), once. ``_destroyed`` is set under ``_lifecycle`` with no
+        use in flight, so a callback pump that has not started by then never
+        will (see :meth:`_pump_use`)."""
+        with self._lifecycle:
+            while self._uses:
+                self._lifecycle.wait()
+            if self._destroyed:
+                return
+            self._destroyed = True
+        _lib.Producer_destroy(self._c_producer)
+
+    def _pump_use(self) -> bool:
+        """Count a run of the callback pump as a use of the handle, unlike
+        :meth:`_use` also once ``close()`` has begun (its completions still
+        need the pump); ``False`` once the handle is destroyed. The caller
+        ends the use with :meth:`_end_use`."""
+        with self._lifecycle:
+            if self._destroyed:
+                return False
+            self._uses += 1
+            return True
+
+    def _end_use(self) -> None:
+        with self._lifecycle:
+            self._uses -= 1
+            if self._uses == 0:
+                self._lifecycle.notify_all()
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""
@@ -418,47 +527,18 @@ class _ProducerState:
                                      headers)
         return native, topic, partition
 
-    def _track(self, future: Any) -> None:
+    def _track(self, future: _FutureState[Any]) -> None:
         """Track a sent record's future until its completion untracks it, right
         after completing it (``_discard_future``), so a flush() or
         commit_transaction() waits for the records sent before it. Untracking
         in the completion, rather than by a done callback, saves the asyncio
         loop a scheduled callback per record. A record can complete before
-        ``send()`` gets here (on the sync producer's C completion thread): its
+        ``send()`` gets here (on the sync producer's completion thread): its
         future is then already done, and untracked at once. The sync ``send()``
-        fast path does not call this: it checks its completion's own flag, as
-        ``concurrent.futures.Future.done()`` takes the future's lock."""
+        does not call this: it checks its completion's own flag."""
         self._futures.add(future)
-        if future.done():
+        if future.is_done():
             self._futures.discard(future)
-
-    def _drain_sync(self, timeout_s: float | None = None, *, closing: bool = False) -> bool:
-        """Wait until every record sent so far is with the Rust producer, so a
-        send that returned belongs to the flush, transaction-control operation
-        or close that follows (producer-transactions.md §13); at most
-        ``timeout_s`` seconds when given. Returns whether they are.
-
-        Only the registration is a use of the handle: the wait is not, so a
-        ``close()`` meanwhile proceeds (its last send round fires the waiter).
-        ``closing`` is passed by ``close()`` alone (see ``_drain_registered``)."""
-        done = threading.Event()
-        if self._drain_registered(done.set, closing=closing):
-            return True
-        return done.wait(timeout_s)
-
-    def _drain_registered(self, ready: Callable[[], None], *, closing: bool = False) -> bool:
-        """``Producer_drain``: True if drained, else ``ready`` is registered.
-
-        Only ``close()`` passes ``closing``: it owns the handle, which it frees
-        only after this returns, so it uses the handle directly although
-        ``_closed`` is set. Every other caller registers as a counted use,
-        which raises Java's closed ``IllegalStateError`` once a ``close()`` has
-        begun, even when the caller passed its own closed check before that
-        (``_closed`` alone cannot tell such a caller from ``close()``)."""
-        if closing:
-            return bool(_lib.Producer_drain(self._c_producer, ready))
-        with self._use() as c_producer:
-            return bool(_lib.Producer_drain(c_producer, ready))
 
     def _close_serializers(self) -> None:
         """Java closes both serializers at producer close; a failing

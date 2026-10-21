@@ -11,8 +11,9 @@ contract), and **How to apply** (concrete guidance for Actor / Critic).
 
 ## 1. API surface: async-only, no sync facade
 
-The `AsyncKafkaConsumer` API exposes async equivalents of every method that
-blocks in Java:
+The `Consumer` API exposes async equivalents of every method that blocks in
+Java (on the trait they are declared as returning `impl Future + Send`, see
+§2):
 
   - `async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>>`
   - `async fn commit_sync(...)`, `async fn commit_async(...)`
@@ -27,11 +28,49 @@ blocks in Java:
     `async fn close_with_options(...)` (Java's `@Deprecated close(Duration)`
     is not translated — pass `CloseOptions::new_timeout(..)` instead)
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
+  - `async fn current_lag(&mut self, ..) -> Result<Option<i64>, Error>`:
+    Java's `currentLag` is `addAndGet(CurrentLagEvent)`, a wait on the
+    background thread, so it is async and fallible like `position`
 
 Java methods that do not block remain synchronous:
 
-  - `assignment()`, `subscription()`, `paused()`, `metrics()`, `client_id()`,
-    `group_metadata()`, `wakeup()`
+  - `assignment()`, `subscription()`, `paused()`, `group_metadata()` take
+    `&mut self`
+  - `metrics()`, `wakeup()` and the Rust-only `handle()` take `&self`
+
+The receiver follows Java's guard, not whether the method reads or writes.
+Java's consumer methods start with `acquireAndEnsureOpen()`, which throws
+`ConcurrentModificationException` when another thread is inside the consumer;
+`&mut self` is the type-level form of that guard, so the guarded getters take
+it too. It is also forward compatibility (CLAUDE.md §3): a Java getter that
+gains a side effect (`currentLag` became `addAndGet(CurrentLagEvent)`) would
+otherwise force a breaking `&self` -> `&mut self` change.
+
+A method keeps `&self` only when Java leaves it outside the guard. Java's
+unguarded methods are `metrics()`, `wakeup()` (cross-thread by design),
+`clientInstanceId(Duration)`, `registerMetricForSubscription` and
+`unregisterMetricFromSubscription` (`AsyncKafkaConsumer.java:887-902,1301,1855-1861`).
+The last three are not translated yet: when one is, it takes `&self` and is
+added to the allowlist of `cargo xtask lint-custom`
+(`check-consumer-receiver`). The Rust-only `handle()` also takes `&self`: it
+hands out the `ConsumerHandle` (§31, §41), the one cross-thread path into the
+consumer. The lint fails on any other `Consumer` / `DynConsumer` method taking
+`&self`. (`enforceRebalance` is unguarded in `AsyncKafkaConsumer` but guarded
+in `ClassicKafkaConsumer`, so it takes `&mut self`.)
+
+On `KafkaConsumer`, misuse of the guarded sync getters is a programming bug,
+so it panics with Java's message instead of returning a `Result` (the
+precedent is "precondition throws stay panics"): a closed consumer panics with
+`"This consumer has already been closed."`, and `group_metadata()` without
+`group.id` with `InvalidGroupIdException`'s message. Each getter documents its
+panic under `# Panics`. `current_lag` is already async and fallible, so on a
+closed consumer it returns `Err(IllegalStateError)` instead. `MockConsumer`
+follows Java's `MockConsumer`: its getters do not check for a closed consumer,
+and its `metrics()` panics when closed, where Java's `ensureNotClosed()`
+throws.
+
+`clientId()` is package-private on Java's `KafkaConsumer` and absent from the
+`Consumer` interface, so it is not on the Rust trait and has no C binding.
 
 Two notes on the names above, so neither is "corrected" back later:
 
@@ -72,70 +111,78 @@ user-supplied trait (`ConsumerRebalanceListener`, `OffsetCommitCallback`,
   - A `BaseConsumer`-style sync API (cf. `rdkafka` crate). Revisit only if a
     concrete user need surfaces.
 
-## 2. Consumer dispatch surface: `#[async_trait]` + `Box<dyn Consumer>`
+## 2. Consumer dispatch surface: `Consumer` + `DynConsumer`, concrete `KafkaConsumer`
 
-The Rust equivalent of Java's `Consumer<K, V>` interface is an `#[async_trait]`
-trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
+The Rust equivalent of Java's `Consumer<K, V>` interface is a trait whose
+asynchronous methods return `impl Future + Send` (no `#[async_trait]`), paired
+with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape as
+`Producer` / `DynProducer` (CLAUDE.md §3):
 
-    use async_trait::async_trait;
-
-    #[async_trait]
-    pub trait Consumer<K, V>: Send + Sync + 'static
+    pub trait Consumer<K, V>: Send + 'static
     where
-        K: Send + Sync + 'static,
-        V: Send + Sync + 'static,
+        K: Send + 'static,
+        V: Send + 'static,
     {
-        // Blocking-in-Java methods become async (see §1).
-        async fn poll(&mut self, timeout: Duration)
-            -> Result<ConsumerRecords<K, V>, Error>;
-        async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
-        async fn subscribe_with_topics_listener(
+        // Blocking-in-Java methods return a `Send` future (see §1).
+        // Implementations may still write them as `async fn`.
+        fn poll(&mut self, timeout: Duration)
+            -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
+        fn subscribe_with_topics(&mut self, topics: Vec<String>)
+            -> impl Future<Output = Result<(), Error>> + Send;
+        fn subscribe_with_topics_listener(
             &mut self,
             topics: Vec<String>,
             listener: Arc<dyn ConsumerRebalanceListener>,
-        ) -> Result<(), Error>;
-        async fn subscribe_with_pattern(
-            &mut self,
-            pattern: SubscriptionPattern,
-        ) -> Result<(), Error>;
-        async fn subscribe_with_pattern_listener(
-            &mut self,
-            pattern: SubscriptionPattern,
-            listener: Arc<dyn ConsumerRebalanceListener>,
-        ) -> Result<(), Error>;
-        async fn unsubscribe(&mut self) -> Result<(), Error>;
-        async fn commit_sync(&mut self) -> Result<(), Error>;
-        async fn commit_async(&mut self) -> Result<(), Error>;
-        async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
-        async fn committed(&mut self, partitions: &[TopicPartition])
-            -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
-        async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+        fn position(&mut self, partition: &TopicPartition)
+            -> impl Future<Output = Result<i64, Error>> + Send;
+        fn close_with_options(&mut self, options: CloseOptions)
+            -> impl Future<Output = Result<(), Error>> + Send;
         // ... other methods that block in Java ...
 
-        // Methods that do not block in Java stay sync.
-        fn assignment(&self) -> HashSet<TopicPartition>;
-        fn subscription(&self) -> HashSet<String>;
-        fn paused(&self) -> HashSet<TopicPartition>;
-        fn wakeup(&self);
+        fn current_lag(&mut self, topic_partition: &TopicPartition)
+            -> impl Future<Output = Result<Option<i64>, Error>> + Send;
+
+        // Methods that do not block in Java stay sync. The ones Java guards
+        // with `acquireAndEnsureOpen()` take `&mut self` and, on
+        // `KafkaConsumer`, panic on misuse (§1); the ones Java leaves
+        // unguarded, and the Rust-only `handle`, take `&self`.
+        fn assignment(&mut self) -> HashSet<TopicPartition>;
+        fn subscription(&mut self) -> HashSet<String>;
+        fn paused(&mut self) -> HashSet<TopicPartition>;
         // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
         // its constructors; it becomes an interface in Kafka 5.0).
-        fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-        fn client_id(&self) -> &str;
+        fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
+        fn metrics(&self) -> /* ... */;
+        fn wakeup(&self);
+        fn handle(&self) -> ConsumerHandle;
     }
 
-    impl KafkaConsumer {
-        // Java's constructor returns the delegate `ConsumerDelegateCreator`
-        // chose; Rust returns it boxed rather than wrapping it again.
-        pub fn new<K, V>(
+    // Sealed; blanket-implemented for every `C: Consumer<K, V>`. Each async
+    // method returns `Pin<Box<dyn Future + Send + 'a>>`, and
+    // `dyn DynConsumer<K, V>` implements `Consumer<K, V>` in turn.
+    pub trait DynConsumer<K, V>: Sealed<K, V> + Send + 'static { /* ... */ }
+
+    // Java's `KafkaConsumer` is a public class wrapping a private `delegate`
+    // (`KafkaConsumer.java:615`); the Rust struct has the same shape.
+    pub struct KafkaConsumer<K, V> {
+        delegate: AsyncKafkaConsumer<K, V>,
+        // Drops `Sync`, keeps `Send`: the type-level form of Java's
+        // `acquire()` guard (see "Thread-safety" below).
+        not_sync: PhantomData<Cell<()>>,
+    }
+
+    impl<K, V> KafkaConsumer<K, V> {
+        pub fn new(
             config: ConsumerConfig,
             key_deserializer: Box<dyn Deserializer<K>>,
             value_deserializer: Box<dyn Deserializer<V>>,
-        ) -> Result<Box<dyn Consumer<K, V>>, Error>
-        where K: Send + Sync + 'static, V: Send + Sync + 'static
-        {
+        ) -> Result<Self, Error> {
             match GroupProtocol::of(config.group_protocol())? {
-                GroupProtocol::Consumer => Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(
-                    config, key_deserializer, value_deserializer)?)),
+                GroupProtocol::Consumer => Ok(Self {
+                    delegate: AsyncKafkaConsumer::<K, V>::new(
+                        config, key_deserializer, value_deserializer)?,
+                }),
                 GroupProtocol::Classic => Err(Error::unsupported_version(
                     "Classic group protocol is not yet supported in this client; \
                      set group.protocol=consumer (KIP-848).",
@@ -144,66 +191,105 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         }
     }
 
-Implementations in Milestone 8:
+    // Every method forwards to the delegate's own `Consumer` impl.
+    impl<K, V> Consumer<K, V> for KafkaConsumer<K, V> { /* ... */ }
 
+Implementations:
+
+  - `KafkaConsumer<K, V>` — the public consumer type. It holds the
+    `AsyncKafkaConsumer` delegate and forwards every `Consumer` method to the
+    delegate's `Consumer` impl, returning the delegate's future unchanged (no
+    box). `ConsumerDelegate` / `ConsumerDelegateCreator` stay out of scope
+    (§20): with a single delegate the field is `AsyncKafkaConsumer` directly.
   - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
     `consumer.internals`, so it is `pub(crate)`: users reach it only through
-    `KafkaConsumer::new` as a `Box<dyn Consumer<K, V>>`.
-    `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
-    with no Java class; it stays public through an entry in
-    `rust/xtask/public-audience-allowlist.txt`, because listeners need it for
+    `KafkaConsumer`. `ConsumerHandle` (§31, §41), declared in the same file, is
+    a Rust-only type with no Java class; it stays public through its
+    `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`), because listeners need it for
     in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
     (`add_record`, `set_pollable`, etc.) as inherent methods on the concrete
     type, not on the `Consumer` trait. In tests, hold a `MockConsumer`
-    directly and pass `&mut consumer` where `&mut dyn Consumer<K, V>` is
-    expected.
+    directly and pass `&mut consumer` where a `C: Consumer<K, V>` or a
+    `&mut dyn DynConsumer<K, V>` is expected.
+  - `DynConsumer<K, V>` — Rust-only (no Java class), public through its
+    `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`). It restores
+    what a Java interface gives for free: holding different implementations
+    behind one type (`Vec<Box<dyn DynConsumer<K, V>>>`), as the C FFI does for
+    its handle, which holds either a `KafkaConsumer` or a `MockConsumer`.
 
-A `ClassicKafkaConsumer<K, V>` impl may be added later without breaking
-changes; `KafkaConsumer::new` just gains a new arm.
+**Thread-safety.** `KafkaConsumer` and `MockConsumer` (and so
+`dyn DynConsumer`) are `Send + !Sync`; `ConsumerHandle` is `Send + Sync`.
+Java's consumer is single-threaded and enforces it at runtime with
+`acquire()`; Rust enforces it at compile time. `&mut self` on the guarded
+methods (§1) rules out concurrent calls through one reference, and `!Sync`
+rules out sharing `&KafkaConsumer` across threads, so an accidental `Sync`
+(every field happening to be `Sync`) cannot let the `&self` methods race the
+others. `KafkaConsumer` holds a zero-sized `PhantomData<Cell<()>>` marker for
+this; no new dependency. A task that must reach the consumer from another
+thread (to wake it, or from a listener) goes through `consumer.handle()`.
+Unit tests in `kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs`
+pin the auto traits through the `test_thread_safety` probe, two
+`compile_fail` doc tests on `KafkaConsumer` pin `!Sync` and the `&mut self`
+getter, and `check-consumer-receiver` (§1) pins the receivers.
 
-**Why `#[async_trait]` despite CLAUDE.md §13:**
+When the classic protocol is added, `KafkaConsumer`'s field becomes a private
+enum over the two delegates and `KafkaConsumer::new` gains a new arm; the
+public surface does not change.
 
-CLAUDE.md §13 cautions against `Pin<Box<dyn Future>>` per call on **hot
-paths**. The `Consumer` dispatch surface is *not* a hot path:
+**Why `impl Future` + `DynConsumer` rather than `#[async_trait]`:**
 
-  - `poll()` is called at batch granularity (≤ ~100/sec realistically); the
-    ~50 ns `Box::new` cost is <0.0001% of the call body.
-  - `commit_*`, `subscribe`, `close`, `position`, `committed` are even less
-    frequent.
-  - The true hot path (per-record deserializer / interceptor / record build)
-    runs *inside* `poll()` and does not go through the `Consumer` trait. See
-    sections 27–28 for the per-record trait choices, which do NOT use
-    `#[async_trait]`.
-
-Benefits over an enum-dispatch alternative:
-
-  - Library code: ~30 trait methods × 1 line each, vs. 3-line `match` per
-    method on an enum (~90 lines of dispatch boilerplate avoided per new
-    method or variant).
-  - Test code: `&mut MockConsumer` upcasts directly to
-    `&mut dyn Consumer<K, V>`; no wrap-then-unwrap pattern is needed.
-  - Open extension surface: users can implement custom wrapping consumers
-    (instrumentation, retry-on-poll, etc.). Java does not offer this either,
-    but Rust users will expect it.
+  - Static dispatch is available without a boxed future: calling a `Consumer`
+    method on a concrete `KafkaConsumer` / `MockConsumer`, or through generic
+    code taking `C: Consumer<K, V>`, uses the implementation's own future.
+    With `#[async_trait]` every call boxes, even on a concrete type.
+  - The concrete type is nameable, so users can store it in their own structs
+    and write generic code over `Consumer` (for example, generic over
+    `KafkaConsumer` in production and `MockConsumer` in tests) without `dyn`.
+  - `dyn` remains available through `DynConsumer`, which pays one box per
+    asynchronous call — the same cost `#[async_trait]` had for every call.
+  - The per-call box is not a hot-path cost either way (CLAUDE.md §13):
+    `poll()` runs at batch granularity, and the per-record path runs *inside*
+    it (sections 27–28). The choice is about the static-dispatch surface, not
+    throughput.
+  - It is the same design as `Producer` / `DynProducer`, so one pattern covers
+    both clients, and the `check-dyn-compatible` lint
+    (`rust/xtask/src/lint_custom.rs`) enforces the pairing.
 
 **How to apply:**
 
-  - Define `Consumer<K, V>` as one `#[async_trait]` trait in
-    `rust/src/consumer/mod.rs`. Public method surface mirrors
-    `Consumer.java` (Apache Kafka 4.2).
-  - Expose `Box<dyn Consumer<K, V>>` from the `KafkaConsumer::new` factory.
-  - `AsyncKafkaConsumer` and `MockConsumer` both `impl Consumer<K, V> for ...`.
-  - Tests construct `MockConsumer` directly and pass it as `&mut dyn
-    Consumer<K, V>` to code-under-test. No enum match, no `as_mock_mut`
-    helper.
-  - Use default `#[async_trait]` (with `Send` bound). Do NOT use
-    `#[async_trait(?Send)]` — non-`Send` futures cannot cross task
-    boundaries, which is required for the tokio multi-thread runtime.
+  - Define `Consumer<K, V>` in `rust/src/consumer/mod.rs`. Public method
+    surface mirrors `Consumer.java`. Asynchronous methods are declared
+    `fn name(..) -> impl Future<Output = ..> + Send`; implementations may use
+    `async fn`. Do NOT put `#[async_trait]` on the trait or its impls.
+  - `DynConsumer<K, V>` lives in `rust/src/consumer/dyn_consumer.rs`: sealed,
+    blanket-implemented for every `Consumer`, with `Consumer` implemented for
+    `dyn DynConsumer<K, V>`. Every `Consumer` method has a `DynConsumer`
+    counterpart; adding a method to `Consumer` means adding it to all three
+    blocks of that file and to `KafkaConsumer`'s forwarding impl.
+  - `KafkaConsumer::new` returns `Result<KafkaConsumer<K, V>, Error>`. The
+    forwarding impl calls the delegate's `Consumer` impl (not its inherent
+    methods), so the public type runs exactly the code the delegate's trait
+    impl runs.
+  - Code that holds several implementations behind one type uses
+    `Box<dyn DynConsumer<K, V>>` / `&mut dyn DynConsumer<K, V>`. Code that does
+    not, prefers the concrete type or a generic `C: Consumer<K, V> + ?Sized`.
+  - With both traits imported, a method call on a concrete consumer is
+    ambiguous (both apply). Import one; where both names are needed, refer to
+    `DynConsumer` by path in type positions (as
+    `rust/tests/consumer/async_kafka_consumer_test.rs` does).
+  - Every returned future is `Send` (the trait says so); non-`Send` futures
+    cannot cross task boundaries, which the tokio multi-thread runtime needs.
+
+**`#[async_trait]` remains correct for** the per-rebalance / per-commit
+callback traits `ConsumerRebalanceListener` and `OffsetCommitCallback` (§31):
+they are user-implemented, invoked through `Arc<dyn ..>`, and called once per
+rebalance or commit.
 
 **Do NOT use `#[async_trait]` for:**
 
+  - `Consumer<K, V>` itself (see above).
   - `Deserializer<T>` / `Serializer<T>` — per-record, sync trait
     (`fn deserialize(bytes: &[u8]) -> Result<T, Error>`).
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing

@@ -34,7 +34,7 @@ class StreamsTopologyFencedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 132  # kafka_common_ErrorCode_STREAMS_TOPOLOGY_FENCED
+    _ffi_id: ClassVar[int] = 132  # kafka_common_Error_STREAMS_TOPOLOGY_FENCED
 
     def __init__(
         self,

@@ -707,7 +707,9 @@ def main(v2=False):
                             key=message[0],
                             value=message[1]
                         ))
-                        r = produce_call.result()
+                        # v3's send() returns a KafkaFuture (get()), the v2
+                        # wrapper a concurrent.futures.Future (result()).
+                        r = produce_call.result() if v2 else produce_call.get()
                         verification_function(r)
                         warmup_sent += 1
                     except Exception:
@@ -839,14 +841,21 @@ async def async_main():
         else v3_async_producer(common_default_configuration)
 
     def record_delivery_async(fut, start_time):
-        # Runs on the event loop when the delivery future resolves
-        # (add_done_callback -> call_soon), stamping latency at completion so a
-        # backed-up reader can't inflate it. Single-threaded (the loop), so no
-        # lock is needed. Matches the sync path and the native rust/C apps.
-        nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
-        # A cancelled future carries no result/exception (calling .exception()
-        # on it would raise), so treat it like any other completion below.
+        # v2: runs on the event loop when the delivery future resolves
+        # (add_done_callback -> call_soon). A cancelled future carries no
+        # result/exception (calling .exception() on it would raise), so treat
+        # it like any other completion.
         exc = None if fut.cancelled() else fut.exception()
+        record_completion_async(None if exc is not None or fut.cancelled() else fut.result(),
+                                exc, start_time)
+
+    def record_completion_async(result, exc, start_time):
+        # Runs on the event loop when the delivery completes (v3: the send()
+        # callback, which runs on the loop before the record's future
+        # completes), stamping latency at completion so a backed-up reader can't
+        # inflate it. Single-threaded (the loop), so no lock is needed. Matches
+        # the sync path and the native rust/C apps.
+        nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
         # QUEUE_FULL is the one outcome kept OUT of the throughput count: those
         # records were never sent, so they are subtracted from measured_sent
         # instead. Don't log it — it can occur tens of thousands of times.
@@ -865,9 +874,9 @@ async def async_main():
                 # Counted as completed (in `finally`), no latency or throughput.
                 print(f"Produce call resulted in exception: {exc}")
                 return
-            elif not fut.cancelled():
+            elif result is not None:
                 try:
-                    verification_function(fut.result())
+                    verification_function(result)
                 except Exception as e:
                     print(f"Produce call resulted in exception: {e}")
             current_latency = int(time.time() * 1000) - start_time
@@ -897,7 +906,8 @@ async def async_main():
                             key=message[0],
                             value=message[1]
                         ))
-                        r = await produce_call
+                        # v3's send() returns an AsyncKafkaFuture (get()).
+                        r = await produce_call if v2 else await produce_call.get()
                         verification_function(r)
                         warmup_sent += 1
                     except Exception:
@@ -936,9 +946,18 @@ async def async_main():
                     start_time = int(time.time() * 1000)
                     # Record latency in the delivery callback (stamped at the
                     # ack on the event loop), not in a recorder task.
-                    fut = await producer.send(record=next_message)
-                    fut.add_done_callback(
-                        lambda f, st=start_time: record_delivery_async(f, st))
+                    if v2:
+                        fut = await producer.send(record=next_message)
+                        fut.add_done_callback(
+                            lambda f, st=start_time: record_delivery_async(f, st))
+                    else:
+                        # The send() callback (Java's Callback), as the sync cell
+                        # passes it: it runs on the event loop before the record's
+                        # future completes, and the future itself is not kept.
+                        await producer.send(
+                            record=next_message,
+                            callback=lambda md, exc, st=start_time: record_completion_async(
+                                md, exc, st))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:

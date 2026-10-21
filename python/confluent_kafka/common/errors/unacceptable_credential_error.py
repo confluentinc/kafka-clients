@@ -39,7 +39,7 @@ class UnacceptableCredentialError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 93  # kafka_common_ErrorCode_UNACCEPTABLE_CREDENTIAL
+    _ffi_id: ClassVar[int] = 93  # kafka_common_Error_UNACCEPTABLE_CREDENTIAL
 
     def __init__(
         self,

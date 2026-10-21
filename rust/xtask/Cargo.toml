@@ -1,11 +1,11 @@
 [package]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0-beta.1"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-syn = { version = "2", features = ["full", "parsing"] }
+syn = { version = "2", features = ["full", "parsing", "visit"] }
 quote = "1"
 
 [lints.clippy]

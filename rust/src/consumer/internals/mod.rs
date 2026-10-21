@@ -20,6 +20,7 @@
 mod abstract_fetch;
 mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
+mod async_kafka_consumer;
 pub(crate) mod auto_offset_reset_strategy;
 #[cfg(test)]
 mod auto_offset_reset_strategy_test;
@@ -71,6 +72,9 @@ pub(crate) use abstract_heartbeat_request_manager::{
     AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
+pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
+// `ConsumerHandle` is public (tagged `rust-only`): `crate::consumer` re-exports it.
+pub use async_kafka_consumer::ConsumerHandle;
 pub(crate) use auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub(crate) use commit_request_manager::CommitRequestManager;
 pub(crate) use completed_fetch::CompletedFetch;
@@ -98,7 +102,9 @@ pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
-pub(crate) use offset_commit_callback_invoker::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
+pub(crate) use offset_commit_callback_invoker::{
+    AutoCommitInterceptorHook, OffsetCommitCallbackInvoker, OffsetCommitCallbackQueue,
+};
 pub(crate) use offset_fetcher_utils::{ListOffsetData, ListOffsetResult, OffsetFetcherUtils};
 pub(crate) use offsets_for_leader_epoch_client::{OffsetForEpochResult, OffsetsForLeaderEpochClient};
 pub(crate) use offsets_request_manager::OffsetsRequestManager;

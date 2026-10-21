@@ -69,11 +69,14 @@ MOCK_METHODS = [
     "schedule_nop_poll_task", "last_poll_timeout",
 ]
 
-# The methods whose entry point has an _async completion form in the FFI header
-# (Class family): not current_lag, although Java's waits (addAndGet).
-WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "seek", "seek_to_beginning",
-           "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
-           "resume", "offsets_for_times", "beginning_offsets", "end_offsets", "close",
+# The methods whose entry point has a _cb completion form in the FFI header
+# (Class family), current_lag among them (kafka_consumer_Consumer_current_lag_cb,
+# as Java's waits through addAndGet); commit_nowait is too, as its entry point
+# completes through _cb and Java's commitAsync waits for the commit's
+# offsetsReady.
+WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "commit_nowait", "seek",
+           "seek_to_beginning", "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
+           "resume", "offsets_for_times", "beginning_offsets", "end_offsets", "current_lag", "close",
            "__aenter__", "__aexit__"}
 
 DUNDERS = ("__enter__", "__exit__", "__aenter__", "__aexit__")
@@ -130,13 +133,14 @@ def test_not_generated_or_dropped(name: str) -> None:
         assert not hasattr(cls, name), (cls.__name__, name)
 
 
-def test_current_lag_is_a_plain_def_on_every_class() -> None:
-    # Its entry point, kafka_consumer_Consumer_current_lag, has no _async
-    # form, so it is a plain def on both classes (Class family), the mocks
-    # included.
-    for cls in (Consumer, KafkaConsumer, MockConsumer, AsyncConsumer, AsyncKafkaConsumer,
-                AsyncMockConsumer):
+def test_current_lag_is_async_def_on_the_async_classes_only() -> None:
+    # Its entry point has a _cb twin, kafka_consumer_Consumer_current_lag_cb:
+    # the async classes await it, the sync classes wait on it in a plain def
+    # (Class family), the mocks following their base.
+    for cls in (Consumer, KafkaConsumer, MockConsumer):
         assert not inspect.iscoroutinefunction(cls.current_lag), cls.__name__
+    for cls in (AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer):
+        assert inspect.iscoroutinefunction(cls.current_lag), cls.__name__
 
 
 def test_module_exports() -> None:
@@ -302,7 +306,7 @@ def test_the_async_classes_check_the_same_forms() -> None:
             await c.seek(partition=TP)
         assert str(e.value) == SEEK_MESSAGE + "(partition)"
         with pytest.raises(IllegalArgumentError) as e:
-            c.commit_nowait(offsets={})
+            await c.commit_nowait(offsets={})
         assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
         with pytest.raises(TypeError):
             await c.close(timeout=1)  # type: ignore[call-arg]

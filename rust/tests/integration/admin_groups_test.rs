@@ -80,6 +80,10 @@
 //!     — a stable classic group with a joined member. That stays covered by the
 //!     unit tests in `src/consumer/internals/consumer_protocol.rs` and
 //!     `src/admin/internals/describe_classic_groups_handler.rs`.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -90,7 +94,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
+use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer, OffsetAndMetadata};
 
 use crate::common::admin_backend::{
     AdminBackend, admin_for, all_of_exactly, alter_consumer_group_offsets_awaiting_propagation, create_topic,
@@ -126,12 +130,12 @@ fn kip848_partitioned_offsets(num_partitions: u16) -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
 
-type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
+type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 
 /// Build a KIP-848 (`group.protocol=consumer`) `ConsumerConfig`.
 fn consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
@@ -163,21 +167,25 @@ fn static_consumer_config(ctx: &TestContext, group_id: &str, instance_id: &str) 
 }
 
 fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(ctx, group_id),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            consumer_config(ctx, group_id),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 fn new_static_bytes_consumer(ctx: &TestContext, group_id: &str, instance_id: &str) -> BytesConsumer {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        static_consumer_config(ctx, group_id, instance_id),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            static_consumer_config(ctx, group_id, instance_id),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Subscribe the consumer to `topic` and poll until it has been assigned
@@ -281,7 +289,7 @@ async fn list_groups_shows_live_group<F: AdminBackendFactory>(ctx: &mut TestCont
             .unwrap_or_else(|e| panic!("{backend} backend: list groups reported a per-broker error: {e}"));
         if let Some(g) = listed.valid.iter().find(|g| g.group_id() == group_id) {
             assert_eq!(
-                g.group_type(),
+                g.r#type(),
                 Some(GroupType::Consumer),
                 "{backend} backend: live group should be a KIP-848 consumer group"
             );
@@ -476,7 +484,7 @@ async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut T
             .clone();
         assert_eq!(desc.group_id(), group_id);
         assert_eq!(
-            desc.group_type(),
+            desc.r#type(),
             GroupType::Consumer,
             "{backend} backend: a KIP-848 group describes as Consumer"
         );
@@ -955,10 +963,10 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
             panic!("{backend} backend: the classic fallback must describe a simple classic group, got: {e}")
         });
     assert_eq!(
-        consumer.group_type(),
+        consumer.r#type(),
         GroupType::Classic,
         "{backend} backend: the fallback path reports GroupType.CLASSIC, got {:?}",
-        consumer.group_type()
+        consumer.r#type()
     );
     assert_eq!(
         consumer.group_state(),
@@ -1005,7 +1013,7 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
         )
     });
     assert_eq!(
-        listing.group_type(),
+        listing.r#type(),
         Some(GroupType::Classic),
         "{backend} backend: the listing's own type"
     );
@@ -1153,8 +1161,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     member_one.close().await.expect("close m1");
 
     // Remove instance-1 by its group.instance.id.
-    let options =
-        RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).expect("non-empty members");
+    let options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("instance-1")])
+        .expect("non-empty members");
     assert!(
         !options.remove_all(),
         "{backend} backend: options built from a non-empty member set are not removeAll"
@@ -1313,7 +1321,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
     // selection is unrepresentable as an options object in the first place. That
     // is the assertion: every backend's binding must refuse it the same way,
     // rather than one of them defaulting to the destructive removeAll form.
-    let rejected = RemoveMembersFromConsumerGroupOptions::new(Vec::<MemberToRemove>::new());
+    let rejected = RemoveMembersFromConsumerGroupOptions::with_members(Vec::<MemberToRemove>::new());
     let err = rejected.expect_err(&format!(
         "{backend} backend: an empty member collection must be rejected, not silently treated as removeAll"
     ));

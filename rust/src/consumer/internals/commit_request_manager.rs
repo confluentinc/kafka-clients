@@ -54,7 +54,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::oneshot;
 
@@ -843,11 +843,11 @@ impl CommitRequestManager {
     /// pass-through to the existing `maybe_auto_commit_async` driver.
     ///
     /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
-    /// `AssignmentChange` events. As in Java, this is the ONLY place the
-    /// interval auto-commit is started: the bg-task `poll_with_coordinator`
-    /// only drains requests already queued, so offsets are auto-committed
-    /// only when the application calls `poll()` / `assign()`, never while it
-    /// is still processing the records the previous `poll()` returned.
+    /// `AssignmentChange` events, its only callers, as in Java: since
+    /// KAFKA-18641 the auto-commit on the interval fires only from the
+    /// application's poll, never from the background task's
+    /// [`Self::poll_with_coordinator`], so it commits only records the
+    /// application has had the chance to process.
     /// Takes `&self` (not `&mut self`) because all mutation flows through
     /// the interior `Arc<CommitRequestManagerInner>` `Mutex` slots. The
     /// shape change is required for Phase-12 production wire-up where the
@@ -965,7 +965,8 @@ impl CommitRequestManager {
             guard.pending.unsent_offset_commits.push_back(request);
         }
         let result_tx = Arc::new(Mutex::new(Some(tx)));
-        let inner = Arc::clone(&self.inner);
+        // A `Weak`: see "Retry drivers" below.
+        let inner = Arc::downgrade(&self.inner);
         // Spawn a task that resolves the public future based on the
         // commit request's response, with sync-style retry on retriable
         // errors. Java models this via `whenComplete` on the
@@ -1058,7 +1059,8 @@ impl CommitRequestManager {
             guard.pending.unsent_offset_commits.push_back(request);
         }
         let result_tx = Arc::new(Mutex::new(Some(tx)));
-        let inner = Arc::clone(&self.inner);
+        // A `Weak`: see "Retry drivers" below.
+        let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             auto_commit_sync_before_rebalance_with_retries(
                 inner,
@@ -1308,7 +1310,8 @@ impl CommitRequestManager {
             chained
         };
         let result_tx = Arc::new(Mutex::new(Some(tx)));
-        let inner = Arc::clone(&self.inner);
+        // A `Weak`: see "Retry drivers" below.
+        let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             fetch_offsets_with_retries(
                 inner,
@@ -1526,19 +1529,16 @@ impl CommitRequestManager {
             return self.drain_pending_offset_commit_requests();
         }
 
-        // No auto-commit is started here. Java's `poll` only drains requests
-        // that are already queued; the interval auto-commit is started solely
-        // by `updateTimerAndMaybeCommit` (`Self::update_timer_and_maybe_commit`),
-        // which runs when the application calls `poll()` (`AsyncPollEvent`)
-        // or `assign()` (`AssignmentChangeEvent`). Starting it from this
-        // background-loop poll would commit the positions of records the
-        // application has been handed by `poll()` but may still be
-        // processing, turning auto-commit into at-most-once delivery. A long
+        // No auto-commit here: since KAFKA-18641 Java's `poll` only sends what
+        // is already queued. The auto-commit on the interval is enqueued by
+        // `update_timer_and_maybe_commit`, from the application's poll
+        // (`AsyncPoll`) and `AssignmentChange` events; firing it from this
+        // background timer would commit the positions of records the
+        // application is still processing, and lose them on a crash. A long
         // `poll()` with no new records still auto-commits on the interval:
         // `maximum_time_to_wait` bounds the application task's wait by the
         // auto-commit timer, so its poll loop submits a fresh
         // `AsyncPollEvent` when the timer expires.
-
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if !guard.pending.has_unsent_requests() {
             return PollResult::empty();
@@ -1618,6 +1618,24 @@ impl CommitRequestManager {
         PollResult::new(next_poll, to_send)
     }
 
+    /// If auto-commit is enabled, and the auto-commit interval has expired,
+    /// this will generate and enqueue a request to commit all consumed
+    /// offsets, and will reset the auto-commit timer to the interval. The
+    /// request will be sent on the next call to
+    /// [`Self::poll_with_coordinator`].
+    ///
+    /// If the request completes with a retriable error, this will reset the
+    /// auto-commit timer with the exponential backoff. If it fails with a
+    /// non-retriable error, no action is taken, so the next commit will be
+    /// generated when the interval expires.
+    ///
+    /// This will not generate a new commit request if a previous one hasn't
+    /// received a response. In that case, the next auto-commit request will
+    /// be sent on the next call to poll, after a response for the in-flight
+    /// is received.
+    ///
+    /// Reached only from [`Self::update_timer_and_maybe_commit`], as Java's
+    /// private `maybeAutoCommitAsync` is since KAFKA-18641.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeAutoCommitAsync")]
     fn maybe_auto_commit_async(&self, current_time_ms: i64) {
         // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
@@ -1711,9 +1729,15 @@ impl CommitRequestManager {
         // clear the `inflightCommitStatus` flag regardless of outcome and log
         // the result. The timer keeps the interval set above (see the comment
         // at the top of this method on `maybeResetTimerWithBackoff`).
-        let inner = Arc::clone(&self.inner);
+        // A `Weak`, as the retry drivers hold (see "Retry drivers" below): the
+        // request's sender sits on `inner.state.pending` until it is sent.
+        let manager = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let outcome = request_rx.await;
+            let Some(inner) = manager.upgrade() else {
+                log::debug!("Asynchronous auto-commit abandoned: the commit request manager was dropped");
+                return;
+            };
             // Clear the inflight flag, then drop the guard before firing the
             // interceptor hook (which takes its own lock inside the invoker).
             {
@@ -2390,10 +2414,29 @@ impl CommitRequestManagerInner {
 // =========================================================================
 //                Retry drivers (spawned per outstanding request)
 // =========================================================================
+//
+// Each driver holds the manager's state as a `Weak` and upgrades it only
+// after its request's oneshot resolves, dropping the strong reference again
+// before the next await. The oneshot's sender sits in the request state on
+// `inner.state.pending` until the request is sent, so a strong reference held
+// across the await would keep that sender, the driver and the whole manager
+// (with the consumer's metadata and subscription state) alive for as long as
+// the runtime running the driver outlives the manager, once the manager is
+// dropped with the request still unsent. That happens when a manager is
+// dropped on a live runtime: in a unit test, or under the test-only
+// `BgJoin::Spawned` close handle. A production consumer runs its managers on
+// its dedicated background runtime, which is dropped right after them and
+// drops the drivers with it, so there the cycle never outlives the consumer;
+// the `Weak` keeps the manager free of that dependency on the runtime. With a
+// `Weak`, dropping the manager drops the request, the oneshot fails and the
+// driver ends. Java needs nothing like this: its collector frees the same
+// cycle.
+// A failed upgrade means the manager was dropped; the driver then fails as it
+// does when the oneshot's sender is dropped unsent.
 
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#commitSyncWithRetries")]
 async fn commit_sync_with_retries(
-    inner: Arc<CommitRequestManagerInner>,
+    manager: Weak<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<CommitResult>,
     result_tx: CommitFutureTx,
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -2419,7 +2462,11 @@ async fn commit_sync_with_retries(
     let mut request_rx = initial_request_rx;
     let mut commit_sync_attempts: i32 = 0;
     let outcome = loop {
-        match request_rx.await {
+        let response = request_rx.await;
+        let Some(inner) = manager.upgrade() else {
+            break Err(Error::new(Errors::NetworkError));
+        };
+        match response {
             Ok(Ok(value)) => break Ok(value),
             Ok(Err(err)) => {
                 // KIP-848 transient: see the doc-comment in
@@ -2514,7 +2561,7 @@ fn maybe_wrap_as_timeout_error(err: Error) -> Error {
     alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#autoCommitSyncBeforeRebalanceWithRetries"
 )]
 async fn auto_commit_sync_before_rebalance_with_retries(
-    inner: Arc<CommitRequestManagerInner>,
+    manager: Weak<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<CommitResult>,
     result_tx: RebalanceFlushTx,
     initial_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -2542,7 +2589,11 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     // info read at that time; this driver refreshes the member id/epoch from
     // `inner.state` on each retry (Java re-reads `memberInfo` per attempt).
     let outcome: Result<(), Error> = loop {
-        match request_rx.await {
+        let response = request_rx.await;
+        let Some(inner) = manager.upgrade() else {
+            break Err(Error::new(Errors::NetworkError));
+        };
+        match response {
             Ok(Ok(_committed)) => {
                 // Java `autoCommitCallback`: on success, enqueue the
                 // interceptor `on_commit` invocation with the offsets that
@@ -2640,7 +2691,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     };
     // Clear the inflight flag regardless of outcome (Java:
     // `autoCommitCallback` BiConsumer in `requestAutoCommit`).
-    {
+    if let Some(inner) = manager.upgrade() {
         let mut guard = inner.state.lock().expect("commit manager state poisoned");
         if let Some(ac) = guard.auto_commit.as_mut() {
             ac.set_inflight_commit_status(false);
@@ -2709,7 +2760,7 @@ fn wake_background_task(inner: &CommitRequestManagerInner) {
 /// [`Error::timeout`] wrapping the original error message.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#fetchOffsetsWithRetries")]
 async fn fetch_offsets_with_retries(
-    inner: Arc<CommitRequestManagerInner>,
+    manager: Weak<CommitRequestManagerInner>,
     initial_request_rx: oneshot::Receiver<FetchResult>,
     result_tx: FetchFutureTx,
     requested_partitions: HashSet<TopicPartition>,
@@ -2722,7 +2773,11 @@ async fn fetch_offsets_with_retries(
     let mut request_rx = initial_request_rx;
     let mut attempts: i32 = 0;
     let outcome: FetchResult = loop {
-        match request_rx.await {
+        let response = request_rx.await;
+        let Some(inner) = manager.upgrade() else {
+            break Err(Error::new(Errors::NetworkError));
+        };
+        match response {
             Ok(Ok(value)) => {
                 // Partition-level errors (Java: `hasRetriablePartitionErrors`).
                 // The only retriable partition errors are UNKNOWN_TOPIC_ID and
@@ -3764,7 +3819,7 @@ mod tests {
         assert!(!woken(), "no new auto-commit was enqueued, so the bg loop must not be woken");
     }
 
-    /// Audit finding C4-01: `CommitRequestManager.poll()`
+    /// Audit finding C4-01 / KAFKA-18641: `CommitRequestManager.poll()`
     /// (`CommitRequestManager.java:181-209`) only drains requests that are
     /// already queued and never starts an auto-commit; only
     /// `updateTimerAndMaybeCommit` (driven by the application's `poll()` /
@@ -3783,14 +3838,16 @@ mod tests {
             s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
             s.seek(&tp, 10).expect("seek");
         }
-        // The interval has expired, but the application has not called
-        // poll() again: only the background loop runs.
-        let sent = manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.len();
-        assert_eq!(
-            sent, 0,
-            "Java: CommitRequestManager.poll() never fires an auto-commit; only \
-             updateTimerAndMaybeCommit (application poll()/assign()) does"
-        );
+        // The interval expires, but the application has not called poll()
+        // again: only the background loop runs, however often.
+        for now in [0, 1_000, 1_500, 2_000] {
+            let sent = manager.poll_with_coordinator(&coordinator, now).unsent_requests.len();
+            assert_eq!(
+                sent, 0,
+                "poll at {now} ms: Java's CommitRequestManager.poll() never fires an \
+                 auto-commit; only updateTimerAndMaybeCommit (application poll()/assign()) does"
+            );
+        }
         // The timer is still expired, so the application task is told not to
         // wait: its poll loop submits the event that starts the auto-commit.
         assert_eq!(
@@ -5087,8 +5144,9 @@ mod tests {
     /// STALE_MEMBER_EPOCH and increasing epochs.
     #[tokio::test(flavor = "current_thread")]
     async fn last_epoch_sent_on_commit() {
-        // Auto-commit enabled, very long interval (avoid interval auto-commits):
-        // Java's `create(true, Integer.MAX_VALUE)`.
+        // Enable auto-commit but with very long interval to avoid triggering
+        // auto-commits on the interval and just test the auto-commits
+        // triggered before revocation (Java: `create(true, Integer.MAX_VALUE)`).
         let (manager, subs) = make_manager_with_subs_interval(0, true, i64::from(i32::MAX));
         let coordinator = Arc::new(coordinator_with_node());
         manager.set_coordinator(Arc::clone(&coordinator));
@@ -5151,6 +5209,62 @@ mod tests {
             .handler()
             .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
         assert_eq!(manager.last_epoch_sent_on_commit(), None);
+    }
+
+    /// A manager dropped with a request still unsent frees its state. Each
+    /// task spawned to await a request's oneshot (commit sync, the rebalance
+    /// flush, the async auto-commit, the offset fetch) must hold the manager's
+    /// state weakly: the oneshot's sender sits on `inner.state.pending` until
+    /// the request is sent, so a strong reference would keep the sender, the
+    /// task and the state (with the consumer's metadata and subscription
+    /// state) alive as long as the runtime running the task, here the test's,
+    /// outlives the manager. A production consumer's dedicated runtime is
+    /// dropped with its managers, which drops the tasks. Java's collector
+    /// frees the same cycle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_manager_with_unsent_request_frees_its_state() {
+        for kind in [
+            "commit_sync",
+            "auto_commit_sync_before_rebalance",
+            "auto_commit_async",
+            "fetch_offsets",
+        ] {
+            let (manager, subs) = make_manager_with_subs(0, true);
+            let tp = topic_partition("topic", 1);
+            {
+                let mut s = subs.lock().unwrap();
+                s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+                s.seek(&tp, 10).expect("seek");
+            }
+            // The public receivers are dropped at once: only the spawned
+            // task's hold on the manager's state is under test.
+            match kind {
+                "commit_sync" => drop(manager.commit_sync(singleton_offset(tp.clone(), 0), 60_000, 0)),
+                "auto_commit_sync_before_rebalance" => drop(manager.maybe_auto_commit_sync_before_rebalance(60_000, 0)),
+                "auto_commit_async" => manager.update_timer_and_maybe_commit(1_000),
+                _ => drop(manager.fetch_offsets(HashSet::from([tp.clone()]), 60_000, 0)),
+            }
+            assert_eq!(
+                1,
+                {
+                    let guard = manager.inner.state.lock().unwrap();
+                    guard.pending.unsent_offset_commits.len() + guard.pending.unsent_offset_fetches.len()
+                },
+                "{kind}: exactly one unsent request expected"
+            );
+            // Let the spawned task start awaiting its request.
+            tokio::task::yield_now().await;
+
+            let state = Arc::downgrade(&manager.inner);
+            drop(manager);
+            for _ in 0..32 {
+                if state.strong_count() == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(0, state.strong_count(), "{kind}: the manager's state is still referenced");
+        }
     }
 
     /// `testSignalClose`: after `signal_close`, a pending async commit is
@@ -5389,13 +5503,6 @@ mod tests {
         );
         assert!(guard.pending.unsent_offset_fetches.is_empty());
         assert!(guard.pending.inflight_offset_fetches.is_empty());
-    }
-
-    /// Helper for `last_epoch_sent_on_commit`: returns the manager's
-    /// subscription-state handle. The `make_manager` ctor does not expose it,
-    /// so reach through `inner`.
-    fn manager_subscriptions(manager: &CommitRequestManager) -> Arc<Mutex<SubscriptionState>> {
-        Arc::clone(&manager.inner.subscriptions)
     }
 
     /// Poll repeatedly (advancing `now_ms` each iteration past the re-queued
@@ -7056,7 +7163,7 @@ mod tests {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
 
         let calls = recorder.calls();
         assert_eq!(
@@ -7097,7 +7204,7 @@ mod tests {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert!(recorder.calls().is_empty(), "interceptor must NOT fire on auto-commit error");
     }
 

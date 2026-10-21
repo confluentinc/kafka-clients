@@ -108,8 +108,8 @@ use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
@@ -125,8 +125,8 @@ use crate::common::test_utils;
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+// `Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -187,9 +187,15 @@ fn make_consumer_config_bytes(
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
-fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("KafkaConsumer::new should succeed")
+fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            config,
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
+    )
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -406,7 +412,11 @@ impl CountConsumerCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
@@ -416,6 +426,7 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
                 *self.last_error.lock().expect("last_error mutex poisoned") = Some(err.clone());
             },
         }
+        Ok(())
     }
 }
 
@@ -1180,7 +1191,9 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
 
     let start = Instant::now();
     consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_millis(500)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(
+            Duration::from_millis(500),
+        ))
         .await
         .expect("close should complete");
     let close_duration = start.elapsed();

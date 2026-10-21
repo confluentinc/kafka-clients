@@ -226,7 +226,7 @@ static long current_time_ns() {
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
 }
 
-static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
+static bool verify_record_metadata(const kafka_producer_RecordMetadata_t* metadata) {
     if (!DO_VERIFY) {
         verified++;
         return true;
@@ -272,42 +272,110 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 // Each send carries a delivery callback that stamps the ack time, so latency
 // does not depend on when the completion thread reaches the record's future
 // (head-of-line blocking on an earlier future would otherwise inflate it).
+//
+// `test_Producer_t` is the `kafka_producer_KafkaProducer_t` class handle; the
+// sends go through its `Producer` interface view, a borrowed pointer valid
+// until the class handle is destroyed, cached here so the per-message path
+// does not re-derive it.
+static const kafka_producer_Producer_t *v3_producer_view = NULL;
+
 typedef struct {
-    kafka_common_KafkaFuture_RecordMetadata_t *future;
+    kafka_common_KafkaFuture_t *future;
     // Ack timestamp (CLOCK_MONOTONIC ns), release-stored by test_v3_dr; 0 until
     // the callback has fired.
     atomic_long done_ns;
 } V3Future;
 
-// Delivery callback, run once per record on the producer's dispatcher thread.
-// It owns the metadata / error handles; the result itself is read through the
-// future. The store of done_ns is its last access to the V3Future.
-static void test_v3_dr(kafka_producer_RecordMetadata_t *metadata,
-                       kafka_common_Error_t *error, void *user_data) {
-    V3Future *f = (V3Future *)user_data;
-    long now = current_time_ns();
-    if (metadata) kafka_producer_RecordMetadata_destroy(metadata);
-    if (error) kafka_common_Error_destroy(error);
-    atomic_store_explicit(&f->done_ns, now, memory_order_release);
+// The delivery callbacks are queued on the producer's callback vector, so a
+// dedicated pump thread drains it whenever the notify hook reports it went
+// non-empty: the ack is stamped when the record completes, not when the
+// completion thread's `KafkaFuture_get` reaches it. The pump state is static,
+// so a hook firing after the pump stopped only signals an unused condvar.
+static pthread_t v3_pump_thread;
+static pthread_mutex_t v3_pump_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t v3_pump_cond = PTHREAD_COND_INITIALIZER;
+static bool v3_pump_pending = false;
+static bool v3_pump_stop = false;
+static bool v3_pump_running = false;
+
+static void v3_pump_notify(void *opaque) {
+    (void)opaque;
+    pthread_mutex_lock(&v3_pump_mutex);
+    v3_pump_pending = true;
+    pthread_cond_signal(&v3_pump_cond);
+    pthread_mutex_unlock(&v3_pump_mutex);
+}
+
+static void *v3_pump_loop(void *arg) {
+    const kafka_producer_Producer_t *view = (const kafka_producer_Producer_t *)arg;
+    for (;;) {
+        pthread_mutex_lock(&v3_pump_mutex);
+        while (!v3_pump_pending && !v3_pump_stop) {
+            pthread_cond_wait(&v3_pump_cond, &v3_pump_mutex);
+        }
+        bool stop = v3_pump_stop;
+        v3_pump_pending = false;
+        pthread_mutex_unlock(&v3_pump_mutex);
+        if (stop) break;
+        while (kafka_producer_Producer__execute_callbacks(view) > 0) {
+        }
+    }
+    return NULL;
+}
+
+static void v3_pump_start(const kafka_producer_Producer_t *view) {
+    v3_pump_stop = false;
+    v3_pump_pending = false;
+    kafka_producer_Producer__set_callbacks_notify(view, v3_pump_notify, NULL);
+    pthread_create(&v3_pump_thread, NULL, v3_pump_loop, (void *)view);
+    v3_pump_running = true;
+}
+
+// Joined before the producer is destroyed, which runs what is still queued.
+static void v3_pump_stop_and_join(void) {
+    if (!v3_pump_running) return;
+    pthread_mutex_lock(&v3_pump_mutex);
+    v3_pump_stop = true;
+    pthread_cond_signal(&v3_pump_cond);
+    pthread_mutex_unlock(&v3_pump_mutex);
+    pthread_join(v3_pump_thread, NULL);
+    v3_pump_running = false;
+}
+
+// Delivery callback, run once per record by whichever thread drains the
+// callback vector (normally the pump). The metadata and error are borrowed for
+// the call; the result itself is read through the future, which completes
+// only after this report, so done_ns is set by the time `KafkaFuture_get`
+// returns.
+static void test_v3_dr(void *self_, const kafka_producer_RecordMetadata_t *metadata,
+                       const kafka_common_Error_t *error, int64_t callback_id) {
+    (void)metadata;
+    (void)error;
+    V3Future *f = (V3Future *)self_;
+    atomic_store_explicit(&f->done_ns, current_time_ns(), memory_order_release);
+    kafka_producer_Producer__set_callback_result(v3_producer_view, callback_id, NULL, NULL);
 }
 
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
-    kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
+    (void)producer;
     kafka_common_Error_t *error = NULL;
-    const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
-    int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
-    V3Future *f = calloc(1, sizeof(V3Future));
-    atomic_init(&f->done_ns, 0);
+    // NULL serializers: key and value are `kafka_Bytes_t` views, read while
+    // the blocking send runs, so the stack copies below suffice.
+    kafka_Bytes_t key = { message->key, (int32_t)KEY_SIZE };
+    kafka_Bytes_t value = { message->value, (int32_t)VALUE_SIZE };
+    kafka_producer_ProducerRecord_t *record =
+        kafka_producer_ProducerRecord_with_key(TOPIC, KEY_SIZE > 0 ? &key : NULL, &value);
+    V3Future *f = NULL;
     do {
         error = NULL;
-        // On a synchronous failure (error set) the callback is not invoked, so
-        // the same V3Future can be reused for the retry.
-        f->future = kafka_producer_Producer_send_with_callback(
-            p, TOPIC, -1, -1,
-            key, key_len,
-            message->value, (int32_t)VALUE_SIZE,
-            test_v3_dr, f,
-            &error);
+        // After a failed send the callback may still fire once, if the record
+        // reached the accumulator, so a failed attempt's V3Future is leaked
+        // rather than reused or freed.
+        f = calloc(1, sizeof(V3Future));
+        atomic_init(&f->done_ns, 0);
+        kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
+        // The send consumes the callback handle, whatever the outcome.
+        f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
@@ -315,8 +383,8 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
             kafka_common_Error_destroy(error);
         }
     } while (error && !interrupted);
-    if (f->future == NULL) {
-        free(f);
+    kafka_producer_ProducerRecord_destroy(record);
+    if (error || f->future == NULL) {
         return NULL;
     }
     return f;
@@ -324,48 +392,33 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
 
 static bool test_v3_verify_future(test_Future_t future, long *done_ns_out) {
     V3Future *v3 = (V3Future *)future;
-    kafka_common_KafkaFuture_RecordMetadata_t *f = v3->future;
+    kafka_common_KafkaFuture_t *f = v3->future;
     kafka_common_Error_t* error = NULL;
-    kafka_producer_RecordMetadata_t* metadata =
-        kafka_common_KafkaFuture_RecordMetadata_get(f, &error);
-    // The callback fires on the dispatcher thread and may land just after the
-    // future resolves: wait for its ack timestamp (bounded, falling back to
-    // now if it never arrives) before releasing the V3Future it writes to.
-    long deadline = current_time_ns() + 10L * 1000000000L;
-    long done_ns;
-    while ((done_ns = atomic_load_explicit(&v3->done_ns, memory_order_acquire)) == 0) {
-        if (current_time_ns() > deadline) {
-            fprintf(stderr, "Delivery callback did not fire within 10 s\n");
-            done_ns = current_time_ns();
-            break;
-        }
-        struct timespec pause = {0, 20000};
-        nanosleep(&pause, NULL);
-    }
-    *done_ns_out = done_ns;
-    bool callback_fired = atomic_load_explicit(&v3->done_ns, memory_order_acquire) != 0;
-    // Only free the V3Future once the callback is done with it; if it never
-    // fired, leak it rather than risk a late write to freed memory.
-    if (callback_fired) free(v3);
+    void *value = kafka_common_KafkaFuture_get(f, &error);
+    // The future completes only after the callback reported, and the callback
+    // stores done_ns before reporting, so it is set here.
+    long done_ns = atomic_load_explicit(&v3->done_ns, memory_order_acquire);
+    *done_ns_out = done_ns != 0 ? done_ns : current_time_ns();
+    free(v3);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
         fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
         kafka_common_Error_destroy(error);
-        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_destroy(f);
         return false;
     }
 
-    // Verify the RecordMetadata
+    // The RecordMetadata is borrowed from the future: destroying the future
+    // frees it, and it is never passed to RecordMetadata_destroy.
+    const kafka_producer_RecordMetadata_t* metadata = (const kafka_producer_RecordMetadata_t*)value;
     if (!verify_record_metadata(metadata)) {
         fprintf(stderr, "RecordMetadata verification failed\n");
-        kafka_producer_RecordMetadata_destroy(metadata);
-        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_destroy(f);
         return false;
     }
 
-    kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+    kafka_common_KafkaFuture_destroy(f);
     return true;
 }
 
@@ -1236,43 +1289,59 @@ static void run_test() {
     Queue produce_calls;
 
     if (CLIENT_VERSION == 3) {
-        kafka_producer_ProducerProperties_t* properties =
-            kafka_producer_ProducerProperties_new();
-        kafka_producer_ProducerProperties_put(properties, "bootstrap.servers", BOOTSTRAP_SERVERS);
+        // `ProducerConfig` is built from a map of C strings; a map built in C
+        // borrows its keys and values, so every formatted value needs its own
+        // storage that outlives `ProducerConfig_new`.
+        kafka_Map_t* properties = kafka_Map_new();
+        kafka_Map_put(properties, (void*)"bootstrap.servers", (void*)BOOTSTRAP_SERVERS);
+        char jaas_config[512];
         if (sasl_enabled) {
-            char buffer[512];
-            snprintf(buffer, sizeof(buffer),
+            snprintf(jaas_config, sizeof(jaas_config),
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \n\tusername=\"%s\" \n\tpassword=\"%s\";",
                 SASL_USERNAME, SASL_PASSWORD);
-            kafka_producer_ProducerProperties_put(properties, "security.protocol", SECURITY_PROTOCOL);
-            kafka_producer_ProducerProperties_put(properties, "sasl.mechanism", SASL_MECHANISM);
-            kafka_producer_ProducerProperties_put(properties, "sasl.jaas.config", buffer);
+            kafka_Map_put(properties, (void*)"security.protocol", (void*)SECURITY_PROTOCOL);
+            kafka_Map_put(properties, (void*)"sasl.mechanism", (void*)SASL_MECHANISM);
+            kafka_Map_put(properties, (void*)"sasl.jaas.config", jaas_config);
         }
         if (SSL_CA_LOCATION) {
-            kafka_producer_ProducerProperties_put(properties, "ssl.truststore.location", SSL_CA_LOCATION);
-            kafka_producer_ProducerProperties_put(properties, "ssl.truststore.type", "PEM");
+            kafka_Map_put(properties, (void*)"ssl.truststore.location", (void*)SSL_CA_LOCATION);
+            kafka_Map_put(properties, (void*)"ssl.truststore.type", (void*)"PEM");
         }
 
-        char buffer[512];
+        char buffer_memory_str[32];
+        char batch_size_str[32];
+        char max_request_size_str[32];
         if (!USE_DEFAULTS) {
             if (buffer_memory_bytes > 0) {
-                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes);
-                kafka_producer_ProducerProperties_put(properties, "buffer.memory", buffer);
+                snprintf(buffer_memory_str, sizeof(buffer_memory_str), "%" PRId64, buffer_memory_bytes);
+                kafka_Map_put(properties, (void*)"buffer.memory", buffer_memory_str);
             }
-            snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-            kafka_producer_ProducerProperties_put(properties, "batch.size", buffer);
-            snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-            kafka_producer_ProducerProperties_put(properties, "max.request.size", buffer);
-            kafka_producer_ProducerProperties_put(properties, "compression.type", COMPRESSION_TYPE);
-            kafka_producer_ProducerProperties_put(properties, "linger.ms", LINGER_MS);
-            kafka_producer_ProducerProperties_put(properties, "acks", "all");
-            kafka_producer_ProducerProperties_put(properties, "enable.idempotence", ENABLE_IDEMPOTENCE);
-            kafka_producer_ProducerProperties_put(properties, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT);
+            snprintf(batch_size_str, sizeof(batch_size_str), "%" PRId64, batch_size_bytes);
+            kafka_Map_put(properties, (void*)"batch.size", batch_size_str);
+            snprintf(max_request_size_str, sizeof(max_request_size_str), "%" PRId64, max_request_size_bytes);
+            kafka_Map_put(properties, (void*)"max.request.size", max_request_size_str);
+            kafka_Map_put(properties, (void*)"compression.type", (void*)COMPRESSION_TYPE);
+            kafka_Map_put(properties, (void*)"linger.ms", (void*)LINGER_MS);
+            kafka_Map_put(properties, (void*)"acks", (void*)"all");
+            kafka_Map_put(properties, (void*)"enable.idempotence", (void*)ENABLE_IDEMPOTENCE);
+            kafka_Map_put(properties, (void*)"max.in.flight.requests.per.connection", (void*)MAX_IN_FLIGHT);
         }
 
+        producer = NULL;
         kafka_common_Error_t* error = NULL;
-        producer = kafka_producer_KafkaProducer_new(properties, &error);
-        kafka_producer_ProducerProperties_destroy(properties);
+        kafka_producer_ProducerConfig_t* config = kafka_producer_ProducerConfig_new(properties, &error);
+        kafka_Map_destroy(properties);
+        if (!error) {
+            // NULL serializers: the record's key and value are `kafka_Bytes_t`.
+            kafka_producer_KafkaProducer_t* kafka_producer = NULL;
+            kafka_producer = kafka_producer_KafkaProducer_new(config, NULL, NULL, &error);
+            kafka_producer_ProducerConfig_destroy(config);
+            if (!error) {
+                producer = kafka_producer;
+                v3_producer_view = kafka_producer_KafkaProducer__as_Producer(kafka_producer);
+                v3_pump_start(v3_producer_view);
+            }
+        }
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
@@ -1586,12 +1655,17 @@ static void run_test() {
     queue_destroy(&produce_calls);
 end:
     if (CLIENT_VERSION == 3) {
-        kafka_common_Error_t *error = NULL;
-        kafka_producer_Producer_close(producer, &error);
-        if (error) {
-            kafka_common_Error_destroy(error);
+        if (producer != NULL) {
+            // close() through the interface view, then the class destroy.
+            kafka_common_Error_t *error = NULL;
+            kafka_producer_Producer_close(v3_producer_view, &error);
+            if (error) {
+                kafka_common_Error_destroy(error);
+            }
+            v3_pump_stop_and_join();
+            kafka_producer_KafkaProducer_destroy((kafka_producer_KafkaProducer_t *)producer);
+            v3_producer_view = NULL;
         }
-        kafka_producer_Producer_destroy(producer);
     } else {
         if (poll_running) {
             poll_running = false;

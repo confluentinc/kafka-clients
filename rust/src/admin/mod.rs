@@ -82,7 +82,7 @@ pub mod mock_admin_client;
 mod new_partition_reassignment;
 mod new_partitions;
 mod new_topic;
-mod offset_spec;
+pub mod offset_spec;
 pub mod options;
 mod partition_reassignment;
 mod producer_state;
@@ -164,7 +164,8 @@ pub use finalized_version_range::FinalizedVersionRange;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
 pub use list_config_resources_result::ListConfigResourcesResult;
-pub use list_consumer_group_offsets_result::{GroupOffsets, ListConsumerGroupOffsetsResult};
+pub(crate) use list_consumer_group_offsets_result::GroupOffsets;
+pub use list_consumer_group_offsets_result::ListConsumerGroupOffsetsResult;
 pub use list_consumer_group_offsets_spec::ListConsumerGroupOffsetsSpec;
 pub use list_groups_result::ListGroupsResult;
 pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
@@ -1359,14 +1360,14 @@ mod tests {
             .get()
             .await
             .unwrap();
-        convenience.sort_by_key(|resource| (resource.resource_type() as i32, resource.name().to_string()));
-        explicit.sort_by_key(|resource| (resource.resource_type() as i32, resource.name().to_string()));
+        convenience.sort_by_key(|resource| (resource.r#type() as i32, resource.name().to_string()));
+        explicit.sort_by_key(|resource| (resource.r#type() as i32, resource.name().to_string()));
 
         assert_eq!(convenience, explicit);
         assert!(
             convenience
                 .iter()
-                .any(|resource| resource.resource_type() == config_resource::Type::Topic),
+                .any(|resource| resource.r#type() == config_resource::Type::Topic),
             "an empty type set must not mean an empty result: {convenience:?}"
         );
     }

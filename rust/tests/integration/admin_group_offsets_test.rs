@@ -41,20 +41,24 @@
 //! admin.py's inner `None`), and
 //! [`delete_consumer_group_offsets_on_inactive_group`] is what observes the
 //! present → absent transition end to end.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
+    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
 };
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
+use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer, OffsetAndMetadata};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{AdminBackend, GroupOffsets, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::test_context::TestContext;
@@ -67,12 +71,12 @@ const NUM_PARTITIONS: i32 = 2;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
 
-type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
+type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 
 fn consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
     let mut props = HashMap::from([
@@ -87,12 +91,14 @@ fn consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
 }
 
 fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(ctx, group_id),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            consumer_config(ctx, group_id),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Subscribe and poll until the KIP-848 group has reconciled (partitions

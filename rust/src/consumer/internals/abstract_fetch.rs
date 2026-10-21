@@ -63,10 +63,10 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::common::Node;
 use crate::common::TopicPartition;
-use crate::common::memory::BufferSupplier;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::{self, FetchRequest, PartitionData};
+use crate::common::utils::internals::BufferSupplier;
 use crate::consumer::internals::CompletedFetch;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::FetchBuffer;
@@ -1602,7 +1602,7 @@ mod tests {
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }
@@ -1714,10 +1714,10 @@ mod tests {
             FetchMetricsManager::for_test(),
             Arc::new(SystemTime),
         );
-        let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
+        let fetch = collector.collect_fetch_now(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
-        let recs = fetch.records_partition(&partition);
+        let recs = fetch.records_with_partition(&partition);
         assert_eq!(COUNT as usize, recs.len());
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(i as i64, rec.offset(), "offset ordering preserved");

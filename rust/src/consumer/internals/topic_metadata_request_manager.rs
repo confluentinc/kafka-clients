@@ -537,8 +537,11 @@ mod tests {
     const RETRY_BACKOFF_MS: i64 = 100;
 
     fn setup_manager() -> TopicMetadataRequestManager {
-        let mut config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
-            .set_retry_backoff_ms(RETRY_BACKOFF_MS);
+        let mut config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            retry_backoff_ms: RETRY_BACKOFF_MS,
+            ..Default::default()
+        };
         // Java's `ALLOW_AUTO_CREATE_TOPICS_CONFIG = false` matches Java's
         // `testSetup` properties. The field is `pub(crate)` so we set it
         // directly in tests (no public builder method exposed).

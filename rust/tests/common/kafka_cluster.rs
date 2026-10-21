@@ -199,7 +199,7 @@ struct BrokerPorts {
 }
 
 impl BrokerPorts {
-    /// Reserve four free host ports for a broker by binding to port 0.
+    /// Reserve four free host ports for a broker ([`find_available_port`]).
     fn reserve() -> Self {
         Self {
             plaintext: find_available_port(),
@@ -410,52 +410,67 @@ impl BrokerProxy {
 
 /// Every port handed out by [`find_available_port`] in this process.
 ///
-/// The OS-assigned-port trick has a TOCTOU window: the probe listener is
+/// The probe-then-bind approach has a TOCTOU window: the probe listener is
 /// dropped (releasing the port) before Docker binds it, so the same port can
 /// be handed to a second caller in between. With a single cluster that window
 /// is negligible, but `tests/integration/main.rs` is one binary running ~14
 /// distinct [`ClusterConfig`]s, and libtest bootstraps several concurrently —
-/// four live clusters is 32 reservations, all drawn from the same ephemeral
-/// range and all released before use. Collisions were observed in practice
-/// (one broker stuck in `Created` with
+/// four live clusters is 32 reservations, all released before use. Collisions
+/// were observed in practice (one broker stuck in `Created` with
 /// `Bind for 0.0.0.0:<port> failed: port is already allocated`).
 ///
 /// This registry closes the in-process half of the race: a port is never
-/// handed out twice, even if the OS offers it again. Ports are never
-/// returned — a cluster lives until the process exits, and a port that
-/// failed to bind is one we specifically must not retry.
+/// handed out twice. Ports are never returned — a cluster lives until the
+/// process exits, and a port that failed to bind is one we specifically must
+/// not retry.
 ///
 /// `BTreeSet` (not `HashSet`) so the `static` can be `const`-constructed.
 static RESERVED_PORTS: std::sync::Mutex<std::collections::BTreeSet<u16>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// How many times [`find_available_port`] retries when the OS offers a port
-/// this process has already reserved.
-const PORT_PROBE_ATTEMPTS: u32 = 64;
-
-/// Finds an available TCP port by letting the OS assign one, rejecting any
-/// port already handed out in this process (see [`RESERVED_PORTS`]).
+/// Host ports [`find_available_port`] hands out: below the ephemeral range of
+/// every platform the suite runs on (Linux 32768–60999, macOS 49152–65535).
 ///
-/// Binds `0.0.0.0`, not `127.0.0.1`: Docker publishes mapped ports on all
-/// interfaces, so a loopback-only probe cannot see a conflict elsewhere.
+/// An ephemeral port is also the local port the kernel gives an outgoing
+/// connection, so a port drawn from that range can be taken by any connection
+/// opened between the probe and Docker's bind. On macOS CI that bind happens
+/// inside Colima's Linux VM, where every forwarded client connection opens one
+/// such connection and the host probe cannot see any of them: a whole
+/// six-attempt bootstrap was observed failing with
+/// `failed to bind host port 0.0.0.0:<port>/tcp: address already in use`.
+/// Outside the ephemeral range a port is taken only by an explicit bind.
+const HOST_PORT_RANGE: std::ops::Range<u16> = 20000..32768;
+
+/// Finds a free TCP port in [`HOST_PORT_RANGE`], skipping any port already
+/// handed out in this process (see [`RESERVED_PORTS`]).
+///
+/// The scan starts at a random offset so concurrent test processes do not
+/// probe the same ports in the same order. A port counts as free only when it
+/// binds on both `0.0.0.0` (Docker publishes mapped ports on all interfaces)
+/// and `127.0.0.1` (on macOS, `SO_REUSEADDR` lets the wildcard bind succeed
+/// past a loopback-only listener).
 ///
 /// The cross-process half of the race (another `cargo test`, or Docker's own
 /// allocations) is not detectable here — [`KafkaCluster::start_with_config`]
 /// handles that by retrying with fresh ports.
 fn find_available_port() -> u16 {
-    // Hold each rejected listener open for the whole loop so the OS cannot
-    // offer the same port again on the next iteration.
-    let mut rejected = Vec::new();
-    for _ in 0..PORT_PROBE_ATTEMPTS {
-        let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("Failed to bind to port 0");
-        let port = listener.local_addr().expect("Failed to get local addr").port();
-        let first_time = RESERVED_PORTS.lock().expect("reserved-port registry poisoned").insert(port);
-        if first_time {
+    let mut reserved = RESERVED_PORTS.lock().expect("reserved-port registry poisoned");
+    let range_len = HOST_PORT_RANGE.end - HOST_PORT_RANGE.start;
+    let offset = rand::random_range(0..range_len);
+    for step in 0..range_len {
+        let port = HOST_PORT_RANGE.start + (offset + step) % range_len;
+        if reserved.contains(&port) {
+            continue;
+        }
+        // One probe at a time: the closure drops each listener before the
+        // next bind, which our own wildcard listener would otherwise block.
+        let binds = |host: &str| std::net::TcpListener::bind((host, port)).is_ok();
+        if binds("0.0.0.0") && binds("127.0.0.1") {
+            reserved.insert(port);
             return port;
         }
-        rejected.push(listener);
     }
-    panic!("Could not find an unreserved host port after {PORT_PROBE_ATTEMPTS} attempts");
+    panic!("No free host port in {HOST_PORT_RANGE:?}");
 }
 
 /// Bytes kept from the head of a container-start error — enough for the error
@@ -1599,7 +1614,7 @@ async fn reap_failed_attempt(suffix: &str) {
     };
     let ids: Vec<&str> = ids.split_whitespace().collect();
     if !ids.is_empty() {
-        let mut args = vec!["rm", "-f"];
+        let mut args = vec!["rm", "-f", "-v"];
         args.extend(&ids);
         match docker_cli(&args).await {
             Ok(_) => eprintln!(
@@ -1778,7 +1793,7 @@ mod tests {
             let name_filter = format!("name={}", self.suffix);
             if let Some(out) = docker(&["ps", "-aq", "--filter", &name_filter]) {
                 for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                    let _ = docker(&["rm", "-f", id]);
+                    let _ = docker(&["rm", "-f", "-v", id]);
                 }
             }
             let _ = docker(&["network", "rm", &attempt_network_name(&self.suffix)]);

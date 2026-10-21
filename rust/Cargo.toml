@@ -3,7 +3,7 @@ members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test
 
 [package]
 name = "confluent-kafka"
-version = "0.1.1"
+version = "0.2.0-beta.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Confluent Rust implementation of the Kafka client, translated from the Apache Kafka Java client."
@@ -106,6 +106,11 @@ tokio = { version = "1", features = ["signal"] }
 # Used by the multilanguage consumer client (impl Consumer is #[async_trait])
 # and to build ConsumerRecords.
 async-trait = "0.1"
+# The Schema Registry examples (`avro_producer`, `avro_consumer`): Robert
+# Yokota's client and the Avro crate it serializes with. The library itself
+# does not depend on either.
+schema-registry-client = "0.4"
+apache-avro = "0.21"
 indexmap = "2"
 # Used only when --features multilanguage-tests is enabled.
 tonic = "0.12"
@@ -150,7 +155,7 @@ test = false
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.0"
-cbindgen = { version = "0.29", optional = true }
+cbindgen = { version = "0.29", optional = true, features = ["unstable_ir"] }
 
 # Release-build optimizations (Tier 1, zero behavior change): fat LTO + a single
 # codegen unit let the optimizer inline across crate boundaries (trait dispatch,
@@ -174,3 +179,8 @@ allow_attributes = "deny"
 # so a justification cannot outlive the block it was written for.
 undocumented_unsafe_blocks = "deny"
 unnecessary_safety_comment = "deny"
+# A public method returns `impl Future<Output = T> + Send` with an `async move`
+# body instead of being an `async fn`, so that `Send` is part of its signature
+# rather than inferred from its body (`cargo xtask lint-custom`,
+# `check-send-future`). That is the shape this lint rewrites to `async fn`.
+manual_async_fn = "allow"

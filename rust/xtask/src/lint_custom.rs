@@ -19,17 +19,31 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod ffi_translation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
 
-use crate::java::{self, rust_method_bases, same_name, squash, JavaIndex};
+use crate::java::{self, same_name, squash, JavaIndex};
 
 /// A module path from the crate root, e.g. `["producer", "producer_record"]`.
 type ModPath = Vec<String>;
+
+/// What every rule is built from: the Java index, loaded once, and the
+/// options of this run.
+struct Context {
+    java: Rc<JavaIndex>,
+    /// The `check-ffi-translation` baseline to apply; `None` shows every finding.
+    ffi_baseline: Option<PathBuf>,
+    /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
+    /// the C enumerators are spelled; `None` skips that check.
+    cbindgen_config: Option<PathBuf>,
+}
 
 /// One source-level rule run by `lint-custom`.
 trait Rule {
@@ -52,20 +66,52 @@ trait Rule {
 }
 
 /// The rules `lint-custom` runs, in order.
-fn rules() -> Vec<Box<dyn Rule>> {
+fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
+        Box::new(EnumTranslation::new(ctx)),
+        Box::new(FunctionalInterfaceTrait::new(ctx)),
         Box::new(NoPublicField),
-        Box::new(JavaName::new()),
-        Box::new(NoDeprecatedTranslation::new()),
-        Box::new(PublicAudience::new()),
+        Box::new(NoFixedSizeArray),
+        Box::new(JavaName::new(ctx)),
+        Box::new(NoDeprecatedTranslation::new(ctx)),
+        Box::new(PublicAudience::new(ctx)),
         Box::new(DynCompatible),
+        Box::new(DynForwarding),
+        Box::new(ConsumerHandleSurface),
+        Box::new(ConsumerReceiver),
+        Box::new(SendFuture),
+        Box::new(ErrorPredicate),
+        Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
 }
 
-/// Runs every rule and fails if any of them reports a finding.
-pub fn lint_custom() -> anyhow::Result<()> {
+/// Runs every rule — or the one `args` names — and fails if any of them
+/// reports a finding. `--no-baseline` shows the `check-ffi-translation`
+/// findings the baseline waives.
+pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
+    let mut only: Option<&str> = None;
+    let mut baseline = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-baseline" => baseline = false,
+            name if name.starts_with("check-") && only.is_none() => only = Some(name),
+            other => {
+                anyhow::bail!("unknown lint-custom argument `{other}`; usage: lint-custom [rule-name] [--no-baseline]")
+            },
+        }
+    }
     println!("🔍 Running custom lint rules...");
+
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
+    if let Some(name) = only.filter(|_| rules.is_empty()) {
+        anyhow::bail!("no custom lint rule named `{name}`");
+    }
 
     let krate = Crate::load(Path::new("src/lib.rs"))?;
     let mut failed = 0usize;
@@ -81,7 +127,7 @@ pub fn lint_custom() -> anyhow::Result<()> {
         failed += krate.parse_errors.len();
     }
 
-    for rule in rules() {
+    for rule in rules {
         if let Some(reason) = rule.skip_reason() {
             eprintln!("\n❌ {}: cannot run, {reason}", rule.name());
             failed += 1;
@@ -108,6 +154,47 @@ pub fn lint_custom() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `cargo xtask ffi-baseline`: rewrites [`ffi_translation::FFI_BASELINE`] with
+/// every current `check-ffi-translation` finding, so the C FFI refactor can
+/// burn it down phase by phase (CLAUDE.md §4).
+pub fn write_ffi_baseline() -> anyhow::Result<()> {
+    println!("🔧 Writing the check-ffi-translation baseline...");
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: None,
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rule = ffi_translation::FfiTranslation::new(&ctx);
+    if let Some(reason) = rule.skip_reason() {
+        anyhow::bail!("cannot run check-ffi-translation: {reason}");
+    }
+    let krate = Crate::load(Path::new("src/lib.rs"))?;
+    if !krate.parse_errors.is_empty() {
+        anyhow::bail!(
+            "{} file(s) could not be parsed: {}",
+            krate.parse_errors.len(),
+            krate.parse_errors.join("; ")
+        );
+    }
+    let (findings, _) = rule.findings(&krate);
+    let mut out = String::from(
+        "# check-ffi-translation findings the C FFI refactor has not reached yet (CLAUDE.md §4).\n\
+         # One `<kind> <symbol>` per line, or `prefix:<C prefix>` to waive every symbol under it.\n\
+         # A line matching no finding any more is itself a finding: delete it. Rewrite with\n\
+         # `cargo xtask ffi-baseline`; see everything with\n\
+         # `cargo xtask lint-custom check-ffi-translation --no-baseline`.\n",
+    );
+    let mut keys: Vec<String> = findings.iter().map(ffi_translation::Finding::key).collect();
+    keys.dedup();
+    for key in &keys {
+        out.push_str(key);
+        out.push('\n');
+    }
+    fs::write(ffi_translation::FFI_BASELINE, out)?;
+    println!("✅ Wrote {} finding(s) to {}", keys.len(), ffi_translation::FFI_BASELINE);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Crate index
 // ---------------------------------------------------------------------------
@@ -120,7 +207,7 @@ struct Module {
     is_pub: bool,
     /// Whether the module sits under a `pub` inline-module chain within its file
     /// (the file itself counts as `pub`). This is the reachability notion
-    /// [`NoDataCarryingEnumVariants`] has always used.
+    /// [`EnumTranslation`] uses.
     file_public_path: bool,
     /// The module's items, excluding `#[cfg(test)]` modules.
     items: Vec<syn::Item>,
@@ -314,6 +401,30 @@ impl Crate {
             .expect("public_types only returns defined types")
     }
 
+    /// The attributes of the item `path` names from `module` (`internals::RecordHeader`),
+    /// following `use` chains to where it is defined; `None` if it is not in
+    /// this crate.
+    fn definition_attrs(&self, module: &[String], path: &[String]) -> Option<Vec<syn::Attribute>> {
+        let (name, parent) = path.split_last()?;
+        let mut work = vec![self.resolve_module(module, parent)?];
+        let mut seen = BTreeSet::new();
+        while let Some(module) = work.pop() {
+            if !seen.insert(module.clone()) {
+                continue;
+            }
+            let Some(m) = self.modules.get(&module) else { continue };
+            if let Some((_, attrs)) = m.items.iter().filter_map(item_def).find(|(n, _)| n == name) {
+                return Some(attrs);
+            }
+            for (target, used) in self.uses(&module, false) {
+                if used.as_deref() == Some(name.as_str()) {
+                    work.push(target);
+                }
+            }
+        }
+        None
+    }
+
     /// The `pub use` imports of `module`, as (target module, name); `None` for a glob.
     fn pub_uses(&self, module: &[String]) -> Vec<(ModPath, Option<String>)> {
         self.uses(module, true)
@@ -441,21 +552,176 @@ fn cfg_implies_test(pred: &syn::Meta) -> bool {
 /// The fix is structural rather than an attribute. A variant may carry data only
 /// as a single wrapped type, which then carries its own forward compatibility —
 /// `#[non_exhaustive]` on the wrapped struct, or private fields. This also
-/// matches the Java source: every data-carrying enum here translates a Java
-/// class hierarchy (a Java enum cannot give its constants per-constant shapes),
-/// so one named type per variant is the faithful shape.
+/// matches the Java source: a data-carrying enum translates a Java class
+/// hierarchy (a Java enum cannot give its constants per-constant shapes), so
+/// one named type per variant is the faithful shape. That the Java type is a
+/// hierarchy is [`EnumTranslation`]'s check, not this one's.
+///
+/// The wrapped type must be one this crate defines — a struct, an enum, a trait
+/// (`Box<dyn Gauge>`) or an error macro's type — possibly behind `Box`, `Arc`
+/// or `Rc`, or one of the enum's own type parameters. A type from `std` or
+/// another crate (`TopicIds(Vec<Uuid>)`, `Timestamp(i64)`) cannot carry the
+/// variant's forward compatibility: the field the Java subclass keeps private
+/// is the payload itself, constructed and destructured by any caller, so the
+/// field a later Kafka version adds to the subclass has nowhere to go. A
+/// `rust-only` enum stands for no Java hierarchy — it is a value wrapper, such
+/// as `MetricValue::Double(f64)` for the `Object` Java's `metricValue()`
+/// returns — so its newtype variants may wrap any type; the inline-fields
+/// check still applies to it.
 ///
 /// Marking the *variant* `#[non_exhaustive]` is deliberately not the rule: on a
 /// tuple variant that attribute makes the variant wholly private to other crates
 /// (E0603) — not merely unconstructable but *unmatchable*, so
 /// `match err { Error::Api(e) => .. }` stops compiling downstream.
 ///
-/// Scope: every `pub enum` not under a non-`pub` inline module of its file.
+/// Scope: every `pub enum` another crate can reach, through a `pub` module
+/// chain or a `pub use` ([`Crate::public_names`]). An enum of a `pub(crate)`
+/// module, such as `compress::CompressingWriter`, owes no forward compatibility.
 struct NoDataCarryingEnumVariants;
 
 impl Rule for NoDataCarryingEnumVariants {
     fn name(&self) -> &'static str {
         "check-no-data-carrying-enum-variants"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        // The types the crate defines, whatever their visibility or module:
+        // a wrapped type the crate owns can be given private fields or
+        // `#[non_exhaustive]`; one it does not own cannot.
+        let defined: BTreeSet<String> = krate
+            .modules
+            .values()
+            .flat_map(|m| m.items.iter())
+            .filter_map(|item| match item {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                syn::Item::Enum(e) => Some(e.ident.to_string()),
+                syn::Item::Trait(t) => Some(t.ident.to_string()),
+                syn::Item::Macro(m) => error_macro_type_def(m).map(|def| def.name),
+                // A type alias is transparent: it hides nothing.
+                _ => None,
+            })
+            .collect();
+        let pub_enum = |item: &syn::Item| match item {
+            syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => Some(e.ident.to_string()),
+            _ => None,
+        };
+        let mut checked = 0usize;
+        for (path, name) in krate.public_names(pub_enum) {
+            let module = &krate.modules[&path];
+            let Some(syn::Item::Enum(e)) = module.items.iter().find(|item| pub_enum(item).as_deref() == Some(&name))
+            else {
+                continue;
+            };
+            let value_wrapper = has_tag(&e.attrs, RUST_ONLY);
+            for v in &e.variants {
+                checked += 1;
+                let why = match &v.fields {
+                    // Carries nothing.
+                    syn::Fields::Unit => continue,
+                    // A newtype delegates forward compatibility to the type it
+                    // wraps, which must therefore be the crate's own — unless
+                    // the enum translates no Java hierarchy.
+                    syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => {
+                        let ty = &f.unnamed[0].ty;
+                        let owned = wrapped_type_name(ty).is_some_and(|name| {
+                            defined.contains(&name) || e.generics.type_params().any(|p| p.ident == name)
+                        });
+                        if owned || value_wrapper {
+                            continue;
+                        }
+                        format!("wraps `{}`, a type the crate does not define", compact(ty))
+                    },
+                    // Two or more fields have nothing to delegate to and can
+                    // be destructured positionally downstream.
+                    syn::Fields::Unnamed(f) => format!("holds data inline ({} unnamed fields)", f.unnamed.len()),
+                    syn::Fields::Named(_) => "holds data inline (inline named fields)".to_string(),
+                };
+                findings.push(format!("{}: `{}::{}` {why}", module.file.display(), e.ident, v.ident));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Move the fields into their own struct and wrap it, e.g.:
+       pub struct GzipCompression { level: i32 }
+       Gzip(GzipCompression),   // instead of Gzip { level: i32 }
+   A newtype must wrap a type this crate defines, as Java's subclass does:
+       pub struct TimestampSpec { timestamp: i64 }
+       Timestamp(TimestampSpec), // instead of Timestamp(i64)
+   The struct then carries forward compatibility (private fields, or
+   #[non_exhaustive]); do NOT mark the variant itself."
+    }
+}
+
+/// The type a newtype variant delegates to: `ty` with `Box` / `Arc` / `Rc`
+/// peeled, named by its last path segment (`dyn Trait` by the trait). `None`
+/// for a shape that names no type (a tuple, a slice, a reference, a pointer).
+fn wrapped_type_name(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(p) => {
+            let last = p.path.segments.last()?;
+            let ident = last.ident.to_string();
+            if matches!(ident.as_str(), "Box" | "Arc" | "Rc") {
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                return match args.args.first()? {
+                    syn::GenericArgument::Type(inner) => wrapped_type_name(inner),
+                    _ => None,
+                };
+            }
+            Some(ident)
+        },
+        syn::Type::TraitObject(t) => t.bounds.iter().find_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        }),
+        syn::Type::Paren(p) => wrapped_type_name(&p.elem),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-enum-translation
+// ---------------------------------------------------------------------------
+
+/// Checks that a public enum translates a Java enum or a Java class hierarchy,
+/// never a plain class (CLAUDE.md §3, forward compatibility).
+///
+/// A Java class keeps its state in private fields behind getters, so a later
+/// minor can add a field, change how one is stored, or add a constructor. An
+/// enum makes its variants and their payloads public API instead: another
+/// crate matches them and destructures what they carry, so the same Java
+/// change breaks it. That is why a class becomes a struct with private fields
+/// (`check-no-public-field`), and an enum stands for a Java type only when
+/// Java's own type is a closed set of shapes:
+///   - a Java `enum`;
+///   - a class hierarchy, each variant one subclass: an `interface`, an
+///     `abstract` class, or a class that some class of its package extends
+///     (`OffsetSpec` and its nested `EarliestSpec`, `LatestSpec`, ...).
+///
+/// A class nothing extends — `DescribeTopicsResult`, whose two nullable maps
+/// once became `ByTopicId` / `ByTopicName` variants — is a finding, however
+/// convenient the enum is for an invariant Java enforces in its constructor.
+///
+/// Scope: every `pub enum` of [`NoDataCarryingEnumVariants`]'s scope with a
+/// class marker (`#[doc(alias = "org.apache.kafka.<package>.<Class>")]`, no
+/// `#member`) the Java index resolves; a marker it cannot resolve is
+/// `check-java-name`'s. Runs only when the `kafka` submodule is checked out.
+struct EnumTranslation {
+    index: JavaIndex,
+}
+
+impl EnumTranslation {
+    fn new(ctx: &Context) -> Self {
+        EnumTranslation { index: (*ctx.java).clone() }
+    }
+}
+
+impl Rule for EnumTranslation {
+    fn name(&self) -> &'static str {
+        "check-enum-translation"
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
@@ -469,23 +735,25 @@ impl Rule for NoDataCarryingEnumVariants {
                 if !matches!(e.vis, syn::Visibility::Public(_)) {
                     continue;
                 }
-                for v in &e.variants {
+                for marker in java_markers(&e.attrs).iter().filter(|m| !m.contains('#')) {
+                    let Some(class) = self.index.resolve(marker) else {
+                        continue;
+                    };
                     checked += 1;
-                    let shape = match &v.fields {
-                        // Carries nothing.
-                        syn::Fields::Unit => continue,
-                        // A newtype delegates forward compatibility to the type
-                        // it wraps; two or more fields have nothing to delegate
-                        // to and can be destructured positionally downstream.
-                        syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => continue,
-                        syn::Fields::Unnamed(f) => format!("{} unnamed fields", f.unnamed.len()),
-                        syn::Fields::Named(_) => "inline named fields".to_string(),
+                    let is_hierarchy =
+                        class.is_abstract || class.kind == java::JavaKind::Interface || self.index.has_subclass(class);
+                    if class.kind == java::JavaKind::Enum || is_hierarchy {
+                        continue;
+                    }
+                    let kind = match class.kind {
+                        java::JavaKind::Record => "a record",
+                        _ => "a class",
                     };
                     findings.push(format!(
-                        "{}: `{}::{}` holds data inline ({shape})",
+                        "{}: `{}` is an enum but translates `{marker}`, {kind} that is neither a Java enum nor \
+                         extended by any class",
                         module.file.display(),
-                        e.ident,
-                        v.ident
+                        e.ident
                     ));
                 }
             }
@@ -494,11 +762,306 @@ impl Rule for NoDataCarryingEnumVariants {
     }
 
     fn hint(&self) -> &'static str {
-        "   Move the fields into their own struct and wrap it, e.g.:
-       pub struct GzipCompression { level: i32 }
-       Gzip(GzipCompression),   // instead of Gzip { level: i32 }
-   The struct then carries forward compatibility (private fields, or
-   #[non_exhaustive]); do NOT mark the variant itself."
+        "   Translate the class as a struct with private fields, its constructor and getters, as Java declares
+   them. An invariant Java checks in its constructor stays a check there, not a choice of variants."
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        self.index.is_empty().then(|| {
+            format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            )
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-functional-interface-trait
+// ---------------------------------------------------------------------------
+
+/// Checks that a public Java `@FunctionalInterface` is translated as a trait
+/// (CLAUDE.md §3, forward compatibility).
+///
+/// A functional interface has one abstract method today, but a minor Java
+/// release may add methods to it: `default` overloads of that method, as
+/// `Deserializer` gained in 2.1 and 3.6, or `default` helpers. A trait takes
+/// each as a default method, and the Rust name of an overload is derived as
+/// for any other method (CLAUDE.md §2). A closure type (`Box<dyn Fn ..>`, an
+/// `impl Fn` parameter), an enum or a struct has nowhere to put them, so the
+/// same Java change would break the Rust API.
+///
+/// Public: declared `public` (implicitly so inside an interface), and its
+/// top-level class may be public by CLAUDE.md §2 ([`audience_failures`]).
+/// Each such interface is a finding when:
+///   - a Rust item translating it (its class marker), of any visibility and
+///     outside the C FFI module, is not a trait: a type alias of a closure,
+///     an enum, a struct;
+///   - no Rust item translates it, yet a public Rust method translates
+///     a Java method taking it, so the interface was turned into a closure
+///     parameter. The Java method is the one the Rust method's
+///     `Class#method` marker names (an overload when the marker gives its
+///     parameters, else every overload of the name); it takes the interface
+///     when a parameter's type is the interface's simple name and the method
+///     is declared in the interface's package. The index records no imports,
+///     so a use from another package is not seen.
+///
+///   - the trait translating it lacks a factory: a public fn of the trait's
+///     module taking a function of the method's shape and returning
+///     `impl <Trait>` (CLAUDE.md §3). The abstract method's is `new`; each
+///     `default` overload of it gets `with_<params>`, named by the parameters
+///     it adds (CLAUDE.md §2). An interface declaring no abstract method uses
+///     the one it inherits from the first supertype the index resolves
+///     (`Gauge` from `MetricValueProvider`). A nested interface's factories
+///     live in the outer class's module, prefixed with its name
+///     (`kafka_future::BaseFunction_new`, CLAUDE.md §2).
+///
+/// Runs only when the `kafka` submodule and the Public list are present.
+struct FunctionalInterfaceTrait {
+    index: JavaIndex,
+    /// [`PUBLIC_AUDIENCE_LIST`].
+    public: BTreeSet<String>,
+    /// The dotted packages (below `org.apache.kafka`) carrying the
+    /// unsupported-API disclaimer.
+    unsupported: BTreeSet<String>,
+}
+
+impl FunctionalInterfaceTrait {
+    fn new(ctx: &Context) -> Self {
+        FunctionalInterfaceTrait {
+            index: (*ctx.java).clone(),
+            public: parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default()),
+            unsupported: java::unsupported_packages_at_ref(java::AUDIENCE_REF).unwrap_or_default(),
+        }
+    }
+
+    /// Whether `class` is a public `@FunctionalInterface`.
+    fn is_public_functional(&self, class: &java::JavaClass) -> bool {
+        let top = format!("{}{}.{}", java::MARKER_PREFIX, class.package, class.path[0]);
+        class.functional_interface
+            && !class.is_test
+            && class.visibility == java::Visibility::Public
+            && audience_failures(&self.public, &self.unsupported, &top).is_empty()
+    }
+
+    /// Whether Java method `marker` (`Class#method`, or `Class#method(T1,T2)`)
+    /// takes `interface`, as the rule's docs define it.
+    fn takes(&self, marker: &str, interface: &java::JavaClass) -> bool {
+        let (Some(owner), Some(member)) = (self.index.resolve(marker), JavaIndex::marker_member(marker)) else {
+            return false;
+        };
+        owner.package == interface.package
+            && owner
+                .overloads
+                .iter()
+                .filter(|o| {
+                    if member.contains('(') {
+                        o.signature() == member
+                    } else {
+                        o.name == member
+                    }
+                })
+                .any(|o| o.params.iter().any(|p| p == interface.name()))
+    }
+
+    /// The interface declaring `class`'s functional method: `class` itself,
+    /// or the first supertype in the index that declares one (`Gauge`
+    /// inherits `MetricValueProvider.value`).
+    fn functional_owner<'a>(&'a self, class: &'a java::JavaClass) -> Option<&'a java::JavaClass> {
+        if class.overloads.iter().any(|o| !o.is_static && !o.is_default) {
+            return Some(class);
+        }
+        class.supertypes.iter().find_map(|s| {
+            let supertype = self.index.classes.iter().find(|c| {
+                let nested = c.path.join(".");
+                !c.is_test && ((c.package == class.package && nested == *s) || format!("{}.{nested}", c.package) == *s)
+            })?;
+            self.functional_owner(supertype)
+        })
+    }
+
+    /// The factories the module of the trait translating `interface` must
+    /// define, each with the Java method it stands for: `new` for the abstract
+    /// method, and `with_<params>` for each `default` overload of it, named by
+    /// the parameters it adds (CLAUDE.md §2), or by their types when it adds
+    /// none. A nested interface's carry its name as a prefix
+    /// (`BaseFunction_new`), as they live in the outer class's module.
+    fn expected_factories(&self, interface: &java::JavaClass) -> Vec<(String, String)> {
+        let prefix = if interface.path.len() > 1 {
+            format!("{}_", interface.name())
+        } else {
+            String::new()
+        };
+        let shown = |class: &java::JavaClass, member: String| {
+            format!("{}#{member}", class.marker().trim_start_matches(java::MARKER_PREFIX))
+        };
+        let owner = self.functional_owner(interface);
+        let functional = owner.and_then(|c| c.overloads.iter().find(|o| !o.is_static && !o.is_default));
+        let (Some(owner), Some(functional)) = (owner, functional) else {
+            let java = interface.marker().trim_start_matches(java::MARKER_PREFIX).to_string();
+            return vec![(format!("{prefix}new"), java)];
+        };
+        let mut out = vec![(format!("{prefix}new"), shown(owner, functional.signature()))];
+        for overload in owner
+            .overloads
+            .iter()
+            .filter(|o| !o.is_static && o.is_default && o.name == functional.name)
+        {
+            let mut added: Vec<String> = overload
+                .param_names
+                .iter()
+                .filter(|p| !functional.param_names.contains(p))
+                .map(|p| java::snake_case(p))
+                .collect();
+            if added.is_empty() {
+                added = overload
+                    .params
+                    .iter()
+                    .filter(|t| !functional.params.contains(t))
+                    .map(|t| java::snake_case(t))
+                    .collect();
+            }
+            let name = format!("{prefix}with_{}", added.join("_"));
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, shown(owner, overload.signature())));
+            }
+        }
+        out
+    }
+}
+
+/// The public fns of `module` returning `impl <trait_name>[<..>]`.
+fn trait_factories(module: &Module, trait_name: &str) -> BTreeSet<String> {
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(f) if matches!(f.vis, syn::Visibility::Public(_)) => {
+                let syn::ReturnType::Type(_, ty) = &f.sig.output else {
+                    return None;
+                };
+                let syn::Type::ImplTrait(returned) = &**ty else {
+                    return None;
+                };
+                returned
+                    .bounds
+                    .iter()
+                    .any(|b| {
+                        matches!(b, syn::TypeParamBound::Trait(t)
+                            if t.path.segments.last().is_some_and(|s| s.ident == trait_name))
+                    })
+                    .then(|| f.sig.ident.to_string())
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+impl Rule for FunctionalInterfaceTrait {
+    fn name(&self) -> &'static str {
+        "check-functional-interface-trait"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let items = public_items(krate);
+        // Every module-level item outside the C FFI module, with its file and kind.
+        let defs: Vec<(&Module, &'static str, String, Vec<syn::Attribute>)> = krate
+            .modules
+            .iter()
+            .filter(|(path, _)| path.first().is_none_or(|m| m != "ffi"))
+            .flat_map(|(_, module)| {
+                module.items.iter().filter_map(move |item| {
+                    let (name, attrs) = item_def(item)?;
+                    Some((module, item_kind(item), name, attrs))
+                })
+            })
+            .collect();
+        let mut checked = 0usize;
+        for interface in self.index.classes.iter().filter(|c| self.is_public_functional(c)) {
+            checked += 1;
+            let marker = interface.marker();
+            let shown = marker.trim_start_matches(java::MARKER_PREFIX);
+            let translations: Vec<_> = defs
+                .iter()
+                .filter(|(_, _, _, attrs)| {
+                    java_markers(attrs)
+                        .iter()
+                        .filter(|m| !m.contains('#'))
+                        .any(|m| self.index.resolve(m).is_some_and(|c| c.marker() == marker))
+                })
+                .collect();
+            for (module, kind, name, _) in &translations {
+                if *kind != "a trait" {
+                    findings.push(format!(
+                        "{}: `{name}` translates `{shown}`, a public `@FunctionalInterface`, as {kind}; it must be \
+                         a trait",
+                        module.file.display(),
+                    ));
+                    continue;
+                }
+                let present = trait_factories(module, name);
+                for (factory, java) in self.expected_factories(interface) {
+                    if !present.contains(&factory) {
+                        findings.push(format!(
+                            "{}: `{name}` translates `{shown}`, a public `@FunctionalInterface`, but its module has \
+                             no `pub fn {factory}(function) -> impl {name}` for `{java}`",
+                            module.file.display(),
+                        ));
+                    }
+                }
+            }
+            if !translations.is_empty() {
+                continue;
+            }
+            let taker = items.iter().find_map(|(file, item)| {
+                let method = java_markers(&item.attrs).into_iter().find(|m| self.takes(m, interface))?;
+                item.is_fn.then_some((file, item, method))
+            });
+            if let Some((file, item, method)) = taker {
+                let name = match &item.owner {
+                    Some(owner) => format!("{owner}::{}", item.name),
+                    None => item.name.clone(),
+                };
+                findings.push(format!(
+                    "{}: `{name}` translates `{}`, which takes `{shown}`, a public `@FunctionalInterface` that no \
+                     trait translates",
+                    file.display(),
+                    method.trim_start_matches(java::MARKER_PREFIX)
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Translate the interface as a public trait marked with its class, its method a trait method, e.g.
+       #[doc(alias = \"org.apache.kafka.common.KafkaFuture$BaseFunction\")]
+       pub trait BaseFunction<A, B>: Send + Sync { fn apply(&self, a: A) -> B; }
+   and take it where Java does (`impl BaseFunction<A, B>`, or `Box<dyn ..>` when stored); a method
+   Java adds later becomes a default method. Its module defines a factory per function shape,
+   returning a private adapter that calls the function:
+       pub fn new<F: FnOnce(..) + Send + Sync>(function: F) -> impl Callback { .. }
+   `with_<params>` for each `default` overload of the method, and `<Inner>_new` in the outer
+   class's module for a nested interface (`kafka_future::BaseFunction_new`)."
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        if self.index.is_empty() {
+            return Some(format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            ));
+        }
+        if self.public.is_empty() {
+            return Some(format!("no Public list at `{PUBLIC_AUDIENCE_LIST}`"));
+        }
+        self.unsupported.is_empty().then(|| {
+            format!(
+                "no unsupported-API disclaimers at Kafka `{}`: the ref is not in the `kafka` submodule \
+                 (run `cargo xtask fetch-java-refs`)",
+                java::AUDIENCE_REF
+            )
+        })
     }
 }
 
@@ -556,6 +1119,110 @@ impl Rule for NoPublicField {
 }
 
 // ---------------------------------------------------------------------------
+// Rule: check-no-fixed-size-array
+// ---------------------------------------------------------------------------
+
+/// Checks that no public interface accepts or returns a fixed-size array
+/// `[T; N]` (CLAUDE.md §3, forward compatibility).
+///
+/// An array's length is part of its type, so a Java `byte[]` or `T[]`
+/// translated as `[T; N]` fixes a length Java leaves open: as a parameter it
+/// rejects every other length at compile time, and as a return type a new value
+/// (one more enum constant in `values()`) becomes a breaking change. A slice
+/// (`&[T]`) or a `Vec<T>` carries the length at run time instead.
+///
+/// Scope: the public items of [`NoDeprecatedTranslation`] — each parameter and
+/// the return type of a public function or method, and the type a public `type`
+/// alias names — plus the trait arguments and associated types of a trait impl
+/// for a public type (`impl From<[u8; 16]> for Uuid`). An array anywhere in the
+/// type counts: `&[u8; 16]`, `Option<[u8; 16]>`,
+/// `impl Iterator<Item = [u8; 4]>`. The C FFI (`src/ffi`) and `#[cfg(test)]`
+/// functions are excluded.
+struct NoFixedSizeArray;
+
+impl Rule for NoFixedSizeArray {
+    fn name(&self) -> &'static str {
+        "check-no-fixed-size-array"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let is_ffi = |module: &[String]| module.first().is_some_and(|m| m == "ffi");
+        let mut checked = 0usize;
+        for (file, item) in public_items(krate) {
+            if item.types.is_empty() || is_ffi(&item.module) {
+                continue;
+            }
+            checked += 1;
+            let name = item
+                .owner
+                .map_or_else(|| item.name.clone(), |owner| format!("{owner}::{}", item.name));
+            for (role, ty) in &item.types {
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_type(&mut arrays, ty);
+                for array in arrays.0 {
+                    findings.push(format!(
+                        "{}: {role} of `{name}` holds the fixed-size array `{array}`",
+                        file.display()
+                    ));
+                }
+            }
+        }
+        let types = krate.public_types();
+        for (path, module) in krate.modules.iter().filter(|(path, _)| !is_ffi(path)) {
+            for item in &module.items {
+                let syn::Item::Impl(i) = item else { continue };
+                let Some((_, trait_path, _)) = &i.trait_ else { continue };
+                let syn::Type::Path(self_ty) = &*i.self_ty else {
+                    continue;
+                };
+                let Some(self_ty) = self_ty.path.segments.last() else {
+                    continue;
+                };
+                if !types.contains(&(path.clone(), self_ty.ident.to_string())) {
+                    continue;
+                }
+                checked += 1;
+                let header = format!("`impl {} for {}`", compact(trait_path), self_ty.ident);
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_path(&mut arrays, trait_path);
+                let mut found: Vec<_> = arrays.0.into_iter().map(|a| ("the trait", a)).collect();
+                for it in &i.items {
+                    if let syn::ImplItem::Type(t) = it {
+                        let mut arrays = Arrays::default();
+                        syn::visit::Visit::visit_type(&mut arrays, &t.ty);
+                        found.extend(arrays.0.into_iter().map(|a| ("an associated type", a)));
+                    }
+                }
+                for (role, array) in found {
+                    findings.push(format!(
+                        "{}: {role} of {header} holds the fixed-size array `{array}`",
+                        module.file.display()
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Accept a slice (`&[T]`), checking its length where Java does and returning
+   `IllegalArgumentError`; return a `&'static [T]`, a `Vec<T>` or an iterator;
+   or make the item `pub(crate)` if Java does not expose it."
+    }
+}
+
+/// The outermost fixed-size arrays a visited type holds, as written.
+#[derive(Default)]
+struct Arrays(Vec<String>);
+
+impl<'ast> syn::visit::Visit<'ast> for Arrays {
+    fn visit_type_array(&mut self, array: &'ast syn::TypeArray) {
+        // An array of arrays is one finding: its elements are not visited.
+        self.0.push(compact(array));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule: check-java-name
 // ---------------------------------------------------------------------------
 
@@ -565,8 +1232,8 @@ impl Rule for NoPublicField {
 /// An item declares what it translates with a marker (see [`crate::java`]):
 /// `#[doc(alias = "org.apache.kafka.<package>.<Class>[$Nested][#method]")]`.
 /// The marker is also the Java name rustdoc search finds the item under.
-/// Mentioning a Java class in a doc comment claims nothing, so helpers that
-/// cite the class they serve are not held to its name.
+/// Mentioning a Java class in a doc comment claims nothing, so non-public
+/// helpers that cite the class they serve are not held to its name.
 ///
 /// For every marker:
 ///   - **class** (`..Class`, `..Outer$Nested`): the class exists in the Java
@@ -579,7 +1246,16 @@ impl Rule for NoPublicField {
 ///     `throw` → `return`, an optional dropped `get`, `_with_<params>` for an
 ///     overload, `new` / `with_<params>` for a constructor.
 ///
-/// The C FFI (`src/ffi`) is excluded for now.
+/// The C FFI (`src/ffi`) is out of scope: its symbols derive from the Rust
+/// items they bind, which `check-ffi-translation` checks name by name.
+///
+/// Every public method carries a method marker: a `pub fn` of an inherent
+/// `impl` of a public type, a public trait's method, or a `pub fn` of a
+/// reachable module (the scope of [`public_items`]; trait-impl methods,
+/// `#[cfg(test)]` functions and the C FFI are out of it). A public method
+/// translating no Java method is a finding — make it `pub(crate)` — unless it
+/// is tagged [`RUST_ONLY`], with a comment giving the reason a rule needs it
+/// public (CLAUDE.md §12.4's `Error::is_*_error`).
 ///
 /// And for every file named after a Java class of its package
 /// (`producer/producer_record.rs` ↔ `clients.producer.ProducerRecord`,
@@ -591,12 +1267,18 @@ impl Rule for NoPublicField {
 /// together guarantee a class only ever shares a module with its own package:
 ///   - **location**: a marked item under `src/` lives in its class's package
 ///     module. A file's module is its directory, less the folders that are no
-///     Java package — grouping folders such as `admin/options/`.
+///     Java package — grouping folders such as `admin/options/`. A method of an
+///     impl or trait is placed by its owner type, so it may name the supertype
+///     that declares it in another package, e.g. `Partitioner::configure` marked
+///     `common.Configurable#configure`.
 ///   - **mapping**: no two Java packages map to one module, and no two classes
 ///     of a package map to one Rust name.
 ///   - **re-exports**: a module's `pub use` lifts only from its own class files
 ///     and grouping folders — never from another package (`crate::`, `super::`,
-///     a sub-package), whose class could collide with one of this package's.
+///     a sub-package), whose class could collide with one of this package's —
+///     unless the lifted item is tagged public on purpose ([`RUST_ONLY`],
+///     [`PUBLIC_IN_RUST`]): `common::header` lifts
+///     `internals::{RecordHeader, RecordHeaders}`.
 ///
 /// Scope: `src/` (without `src/bin`) and `tests/`, test modules included; the
 /// package checks cover `src/` only. Runs only when the `kafka` submodule is
@@ -605,23 +1287,18 @@ struct JavaName {
     index: JavaIndex,
     /// Every Rust module a Java package maps to, and each of its ancestors.
     package_modules: BTreeSet<Vec<String>>,
-    /// [`PUBLIC_AUDIENCE_ALLOWLIST`]: a re-export of an allow-listed item from
-    /// another package is allowed (`common::header` lifts
-    /// `internals::{RecordHeader, RecordHeaders}`).
-    allow: AllowList,
 }
 
 impl JavaName {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let mut package_modules = BTreeSet::new();
         for class in &index.classes {
             for len in 0..=class.module.len() {
                 package_modules.insert(class.module[..len].to_vec());
             }
         }
-        let (allow, _) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
-        JavaName { index, package_modules, allow }
+        JavaName { index, package_modules }
     }
 
     /// The Rust module of `src/` file `path`: its directory, less the grouping
@@ -646,6 +1323,10 @@ struct Marked {
     kind: ItemKind,
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// Whether it is a method of an impl or trait, placed by its owner type.
+    member: bool,
+    /// Whether it is a function taking `self`.
+    has_self: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -658,7 +1339,22 @@ enum ItemKind {
 /// inherent-impl and trait methods, and the error types of the error macros.
 fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
     let push = |kind, ident: &syn::Ident, attrs: &[syn::Attribute], out: &mut Vec<Marked>| {
-        out.push(Marked { kind, name: ident.to_string(), attrs: attrs.to_vec() })
+        out.push(Marked {
+            kind,
+            name: ident.to_string(),
+            attrs: attrs.to_vec(),
+            member: false,
+            has_self: false,
+        })
+    };
+    let push_member = |sig: &syn::Signature, attrs: &[syn::Attribute], out: &mut Vec<Marked>| {
+        out.push(Marked {
+            kind: ItemKind::Fn,
+            name: sig.ident.to_string(),
+            attrs: attrs.to_vec(),
+            member: true,
+            has_self: sig.receiver().is_some(),
+        })
     };
     for item in items {
         match item {
@@ -670,7 +1366,7 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
                 push(ItemKind::Type, &t.ident, &t.attrs, out);
                 for it in &t.items {
                     if let syn::TraitItem::Fn(f) = it {
-                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                        push_member(&f.sig, &f.attrs, out);
                     }
                 }
             },
@@ -678,7 +1374,7 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
             syn::Item::Impl(i) if i.trait_.is_none() => {
                 for it in &i.items {
                     if let syn::ImplItem::Fn(f) = it {
-                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                        push_member(&f.sig, &f.attrs, out);
                     }
                 }
             },
@@ -689,7 +1385,13 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
             },
             syn::Item::Macro(m) => {
                 if let Some(def) = error_macro_type_def(m) {
-                    out.push(Marked { kind: ItemKind::Type, name: def.name, attrs: def.attrs });
+                    out.push(Marked {
+                        kind: ItemKind::Type,
+                        name: def.name,
+                        attrs: def.attrs,
+                        member: false,
+                        has_self: false,
+                    });
                 }
             },
             _ => {},
@@ -697,11 +1399,14 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
     }
 }
 
-/// A type defined by an error macro: its name and the attributes written
-/// inside the macro.
+/// A type defined by an error macro: its name, the attributes written inside
+/// the macro, and the predicates its `extends:` list names.
 struct TypeDef {
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// The `ErrorHierarchy` predicates the type answers `true` to; empty for a
+    /// macro with no `extends:` list.
+    extends: Vec<String>,
 }
 
 /// The type a `kafka_error_type!` / `message_only_error!` invocation defines:
@@ -720,35 +1425,144 @@ fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
         .parse_body_with(|input: syn::parse::ParseStream| {
             let attrs = input.call(syn::Attribute::parse_outer)?;
             let ident: syn::Ident = input.parse()?;
-            // The rest of the body (the `extends` list, ..) is not needed.
-            input.step(|cursor| {
+            // Of the rest of the body (`code: ..`, `extends: [..]`), only the
+            // `extends` list is needed.
+            let extends = input.step(|cursor| {
+                let mut extends = Vec::new();
                 let mut rest = *cursor;
-                while let Some((_, next)) = rest.token_tree() {
+                while !rest.eof() {
+                    let list = rest
+                        .ident()
+                        .filter(|(i, _)| i == "extends")
+                        .and_then(|(_, after)| after.punct())
+                        .filter(|(p, _)| p.as_char() == ':')
+                        .and_then(|(_, after)| after.any_group());
+                    if let Some((mut inside, _, _, after)) = list {
+                        while let Some((_, next)) = inside.token_tree() {
+                            if let Some((i, _)) = inside.ident() {
+                                extends.push(i.to_string());
+                            }
+                            inside = next;
+                        }
+                        rest = after;
+                        continue;
+                    }
+                    let Some((_, next)) = rest.token_tree() else { break };
                     rest = next;
                 }
-                Ok(((), rest))
+                Ok((extends, rest))
             })?;
-            Ok(TypeDef { name: ident.to_string(), attrs })
+            Ok(TypeDef { name: ident.to_string(), attrs, extends })
         })
         .ok()
 }
 
-/// The markers among `attrs`' `#[doc(alias = "..")]`s.
-fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
+/// The values of `attrs`' `#[doc(alias = "..")]`s.
+fn doc_aliases(attrs: &[syn::Attribute]) -> Vec<String> {
     let mut out = Vec::new();
     for attr in attrs.iter().filter(|a| a.path().is_ident("doc")) {
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("alias") {
                 let lit: syn::LitStr = meta.value()?.parse()?;
-                if lit.value().starts_with(java::MARKER_PREFIX) {
-                    out.push(lit.value());
-                }
+                out.push(lit.value());
             } else if meta.input.peek(syn::Token![=]) {
                 // Skip the value of any other `doc(key = value)`.
                 let _: syn::Expr = meta.value()?.parse()?;
             }
             Ok(())
         });
+    }
+    out
+}
+
+/// The markers among `attrs`' `#[doc(alias = "..")]`s.
+fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
+    doc_aliases(attrs)
+        .into_iter()
+        .filter(|alias| alias.starts_with(java::MARKER_PREFIX))
+        .collect()
+}
+
+/// The tag of a public item that translates no Java API — a Rust-only helper, a
+/// JDK type, a C-only handle — yet is public on purpose:
+/// `#[doc(alias = "rust-only")]`, with the reason in a comment above it. Read by
+/// [`JavaName`] and [`PublicAudience`].
+const RUST_ONLY: &str = "rust-only";
+
+/// The tag of a public item translating Java API that the audience rules keep
+/// non-public — a test-jar class, a class of an `internals` package, a
+/// non-`public` method — yet is public on purpose:
+/// `#[doc(alias = "public-in-rust")]`, with the reason in a comment above it.
+const PUBLIC_IN_RUST: &str = "public-in-rust";
+
+/// Whether `attrs` carry tag `tag` ([`RUST_ONLY`] or [`PUBLIC_IN_RUST`]).
+fn has_tag(attrs: &[syn::Attribute], tag: &str) -> bool {
+    doc_aliases(attrs).iter().any(|alias| alias == tag)
+}
+
+/// An item that may carry a tag: its file, the type or trait it is a member of,
+/// and its name.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TagSite {
+    file: PathBuf,
+    owner: Option<String>,
+    name: String,
+    tag: &'static str,
+}
+
+impl TagSite {
+    fn new(file: &Path, owner: Option<&str>, name: &str, tag: &'static str) -> Self {
+        TagSite {
+            file: file.to_path_buf(),
+            owner: owner.map(str::to_string),
+            name: name.to_string(),
+            tag,
+        }
+    }
+}
+
+/// Every tag of `krate`, on an item of any visibility: a module-level item, an
+/// error macro's type, or a member of a trait or an inherent `impl`.
+fn tag_sites(krate: &Crate) -> BTreeSet<TagSite> {
+    let mut out = BTreeSet::new();
+    for module in krate.modules.values() {
+        let file = module.file.as_path();
+        let mut add = |owner: Option<&syn::Ident>, name: &str, attrs: &[syn::Attribute]| {
+            let owner = owner.map(ToString::to_string);
+            for tag in [RUST_ONLY, PUBLIC_IN_RUST].into_iter().filter(|t| has_tag(attrs, t)) {
+                out.insert(TagSite::new(file, owner.as_deref(), name, tag));
+            }
+        };
+        for item in &module.items {
+            match item {
+                syn::Item::Trait(t) => {
+                    add(None, &t.ident.to_string(), &t.attrs);
+                    for it in &t.items {
+                        match it {
+                            syn::TraitItem::Fn(f) => add(Some(&t.ident), &f.sig.ident.to_string(), &f.attrs),
+                            syn::TraitItem::Const(c) => add(Some(&t.ident), &c.ident.to_string(), &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                syn::Item::Impl(i) if i.trait_.is_none() => {
+                    let syn::Type::Path(ty) = &*i.self_ty else { continue };
+                    let Some(ty) = ty.path.segments.last() else { continue };
+                    for it in &i.items {
+                        match it {
+                            syn::ImplItem::Fn(f) => add(Some(&ty.ident), &f.sig.ident.to_string(), &f.attrs),
+                            syn::ImplItem::Const(c) => add(Some(&ty.ident), &c.ident.to_string(), &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {
+                    if let Some((name, attrs)) = item_def(item) {
+                        add(None, &name, &attrs);
+                    }
+                },
+            }
+        }
     }
     out
 }
@@ -780,6 +1594,76 @@ fn use_paths(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<St
     }
 }
 
+/// A public function carrying no Java marker.
+struct UnmarkedMethod {
+    file: PathBuf,
+    /// The type or trait it is a member of; `None` for a free function.
+    owner: Option<String>,
+    name: String,
+    /// Whether it is tagged [`RUST_ONLY`].
+    rust_only: bool,
+    /// Whether its owner is tagged [`RUST_ONLY`]: a type translating no Java
+    /// class has no Java method for its members to name, so they inherit it.
+    owner_rust_only: bool,
+}
+
+impl UnmarkedMethod {
+    /// `Owner::method`, or the bare name of a free function.
+    fn display(&self) -> String {
+        self.owner
+            .as_ref()
+            .map_or_else(|| self.name.clone(), |owner| format!("{owner}::{}", self.name))
+    }
+
+    /// Where its [`RUST_ONLY`] tag sits.
+    fn tag_site(&self) -> TagSite {
+        TagSite::new(&self.file, self.owner.as_deref(), &self.name, RUST_ONLY)
+    }
+}
+
+/// The public functions of `krate` outside the C FFI that carry no Java
+/// marker, and how many public functions were inspected. The scope is
+/// [`public_items`]'s: a `pub fn` of an inherent `impl` of a public type, a
+/// public trait's methods, a `pub fn` of a reachable module.
+fn unmarked_public_methods(krate: &Crate) -> (Vec<UnmarkedMethod>, usize) {
+    let mut out = Vec::new();
+    let mut checked = 0;
+    for (file, item) in public_items(krate) {
+        if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+            continue;
+        }
+        checked += 1;
+        if !java_markers(&item.attrs).is_empty() {
+            continue;
+        }
+        let owner_rust_only = item.owner.as_ref().is_some_and(|owner| {
+            krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .is_some_and(|attrs| has_tag(&attrs, RUST_ONLY))
+        });
+        out.push(UnmarkedMethod {
+            file: file.to_path_buf(),
+            rust_only: has_tag(&item.attrs, RUST_ONLY),
+            owner_rust_only,
+            owner: item.owner,
+            name: item.name,
+        });
+    }
+    (out, checked)
+}
+
+/// The Rust module `src/` file `path` defines: `src/a/b.rs` and `src/a/b/mod.rs`
+/// are `a::b`, `src/lib.rs` is the root. `None` outside `src/`.
+fn rust_module(path: &Path) -> Option<ModPath> {
+    let rel = path.strip_prefix("src").ok()?;
+    let mut module: ModPath = rel.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+    let stem = module.pop()?.trim_end_matches(".rs").to_string();
+    if !matches!(stem.as_str(), "mod" | "lib") {
+        module.push(stem);
+    }
+    Some(module)
+}
+
 /// Every `.rs` file under `dir`, sorted.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -798,7 +1682,8 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 impl JavaName {
     /// Checks one marker on `item`, pushing a finding if its name does not follow,
     /// or if the item is not in its class's package module (`module`, the item's
-    /// module; `None` outside `src/`).
+    /// module; `None` outside `src/`). A method of an impl or trait is exempt from
+    /// the module check: its owner type's marker places it.
     fn check_marker(
         &self,
         file: &str,
@@ -815,7 +1700,7 @@ impl JavaName {
             return;
         };
         let origin = format!("`{}`", marker.trim_start_matches(java::MARKER_PREFIX));
-        if let Some(module) = module.filter(|m| **m != class.module) {
+        if let Some(module) = module.filter(|m| **m != class.module && !item.member) {
             findings.push(format!(
                 "{file}: `{}` translates {origin}, so it belongs in module `{}`, not `{}`",
                 item.name,
@@ -845,18 +1730,33 @@ impl JavaName {
                     }
                 }
                 if !class.methods.contains(method) {
-                    findings.push(format!(
-                        "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
-                        item.name,
-                        class.name()
-                    ));
+                    if !class.fields.contains_key(method) {
+                        findings.push(format!(
+                            "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
+                            item.name,
+                            class.name()
+                        ));
+                    } else if !class.is_rust_accessor_of(method, &item.name) {
+                        let base = java::rust_method_bases(method).swap_remove(0);
+                        findings.push(format!(
+                            "{file}: `{}` translates field {origin} and must be named `{base}` (getter) or \
+                             `set_{base}` (setter)",
+                            item.name
+                        ));
+                    }
                     return;
                 }
-                if !class.is_rust_name_of(method, &item.name) {
-                    let expected = if method == class.name() {
+                if !class.is_rust_name_of(method, &item.name, item.has_self) {
+                    let statics = class.static_rust_names(method);
+                    let shared =
+                        !statics.is_empty() && class.overloads.iter().any(|o| o.name == *method && !o.is_static);
+                    let expected = if shared && !item.has_self {
+                        statics.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(" or ")
+                    } else if method == class.name() {
                         "`new` or `with_<params>`".to_string()
                     } else {
-                        rust_method_bases(method)
+                        class
+                            .rust_bases(method)
                             .iter()
                             .map(|b| format!("`{b}`"))
                             .collect::<Vec<_>>()
@@ -970,8 +1870,16 @@ impl JavaName {
     /// The re-export check: each `pub use` of `items`, in module `module`, lifts
     /// from a class file or grouping folder of that same module — never from
     /// another package. Macros the file defines may be re-exported too, and so
-    /// may an item of [`PUBLIC_AUDIENCE_ALLOWLIST`] (by its lifted Rust path).
-    fn check_reexports(&self, file: &str, module: &[String], items: &[syn::Item], findings: &mut Vec<String>) -> usize {
+    /// may an item tagged public on purpose ([`RUST_ONLY`], [`PUBLIC_IN_RUST`]),
+    /// found in `krate` from `rust_module`, the Rust module of the file.
+    fn check_reexports(
+        &self,
+        krate: &Crate,
+        file: &str,
+        (module, rust_module): (&[String], &[String]),
+        items: &[syn::Item],
+        findings: &mut Vec<String>,
+    ) -> usize {
         let mut children = BTreeSet::new();
         let mut macros = BTreeSet::new();
         for item in items {
@@ -1002,7 +1910,12 @@ impl JavaName {
                 let lifted = path.join("::");
                 let mut child = module.to_vec();
                 child.push(name.clone());
-                let foreign = if macros.contains(name) || self.allow.allows_quietly(&[&format!("{into}::{lifted}")]) {
+                let tagged = || {
+                    krate
+                        .definition_attrs(rust_module, &path)
+                        .is_some_and(|attrs| has_tag(&attrs, RUST_ONLY) || has_tag(&attrs, PUBLIC_IN_RUST))
+                };
+                let foreign = if macros.contains(name) || tagged() {
                     None
                 } else if !children.contains(name) {
                     Some(format!("`{name}`, outside this module"))
@@ -1017,6 +1930,24 @@ impl JavaName {
                     ));
                 }
             }
+        }
+        checked
+    }
+
+    /// The unmarked-method check: every public function carries a Java
+    /// marker, unless it is tagged [`RUST_ONLY`]. A function carrying only a
+    /// class marker is reported by [`JavaName::check_marker`]. A needless tag is
+    /// reported by [`PublicAudience`], which sees every tag.
+    fn check_unmarked_methods(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let (unmarked, checked) = unmarked_public_methods(krate);
+        for method in unmarked.iter().filter(|m| !m.rust_only && !m.owner_rust_only) {
+            findings.push(format!(
+                "{}: public method `{}` carries no Java method marker; mark the Java method it translates \
+                 (#[doc(alias = \"org.apache.kafka.<package>.<Class>#<method>\")]), make it `pub(crate)`, or tag \
+                 it #[doc(alias = \"{RUST_ONLY}\")] under a comment giving the reason it is public",
+                method.file.display(),
+                method.display()
+            ));
         }
         checked
     }
@@ -1036,7 +1967,7 @@ impl Rule for JavaName {
         })
     }
 
-    fn check(&self, _krate: &Crate, findings: &mut Vec<String>) -> usize {
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
         let mut files = Vec::new();
         rust_files(Path::new("src"), &mut files);
         rust_files(Path::new("tests"), &mut files);
@@ -1066,11 +1997,11 @@ impl Rule for JavaName {
                 }
             }
             checked += self.check_file(path, &items, findings);
-            if let Some(module) = &module {
-                checked += self.check_reexports(&file, module, &parsed.items, findings);
+            if let (Some(module), Some(rust_module)) = (&module, rust_module(path)) {
+                checked += self.check_reexports(krate, &file, (module, &rust_module), &parsed.items, findings);
             }
         }
-        checked + self.check_mapping(findings)
+        checked + self.check_mapping(findings) + self.check_unmarked_methods(krate, findings)
     }
 
     fn hint(&self) -> &'static str {
@@ -1078,7 +2009,11 @@ impl Rule for JavaName {
    (CLAUDE.md §2: Exception -> Error with the package prefix outside `common`,
    camelCase -> snake_case, `_with_<params>` for overloads, `new`/`with_..` for
    constructors, a nested class under its bare name). Fix the marker instead if
-   it names the wrong Java class or method; a Rust-only helper carries none."
+   it names the wrong Java class or method; a Rust-only helper carries none.
+   A public method must carry the marker of the Java method it translates. One
+   that translates none is made `pub(crate)`, or, if a rule needs it public
+   (CLAUDE.md §12.4's `Error::is_*_error`), tagged #[doc(alias = \"rust-only\")]
+   under a `//` comment giving the reason."
     }
 }
 
@@ -1122,8 +2057,8 @@ struct NoDeprecatedTranslation {
 }
 
 impl NoDeprecatedTranslation {
-    fn new() -> Self {
-        let mut index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let mut index = (*ctx.java).clone();
         let list = fs::read_to_string(java::DEPRECATED_LIST).unwrap_or_default();
         index.merge_deprecation_list(&list);
         let baseline = fs::read_to_string(DEPRECATED_BASELINE)
@@ -1171,9 +2106,93 @@ impl NoDeprecatedTranslation {
 struct PublicItem {
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// The module defining the item.
+    module: ModPath,
+    /// The type or trait a method or associated const belongs to; `None` for
+    /// a module-level item.
+    owner: Option<String>,
+    /// Whether the item is a function: a method or a free function.
+    is_fn: bool,
+    /// Whether the item is an `async fn`. A method of an `#[async_trait]`
+    /// trait is not: the attribute boxes its future as `Send`.
+    is_async: bool,
+    /// The value of a `const` initialized by a string literal.
+    str_value: Option<String>,
+    /// The types a caller passes or receives through the item, each with its
+    /// role: a function's parameters and return type, the type a `type` alias
+    /// names.
+    types: Vec<(String, syn::Type)>,
+}
+
+/// What [`public_items`] records about an item beyond its name and attributes.
+#[derive(Default)]
+struct Shape {
+    is_fn: bool,
+    is_async: bool,
+    str_value: Option<String>,
+    types: Vec<(String, syn::Type)>,
+}
+
+impl Shape {
+    /// A function with signature `sig`; `boxed` for a method of an
+    /// `#[async_trait]` trait, whose `async` is not native.
+    fn of_fn(sig: &syn::Signature, boxed: bool) -> Self {
+        Shape {
+            is_fn: true,
+            is_async: sig.asyncness.is_some() && !boxed,
+            str_value: None,
+            types: sig_types(sig),
+        }
+    }
+
+    /// A `const` initialized by `expr`.
+    fn of_const(expr: Option<&syn::Expr>) -> Self {
+        let str_value = match expr {
+            Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) => Some(s.value()),
+            _ => None,
+        };
+        Shape { str_value, ..Shape::default() }
+    }
+}
+
+/// Whether `attrs` carry `#[async_trait]`, under any path.
+fn is_async_trait(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"))
+}
+
+/// The parameter types and the return type of `sig`, each with its role.
+fn sig_types(sig: &syn::Signature) -> Vec<(String, syn::Type)> {
+    let mut out: Vec<_> = sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pt) => Some((format!("parameter `{}`", compact(&pt.pat)), (*pt.ty).clone())),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        out.push(("the return type".to_string(), (**ty).clone()));
+    }
+    out
+}
+
+/// `t`'s tokens, spaced as rustfmt would for a type: `From<[u8; 16]>`.
+fn compact(t: &impl ToTokens) -> String {
+    t.to_token_stream()
+        .to_string()
+        .replace(" ;", ";")
+        .replace("& ", "&")
+        .replace(" < ", "<")
+        .replace("< ", "<")
+        .replace(" >", ">")
+        .replace(" ,", ",")
+        .replace(" :: ", "::")
 }
 
 /// The public items of `krate` (see [`NoDeprecatedTranslation`] for the scope).
+/// A `#[cfg(test)]` function is skipped: it never ships.
 fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
     let types = krate.public_types();
     let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
@@ -1183,25 +2202,64 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
         let reachable = krate.is_reachable(path);
         let is_public_type = |name: &str| types.contains(&(path.clone(), name.to_string()));
         for item in &module.items {
-            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute]| {
-                out.push((file, PublicItem { name: name.to_string(), attrs: attrs.to_vec() }))
+            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute], owner: Option<&syn::Ident>, shape: Shape| {
+                if shape.is_fn && is_cfg_test(attrs) {
+                    return;
+                }
+                out.push((
+                    file,
+                    PublicItem {
+                        name: name.to_string(),
+                        attrs: attrs.to_vec(),
+                        module: path.clone(),
+                        owner: owner.map(ToString::to_string),
+                        is_fn: shape.is_fn,
+                        is_async: shape.is_async,
+                        str_value: shape.str_value,
+                        types: shape.types,
+                    },
+                ))
             };
             match item {
-                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => push(&s.ident, &s.attrs),
-                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => push(&e.ident, &e.attrs),
+                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => {
+                    push(&s.ident, &s.attrs, None, Shape::default())
+                },
+                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => {
+                    push(&e.ident, &e.attrs, None, Shape::default())
+                },
                 syn::Item::Trait(t) if is_public_type(&t.ident.to_string()) => {
-                    push(&t.ident, &t.attrs);
+                    push(&t.ident, &t.attrs, None, Shape::default());
+                    let boxed = is_async_trait(&t.attrs);
                     for it in &t.items {
                         match it {
-                            syn::TraitItem::Fn(f) => push(&f.sig.ident, &f.attrs),
-                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs),
+                            syn::TraitItem::Fn(f) => {
+                                push(&f.sig.ident, &f.attrs, Some(&t.ident), Shape::of_fn(&f.sig, boxed))
+                            },
+                            syn::TraitItem::Const(c) => push(
+                                &c.ident,
+                                &c.attrs,
+                                Some(&t.ident),
+                                Shape::of_const(c.default.as_ref().map(|(_, e)| e)),
+                            ),
                             _ => {},
                         }
                     }
                 },
-                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(&t.ident, &t.attrs),
-                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
-                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(
+                    &t.ident,
+                    &t.attrs,
+                    None,
+                    Shape {
+                        types: vec![("the aliased type".to_string(), (*t.ty).clone())],
+                        ..Shape::default()
+                    },
+                ),
+                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => {
+                    push(&f.sig.ident, &f.attrs, None, Shape::of_fn(&f.sig, false))
+                },
+                syn::Item::Const(c) if reachable && is_pub(&c.vis) => {
+                    push(&c.ident, &c.attrs, None, Shape::of_const(Some(&c.expr)))
+                },
                 syn::Item::Impl(i) if i.trait_.is_none() => {
                     let syn::Type::Path(ty) = &*i.self_ty else { continue };
                     let Some(ty) = ty.path.segments.last() else { continue };
@@ -1210,8 +2268,12 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     }
                     for it in &i.items {
                         match it {
-                            syn::ImplItem::Fn(f) if is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
-                            syn::ImplItem::Const(c) if is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                            syn::ImplItem::Fn(f) if is_pub(&f.vis) => {
+                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), Shape::of_fn(&f.sig, false))
+                            },
+                            syn::ImplItem::Const(c) if is_pub(&c.vis) => {
+                                push(&c.ident, &c.attrs, Some(&ty.ident), Shape::of_const(Some(&c.expr)))
+                            },
                             _ => {},
                         }
                     }
@@ -1220,7 +2282,19 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     // The error types are public: every error is a variant of
                     // the public `Error` (CLAUDE.md §12).
                     if let Some(def) = error_macro_type_def(m) {
-                        out.push((file, PublicItem { name: def.name, attrs: def.attrs }));
+                        out.push((
+                            file,
+                            PublicItem {
+                                name: def.name,
+                                attrs: def.attrs,
+                                module: path.clone(),
+                                owner: None,
+                                is_fn: false,
+                                is_async: false,
+                                str_value: None,
+                                types: Vec::new(),
+                            },
+                        ));
                     }
                 },
                 _ => {},
@@ -1299,94 +2373,8 @@ impl Rule for NoDeprecatedTranslation {
 /// one fully-qualified top-level name per line.
 const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
-/// The public items [`PublicAudience`] lets through although no Public Java
-/// class backs them, one per line: `<key>  # <reason>`.
-const PUBLIC_AUDIENCE_ALLOWLIST: &str = "xtask/public-audience-allowlist.txt";
-
 /// Where the C header's `[export] include` list lives.
 const CBINDGEN_TOML: &str = "cbindgen.toml";
-
-/// One line of [`PUBLIC_AUDIENCE_ALLOWLIST`].
-struct AllowEntry {
-    /// A Java class (`org.apache.kafka.clients.admin.MockAdminClient`), a Rust
-    /// path (`crate::common::Error`) or a C symbol prefix
-    /// (`kafka_consumer_ConsumerHandle`); `*` matches any run of characters.
-    key: String,
-    line: usize,
-    /// Whether the entry let through an item that would otherwise be a finding.
-    used: std::cell::Cell<bool>,
-}
-
-/// The entries of [`PUBLIC_AUDIENCE_ALLOWLIST`].
-#[derive(Default)]
-struct AllowList {
-    entries: Vec<AllowEntry>,
-}
-
-impl AllowList {
-    /// Reads the list at `path` (empty if there is none), with a finding for
-    /// each malformed line.
-    fn load(path: &Path) -> (Self, Vec<String>) {
-        Self::parse(&path.display().to_string(), &fs::read_to_string(path).unwrap_or_default())
-    }
-
-    /// Parses `text`: a line is `<key>  # <reason>`, and the reason is
-    /// required; blank lines and lines starting with `#` are comments. The
-    /// reason starts at the first `#` after whitespace, since a member marker
-    /// key (`Class#member`) contains a `#` of its own.
-    fn parse(file: &str, text: &str) -> (Self, Vec<String>) {
-        let mut list = AllowList::default();
-        let mut errors = Vec::new();
-        for (i, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let reason_at = line
-                .char_indices()
-                .find(|&(at, c)| c == '#' && line[..at].ends_with(char::is_whitespace));
-            let (key, reason) = reason_at.map_or((line, ""), |(at, _)| (line[..at].trim(), line[at + 1..].trim()));
-            if key.is_empty() || key.contains(char::is_whitespace) || reason.is_empty() {
-                errors.push(format!("{file}:{}: expected `<key>  # <reason>`, found `{line}`", i + 1));
-                continue;
-            }
-            list.entries
-                .push(AllowEntry { key: key.to_string(), line: i + 1, used: Default::default() });
-        }
-        (list, errors)
-    }
-
-    /// Whether an entry matches one of `keys`; the entry is then recorded as used.
-    fn allows(&self, keys: &[&str]) -> bool {
-        let hit = self.entries.iter().find(|e| keys.iter().any(|k| glob_match(&e.key, k)));
-        hit.inspect(|e| e.used.set(true)).is_some()
-    }
-
-    /// [`AllowList::allows`], without recording the entry as used.
-    fn allows_quietly(&self, keys: &[&str]) -> bool {
-        self.entries.iter().any(|e| keys.iter().any(|k| glob_match(&e.key, k)))
-    }
-}
-
-/// Whether `text` matches `pattern`, in which `*` matches any run of
-/// characters (`::` included) and every other character matches itself.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let Some((head, rest)) = pattern.split_once('*') else {
-        return pattern == text;
-    };
-    let Some(mut text) = text.strip_prefix(head) else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('*').collect();
-    let (last, middle) = parts.split_last().expect("split yields at least one part");
-    for part in middle {
-        match text.find(part) {
-            Some(at) => text = &text[at + part.len()..],
-            None => return false,
-        }
-    }
-    text.len() >= last.len() && text.ends_with(last)
-}
 
 /// Checks that the crate makes public — in Rust and in C — only what Java's
 /// public API holds (CLAUDE.md §2, §4). A public item translating a Java class
@@ -1398,11 +2386,13 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 ///      [`java::AUDIENCE_REF`] ([`PUBLIC_AUDIENCE_LIST`]); a nested class
 ///      takes the audience of the top-level class declaring it.
 ///
-/// A public item without a Java class (a Rust-only helper, a JDK type) must be
-/// listed in [`PUBLIC_AUDIENCE_ALLOWLIST`] with the reason it is public, as
-/// must a Java class that is public on purpose despite the rules (a test-jar
-/// helper). An entry that no longer lets anything through is reported, so the
-/// list cannot rot.
+/// A public item without a Java class (a Rust-only helper, a JDK type, a C-only
+/// handle) must be tagged [`RUST_ONLY`], and an item translating Java API that is
+/// public on purpose despite the rules (a test-jar helper) [`PUBLIC_IN_RUST`],
+/// each under a comment giving the reason. A C prefix is let through by a tag on
+/// any of its symbols. [`JavaName`] reads [`RUST_ONLY`] on a public method that
+/// translates no Java method. A tag that lets nothing through, for either rule,
+/// is reported, so tags cannot pile up.
 ///
 /// **Rust:** every `pub` struct, enum, union, trait, type alias, fn, const and
 /// static another crate can name — defined in a reachable module or
@@ -1435,6 +2425,28 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// `Class#method` marker; a marker naming a method only by name matches its
 /// widest overload, and an interface member without a modifier is `public`.
 /// A method marked with a field, or unmarked, is not checked here.
+///
+/// **Configurations:** a [`RUST_ONLY`] public method of a type translating a
+/// subclass of `AbstractConfig` (`ConsumerConfig`, `ProducerConfig`,
+/// `AdminClientConfig`) must take a trait object: the only Rust-only methods
+/// such a class may have are the setters CLAUDE.md §2 prescribes for a
+/// class-valued key (`ProducerConfig::set_partitioner`). A typed getter or
+/// setter of a plain key is reported. A getter freezes the key's Java type,
+/// which Java changes in minors (`linger.ms` was a `long`, an `int`, then a
+/// `long` again), and a setter skips the `ConfigDef` validators that
+/// `new(&props)` runs; so the string map stays the only typed input, and the
+/// typed getters the client reads are `pub(crate)`.
+///
+/// **Constants:** a public associated const of a type translating a Java class
+/// translates the field of the same name, which Java must declare `public` on
+/// that class or a supertype (Java inherits static fields:
+/// `ConsumerConfig.CONFIG_PROVIDERS_CONFIG` is `AbstractConfig`'s). A const
+/// naming no Java field is a Rust addition and is tagged [`RUST_ONLY`]; one
+/// re-declaring another class's field (`ProducerConfig::SASL_JAAS_CONFIG` for
+/// `SaslConfigs.SASL_JAAS_CONFIG`) is removed, since CLAUDE.md §2 exports a
+/// constant only from the struct defining it. And no public const holds an
+/// `internal.*` key: Java defines those with `defineInternal` and removes them
+/// in minor releases (`internal.leave.group.on.close`, 4.2).
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].
@@ -1442,51 +2454,28 @@ struct PublicAudience {
     /// The dotted packages (below `org.apache.kafka`) carrying the
     /// unsupported-API disclaimer.
     unsupported: BTreeSet<String>,
-    allow: AllowList,
-    /// The malformed lines of the allow-list.
-    allow_errors: Vec<String>,
     /// Where the `[export] include` list is read from.
     cbindgen: PathBuf,
 }
 
 impl PublicAudience {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let public = parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default());
         // Read at the ref, never from the working tree: the tree is the
         // translated source (4.3.1), not the release whose disclaimers count.
         let unsupported = java::unsupported_packages_at_ref(java::AUDIENCE_REF).unwrap_or_default();
-        let (allow, allow_errors) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
-        PublicAudience {
-            index,
-            public,
-            unsupported,
-            allow,
-            allow_errors,
-            cbindgen: PathBuf::from(CBINDGEN_TOML),
-        }
+        PublicAudience { index, public, unsupported, cbindgen: PathBuf::from(CBINDGEN_TOML) }
     }
 
-    /// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`)
-    /// may not be public, one reason per rule it fails; empty when it may.
+    /// Why top-level Java class `fqn` may not be public; see [`audience_failures`].
     fn audience_failures(&self, fqn: &str) -> Vec<String> {
-        let path = fqn.strip_prefix(java::MARKER_PREFIX).unwrap_or(fqn);
-        let (package, _) = path.rsplit_once('.').unwrap_or(("", path));
-        let mut reasons = Vec::new();
-        if package.split('.').any(|seg| seg.contains("internal")) {
-            reasons.push(format!("its package `{package}` is internal"));
-        }
-        if self.unsupported.contains(package) {
-            reasons.push(format!("its package `{package}` is not a supported Kafka API"));
-        }
-        if !self.public.contains(fqn) {
-            reasons.push(format!("it is not `@InterfaceAudience.Public` in Kafka {}", java::AUDIENCE_REF));
-        }
-        reasons
+        audience_failures(&self.public, &self.unsupported, fqn)
     }
 
-    /// The Rust half: public items and the generated module.
-    fn check_rust(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// The Rust half: public items and the generated module. Each tag that lets
+    /// an item through is recorded in `used`.
+    fn check_rust(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         let mut checked = 0;
         for (module, name) in krate.public_names(|item| pub_def(item).map(|(name, _)| name)) {
             if module.first().is_some_and(|m| m == "ffi") {
@@ -1497,13 +2486,20 @@ impl PublicAudience {
             // Every item of the name (a type and a fn may share it through a macro).
             for (_, attrs) in m.items.iter().filter_map(pub_def).filter(|(n, _)| *n == name) {
                 checked += 1;
-                let full = format!("{}::{name}", module_path(&module));
                 // The path §2 imports it by: its file module dropped.
                 let canonical = match module.split_last() {
                     Some((file_mod, parent)) if *file_mod == java::snake_case(&name) => {
                         format!("{}::{name}", module_path(parent))
                     },
-                    _ => full.clone(),
+                    _ => format!("{}::{name}", module_path(&module)),
+                };
+                // Whether the item carries `tag`, recording it as used if so.
+                let mut tagged = |tag| {
+                    let hit = has_tag(&attrs, tag);
+                    if hit {
+                        used.insert(TagSite::new(&m.file, None, &name, tag));
+                    }
+                    hit
                 };
                 let classes: BTreeSet<String> = java_markers(&attrs)
                     .iter()
@@ -1511,14 +2507,11 @@ impl PublicAudience {
                     .map(str::to_string)
                     .collect();
                 let tops: Vec<String> = classes.iter().map(|c| top_level_class(c).to_string()).collect();
-                let mut keys: Vec<&str> = vec![&full, &canonical];
-                keys.extend(classes.iter().map(String::as_str));
-                keys.extend(tops.iter().map(String::as_str));
                 if classes.is_empty() {
-                    if !self.allow.allows(&keys) {
+                    if !tagged(RUST_ONLY) {
                         findings.push(format!(
                             "{file}: `{canonical}` is public but carries no Java marker; mark the class it translates, or \
-                             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public"
+                             tag it #[doc(alias = \"{RUST_ONLY}\")] under a comment giving the reason it is public"
                         ));
                     }
                     continue;
@@ -1530,7 +2523,7 @@ impl PublicAudience {
                         (!reasons.is_empty()).then(|| format!("`{top}`: {}", reasons.join(", ")))
                     })
                     .collect();
-                if !failures.is_empty() && !self.allow.allows(&keys) {
+                if !failures.is_empty() && !tagged(PUBLIC_IN_RUST) {
                     findings.push(format!(
                         "{file}: `{canonical}` is public but translates {}",
                         failures.join("; ")
@@ -1538,12 +2531,12 @@ impl PublicAudience {
                 }
             }
         }
-        checked + self.check_members(krate, findings) + check_generated_module(krate, findings)
+        checked + self.check_members(krate, findings, used) + check_generated_module(krate, findings)
     }
 
     /// The member half: no public method translates a Java method that is not
-    /// `public`.
-    fn check_members(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// `public`, unless it is tagged [`PUBLIC_IN_RUST`] (recorded in `used`).
+    fn check_members(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         let mut checked = 0;
         for (file, item) in public_items(krate) {
             for marker in java_markers(&item.attrs) {
@@ -1557,7 +2550,8 @@ impl PublicAudience {
                     continue;
                 };
                 checked += 1;
-                if self.allow.allows(&[marker.as_str()]) {
+                if has_tag(&item.attrs, PUBLIC_IN_RUST) {
+                    used.insert(TagSite::new(file, item.owner.as_deref(), &item.name, PUBLIC_IN_RUST));
                     continue;
                 }
                 let visibility = match visibility {
@@ -1592,6 +2586,11 @@ impl PublicAudience {
     /// (possibly nested) marker and its top-level marker; `None` if it names
     /// none.
     fn resolve_ffi_class(&self, pkg: &[&str], class: &str) -> Option<(String, String)> {
+        if pkg.is_empty() {
+            // A package-less `kafka_<Type>_…` stands for a JDK type (`kafka_List_t`,
+            // CLAUDE.md §4), never a Kafka class; its `rust-only` tag admits it.
+            return None;
+        }
         let dotted = pkg.join(".");
         let packages = [format!("clients.{dotted}"), dotted];
         let mut names = vec![class.to_string()];
@@ -1649,9 +2648,13 @@ impl PublicAudience {
 
     /// The C half: the FFI symbols and the header's include list, reported once
     /// per `kafka_<pkg>_<Class>` prefix.
-    fn check_c(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// A prefix is let through by a tag on any of its symbols, which are then
+    /// recorded in `used`.
+    fn check_c(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         // symbol -> file it is declared in.
         let mut symbols: BTreeMap<String, String> = BTreeMap::new();
+        // prefix -> the tags on its symbols.
+        let mut tags: BTreeMap<String, Vec<TagSite>> = BTreeMap::new();
         for (path, module) in &krate.modules {
             if path.first().is_none_or(|m| m != "ffi") {
                 continue;
@@ -1666,6 +2669,12 @@ impl PublicAudience {
                     _ => continue,
                 };
                 if matches!(item, syn::Item::Fn(_)) || (name.starts_with("kafka_") && name.ends_with("_t")) {
+                    if let Some((_, attrs)) = item_def(item) {
+                        for tag in [RUST_ONLY, PUBLIC_IN_RUST].into_iter().filter(|t| has_tag(&attrs, t)) {
+                            let site = TagSite::new(&module.file, None, &name, tag);
+                            tags.entry(ffi_prefix(&name)).or_default().push(site);
+                        }
+                    }
                     symbols.entry(name).or_insert_with(|| module.file.display().to_string());
                 }
             }
@@ -1679,15 +2688,19 @@ impl PublicAudience {
         let mut by_prefix: BTreeMap<String, (String, usize, Option<String>)> = BTreeMap::new();
         for (symbol, file) in &symbols {
             let parsed = ffi_class(symbol);
-            let prefix = parsed
-                .as_ref()
-                .map_or_else(|| symbol.clone(), |(pkg, class)| format!("kafka_{}_{class}", pkg.join("_")));
+            let prefix = ffi_prefix(symbol);
             if let Some(entry) = by_prefix.get_mut(&prefix) {
                 entry.1 += 1;
                 continue;
             }
+            // Whether a symbol of the prefix carries `tag`, recording the tags if so.
+            let mut tagged = |tag| {
+                let sites: Vec<&TagSite> = tags.get(&prefix).into_iter().flatten().filter(|s| s.tag == tag).collect();
+                used.extend(sites.iter().map(|s| (*s).clone()));
+                !sites.is_empty()
+            };
             let reason = match parsed.as_ref().and_then(|(pkg, class)| self.resolve_ffi_class(pkg, class)) {
-                None if self.allow.allows(&[symbol, &prefix]) => None,
+                None if tagged(RUST_ONLY) => None,
                 None => Some(format!(
                     "names no Java class (`kafka_<pkg>_<Class>_…`, with `<pkg>` the Java package without \
                      `clients`){}",
@@ -1697,7 +2710,7 @@ impl PublicAudience {
                 )),
                 Some((class, top)) => {
                     let failures = self.audience_failures(&top);
-                    if failures.is_empty() || self.allow.allows(&[symbol, &prefix, &class, &top]) {
+                    if failures.is_empty() || tagged(PUBLIC_IN_RUST) {
                         None
                     } else {
                         Some(format!("binds `{class}`, which may not be public: {}", failures.join(", ")))
@@ -1715,24 +2728,81 @@ impl PublicAudience {
     }
 }
 
+/// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`) may
+/// not be public by CLAUDE.md §2, one reason per rule it fails; empty when it
+/// may. `public` is the [`PUBLIC_AUDIENCE_LIST`], `unsupported` the dotted
+/// packages carrying the unsupported-API disclaimer.
+fn audience_failures(public: &BTreeSet<String>, unsupported: &BTreeSet<String>, fqn: &str) -> Vec<String> {
+    let path = fqn.strip_prefix(java::MARKER_PREFIX).unwrap_or(fqn);
+    let (package, _) = path.rsplit_once('.').unwrap_or(("", path));
+    let mut reasons = Vec::new();
+    if package.split('.').any(|seg| seg.contains("internal")) {
+        reasons.push(format!("its package `{package}` is internal"));
+    }
+    if unsupported.contains(package) {
+        reasons.push(format!("its package `{package}` is not a supported Kafka API"));
+    }
+    if !public.contains(fqn) {
+        reasons.push(format!("it is not `@InterfaceAudience.Public` in Kafka {}", java::AUDIENCE_REF));
+    }
+    reasons
+}
+
 /// The name a public item defines, and its attributes: a `pub` struct, enum,
 /// union, trait, type alias, fn, const or static, or an error macro's type
 /// (always `pub`).
 fn pub_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
-    let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
+    let vis = match item {
+        syn::Item::Struct(s) => &s.vis,
+        syn::Item::Enum(e) => &e.vis,
+        syn::Item::Union(u) => &u.vis,
+        syn::Item::Trait(t) => &t.vis,
+        syn::Item::Type(t) => &t.vis,
+        syn::Item::Fn(f) => &f.vis,
+        syn::Item::Const(c) => &c.vis,
+        syn::Item::Static(s) => &s.vis,
+        syn::Item::Macro(_) => return item_def(item),
+        _ => return None,
+    };
+    if matches!(vis, syn::Visibility::Public(_)) {
+        item_def(item)
+    } else {
+        None
+    }
+}
+
+/// [`pub_def`], whatever the item's visibility.
+fn item_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
     let (ident, attrs) = match item {
-        syn::Item::Struct(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
-        syn::Item::Enum(e) if is_pub(&e.vis) => (&e.ident, &e.attrs),
-        syn::Item::Union(u) if is_pub(&u.vis) => (&u.ident, &u.attrs),
-        syn::Item::Trait(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
-        syn::Item::Type(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
-        syn::Item::Fn(f) if is_pub(&f.vis) => (&f.sig.ident, &f.attrs),
-        syn::Item::Const(c) if is_pub(&c.vis) => (&c.ident, &c.attrs),
-        syn::Item::Static(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
+        syn::Item::Struct(s) => (&s.ident, &s.attrs),
+        syn::Item::Enum(e) => (&e.ident, &e.attrs),
+        syn::Item::Union(u) => (&u.ident, &u.attrs),
+        syn::Item::Trait(t) => (&t.ident, &t.attrs),
+        syn::Item::Type(t) => (&t.ident, &t.attrs),
+        syn::Item::Fn(f) => (&f.sig.ident, &f.attrs),
+        syn::Item::Const(c) => (&c.ident, &c.attrs),
+        syn::Item::Static(s) => (&s.ident, &s.attrs),
         syn::Item::Macro(m) => return error_macro_type_def(m).map(|def| (def.name, def.attrs)),
         _ => return None,
     };
     Some((ident.to_string(), attrs.clone()))
+}
+
+/// What `item` is declared as, with its article: `a struct`, `an enum`, `a
+/// trait`, `a type alias`, ... (an error macro's type is `an error type`).
+fn item_kind(item: &syn::Item) -> &'static str {
+    match item {
+        syn::Item::Struct(_) => "a struct",
+        syn::Item::Enum(_) => "an enum",
+        syn::Item::Union(_) => "a union",
+        syn::Item::Trait(_) => "a trait",
+        syn::Item::Type(_) => "a type alias",
+        syn::Item::Fn(_) => "a fn",
+        syn::Item::Const(_) => "a const",
+        syn::Item::Static(_) => "a static",
+        syn::Item::Macro(_) => "an error type",
+        _ => "an item",
+    }
 }
 
 /// The top-level class of a class marker: `…Outer$Nested` → `…Outer`.
@@ -1788,14 +2858,31 @@ fn is_no_mangle(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.meta.to_token_stream().to_string().contains("no_mangle"))
 }
 
-/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); `None`
-/// when it has no lower-case package segment followed by a PascalCase class.
+/// The prefix C `symbol` is reported under: `kafka_<pkg>_<Class>` (`kafka_<Class>`
+/// for a package-less helper), or the whole symbol when it names no class.
+fn ffi_prefix(symbol: &str) -> String {
+    ffi_class(symbol).map_or_else(
+        || symbol.to_string(),
+        |(pkg, class)| {
+            if pkg.is_empty() {
+                format!("kafka_{class}")
+            } else {
+                format!("kafka_{}_{class}", pkg.join("_"))
+            }
+        },
+    )
+}
+
+/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); the
+/// segments are empty for a package-less `kafka_<Class>_…` helper standing for
+/// a JDK type (`kafka_List_t`, CLAUDE.md §4). `None` when no PascalCase class
+/// follows the lower-case segments.
 fn ffi_class(symbol: &str) -> Option<(Vec<&str>, &str)> {
     let rest = symbol.strip_prefix("kafka_")?;
     let mut pkg = Vec::new();
     for seg in rest.split('_') {
         if seg.starts_with(|c: char| c.is_ascii_uppercase()) {
-            return (!pkg.is_empty()).then_some((pkg, seg));
+            return Some((pkg, seg));
         }
         if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
             return None;
@@ -1838,6 +2925,202 @@ fn parse_public_list(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+impl PublicAudience {
+    /// The configuration half (see the type's docs): every [`RUST_ONLY`] public
+    /// method of a type translating a subclass of [`ABSTRACT_CONFIG`] is a typed
+    /// accessor of a configuration key unless it takes a trait object. Returns
+    /// how many such methods were inspected.
+    fn check_configs(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") || !has_tag(&item.attrs, RUST_ONLY) {
+                continue;
+            }
+            let Some(owner) = &item.owner else { continue };
+            let Some(class) = krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .and_then(|attrs| java_markers(&attrs).iter().find_map(|marker| self.index.resolve(marker)))
+            else {
+                continue;
+            };
+            let qualified = format!(".{ABSTRACT_CONFIG}");
+            if !class.supertypes.iter().any(|s| s == ABSTRACT_CONFIG || s.ends_with(&qualified)) {
+                continue;
+            }
+            checked += 1;
+            if item
+                .types
+                .iter()
+                .any(|(role, ty)| role.starts_with("parameter") && names_trait_object(ty))
+            {
+                continue;
+            }
+            findings.push(format!(
+                "{}: `{owner}::{}` is a typed accessor of a configuration key on `{}`, a translation of an \
+                 `AbstractConfig`: make it `pub(crate)` so the string map stays the only typed input (`new(&props)` \
+                 validates it as Java's `ConfigDef` does), or take a trait object for a class-valued key (CLAUDE.md §2)",
+                file.display(),
+                item.name,
+                class.marker()
+            ));
+        }
+        checked
+    }
+}
+
+impl PublicAudience {
+    /// The constant half (see the type's docs). A public associated const
+    /// without a member marker translates the field of the same name on its
+    /// type's Java class, which must be `public` there; one naming no field of
+    /// that class must be tagged [`RUST_ONLY`]. And no public const holds an
+    /// [`INTERNAL_KEY_PREFIX`] key, whatever Java's visibility. A tag that lets
+    /// a const through is recorded in `used`. Returns how many consts were
+    /// inspected.
+    fn check_constants(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+                continue;
+            }
+            let name = item
+                .owner
+                .as_ref()
+                .map_or_else(|| item.name.clone(), |o| format!("{o}::{}", item.name));
+            let mut tagged = |tag| {
+                let hit = has_tag(&item.attrs, tag);
+                if hit {
+                    used.insert(TagSite::new(file, item.owner.as_deref(), &item.name, tag));
+                }
+                hit
+            };
+            if let Some(key) = item.str_value.as_deref().filter(|v| v.starts_with(INTERNAL_KEY_PREFIX)) {
+                checked += 1;
+                if !tagged(PUBLIC_IN_RUST) {
+                    findings.push(format!(
+                        "{}: `{name}` is public but holds `{key}`, an internal configuration key Java may remove in a \
+                         minor release; make it `pub(crate)`",
+                        file.display()
+                    ));
+                }
+                continue;
+            }
+            // An associated const: a method is skipped above, and only an
+            // associated item has an owner.
+            let Some(owner) = &item.owner else { continue };
+            if java_markers(&item.attrs).iter().any(|m| JavaIndex::marker_member(m).is_some()) {
+                // `check_members` resolves a marked member.
+                continue;
+            }
+            let Some(class) = krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .and_then(|attrs| java_markers(&attrs).iter().find_map(|marker| self.index.resolve(marker)))
+            else {
+                continue;
+            };
+            checked += 1;
+            match self.field(class, &item.name) {
+                Some((_, java::Visibility::Public)) => {},
+                Some((declaring, visibility)) => {
+                    if !tagged(PUBLIC_IN_RUST) {
+                        findings.push(format!(
+                            "{}: `{name}` is public but translates `{}#{}`, which is {} in Java; make it `pub(crate)`",
+                            file.display(),
+                            declaring.marker(),
+                            item.name,
+                            visibility.keyword()
+                        ));
+                    }
+                },
+                None => {
+                    if !tagged(RUST_ONLY) {
+                        findings.push(format!(
+                            "{}: `{name}` is public but `{}` declares no field `{}`; give it the name of the public \
+                             Java field it translates, make it `pub(crate)`, or tag it #[doc(alias = \"{RUST_ONLY}\")] \
+                             under a comment giving the reason it is public",
+                            file.display(),
+                            class.marker(),
+                            item.name
+                        ));
+                    }
+                },
+            }
+        }
+        checked
+    }
+}
+
+impl PublicAudience {
+    /// The field `name` as Java code reaches it through `class`: declared
+    /// there or, since Java inherits static fields, on a supertype
+    /// (`ConsumerConfig.CONFIG_PROVIDERS_CONFIG` is `AbstractConfig`'s). With
+    /// the class declaring it and its visibility there.
+    fn field<'a>(&'a self, class: &'a java::JavaClass, name: &str) -> Option<(&'a java::JavaClass, java::Visibility)> {
+        self.field_from(class, name, &mut BTreeSet::new())
+    }
+
+    fn field_from<'a>(
+        &'a self,
+        class: &'a java::JavaClass,
+        name: &str,
+        seen: &mut BTreeSet<String>,
+    ) -> Option<(&'a java::JavaClass, java::Visibility)> {
+        if !seen.insert(class.marker()) {
+            return None;
+        }
+        if let Some(&visibility) = class.field_visibility.get(name) {
+            return Some((class, visibility));
+        }
+        class
+            .supertypes
+            .iter()
+            .filter_map(|s| self.supertype(class, s))
+            .find_map(|supertype| self.field_from(supertype, name, seen))
+    }
+
+    /// The class supertype `written` of `class` names: in `class`'s package,
+    /// fully qualified below `org.apache.kafka`, or else the only class of that
+    /// simple name (an imported one, `AbstractConfig`).
+    fn supertype(&self, class: &java::JavaClass, written: &str) -> Option<&java::JavaClass> {
+        let classes = || self.index.classes.iter().filter(|c| !c.is_test);
+        let exact = classes().find(|c| {
+            let nested = c.path.join(".");
+            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
+        });
+        exact.or_else(|| {
+            let simple = written.rsplit('.').next().unwrap_or(written);
+            let mut named = classes().filter(|c| c.name() == simple);
+            match (named.next(), named.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        })
+    }
+}
+
+/// The prefix of the configuration keys Java defines with `defineInternal`
+/// and removes in minor releases (`internal.leave.group.on.close`, 4.2).
+const INTERNAL_KEY_PREFIX: &str = "internal.";
+
+/// Java's base class of every client configuration,
+/// `org.apache.kafka.common.config.AbstractConfig`, as a `supertypes` entry
+/// names it.
+const ABSTRACT_CONFIG: &str = "AbstractConfig";
+
+/// Whether `ty` holds a trait object anywhere: `Box<dyn Partitioner<K, V>>`,
+/// `Vec<Arc<dyn ConsumerInterceptor<K, V>>>`. `impl Trait` does not count:
+/// `impl Into<String>` is a plain string.
+fn names_trait_object(ty: &syn::Type) -> bool {
+    struct Finder(bool);
+    impl syn::visit::Visit<'_> for Finder {
+        fn visit_type_trait_object(&mut self, _: &syn::TypeTraitObject) {
+            self.0 = true;
+        }
+    }
+    let mut finder = Finder(false);
+    syn::visit::Visit::visit_type(&mut finder, ty);
+    finder.0
+}
+
 impl Rule for PublicAudience {
     fn name(&self) -> &'static str {
         "check-public-audience"
@@ -1863,12 +3146,28 @@ impl Rule for PublicAudience {
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
-        findings.extend(self.allow_errors.iter().cloned());
-        let checked = self.check_rust(krate, findings) + self.check_c(krate, findings);
-        for entry in self.allow.entries.iter().filter(|e| !e.used.get()) {
+        let mut used = BTreeSet::new();
+        let checked = self.check_rust(krate, findings, &mut used)
+            + self.check_c(krate, findings, &mut used)
+            + self.check_configs(krate, findings)
+            + self.check_constants(krate, findings, &mut used);
+        // `check-java-name` lets a `rust-only` public method through.
+        used.extend(
+            unmarked_public_methods(krate)
+                .0
+                .iter()
+                .filter(|m| m.rust_only && !m.owner_rust_only)
+                .map(UnmarkedMethod::tag_site),
+        );
+        for site in tag_sites(krate).difference(&used) {
+            let name = site
+                .owner
+                .as_ref()
+                .map_or_else(|| site.name.clone(), |o| format!("{o}::{}", site.name));
             findings.push(format!(
-                "{PUBLIC_AUDIENCE_ALLOWLIST}:{}: `{}` lets nothing through any more; remove it",
-                entry.line, entry.key
+                "{}: `{name}` is tagged `{}` but would pass without it; remove the tag",
+                site.file.display(),
+                site.tag
             ));
         }
         checked
@@ -1878,11 +3177,21 @@ impl Rule for PublicAudience {
         "   Make the item `pub(crate)` and drop its C binding: only a class Java
    publishes may be public — outside `internal*` packages, outside packages whose
    package-info.java says \"not a supported Kafka API\", and annotated
-   `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item, or a deliberate
-   exception, goes in xtask/public-audience-allowlist.txt with its reason.
+   `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item (a C-only handle
+   included) is tagged #[doc(alias = \"rust-only\")], a deliberate exception
+   #[doc(alias = \"public-in-rust\")], under a `//` comment giving the reason;
+   for C, tag any symbol of the prefix, preferably its `_t` type.
    Likewise a public method may only translate a Java method that is `public`
    (an interface member without a modifier is): make the others `pub(crate)`,
-   or allow-list the method's marker with the reason.
+   or tag the method #[doc(alias = \"public-in-rust\")] with the reason.
+   A tag on an item that would pass without it is reported: remove it.
+   A Rust-only method of a configuration (a subclass of `AbstractConfig`) may
+   only set a class-valued key through a trait object: a typed getter or setter
+   of a plain key is `pub(crate)`, and users configure through the string map.
+   A public constant translates a `public` field of its class's Java class (or
+   one it inherits): a constant Java keeps non-public is `pub(crate)`, one that
+   re-declares another class's field is removed (CLAUDE.md §2), and a Rust-only
+   one is tagged; a constant holding an `internal.*` key is never public.
    A public signature naming a crate-private type is caught by rustc's
    `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }
@@ -1923,10 +3232,7 @@ impl DynCompatible {
     /// The reasons `t` is not dyn-compatible; empty when it is.
     fn violations(t: &syn::ItemTrait) -> Vec<String> {
         let mut reasons = Vec::new();
-        let is_async_trait = t
-            .attrs
-            .iter()
-            .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"));
+        let is_async_trait = is_async_trait(&t.attrs);
 
         if requires_sized(&t.generics) {
             reasons.push("trait-level `where Self: Sized`".to_string());
@@ -2058,6 +3364,987 @@ impl Rule for DynCompatible {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule: check-dyn-forwarding
+// ---------------------------------------------------------------------------
+
+/// Checks that a `Dyn<Name>` companion and its trait forward to each other
+/// method for method (CLAUDE.md §3, forward compatibility).
+///
+/// [`DynCompatible`] lets a performance-oriented trait `Name` (`Producer`) off
+/// with a dyn-compatible `Dyn<Name>` (`DynProducer`). The pair is three blocks
+/// kept in step by hand: the `Dyn<Name>` trait, the blanket
+/// `impl<P: Name> Dyn<Name> for P` and `impl Name for dyn Dyn<Name>`. A method
+/// Java adds to the interface compiles when added to `Name` alone if it has a
+/// default body, and a `dyn Dyn<Name>` then answers with that default instead
+/// of the boxed producer's override; a forward to the wrong method, or with
+/// its arguments swapped, compiles whenever the types agree. So for every
+/// public trait `Name` with a public trait `Dyn<Name>`:
+///
+///  - the two traits declare the same methods;
+///  - a blanket `impl Dyn<Name> for P` (`P` a type parameter) defines each of
+///    them as a call to `Name::<method>(self, <its parameters in order>)`;
+///  - an `impl Name for dyn Dyn<Name>` defines each of them, defaulted ones
+///    included, as a call to `Dyn<Name>::<method>(self, <parameters>)`.
+///
+/// The call may sit anywhere in the body (`Box::pin(…)`, `….await`).
+struct DynForwarding;
+
+/// One side of a `Name` / `Dyn<Name>` pair: what implementing it must forward to.
+struct Forward<'a> {
+    /// How a finding names the impl: `impl DynProducer for P`.
+    label: String,
+    /// The trait the bodies call: `Producer` for the blanket impl.
+    to: &'a str,
+}
+
+impl DynForwarding {
+    /// The method names of `t`, in declaration order.
+    fn methods(t: &syn::ItemTrait) -> Vec<String> {
+        t.items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The name of the trait `imp` implements, if it implements one.
+    fn implemented(imp: &syn::ItemImpl) -> Option<String> {
+        imp.trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .map(|s| s.ident.to_string())
+    }
+
+    /// Whether `imp` is for a bare type parameter of its own: `impl<P: X> Y for P`.
+    fn is_blanket(imp: &syn::ItemImpl) -> bool {
+        let syn::Type::Path(tp) = &*imp.self_ty else {
+            return false;
+        };
+        tp.qself.is_none()
+            && tp
+                .path
+                .get_ident()
+                .is_some_and(|ident| imp.generics.type_params().any(|p| p.ident == *ident))
+    }
+
+    /// Whether `imp` is for `dyn <dyn_name> + …`.
+    fn is_for_dyn(imp: &syn::ItemImpl, dyn_name: &str) -> bool {
+        let syn::Type::TraitObject(object) = &*imp.self_ty else {
+            return false;
+        };
+        object.bounds.iter().any(|bound| {
+            matches!(bound, syn::TypeParamBound::Trait(tb)
+                if tb.path.segments.last().is_some_and(|s| s.ident == dyn_name))
+        })
+    }
+
+    /// The parameter names of `sig` after the receiver; `None` for a
+    /// parameter that is not a plain name.
+    fn params(sig: &syn::Signature) -> Vec<Option<String>> {
+        sig.inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Receiver(_) => None,
+                syn::FnArg::Typed(pt) => Some(match &*pt.pat {
+                    syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                    _ => None,
+                }),
+            })
+            .collect()
+    }
+
+    /// Whether `f`'s body calls `<to>::<f's name>(self, <f's parameters>)`.
+    fn forwards(f: &syn::ImplItemFn, to: &str) -> bool {
+        struct Finder<'a> {
+            to: &'a str,
+            method: &'a syn::Ident,
+            args: Vec<String>,
+            found: bool,
+        }
+        impl syn::visit::Visit<'_> for Finder<'_> {
+            fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+                if let syn::Expr::Path(func) = &*call.func {
+                    let segments: Vec<_> = func.path.segments.iter().collect();
+                    let names_method = segments.len() >= 2
+                        && segments[segments.len() - 1].ident == *self.method
+                        && segments[segments.len() - 2].ident == self.to;
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            syn::Expr::Path(p) => p.path.get_ident().map_or_else(String::new, ToString::to_string),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    if names_method && args == self.args {
+                        self.found = true;
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let Some(params) = Self::params(&f.sig).into_iter().collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let mut finder = Finder {
+            to,
+            method: &f.sig.ident,
+            args: std::iter::once("self".to_string()).chain(params).collect(),
+            found: false,
+        };
+        syn::visit::Visit::visit_block(&mut finder, &f.block);
+        finder.found
+    }
+
+    /// Checks that `imp` defines each of `methods` as a forward to `side.to`.
+    fn check_impl(file: &Path, imp: &syn::ItemImpl, methods: &[String], side: &Forward, findings: &mut Vec<String>) {
+        for method in methods {
+            let defined = imp.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(f) if f.sig.ident == method => Some(f),
+                _ => None,
+            });
+            match defined {
+                None => findings.push(format!(
+                    "{}: `{}` does not define `{method}`; define it as a forward to `{}::{method}`",
+                    file.display(),
+                    side.label,
+                    side.to
+                )),
+                Some(f) if !Self::forwards(f, side.to) => {
+                    let params: Vec<String> = Self::params(&f.sig)
+                        .into_iter()
+                        .map(|p| p.unwrap_or_else(|| "_".to_string()))
+                        .collect();
+                    findings.push(format!(
+                        "{}: `{}`'s `{method}` does not call `{}::{method}({})`",
+                        file.display(),
+                        side.label,
+                        side.to,
+                        std::iter::once("self".to_string()).chain(params).collect::<Vec<_>>().join(", ")
+                    ));
+                },
+                Some(_) => {},
+            }
+        }
+    }
+}
+
+impl Rule for DynForwarding {
+    fn name(&self) -> &'static str {
+        "check-dyn-forwarding"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let traits: BTreeMap<String, (&ModPath, &syn::ItemTrait)> = krate
+            .public_types()
+            .iter()
+            .filter_map(|(path, name)| match krate.type_item(path, name) {
+                syn::Item::Trait(t) => Some((t.ident.to_string(), (krate.modules.get_key_value(path)?.0, t))),
+                _ => None,
+            })
+            .collect();
+        let impls: Vec<(&Path, &syn::ItemImpl)> = krate
+            .modules
+            .values()
+            .flat_map(|m| {
+                m.items.iter().filter_map(move |item| match item {
+                    syn::Item::Impl(imp) => Some((m.file.as_path(), imp)),
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let mut checked = 0;
+        for (name, (_, base)) in &traits {
+            let dyn_name = format!("Dyn{name}");
+            let Some((dyn_path, dyn_trait)) = traits.get(&dyn_name) else {
+                continue;
+            };
+            checked += 1;
+            let dyn_file = &krate.modules[*dyn_path].file;
+            let (base_methods, dyn_methods) = (Self::methods(base), Self::methods(dyn_trait));
+            for method in base_methods.iter().filter(|m| !dyn_methods.contains(m)) {
+                findings.push(format!(
+                    "{}: `{dyn_name}` lacks `{method}` of `{name}`; declare it and forward it both ways",
+                    dyn_file.display()
+                ));
+            }
+            for method in dyn_methods.iter().filter(|m| !base_methods.contains(m)) {
+                findings.push(format!(
+                    "{}: `{dyn_name}` declares `{method}`, which `{name}` lacks; remove it",
+                    dyn_file.display()
+                ));
+            }
+            let shared: Vec<String> = base_methods.iter().filter(|m| dyn_methods.contains(m)).cloned().collect();
+
+            let blanket = impls
+                .iter()
+                .find(|(_, imp)| Self::implemented(imp).as_deref() == Some(&dyn_name) && Self::is_blanket(imp));
+            let side = Forward { label: format!("impl {dyn_name} for P"), to: name };
+            match blanket {
+                Some((file, imp)) => Self::check_impl(file, imp, &shared, &side, findings),
+                None => findings.push(format!(
+                    "{}: no blanket `impl<P: {name}> {dyn_name} for P`; every `{name}` must be a `{dyn_name}`",
+                    dyn_file.display()
+                )),
+            }
+            let on_dyn = impls.iter().find(|(_, imp)| {
+                Self::implemented(imp).as_deref() == Some(name.as_str()) && Self::is_for_dyn(imp, &dyn_name)
+            });
+            let side = Forward { label: format!("impl {name} for dyn {dyn_name}"), to: &dyn_name };
+            match on_dyn {
+                Some((file, imp)) => Self::check_impl(file, imp, &shared, &side, findings),
+                None => findings.push(format!(
+                    "{}: no `impl {name} for dyn {dyn_name}`; a `dyn {dyn_name}` must be a `{name}`",
+                    dyn_file.display()
+                )),
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Keep a `Dyn<Name>` companion in step with `Name` (CLAUDE.md §3): the two
+   traits declare the same methods; the blanket `impl<P: Name> Dyn<Name> for P`
+   defines each as `Name::<method>(self, <parameters>)` (boxed as needed), and
+   `impl Name for dyn Dyn<Name>` defines each, defaulted ones included, as
+   `Dyn<Name>::<method>(self, <parameters>)`, so a boxed implementation's
+   overrides are the ones a trait object runs."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-consumer-handle
+// ---------------------------------------------------------------------------
+
+/// Checks that `ConsumerHandle`'s public methods are exactly the `Consumer`
+/// methods a rebalance listener or commit callback may call back into
+/// (`consumer-threading.md` §31, KIP-1306).
+///
+/// `ConsumerHandle` is the reentrant view of a consumer: the listener runs
+/// inside the caller's `poll()`, which holds the consumer `&mut`, so the
+/// listener reaches the consumer through this `&self` handle instead. KIP-1306
+/// (KAFKA-20385, Kafka 4.5) names that view `RebalanceConsumer`: the `Consumer`
+/// interface minus the methods that would re-enter or end the running call —
+/// `poll`, `close`, every `subscribe`, `unsubscribe`, `assign`, `wakeup`,
+/// `enforceRebalance` and the two metric-subscription methods — and minus
+/// `subscription()` and `metrics()`, which it does not carry either. The handle
+/// is `rust-only` (Java passes a `RebalanceConsumer` into the callback; Rust
+/// captures a handle), so `check-java-name` skips its methods and nothing else
+/// ties them to the trait.
+///
+/// One difference from `RebalanceConsumer`: the handle keeps `wakeup`. Java's
+/// `Consumer.wakeup()` is the one method another thread may call, on the
+/// consumer object itself, so KIP-1306 has no need to put it on the callback
+/// view. The Rust consumer's methods take `&mut self`, so no other thread can
+/// hold the consumer; the `Send + Sync` handle is the only object through which
+/// Java's cross-thread `wakeup()` contract is honoured. So, with the `Consumer`
+/// trait as the contract:
+///
+///  - every `Consumer` method outside that set is a `pub fn` of the inherent
+///    `impl ConsumerHandle`, taking `&self` and the trait method's parameters,
+///    returning the trait method's type — `impl Future<Output = R> + Send`
+///    where the trait method is `async fn … -> R`;
+///  - no method of that set, nor an overload of one (`close_with_options`,
+///    `subscribe_with_topics`), is a `pub fn` of the handle;
+///  - every `pub fn` of the handle is a `Consumer` method: a handle-only name
+///    (`commit_async_offsets`) is off the §2 overload scheme the trait follows.
+///
+/// A `pub(crate)` method is not checked: the C binding reads `metrics()` and the
+/// mock's flags through such methods so they answer while another call holds
+/// the consumer, as Java's unguarded `metrics()` does.
+struct ConsumerHandleSurface;
+
+/// A method signature reduced to what the rule compares: receiver, named
+/// parameters and return type, as normalized token strings.
+#[derive(PartialEq, Eq)]
+struct HandleSig {
+    name: String,
+    receiver: String,
+    params: Vec<(String, String)>,
+    ret: String,
+}
+
+impl std::fmt::Display for HandleSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fn {}({}", self.name, self.receiver)?;
+        for (name, ty) in &self.params {
+            write!(f, ", {name}: {ty}")?;
+        }
+        write!(f, ")")?;
+        if self.ret != "()" {
+            write!(f, " -> {}", self.ret)?;
+        }
+        Ok(())
+    }
+}
+
+impl ConsumerHandleSurface {
+    /// The module and name of the trait that is the contract.
+    const TRAIT_MODULE: &'static [&'static str] = &["consumer"];
+    const TRAIT: &'static str = "Consumer";
+    /// The handle the rule checks.
+    const HANDLE: &'static str = "ConsumerHandle";
+    /// The §2 base names of the `Consumer` methods a listener may not call,
+    /// KIP-1306's `RebalanceConsumer` omissions in Rust spelling except
+    /// `wakeup` (see the type's documentation), plus `handle`, the Rust-only
+    /// accessor that yields the handle itself.
+    const EXCLUDED: &'static [&'static str] = &[
+        "poll",
+        "close",
+        "subscribe",
+        "unsubscribe",
+        "assign",
+        "enforce_rebalance",
+        "subscription",
+        "metrics",
+        "handle",
+    ];
+
+    /// The §2 base name of `method`: `close_with_options` -> `close`.
+    fn base(method: &str) -> &str {
+        method.split("_with_").next().unwrap_or(method)
+    }
+
+    fn is_excluded(method: &str) -> bool {
+        Self::EXCLUDED.contains(&Self::base(method))
+    }
+
+    /// The finding for an excluded `method` the handle defines.
+    fn excluded_finding(file: &Path, method: &str) -> String {
+        let base = Self::base(method);
+        let overload = if base == method {
+            String::new()
+        } else {
+            format!(", an overload of `{base}`,")
+        };
+        format!(
+            "{}: `{}` defines `{method}`{overload} which KIP-1306's `RebalanceConsumer` keeps from a listener; \
+             remove it",
+            file.display(),
+            Self::HANDLE
+        )
+    }
+
+    /// `ty`'s tokens with every path reduced to its last segment, so the
+    /// handle's `crate::consumer::OffsetCommitCallback` equals the trait's
+    /// imported `OffsetCommitCallback`.
+    fn normalize(ty: &syn::Type) -> String {
+        let mut s = compact(ty);
+        while let Some(end) = s.find("::") {
+            let start = s[..end]
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            s.replace_range(start..end + 2, "");
+        }
+        s
+    }
+
+    /// The return type as the rule compares it: `()` for none, and for an
+    /// `async fn` the `impl Future` its handle counterpart must return. The
+    /// built type is re-parsed so both sides are spaced by [`compact`].
+    fn ret(sig: &syn::Signature) -> String {
+        let inner = match &sig.output {
+            syn::ReturnType::Default => "()".to_string(),
+            syn::ReturnType::Type(_, ty) => Self::normalize(ty),
+        };
+        if sig.asyncness.is_none() {
+            return inner;
+        }
+        let future = format!("impl Future<Output = {inner}> + Send");
+        syn::parse_str::<syn::Type>(&future).map_or(future, |ty| Self::normalize(&ty))
+    }
+
+    /// `sig` reduced for comparison; `receiver` overrides the receiver, which
+    /// is how the expected handle signature is derived from a trait method.
+    fn reduce(sig: &syn::Signature, receiver: Option<&str>) -> HandleSig {
+        let mut actual_receiver = "self".to_string();
+        let mut params = Vec::new();
+        for arg in &sig.inputs {
+            match arg {
+                syn::FnArg::Receiver(r) => {
+                    actual_receiver = match (&r.reference, &r.mutability) {
+                        (Some(_), Some(_)) => "&mut self",
+                        (Some(_), None) => "&self",
+                        (None, _) => "self",
+                    }
+                    .to_string();
+                },
+                syn::FnArg::Typed(pt) => {
+                    let name = match &*pt.pat {
+                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        other => compact(other),
+                    };
+                    params.push((name, Self::normalize(&pt.ty)));
+                },
+            }
+        }
+        HandleSig {
+            name: sig.ident.to_string(),
+            receiver: receiver.map_or(actual_receiver, str::to_string),
+            params,
+            ret: Self::ret(sig),
+        }
+    }
+
+    /// The `pub fn`s of every inherent `impl ConsumerHandle`, with their file.
+    fn handle_methods(krate: &Crate) -> Vec<(&Path, &syn::ImplItemFn)> {
+        let mut out = Vec::new();
+        for module in krate.modules.values() {
+            for item in &module.items {
+                let syn::Item::Impl(imp) = item else {
+                    continue;
+                };
+                if imp.trait_.is_some() {
+                    continue;
+                }
+                let syn::Type::Path(tp) = &*imp.self_ty else {
+                    continue;
+                };
+                if tp.path.segments.last().is_none_or(|s| s.ident != Self::HANDLE) {
+                    continue;
+                }
+                for item in &imp.items {
+                    if let syn::ImplItem::Fn(f) = item {
+                        if matches!(f.vis, syn::Visibility::Public(_)) {
+                            out.push((module.file.as_path(), f));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Rule for ConsumerHandleSurface {
+    fn name(&self) -> &'static str {
+        "check-consumer-handle"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let module_path: ModPath = Self::TRAIT_MODULE.iter().map(ToString::to_string).collect();
+        let Some(module) = krate.modules.get(&module_path) else {
+            return 0;
+        };
+        let Some(consumer) = module.items.iter().find_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == Self::TRAIT => Some(t),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let trait_methods: Vec<&syn::TraitItemFn> = consumer
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let handle_methods = Self::handle_methods(krate);
+        let handle_file = handle_methods.first().map_or(module.file.as_path(), |(file, _)| file);
+        let handle = Self::HANDLE;
+        let contract = Self::TRAIT;
+
+        for tm in &trait_methods {
+            let name = tm.sig.ident.to_string();
+            let defined = handle_methods.iter().find(|(_, f)| f.sig.ident == name);
+            if Self::is_excluded(&name) {
+                if let Some((file, _)) = defined {
+                    findings.push(Self::excluded_finding(file, &name));
+                }
+                continue;
+            }
+            let expected = Self::reduce(&tm.sig, Some("&self"));
+            match defined {
+                None => findings.push(format!(
+                    "{}: `{handle}` lacks `{name}` of `{contract}`; define it as `{expected}`",
+                    handle_file.display()
+                )),
+                Some((file, f)) => {
+                    let actual = Self::reduce(&f.sig, None);
+                    if actual != expected {
+                        findings.push(format!(
+                            "{}: `{handle}::{name}` is `{actual}`; `{contract}::{name}` needs `{expected}`",
+                            file.display()
+                        ));
+                    }
+                },
+            }
+        }
+        for (file, f) in &handle_methods {
+            let name = f.sig.ident.to_string();
+            if trait_methods.iter().any(|tm| tm.sig.ident == name) {
+                continue;
+            }
+            if Self::is_excluded(&name) {
+                findings.push(Self::excluded_finding(file, &name));
+            } else {
+                findings.push(format!(
+                    "{}: `{handle}` defines `{name}`, which `{contract}` lacks; a handle method is a `{contract}` \
+                     method under its CLAUDE.md §2 name",
+                    file.display()
+                ));
+            }
+        }
+        1
+    }
+
+    fn hint(&self) -> &'static str {
+        "   `ConsumerHandle` is the `Consumer` a rebalance listener or commit callback
+   calls back into (consumer-threading.md §31; KIP-1306's `RebalanceConsumer`).
+   Keep its `pub fn`s equal to the `Consumer` trait's methods, each taking
+   `&self` and the trait method's parameters and returning its type (an
+   `async fn … -> R` becomes `impl Future<Output = R> + Send`), minus `poll`,
+   `close`, `subscribe`, `unsubscribe`, `assign`, `enforce_rebalance`,
+   `subscription`, `metrics` and `handle` with their `_with_` overloads.
+   `wakeup` stays: the handle is the only `Send + Sync` object another thread
+   can call it on. A handle-only method has no Java counterpart: add it to
+   `Consumer` under its CLAUDE.md §2 name or drop it."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-consumer-receiver
+// ---------------------------------------------------------------------------
+
+/// Checks that every `Consumer` / `DynConsumer` method takes `&mut self`,
+/// except `wakeup`, `metrics` and `handle` (`consumer-threading.md` §1–§2).
+///
+/// Java's `KafkaConsumer` is single-threaded: its methods run
+/// `acquireAndEnsureOpen()`, which throws `ConcurrentModificationException`
+/// when a second thread is inside the consumer. Rust enforces that at compile
+/// time: the consumer is `Send + !Sync`, and its guarded methods take
+/// `&mut self`, so no two calls can overlap. A method taking `&self` would
+/// compile today and stay callable through a shared reference forever after,
+/// so an implementation that later needs to mutate state for it (Java adding
+/// guarded work to a getter) could not, without a breaking change.
+///
+/// A method keeps `&self` only when Java leaves it outside the guard, plus the
+/// Rust-only `handle`. Java's unguarded methods are `wakeup()` (cross-thread
+/// by design), `metrics()`, `clientInstanceId(Duration)`,
+/// `registerMetricForSubscription` and `unregisterMetricFromSubscription`
+/// (`AsyncKafkaConsumer.java:887-902,1301,1855-1861`); the last three are not
+/// translated yet, and each joins [`Self::SHARED`] when it is. `handle` hands
+/// out the `Send + Sync` handle for callbacks and other tasks.
+///
+/// Scope: the public traits named `Consumer` and `DynConsumer`. Either missing
+/// is a finding, so the rule cannot silently check nothing.
+struct ConsumerReceiver;
+
+impl ConsumerReceiver {
+    /// The traits whose methods are checked.
+    const TRAITS: [&'static str; 2] = ["Consumer", "DynConsumer"];
+
+    /// The methods that take `&self`: the translated methods Java leaves
+    /// outside `acquireAndEnsureOpen()`, and the Rust-only `handle`. When
+    /// `client_instance_id`, `register_metric_for_subscription` or
+    /// `unregister_metric_from_subscription` is translated, it is added here.
+    const SHARED: [&'static str; 3] = ["wakeup", "metrics", "handle"];
+
+    /// The receiver of `sig` as written: `&mut self`, `&self`, `self`, or
+    /// `None` for an associated function.
+    fn receiver(sig: &syn::Signature) -> Option<&'static str> {
+        sig.inputs.iter().find_map(|arg| match arg {
+            syn::FnArg::Receiver(r) => Some(match (&r.reference, &r.mutability) {
+                (Some(_), Some(_)) => "&mut self",
+                (Some(_), None) => "&self",
+                (None, _) => "self",
+            }),
+            syn::FnArg::Typed(_) => None,
+        })
+    }
+}
+
+impl Rule for ConsumerReceiver {
+    fn name(&self) -> &'static str {
+        "check-consumer-receiver"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for name in Self::TRAITS {
+            let found = krate.public_types().into_iter().find_map(|(path, ident)| {
+                if ident != name {
+                    return None;
+                }
+                match krate.type_item(&path, &ident) {
+                    syn::Item::Trait(t) => Some((krate.modules[&path].file.clone(), t)),
+                    _ => None,
+                }
+            });
+            let Some((file, t)) = found else {
+                findings.push(format!("no public trait `{name}`; the rule checks its method receivers"));
+                continue;
+            };
+            for item in &t.items {
+                let syn::TraitItem::Fn(f) = item else {
+                    continue;
+                };
+                checked += 1;
+                let method = f.sig.ident.to_string();
+                let expected = if Self::SHARED.contains(&method.as_str()) {
+                    "&self"
+                } else {
+                    "&mut self"
+                };
+                let actual = Self::receiver(&f.sig).unwrap_or("no receiver");
+                if actual != expected {
+                    findings.push(format!(
+                        "{}: `{name}::{method}` takes `{actual}`; it must take `{expected}`",
+                        file.display()
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   The consumer is single-threaded, as Java's `acquireAndEnsureOpen()` makes it:
+   every `Consumer` / `DynConsumer` method Java guards takes `&mut self`, so the
+   compiler rules out two overlapping calls and a getter can later mutate state
+   without a breaking change. A method takes `&self` only when Java leaves it
+   unguarded (`wakeup`, `metrics`; `client_instance_id`,
+   `register_metric_for_subscription` and `unregister_metric_from_subscription`
+   once translated, added to `SHARED`), plus the Rust-only `handle`
+   (consumer-threading.md §1-§2). A guarded getter that cannot fail in Java's
+   sense panics with Java's message instead of taking `&self`."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-send-future
+// ---------------------------------------------------------------------------
+
+/// Checks that no public method is a native `async fn` (CLAUDE.md §3, forward
+/// compatibility).
+///
+/// The future of an `async fn` is `Send` exactly when everything its body
+/// holds across an `.await` is, and the compiler infers that from the body.
+/// A caller spawning it on a multi-threaded runtime depends on the inference;
+/// a later change that keeps a non-`Send` value (an `Rc`, a `MutexGuard`)
+/// across an `.await` removes the `Send` and breaks that caller, with nothing
+/// in the signature having changed. Declaring
+/// `fn name(…) -> impl Future<Output = T> + Send` with an `async move` body
+/// makes `Send` part of the contract, so such a change fails to compile in
+/// this crate instead, as the `Producer` trait already does.
+///
+/// An `#[async_trait]` method is exempt: the macro boxes its future as
+/// `Pin<Box<dyn Future + Send>>`, `Send` included in the signature.
+///
+/// Scope: the public fns of [`public_items`], outside the C FFI module.
+struct SendFuture;
+
+impl Rule for SendFuture {
+    fn name(&self) -> &'static str {
+        "check-send-future"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (file, item) in public_items(krate) {
+            if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+                continue;
+            }
+            checked += 1;
+            if item.is_async {
+                let name = item
+                    .owner
+                    .as_ref()
+                    .map_or_else(|| item.name.clone(), |o| format!("{o}::{}", item.name));
+                findings.push(format!(
+                    "{}: `{name}` is a public `async fn`, whose future is `Send` only while its body keeps it so; \
+                     declare `fn {}(…) -> impl Future<Output = …> + Send` with an `async move` body",
+                    file.display(),
+                    item.name
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   A public `async fn` leaves `Send` to inference from its body. Write
+   `fn name(&self, …) -> impl Future<Output = T> + Send + '_` (edition 2024
+   captures the parameters' lifetimes) whose body is `async move { … }`, so a
+   change that drops `Send` fails here rather than in a caller's `tokio::spawn`.
+   `#[async_trait]` methods already box a `Send` future and are exempt."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-error-predicate
+// ---------------------------------------------------------------------------
+
+/// The module the crate's flat error enum lives in.
+const ERROR_MODULE: [&str; 2] = ["common", "error"];
+
+/// Checks that every variant of `common::Error` has its class predicate
+/// (CLAUDE.md §3, forward compatibility).
+///
+/// Java's `catch (TopicExistsException e)` also catches a subclass a later Kafka
+/// release adds. Here that subclass becomes a new variant, so a caller's
+/// `matches!(e, Error::TopicExists(_))` would miss it, while
+/// `e.is_topic_exists_error()` keeps matching once the new payload lists its
+/// parent's predicate. So users classify with predicates, and every variant needs
+/// one: `is_` + its payload type snake_cased with a trailing `Error` dropped +
+/// `_error` (`TopicExistsError` → `is_topic_exists_error`, `KafkaError` →
+/// `is_kafka_error`).
+///
+/// A predicate is spelled out in several places. Missing any one of them
+/// compiles, but then quietly gives the wrong answer or isn't reachable, so this
+/// rule checks every one:
+///
+///  - a method on `ErrorHierarchy`, so a payload can override it — an inherent
+///    `matches!` could never answer for a future subclass;
+///  - the variant's own payload answering `true`: its `kafka_error_type!` /
+///    `message_only_error!` `extends:` list names it, or its hand-written
+///    `impl ErrorHierarchy` overrides it.
+///
+/// And for every `ErrorHierarchy` method, intermediate classes included:
+///
+///  - a forwarder in `impl ErrorHierarchy for Box<T>` — without it a boxed
+///    payload silently answers the trait's `false`;
+///  - a public forwarder on `Error` calling the trait through UFCS (a method
+///    call would resolve to the inherent method itself and recurse);
+///  - a C export `kafka_common_Error_<predicate>` in `src/ffi` (CLAUDE.md §4).
+///
+/// The rule checks that the predicates exist, not how the crate's own code
+/// classifies errors.
+struct ErrorPredicate;
+
+impl Rule for ErrorPredicate {
+    fn name(&self) -> &'static str {
+        "check-error-predicate"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let path: ModPath = ERROR_MODULE.iter().map(ToString::to_string).collect();
+        let Some(module) = krate.modules.get(&path) else {
+            findings.push(format!("no `{}` module to find `Error` in", ERROR_MODULE.join("::")));
+            return 0;
+        };
+        let file = module.file.display();
+        let Some(error) = module.items.iter().find_map(|item| match item {
+            syn::Item::Enum(e) if e.ident == "Error" => Some(e),
+            _ => None,
+        }) else {
+            findings.push(format!("{file}: no `enum Error`"));
+            return 0;
+        };
+
+        let trait_methods = hierarchy_trait_methods(&module.items);
+        let box_forwarders = hierarchy_impl_methods(&module.items, |ty| ty == "Box");
+        let error_forwarders = error_forwarders(&module.items);
+        let overrides = payload_overrides(krate);
+        let c_exports = c_exports(krate);
+
+        let mut checked = 0usize;
+        for variant in &error.variants {
+            checked += 1;
+            let Some(payload) = variant_payload(variant) else {
+                findings.push(format!(
+                    "{file}: `Error::{}` does not wrap a single payload type",
+                    variant.ident
+                ));
+                continue;
+            };
+            let predicate = class_predicate(&payload);
+            if !trait_methods.contains(&predicate) {
+                findings.push(format!(
+                    "{file}: `Error::{}` has no class predicate: `ErrorHierarchy` declares no `{predicate}`",
+                    variant.ident
+                ));
+            }
+            if !overrides.get(&payload).is_some_and(|preds| preds.contains(&predicate)) {
+                findings.push(format!("{file}: `{payload}` does not answer `true` to its own `{predicate}`"));
+            }
+        }
+        for method in &trait_methods {
+            checked += 1;
+            if !box_forwarders.contains(method) {
+                findings.push(format!("{file}: `impl ErrorHierarchy for Box<T>` does not forward `{method}`"));
+            }
+            if !error_forwarders.contains(method) {
+                findings.push(format!(
+                    "{file}: `Error` has no `pub fn {method}(&self) -> bool` forwarding to `ErrorHierarchy::{method}(self)`"
+                ));
+            }
+            if !c_exports.contains(&format!("kafka_common_Error_{method}")) {
+                findings.push(format!(
+                    "{file}: `{method}` has no C export `kafka_common_Error_{method}` in `ffi`"
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Every `Error` variant needs its class predicate (CLAUDE.md §3), named
+   `is_` + payload type snake_cased without a trailing `Error` + `_error`:
+     1. a default-false `fn is_x_error(&self) -> bool` on `ErrorHierarchy`;
+     2. its forwarder in `impl ErrorHierarchy for Box<T>`;
+     3. `pub fn is_x_error(&self) -> bool { ErrorHierarchy::is_x_error(self) }`
+        on `Error`;
+     4. the payload answering `true`: `is_x_error` in its `extends:` list, or
+        an override in its hand-written `impl ErrorHierarchy` — and in every
+        payload whose Java class extends it;
+     5. the C export, regenerated with `cargo xtask generate-error-predicates`."
+    }
+}
+
+/// `is_` + `payload` snake_cased with a trailing `Error` dropped + `_error`.
+fn class_predicate(payload: &str) -> String {
+    let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+    format!("is_{}_error", java::snake_case(base))
+}
+
+/// The payload type `variant` wraps, looking through a `Box`: `Timeout(TimeoutError)`
+/// and `QuotaViolation(Box<QuotaViolationError>)` give `TimeoutError` and
+/// `QuotaViolationError`.
+fn variant_payload(variant: &syn::Variant) -> Option<String> {
+    let syn::Fields::Unnamed(fields) = &variant.fields else {
+        return None;
+    };
+    let [field] = fields.unnamed.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let mut ty = &field.ty;
+    loop {
+        let syn::Type::Path(p) = ty else { return None };
+        let last = p.path.segments.last()?;
+        if last.ident != "Box" {
+            return Some(last.ident.to_string());
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+            return None;
+        };
+        ty = inner;
+    }
+}
+
+/// Whether `path` names the `ErrorHierarchy` trait, however qualified.
+fn is_hierarchy_path(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|s| s.ident == "ErrorHierarchy")
+}
+
+/// The methods `trait ErrorHierarchy` declares among `items`.
+fn hierarchy_trait_methods(items: &[syn::Item]) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == "ErrorHierarchy" => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| &t.items)
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last path segment of `ty`, if it is a path type.
+fn type_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    p.path.segments.last().map(|s| s.ident.to_string())
+}
+
+/// The methods of the `impl ErrorHierarchy for T` blocks among `items` whose `T`
+/// satisfies `self_ty`.
+fn hierarchy_impl_methods(items: &[syn::Item], self_ty: impl Fn(&str) -> bool) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(i)
+                if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p))
+                    && type_ident(&i.self_ty).is_some_and(|t| self_ty(&t)) =>
+            {
+                Some(i)
+            },
+            _ => None,
+        })
+        .flat_map(|i| &i.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The predicates `Error` forwards publicly: each `pub fn is_x_error(&self) -> bool`
+/// of an inherent `impl Error` whose body calls `ErrorHierarchy::is_x_error`.
+fn error_forwarders(items: &[syn::Item]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for item in items {
+        let syn::Item::Impl(i) = item else { continue };
+        if i.trait_.is_some() || type_ident(&i.self_ty).as_deref() != Some("Error") {
+            continue;
+        }
+        for item in &i.items {
+            let syn::ImplItem::Fn(f) = item else { continue };
+            let name = f.sig.ident.to_string();
+            let returns_bool = matches!(&f.sig.output, syn::ReturnType::Type(_, ty) if compact(&**ty) == "bool");
+            let body = f.block.to_token_stream().to_string().replace(' ', "");
+            let ufcs = body.contains(&format!("ErrorHierarchy::{name}(self)"));
+            if matches!(f.vis, syn::Visibility::Public(_)) && returns_bool && ufcs {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// The predicates each error payload answers `true` to, keyed by payload type:
+/// the `extends:` list of its `kafka_error_type!` / `message_only_error!`, plus
+/// the methods of its hand-written `impl ErrorHierarchy`, from anywhere in the
+/// crate.
+fn payload_overrides(krate: &Crate) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for module in krate.modules.values() {
+        for item in &module.items {
+            match item {
+                syn::Item::Macro(m) => {
+                    if let Some(def) = error_macro_type_def(m) {
+                        out.entry(def.name).or_default().extend(def.extends);
+                    }
+                },
+                syn::Item::Impl(i) if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p)) => {
+                    let Some(ty) = type_ident(&i.self_ty) else { continue };
+                    let methods = i.items.iter().filter_map(|item| match item {
+                        syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    });
+                    out.entry(ty).or_default().extend(methods);
+                },
+                _ => {},
+            }
+        }
+    }
+    out
+}
+
+/// The `#[no_mangle]` functions of the C FFI (`ffi` and its submodules).
+fn c_exports(krate: &Crate) -> BTreeSet<String> {
+    krate
+        .modules
+        .iter()
+        .filter(|(path, _)| path.first().is_some_and(|p| p == "ffi"))
+        .flat_map(|(_, m)| &m.items)
+        .filter_map(|item| match item {
+            syn::Item::Fn(f) if is_no_mangle(&f.attrs) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,11 +4361,53 @@ mod tests {
             }
             #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
             pub struct KafkaConsumer;
+            impl KafkaConsumer {
+                #[doc(alias = "rust-only")]
+                pub fn rust_only(&self) {}
+                #[doc(alias = "rust-only")]
+                pub(crate) fn needless(&self) {}
+            }
             #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
+            #[doc(alias = "public-in-rust")]
             pub struct MockConsumer;
+            #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
+            pub struct ConsumerConfig;
+            impl ConsumerConfig {
+                // Typed accessors of a plain key: findings.
+                #[doc(alias = "rust-only")]
+                pub fn request_timeout_ms(&self) -> i32 { 0 }
+                #[doc(alias = "rust-only")]
+                pub fn set_client_id(self, client_id: impl Into<String>) -> Self { self }
+                // A class-valued key set through a trait object (CLAUDE.md §2).
+                #[doc(alias = "rust-only")]
+                pub fn set_partitioner(self, partitioner: Box<dyn Partitioner>) -> Self { self }
+                // Constants: a public Java field, one inherited from
+                // `AbstractConfig` and a tagged Rust-only key pass.
+                pub const GROUP_ID_CONFIG: &str = "group.id";
+                pub const CONFIG_PROVIDERS_CONFIG: &str = "config.providers";
+                // selects a built-in partitioner in place of a class-valued key
+                #[doc(alias = "rust-only")]
+                pub const PARTITIONER_TYPE_CONFIG: &str = "partitioner.type";
+                // A package-private Java field, a name Java lacks and an
+                // internal key: findings.
+                pub const DEFAULT_ISOLATION_LEVEL: &str = "read_uncommitted";
+                pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
+                pub const LEAVE_GROUP_ON_CLOSE_CONFIG: &str = "internal.leave.group.on.close";
+                pub(crate) const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &str =
+                    "internal.throw.on.fetch.stable.offset.unsupported";
+            }
+            // An internal key outside any class: a finding, tag or not.
+            // a key of no Java class
+            #[doc(alias = "rust-only")]
+            pub const INTERNAL_KEY: &str = "internal.auto.downgrade.txn.commit";
+            #[doc(alias = "rust-only")]
+            pub trait Partitioner {}
             pub struct Unmarked;
+            #[doc(alias = "rust-only")]
             pub struct Allowed;
             pub(crate) struct Hidden;
+            #[doc(alias = "rust-only")]
+            pub(crate) struct NeedlessTag;
         }
         pub mod common {
             pub mod network {
@@ -2090,14 +4419,22 @@ mod tests {
         }
         pub mod ffi {
             pub struct kafka_consumer_KafkaConsumer_t;
+            #[doc(alias = "rust-only")]
+            pub struct kafka_common_Error_t;
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_KafkaConsumer_new() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_common_Cluster_new() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_Nothing_new() {}
+            #[doc(alias = "rust-only")]
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_StringList_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_StringList_destroy() {}
+            #[doc(alias = "public-in-rust")]
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_KafkaConsumer_destroy() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_common_TopicAuthorizationError_topics() {}
         }
@@ -2118,13 +4455,6 @@ mod tests {
         ]
     "#;
 
-    const ALLOW: &str = "\
-        # the fixture allow-list\n\
-        crate::consumer::Allowed  # Rust-only\n\
-        org.apache.kafka.clients.consumer.MockConsumer  # a test helper\n\
-        kafka_consumer_StringList  # a Java `Collection<String>`\n\
-        kafka_common_Error  # the error handle\n";
-
     fn class(package: &str, path: &[&str]) -> java::JavaClass {
         java::JavaClass {
             module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
@@ -2133,9 +4463,37 @@ mod tests {
             methods: BTreeSet::new(),
             overloads: Vec::new(),
             fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: java::JavaKind::Class,
+            visibility: java::Visibility::Public,
+            is_abstract: false,
+            functional_interface: false,
+            supertypes: Vec::new(),
         }
+    }
+
+    /// `ConsumerConfig`, a subclass of `AbstractConfig`.
+    fn config_class() -> java::JavaClass {
+        let mut class = class("clients.consumer", &["ConsumerConfig"]);
+        class.supertypes = vec!["AbstractConfig".to_string()];
+        class.field_visibility = [
+            ("GROUP_ID_CONFIG", java::Visibility::Public),
+            ("DEFAULT_ISOLATION_LEVEL", java::Visibility::Package),
+            ("LEAVE_GROUP_ON_CLOSE_CONFIG", java::Visibility::Public),
+        ]
+        .into_iter()
+        .map(|(name, visibility)| (name.to_string(), visibility))
+        .collect();
+        class
+    }
+
+    /// `AbstractConfig`, declaring the field `ConsumerConfig` inherits.
+    fn abstract_config_class() -> java::JavaClass {
+        let mut class = class("common.config", &["AbstractConfig"]);
+        class.field_visibility = [("CONFIG_PROVIDERS_CONFIG".to_string(), java::Visibility::Public)].into();
+        class
     }
 
     fn fixture_dir(name: &str) -> PathBuf {
@@ -2143,19 +4501,20 @@ mod tests {
     }
 
     /// The fixture crate written to its own temp dir, and the rule over a
-    /// synthetic Java index with allow-list `allow`.
-    fn fixture(name: &str, allow: &str) -> (Crate, PublicAudience) {
+    /// synthetic Java index.
+    fn fixture(name: &str) -> (Crate, PublicAudience) {
         let dir = fixture_dir(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
         fs::write(dir.join("cbindgen.toml"), FIXTURE_CBINDGEN).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let (allow, allow_errors) = AllowList::parse("allow.txt", allow);
         let rule = PublicAudience {
             index: JavaIndex {
                 classes: vec![
                     class("clients.consumer", &["KafkaConsumer"]),
                     class("clients.consumer", &["MockConsumer"]),
+                    config_class(),
+                    abstract_config_class(),
                     class("clients.consumer.internals", &["Fetcher"]),
                     class("common.network", &["Selector"]),
                     class("common", &["Cluster"]),
@@ -2164,21 +4523,20 @@ mod tests {
             },
             public: [
                 PUBLIC_CONSUMER,
+                "org.apache.kafka.clients.consumer.ConsumerConfig",
                 "org.apache.kafka.common.errors.TopicAuthorizationException",
             ]
             .into_iter()
             .map(str::to_string)
             .collect(),
             unsupported: ["common.network".to_string()].into(),
-            allow,
-            allow_errors,
             cbindgen: dir.join("cbindgen.toml"),
         };
         (krate, rule)
     }
 
-    fn run(name: &str, allow: &str) -> Vec<String> {
-        let (krate, rule) = fixture(name, allow);
+    fn run(name: &str) -> Vec<String> {
+        let (krate, rule) = fixture(name);
         let mut findings = Vec::new();
         rule.check(&krate, &mut findings);
         fs::remove_dir_all(fixture_dir(name)).unwrap();
@@ -2191,7 +4549,7 @@ mod tests {
 
     #[test]
     fn test_public_internal_item_fails_the_internal_and_public_rules() {
-        let findings = run("internal", ALLOW);
+        let findings = run("internal");
         let expected = format!(
             "{}: `crate::consumer::internals::Fetcher` is public but translates \
              `org.apache.kafka.clients.consumer.internals.Fetcher`: its package `clients.consumer.internals` is \
@@ -2204,7 +4562,7 @@ mod tests {
 
     #[test]
     fn test_public_disclaimer_item_fails_the_disclaimer_and_public_rules() {
-        let findings = run("disclaimer", ALLOW);
+        let findings = run("disclaimer");
         let expected = format!(
             "{}: `crate::common::network::Selector` is public but translates \
              `org.apache.kafka.common.network.Selector`: its package `common.network` is not a supported Kafka \
@@ -2217,7 +4575,7 @@ mod tests {
 
     #[test]
     fn test_public_item_outside_the_public_list_fails_only_that_rule() {
-        let findings = run("not-public", ALLOW);
+        let findings = run("not-public");
         let expected = format!(
             "{}: `crate::common::Cluster` is public but translates `org.apache.kafka.common.Cluster`: it is not \
              `@InterfaceAudience.Public` in Kafka {}",
@@ -2228,11 +4586,13 @@ mod tests {
     }
 
     #[test]
-    fn test_public_and_allow_listed_items_pass() {
-        let findings = run("pass", ALLOW);
+    fn test_public_and_tagged_items_pass() {
+        let findings = run("pass");
         // Public in Java, in Rust and in C.
-        assert!(with(&findings, "KafkaConsumer").is_empty(), "{findings:#?}");
-        // Allow-listed by Rust path, by Java class and by C prefix.
+        assert!(with(&findings, "`crate::consumer::KafkaConsumer`").is_empty(), "{findings:#?}");
+        assert!(with(&findings, "C `kafka_consumer_KafkaConsumer`").is_empty(), "{findings:#?}");
+        // Tagged: a Rust-only type, a Java class public on purpose, and C
+        // prefixes through a tagged fn and a tagged `_t` type of the include list.
         assert!(with(&findings, "Allowed").is_empty(), "{findings:#?}");
         assert!(with(&findings, "MockConsumer").is_empty(), "{findings:#?}");
         assert!(with(&findings, "StringList").is_empty(), "{findings:#?}");
@@ -2244,25 +4604,19 @@ mod tests {
     }
 
     #[test]
-    fn test_unmarked_public_item_needs_an_allow_list_entry() {
-        let findings = run("unmarked", ALLOW);
+    fn test_unmarked_public_item_needs_a_rust_only_tag() {
+        let findings = run("unmarked");
         let expected = format!(
             "{}: `crate::consumer::Unmarked` is public but carries no Java marker; mark the class it translates, or \
-             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public",
+             tag it #[doc(alias = \"rust-only\")] under a comment giving the reason it is public",
             fixture_dir("unmarked").join("lib.rs").display()
         );
         assert_eq!(with(&findings, "Unmarked"), [expected]);
-        // Without the allow-list, the Rust-only item is a finding too.
-        let bare = run("unmarked-bare", "");
-        assert_eq!(
-            with(&bare, "`crate::consumer::Allowed` is public but carries no Java marker").len(),
-            1
-        );
     }
 
     #[test]
     fn test_pub_generated_module_and_its_pub_use_are_findings() {
-        let findings = run("generated", ALLOW);
+        let findings = run("generated");
         let file = fixture_dir("generated").join("lib.rs").display().to_string();
         assert_eq!(
             with(&findings, "generated module").len() + with(&findings, "generated protocol").len(),
@@ -2279,7 +4633,7 @@ mod tests {
 
     #[test]
     fn test_ffi_names_for_a_non_public_or_unknown_class_are_findings() {
-        let findings = run("ffi", ALLOW);
+        let findings = run("ffi");
         let file = fixture_dir("ffi").join("lib.rs").display().to_string();
         assert_eq!(
             with(&findings, "C `kafka_common_Cluster`"),
@@ -2303,7 +4657,7 @@ mod tests {
 
     #[test]
     fn test_ffi_name_in_the_wrong_package_says_where_java_declares_it() {
-        let (_, mut rule) = fixture("misplaced", ALLOW);
+        let (_, mut rule) = fixture("misplaced");
         fs::remove_dir_all(fixture_dir("misplaced")).unwrap();
         rule.index.classes.push(class("common", &["TopicPartition"]));
         assert_eq!(rule.resolve_ffi_class(&["consumer"], "TopicPartition"), None);
@@ -2315,34 +4669,161 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_and_malformed_allow_list_entries_are_findings() {
-        let allow = format!("{ALLOW}crate::consumer::Gone  # removed\nno_reason\n");
-        let findings = run("stale", &allow);
+    fn test_typed_accessor_of_a_config_key_is_a_finding() {
+        let findings = run("config");
+        let file = fixture_dir("config").join("lib.rs").display().to_string();
+        let finding = |method: &str| {
+            format!(
+                "{file}: `ConsumerConfig::{method}` is a typed accessor of a configuration key on \
+                 `org.apache.kafka.clients.consumer.ConsumerConfig`, a translation of an `AbstractConfig`: make it \
+                 `pub(crate)` so the string map stays the only typed input (`new(&props)` validates it as Java's \
+                 `ConfigDef` does), or take a trait object for a class-valued key (CLAUDE.md §2)"
+            )
+        };
+        let mut typed = with(&findings, "typed accessor of a configuration key");
+        typed.sort();
+        assert_eq!(typed, [finding("request_timeout_ms"), finding("set_client_id")]);
+        // A class-valued key set through a trait object is CLAUDE.md §2's shape,
+        // and `impl Into<String>` is not a trait object.
+        assert!(with(&findings, "set_partitioner").is_empty(), "{findings:#?}");
+        // The only method findings on the class are those two: its tags are
+        // not needless. Its constants are `test_constants_translate_public_java_fields`'.
+        let methods = with(&findings, "ConsumerConfig");
         assert_eq!(
-            with(&findings, "allow.txt:"),
-            ["allow.txt:7: expected `<key>  # <reason>`, found `no_reason`"]
-        );
-        assert_eq!(
-            with(&findings, "lets nothing through"),
-            [format!(
-                "{PUBLIC_AUDIENCE_ALLOWLIST}:6: `crate::consumer::Gone` lets nothing through any more; remove it"
-            )]
+            methods.iter().filter(|f| !f.contains("is public but")).count(),
+            2,
+            "{findings:#?}"
         );
     }
 
     #[test]
-    fn test_glob_match() {
-        assert!(glob_match("crate::common::Error", "crate::common::Error"));
-        assert!(!glob_match("crate::common::Error", "crate::common::Errors"));
-        assert!(glob_match("crate::common::Local*Error", "crate::common::LocalTimeoutError"));
-        assert!(!glob_match("crate::common::Local*Error", "crate::common::LocalTimeout"));
-        assert!(glob_match(
-            "crate::consumer::*ConsumerHandle",
-            "crate::consumer::async_kafka_consumer::ConsumerHandle"
-        ));
-        assert!(glob_match("a*b*c", "a-b-b-c"));
-        assert!(!glob_match("a*bc*bc", "abc"));
-        assert!(glob_match("x*", "x"));
+    fn test_constants_translate_public_java_fields() {
+        let findings = run("constants");
+        let file = fixture_dir("constants").join("lib.rs").display().to_string();
+        // Class findings name the item by its path (`crate::…`).
+        let mut constants: Vec<_> = with(&findings, "is public but")
+            .into_iter()
+            .filter(|f| !f.contains("`crate::"))
+            .collect();
+        constants.sort();
+        assert_eq!(
+            constants,
+            [
+                format!(
+                    "{file}: `ConsumerConfig::DEFAULT_ISOLATION_LEVEL` is public but translates \
+                     `org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_ISOLATION_LEVEL`, which is \
+                     package-private in Java; make it `pub(crate)`"
+                ),
+                // Java's visibility does not matter for an internal key.
+                format!(
+                    "{file}: `ConsumerConfig::LEAVE_GROUP_ON_CLOSE_CONFIG` is public but holds \
+                     `internal.leave.group.on.close`, an internal configuration key Java may remove in a minor \
+                     release; make it `pub(crate)`"
+                ),
+                format!(
+                    "{file}: `ConsumerConfig::SASL_JAAS_CONFIG` is public but \
+                     `org.apache.kafka.clients.consumer.ConsumerConfig` declares no field `SASL_JAAS_CONFIG`; give \
+                     it the name of the public Java field it translates, make it `pub(crate)`, or tag it \
+                     #[doc(alias = \"rust-only\")] under a comment giving the reason it is public"
+                ),
+                format!(
+                    "{file}: `INTERNAL_KEY` is public but holds `internal.auto.downgrade.txn.commit`, an internal \
+                     configuration key Java may remove in a minor release; make it `pub(crate)`"
+                ),
+            ]
+        );
+        // The `rust-only` tag on `PARTITIONER_TYPE_CONFIG` lets it through.
+        assert!(with(&findings, "PARTITIONER_TYPE_CONFIG").is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_needless_tags_are_findings() {
+        let findings = run("needless");
+        let file = fixture_dir("needless").join("lib.rs").display().to_string();
+        let mut needless = with(&findings, "would pass without it");
+        needless.sort();
+        assert_eq!(
+            needless,
+            [
+                format!("{file}: `KafkaConsumer::needless` is tagged `rust-only` but would pass without it; remove the tag"),
+                format!("{file}: `NeedlessTag` is tagged `rust-only` but would pass without it; remove the tag"),
+                format!(
+                    "{file}: `kafka_consumer_KafkaConsumer_destroy` is tagged `public-in-rust` but would pass without it; \
+                     remove the tag"
+                ),
+            ]
+        );
+        // The `rust-only` tag lets `check-java-name` through for a public
+        // unmarked method, so it is not needless.
+        assert!(with(&findings, "rust_only").is_empty(), "{findings:#?}");
+    }
+
+    /// A crate whose every function exercises one outcome of the unmarked-method
+    /// check of `check-java-name`.
+    const UNMARKED_LIB: &str = r#"
+        pub mod producer {
+            mod p {
+                pub struct P;
+                impl P {
+                    #[doc(alias = "org.apache.kafka.clients.producer.P#send")]
+                    pub fn send(&self) {}
+                    pub fn helper(&self) {}
+                    // Rust-only, and public on purpose.
+                    #[doc(alias = "rust-only")]
+                    pub fn allowed(&self) {}
+                    pub(crate) fn internal(&self) {}
+                    #[cfg(test)]
+                    pub fn test_only(&self) {}
+                }
+                impl Clone for P {
+                    fn clone(&self) -> Self { P }
+                }
+            }
+            pub use p::P;
+            pub trait T {
+                #[doc(alias = "org.apache.kafka.clients.producer.T#m")]
+                fn m(&self);
+                fn rust_only(&self);
+            }
+            pub fn free_helper() {}
+        }
+        mod private {
+            pub struct Q;
+            impl Q {
+                pub fn hidden(&self) {}
+            }
+        }
+        pub mod ffi {
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_producer_P_new() {}
+        }
+    "#;
+
+    #[test]
+    fn test_unmarked_public_methods_are_findings() {
+        let dir = fixture_dir("unmarked-methods");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), UNMARKED_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        let rule = JavaName { index: JavaIndex { classes: Vec::new() }, package_modules: BTreeSet::new() };
+
+        let mut findings = Vec::new();
+        // `send`, `helper`, `allowed`, `m`, `rust_only` and `free_helper`.
+        assert_eq!(rule.check_unmarked_methods(&krate, &mut findings), 6);
+        let file = dir.join("lib.rs");
+        let expected = |name: &str| {
+            format!(
+                "{}: public method `{name}` carries no Java method marker; mark the Java method it translates \
+                 (#[doc(alias = \"org.apache.kafka.<package>.<Class>#<method>\")]), make it `pub(crate)`, or tag \
+                 it #[doc(alias = \"rust-only\")] under a comment giving the reason it is public",
+                file.display()
+            )
+        };
+        let mut want = vec![expected("P::helper"), expected("T::rust_only"), expected("free_helper")];
+        findings.sort();
+        want.sort();
+        assert_eq!(findings, want);
     }
 
     #[test]
@@ -2356,7 +4837,10 @@ mod tests {
             Some((vec!["common", "acl"], "AclBinding"))
         );
         assert_eq!(ffi_class("kafka_consumer_string_destroy"), None);
-        assert_eq!(ffi_class("kafka_Error_t"), None);
+        // A package-less helper standing for a JDK type.
+        assert_eq!(ffi_class("kafka_List_t"), Some((vec![], "List")));
+        assert_eq!(ffi_prefix("kafka_List_add"), "kafka_List");
+        assert_eq!(ffi_class("kafka_string_destroy"), None);
         assert_eq!(ffi_class("other_Thing"), None);
     }
 
@@ -2375,23 +4859,6 @@ mod tests {
         assert_eq!(
             list,
             ["org.apache.kafka.A".to_string(), "org.apache.kafka.B".to_string()].into()
-        );
-    }
-
-    /// A member marker key carries a `#` of its own; the reason starts at the
-    /// first `#` after whitespace.
-    #[test]
-    fn test_allow_list_parses_member_marker_keys() {
-        let text = "# comment\n\
-                    org.apache.kafka.clients.A#m(String,int)  # a reason # with a hash\n\
-                    crate::x::Y  # another\n\
-                    org.apache.kafka.clients.A#m\n";
-        let (list, errors) = AllowList::parse("allow.txt", text);
-        let keys: Vec<&str> = list.entries.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, ["org.apache.kafka.clients.A#m(String,int)", "crate::x::Y"]);
-        assert_eq!(
-            errors,
-            ["allow.txt:4: expected `<key>  # <reason>`, found `org.apache.kafka.clients.A#m`"]
         );
     }
 }
@@ -2544,6 +5011,313 @@ mod dyn_compatible_tests {
 }
 
 #[cfg(test)]
+mod dyn_forwarding_tests {
+    use super::*;
+
+    /// `Good` / `DynGood` forward correctly; `Bad` / `DynBad` break every rule
+    /// once; `Lone` / `DynLone` have no impls at all.
+    const FIXTURE_LIB: &str = r#"
+        use std::future::Future;
+        use std::pin::Pin;
+        type BoxFuture<'a> = Pin<Box<dyn Future<Output = i32> + Send + 'a>>;
+
+        pub trait Good {
+            fn run(&self) -> impl Future<Output = i32> + Send;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32 { 0 }
+        }
+        pub trait DynGood {
+            fn run<'a>(&'a self) -> BoxFuture<'a>;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32;
+        }
+        impl<P: Good + Sync> DynGood for P {
+            fn run<'a>(&'a self) -> BoxFuture<'a> { Box::pin(Good::run(self)) }
+            fn add(&self, x: i32, y: i32) -> i32 { Good::add(self, x, y) }
+            fn get(&self) -> i32 { Good::get(self) }
+        }
+        impl Good for dyn DynGood + '_ {
+            async fn run(&self) -> i32 { DynGood::run(self).await }
+            fn add(&self, x: i32, y: i32) -> i32 { DynGood::add(self, x, y) }
+            fn get(&self) -> i32 { DynGood::get(self) }
+        }
+
+        pub trait Bad {
+            fn run(&self) -> i32;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32 { 0 }
+            fn only_here(&self);
+        }
+        pub trait DynBad {
+            fn run(&self) -> i32;
+            fn add(&self, x: i32, y: i32) -> i32;
+            fn get(&self) -> i32;
+            fn only_dyn(&self);
+        }
+        impl<P: Bad> DynBad for P {
+            fn run(&self) -> i32 { Bad::get(self) }
+            fn add(&self, x: i32, y: i32) -> i32 { Bad::add(self, y, x) }
+            fn get(&self) -> i32 { Bad::get(self) }
+            fn only_dyn(&self) {}
+        }
+        impl Bad for dyn DynBad + '_ {
+            fn run(&self) -> i32 { DynBad::run(self) }
+            fn add(&self, x: i32, y: i32) -> i32 { DynBad::add(self, x, y) }
+            fn only_here(&self) {}
+        }
+
+        pub trait Lone {
+            fn run(&self);
+        }
+        pub trait DynLone {
+            fn run(&self);
+        }
+    "#;
+
+    fn run(name: &str) -> (Vec<String>, String) {
+        let dir = std::env::temp_dir().join(format!("xtask-dyn-forwarding-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = DynForwarding.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // The three pairs.
+        assert_eq!(checked, 3);
+        (findings, dir.join("lib.rs").display().to_string())
+    }
+
+    #[test]
+    fn test_correct_forwarding_passes() {
+        let (findings, _) = run("good");
+        assert!(findings.iter().all(|f| !f.contains("Good")), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_each_broken_link_is_a_finding() {
+        let (mut findings, file) = run("bad");
+        findings.sort();
+        let mut want = vec![
+            format!("{file}: `DynBad` lacks `only_here` of `Bad`; declare it and forward it both ways"),
+            format!("{file}: `DynBad` declares `only_dyn`, which `Bad` lacks; remove it"),
+            // A forward to the wrong method, or with its arguments swapped,
+            // compiles whenever the types agree.
+            format!("{file}: `impl DynBad for P`'s `run` does not call `Bad::run(self)`"),
+            format!("{file}: `impl DynBad for P`'s `add` does not call `Bad::add(self, x, y)`"),
+            // A defaulted method left out runs the default on a trait object,
+            // not the boxed implementation's override.
+            format!("{file}: `impl Bad for dyn DynBad` does not define `get`; define it as a forward to `DynBad::get`"),
+            format!("{file}: no blanket `impl<P: Lone> DynLone for P`; every `Lone` must be a `DynLone`"),
+            format!("{file}: no `impl Lone for dyn DynLone`; a `dyn DynLone` must be a `Lone`"),
+        ];
+        want.sort();
+        assert_eq!(findings, want);
+    }
+}
+
+#[cfg(test)]
+mod consumer_handle_tests {
+    use super::*;
+
+    /// The `Consumer` trait both fixtures share: two sync getters, one async
+    /// method per shape the rule compares, and one method of each excluded kind.
+    const TRAIT: &str = r#"
+            pub trait Consumer<K, V> {
+                fn assignment(&self) -> HashSet<TopicPartition>;
+                fn subscription(&self) -> HashSet<String>;
+                async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
+                async fn commit_sync(&mut self) -> Result<(), Error>;
+                async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+                async fn commit_async_with_callback(
+                    &mut self,
+                    callback: Arc<dyn OffsetCommitCallback>,
+                ) -> Result<(), Error>;
+                async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+                async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+                fn wakeup(&self);
+                fn handle(&self) -> ConsumerHandle;
+            }
+    "#;
+
+    /// A handle with exactly the permitted methods. The callback type is
+    /// spelled through its module path, as the real handle spells it, and the
+    /// `pub(crate)` and private methods are outside the rule.
+    const GOOD_HANDLE: &str = r#"
+            pub struct ConsumerHandle;
+            impl ConsumerHandle {
+                pub fn assignment(&self) -> HashSet<TopicPartition> { todo!() }
+                pub fn commit_sync(&self) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_sync_with_timeout(
+                    &self,
+                    timeout: Duration,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_async_with_callback(
+                    &self,
+                    callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn seek_with_offset(
+                    &self,
+                    partition: TopicPartition,
+                    offset: i64,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn wakeup(&self) {}
+                pub(crate) fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> { todo!() }
+                fn async_state(&self) -> i32 { 0 }
+            }
+    "#;
+
+    /// A handle breaking each rule once: an excluded method, an excluded
+    /// overload, a handle-only method, a missing async method and a missing
+    /// sync one (`wakeup`, which the handle must keep), and three signature
+    /// drifts (receiver, parameter name, return type).
+    const BAD_HANDLE: &str = r#"
+            pub struct ConsumerHandle;
+            impl ConsumerHandle {
+                pub fn assignment(&self) -> HashSet<TopicPartition> { todo!() }
+                pub fn subscription(&self) -> HashSet<String> { todo!() }
+                pub fn close_with_options(&self, options: CloseOptions) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_async_offsets(&self) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn commit_sync(&self) -> Result<(), Error> { Ok(()) }
+                pub fn commit_async_with_callback(
+                    &self,
+                    cb: Arc<dyn OffsetCommitCallback>,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+                pub fn seek_with_offset(
+                    &mut self,
+                    partition: TopicPartition,
+                    offset: i64,
+                ) -> impl Future<Output = Result<(), Error>> + Send { async {} }
+            }
+    "#;
+
+    fn run(name: &str, handle: &str) -> (Vec<String>, String) {
+        let dir = std::env::temp_dir().join(format!("xtask-consumer-handle-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), format!("pub mod consumer {{ {TRAIT} {handle} }}")).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        assert!(krate.parse_errors.is_empty(), "{:#?}", krate.parse_errors);
+        let mut findings = Vec::new();
+        let checked = ConsumerHandleSurface.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(checked, 1);
+        (findings, dir.join("lib.rs").display().to_string())
+    }
+
+    #[test]
+    fn test_permitted_surface_passes() {
+        let (findings, _) = run("good", GOOD_HANDLE);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_each_deviation_is_a_finding() {
+        let (mut findings, file) = run("bad", BAD_HANDLE);
+        findings.sort();
+        let future = "impl Future<Output = Result<(), Error>> + Send";
+        let mut want = vec![
+            format!(
+                "{file}: `ConsumerHandle` defines `subscription` which KIP-1306's `RebalanceConsumer` keeps from a \
+                 listener; remove it"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` defines `close_with_options`, an overload of `close`, which KIP-1306's \
+                 `RebalanceConsumer` keeps from a listener; remove it"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` defines `commit_async_offsets`, which `Consumer` lacks; a handle method is \
+                 a `Consumer` method under its CLAUDE.md §2 name"
+            ),
+            format!(
+                "{file}: `ConsumerHandle` lacks `commit_sync_with_timeout` of `Consumer`; define it as \
+                 `fn commit_sync_with_timeout(&self, timeout: Duration) -> {future}`"
+            ),
+            format!("{file}: `ConsumerHandle` lacks `wakeup` of `Consumer`; define it as `fn wakeup(&self)`"),
+            format!(
+                "{file}: `ConsumerHandle::commit_sync` is `fn commit_sync(&self) -> Result<(), Error>`; \
+                 `Consumer::commit_sync` needs `fn commit_sync(&self) -> {future}`"
+            ),
+            format!(
+                "{file}: `ConsumerHandle::commit_async_with_callback` is `fn commit_async_with_callback(&self, cb: \
+                 Arc<dyn OffsetCommitCallback>) -> {future}`; `Consumer::commit_async_with_callback` needs `fn \
+                 commit_async_with_callback(&self, callback: Arc<dyn OffsetCommitCallback>) -> {future}`"
+            ),
+            format!(
+                "{file}: `ConsumerHandle::seek_with_offset` is `fn seek_with_offset(&mut self, partition: \
+                 TopicPartition, offset: i64) -> {future}`; `Consumer::seek_with_offset` needs `fn \
+                 seek_with_offset(&self, partition: TopicPartition, offset: i64) -> {future}`"
+            ),
+        ];
+        want.sort();
+        assert_eq!(findings, want);
+    }
+}
+
+#[cfg(test)]
+mod send_future_tests {
+    use super::*;
+
+    const FIXTURE_LIB: &str = r#"
+        use std::future::Future;
+
+        pub struct Handle;
+        impl Handle {
+            // A native `async fn`: a finding.
+            pub async fn commit(&self) -> i32 { 0 }
+            // `Send` in the signature passes.
+            pub fn flush(&self) -> impl Future<Output = i32> + Send { async move { 0 } }
+            // Not public.
+            pub(crate) async fn helper(&self) {}
+            async fn private(&self) {}
+        }
+        pub trait Native {
+            async fn run(&self);
+        }
+        #[async_trait::async_trait]
+        pub trait Boxed {
+            async fn run(&self);
+        }
+        pub async fn free() {}
+        pub(crate) struct Hidden;
+        impl Hidden {
+            pub async fn run(&self) {}
+        }
+        pub mod ffi {
+            pub async fn bridged() {}
+        }
+    "#;
+
+    #[test]
+    fn test_native_async_fns_are_findings() {
+        let dir = std::env::temp_dir().join(format!("xtask-send-future-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = SendFuture.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // `commit`, `flush`, both `run`s of the public traits and `free`.
+        assert_eq!(checked, 5);
+        let file = dir.join("lib.rs").display().to_string();
+        let finding = |name: &str, method: &str| {
+            format!(
+                "{file}: `{name}` is a public `async fn`, whose future is `Send` only while its body keeps it so; \
+                 declare `fn {method}(…) -> impl Future<Output = …> + Send` with an `async move` body"
+            )
+        };
+        findings.sort();
+        let mut want = vec![
+            finding("Handle::commit", "commit"),
+            finding("Native::run", "run"),
+            finding("free", "free"),
+        ];
+        want.sort();
+        // The `#[async_trait]` method boxes a `Send` future; `Hidden` is not
+        // public; the FFI module is the C half's.
+        assert_eq!(findings, want);
+    }
+}
+
+#[cfg(test)]
 mod cfg_test_tests {
     use super::*;
 
@@ -2574,5 +5348,878 @@ mod cfg_test_tests {
         assert!(!cfg_test("#[cfg_attr(test, allow(dead_code))]"));
         assert!(!cfg_test(r#"#[doc = "test"]"#));
         assert!(!cfg_test(""));
+    }
+}
+
+#[cfg(test)]
+mod no_fixed_size_array_tests {
+    use super::*;
+
+    /// A crate whose every public item exercises one outcome of
+    /// `check-no-fixed-size-array`.
+    const FIXTURE_LIB: &str = r#"
+        pub struct Uuid;
+        impl Uuid {
+            pub fn with_bytes(bytes: [u8; 16]) -> Self {}
+            pub fn with_slice(bytes: &[u8]) -> Self {}
+            pub fn to_bytes(&self) -> [u8; 16] {}
+            pub fn borrowed(&self) -> &'static [u8; 16] {}
+            pub fn nested(&self, values: Option<Vec<[u8; 4]>>) {}
+            pub fn matrix(&self) -> [[u8; 4]; 2] {}
+            pub fn chunks(&self) -> impl Iterator<Item = [u8; 4]> {}
+            pub fn to_vec(&self) -> Vec<u8> {}
+            pub(crate) fn internal(&self) -> [u8; 16] {}
+            #[cfg(test)]
+            pub fn test_only() -> [u8; 2] {}
+            fn private(&self) -> [u8; 16] {}
+        }
+        impl From<[u8; 16]> for Uuid {
+            fn from(bytes: [u8; 16]) -> Self {}
+        }
+        impl std::ops::Index<usize> for Uuid {
+            type Output = [u8; 2];
+            fn index(&self, i: usize) -> &[u8; 2] {}
+        }
+        impl Clone for Uuid {
+            fn clone(&self) -> Self {}
+        }
+        pub trait Source {
+            fn read(&self, buf: &mut [u8; 8]);
+            fn bytes(&self) -> &[u8];
+        }
+        pub type Key = [u8; 32];
+        pub fn pair() -> (i32, [u8; 3]) {}
+        pub fn slices(a: &[u8], b: &mut [u8]) -> Vec<u8> {}
+        pub(crate) struct Hidden;
+        impl From<[u8; 1]> for Hidden {
+            fn from(bytes: [u8; 1]) -> Self {}
+        }
+        mod private {
+            pub struct Unreachable;
+            impl Unreachable {
+                pub fn hidden() -> [u8; 1] {}
+            }
+        }
+        pub mod ffi {
+            pub struct Buffer;
+            impl Buffer {
+                pub fn bytes(&self) -> [u8; 1] {}
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_common_Uuid_new(bytes: *const [u8; 16]) {}
+        }
+    "#;
+
+    #[test]
+    fn test_fixed_size_arrays_in_public_signatures_are_findings() {
+        let dir = std::env::temp_dir().join(format!("xtask-no-fixed-size-array-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = NoFixedSizeArray.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        let mut expected: Vec<String> = [
+            "parameter `bytes` of `Uuid::with_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::to_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::borrowed` holds the fixed-size array `[u8; 16]`",
+            "parameter `values` of `Uuid::nested` holds the fixed-size array `[u8; 4]`",
+            "the return type of `Uuid::matrix` holds the fixed-size array `[[u8; 4]; 2]`",
+            "the return type of `Uuid::chunks` holds the fixed-size array `[u8; 4]`",
+            "the trait of `impl From<[u8; 16]> for Uuid` holds the fixed-size array `[u8; 16]`",
+            "an associated type of `impl std::ops::Index<usize> for Uuid` holds the fixed-size array `[u8; 2]`",
+            "parameter `buf` of `Source::read` holds the fixed-size array `[u8; 8]`",
+            "the aliased type of `Key` holds the fixed-size array `[u8; 32]`",
+            "the return type of `pair` holds the fixed-size array `[u8; 3]`",
+        ]
+        .iter()
+        .map(|f| format!("{file}: {f}"))
+        .collect();
+        expected.sort();
+        findings.sort();
+        assert_eq!(findings, expected);
+        // The public functions and the alias with types (`Uuid`'s eight,
+        // `Source`'s two, `Key`, `pair`, `slices`), and the three trait impls
+        // for `Uuid`.
+        assert_eq!(checked, 16);
+    }
+}
+
+#[cfg(test)]
+mod error_predicate_tests {
+    use super::*;
+
+    /// A crate whose `Error` has one variant per outcome of
+    /// `check-error-predicate`: two fully wired, then one missing each piece.
+    const FIXTURE_LIB: &str = r#"
+        pub mod common {
+            pub mod error {
+                pub enum Error {
+                    Timeout(TimeoutError),
+                    QuotaViolation(Box<QuotaViolationError>),
+                    Orphan(OrphanError),
+                    Forgetful(ForgetfulError),
+                    Unboxed(UnboxedError),
+                    Recursive(RecursiveError),
+                    Unexported(UnexportedError),
+                }
+
+                pub(crate) trait ErrorHierarchy {
+                    fn is_retriable_error(&self) -> bool { false }
+                    fn is_timeout_error(&self) -> bool { false }
+                    fn is_quota_violation_error(&self) -> bool { false }
+                    fn is_forgetful_error(&self) -> bool { false }
+                    fn is_unboxed_error(&self) -> bool { false }
+                    fn is_recursive_error(&self) -> bool { false }
+                    fn is_unexported_error(&self) -> bool { false }
+                }
+
+                impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
+                    fn is_retriable_error(&self) -> bool { (**self).is_retriable_error() }
+                    fn is_timeout_error(&self) -> bool { (**self).is_timeout_error() }
+                    fn is_quota_violation_error(&self) -> bool { (**self).is_quota_violation_error() }
+                    fn is_forgetful_error(&self) -> bool { (**self).is_forgetful_error() }
+                    fn is_recursive_error(&self) -> bool { (**self).is_recursive_error() }
+                    fn is_unexported_error(&self) -> bool { (**self).is_unexported_error() }
+                }
+
+                impl Error {
+                    pub fn is_retriable_error(&self) -> bool { ErrorHierarchy::is_retriable_error(self) }
+                    pub fn is_timeout_error(&self) -> bool { ErrorHierarchy::is_timeout_error(self) }
+                    pub fn is_quota_violation_error(&self) -> bool { ErrorHierarchy::is_quota_violation_error(self) }
+                    pub fn is_forgetful_error(&self) -> bool { ErrorHierarchy::is_forgetful_error(self) }
+                    pub fn is_unboxed_error(&self) -> bool { ErrorHierarchy::is_unboxed_error(self) }
+                    pub fn is_recursive_error(&self) -> bool { self.is_recursive_error() }
+                    pub fn is_unexported_error(&self) -> bool { ErrorHierarchy::is_unexported_error(self) }
+                }
+
+                kafka_error_type! {
+                    /// Wired through its macro.
+                    TimeoutError,
+                    code: RequestTimedOut,
+                    extends: [is_retriable_error, is_timeout_error,],
+                }
+                kafka_error_type! { OrphanError, code: Orphan, extends: [is_retriable_error,], }
+                kafka_error_type! { ForgetfulError, code: Forgetful, extends: [is_retriable_error,], }
+                kafka_error_type! { UnboxedError, code: Unboxed, extends: [is_unboxed_error,], }
+                kafka_error_type! { RecursiveError, code: Recursive, extends: [is_recursive_error,], }
+                kafka_error_type! { UnexportedError, code: Unexported, extends: [is_unexported_error,], }
+            }
+            pub mod metrics {
+                /// Wired through a hand-written impl, and boxed in its variant.
+                pub struct QuotaViolationError;
+                impl crate::common::error::ErrorHierarchy for QuotaViolationError {
+                    fn is_quota_violation_error(&self) -> bool { true }
+                }
+            }
+        }
+        pub mod ffi {
+            pub mod error_predicates {
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_retriable_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_timeout_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_quota_violation_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_forgetful_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_unboxed_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_recursive_error() -> bool { false }
+                // Not `#[no_mangle]`, so C cannot link it.
+                pub unsafe extern "C" fn kafka_common_Error_is_unexported_error() -> bool { false }
+            }
+        }
+    "#;
+
+    /// The findings over the fixture crate, written to its own temp dir `name`
+    /// because the tests run in parallel.
+    fn run(name: &str) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("xtask-error-predicate-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = ErrorPredicate.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // 7 variants and 7 trait methods.
+        assert_eq!(checked, 14, "{findings:#?}");
+        findings
+    }
+
+    fn with<'a>(findings: &'a [String], needle: &str) -> Vec<&'a str> {
+        findings.iter().filter(|f| f.contains(needle)).map(String::as_str).collect()
+    }
+
+    #[test]
+    fn test_class_predicate_name_drops_a_trailing_error() {
+        assert_eq!(class_predicate("TopicExistsError"), "is_topic_exists_error");
+        assert_eq!(class_predicate("KafkaError"), "is_kafka_error");
+        assert_eq!(
+            class_predicate("InvalidRegularExpression"),
+            "is_invalid_regular_expression_error"
+        );
+        assert_eq!(class_predicate("Error"), "is_error_error");
+    }
+
+    #[test]
+    fn test_wired_predicates_pass() {
+        let findings = run("pass");
+        for wired in [
+            "Timeout",
+            "timeout_error",
+            "retriable_error",
+            "QuotaViolation",
+            "quota_violation_error",
+        ] {
+            assert!(with(&findings, wired).is_empty(), "{wired}: {findings:#?}");
+        }
+    }
+
+    #[test]
+    fn test_each_missing_piece_is_reported() {
+        let findings = run("violations");
+        let fixture = |what: &str| format!("lib.rs: {what}");
+        // Variants in declaration order, then trait methods in name order.
+        let expected = [
+            fixture("`Error::Orphan` has no class predicate: `ErrorHierarchy` declares no `is_orphan_error`"),
+            fixture("`OrphanError` does not answer `true` to its own `is_orphan_error`"),
+            fixture("`ForgetfulError` does not answer `true` to its own `is_forgetful_error`"),
+            fixture(
+                "`Error` has no `pub fn is_recursive_error(&self) -> bool` forwarding to \
+                 `ErrorHierarchy::is_recursive_error(self)`",
+            ),
+            fixture("`impl ErrorHierarchy for Box<T>` does not forward `is_unboxed_error`"),
+            fixture("`is_unexported_error` has no C export `kafka_common_Error_is_unexported_error` in `ffi`"),
+        ];
+        assert_eq!(findings.len(), expected.len(), "{findings:#?}");
+        for (finding, expected) in findings.iter().zip(&expected) {
+            assert!(
+                finding.ends_with(expected.as_str()),
+                "{finding}\n  does not end with\n{expected}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod no_data_carrying_enum_variants_tests {
+    use super::*;
+
+    /// A crate whose public enums exercise every outcome of
+    /// `check-no-data-carrying-enum-variants`: the newtype variants of
+    /// `Wrapped` each delegate to a type the crate owns, those of `Leaky` do
+    /// not or carry several fields, `Value` is a `rust-only` value wrapper,
+    /// and `Reexported` is reached only through a `pub use`.
+    const FIXTURE_LIB: &str = r#"
+        pub struct Payload { level: i32 }
+        pub trait Provider {}
+        message_only_error! { QuotaViolationError code: 1 }
+        pub enum Wrapped<T> {
+            Unit,
+            Struct(Payload),
+            Boxed(Box<Payload>),
+            Shared(std::sync::Arc<Payload>),
+            Interface(Box<dyn Provider + Send>),
+            Macro(Box<QuotaViolationError>),
+            Param(T),
+        }
+        pub enum Leaky {
+            Ids(Vec<u8>),
+            Stamp(i64),
+            Tuple((u8, u8)),
+            Pair(u8, u8),
+            Named { x: u8 },
+        }
+        #[doc(alias = "rust-only")]
+        pub enum Value {
+            Double(f64),
+            Pair(u8, u8),
+        }
+        mod reexported {
+            pub enum Reexported { Raw(i64) }
+        }
+        pub use reexported::Reexported;
+        pub(crate) enum CratePrivate { A(i64) }
+        mod hidden {
+            pub enum Unreachable { A(i64) }
+        }
+    "#;
+
+    #[test]
+    fn test_newtype_must_wrap_a_type_the_crate_defines() {
+        let dir = std::env::temp_dir().join(format!("xtask-no-data-carrying-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = NoDataCarryingEnumVariants.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        findings.sort();
+        let mut expected = [
+            format!("{file}: `Leaky::Ids` wraps `Vec<u8>`, a type the crate does not define"),
+            format!("{file}: `Leaky::Stamp` wraps `i64`, a type the crate does not define"),
+            format!("{file}: `Leaky::Tuple` wraps `(u8, u8)`, a type the crate does not define"),
+            format!("{file}: `Leaky::Pair` holds data inline (2 unnamed fields)"),
+            format!("{file}: `Leaky::Named` holds data inline (inline named fields)"),
+            // A `rust-only` value wrapper may wrap `f64`, but not hold fields inline.
+            format!("{file}: `Value::Pair` holds data inline (2 unnamed fields)"),
+            // Reached through `pub use` from a private module.
+            format!("{file}: `Reexported::Raw` wraps `i64`, a type the crate does not define"),
+        ];
+        expected.sort();
+        assert_eq!(findings, expected);
+        // The fifteen variants of the four reachable `pub` enums; the
+        // `pub(crate)` enum and the one under a private module nothing
+        // re-exports are out of scope.
+        assert_eq!(checked, 15);
+    }
+}
+
+#[cfg(test)]
+mod enum_translation_tests {
+    use super::*;
+
+    /// A crate whose every public enum exercises one outcome of
+    /// `check-enum-translation`.
+    const FIXTURE_LIB: &str = r#"
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+        pub enum DescribeTopicsResult { ByTopicId(u8), ByTopicName(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.TopicRecord")]
+        pub enum TopicRecord { A(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
+        pub enum OffsetSpec { Earliest, Latest }
+        #[doc(alias = "org.apache.kafka.common.TopicCollection")]
+        pub enum TopicCollection { Ids(u8) }
+        #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+        pub enum MetricValueProvider { Gauge(u8) }
+        #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
+        pub enum OpType { Set }
+        #[doc(alias = "org.apache.kafka.clients.admin.Unknown")]
+        pub enum Unresolved { A }
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues")]
+        pub enum MemberMarker { A }
+        #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+        pub(crate) enum CratePrivate { A }
+        mod private {
+            #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
+            pub enum Unreachable { A }
+        }
+    "#;
+
+    fn class(
+        package: &str,
+        path: &[&str],
+        kind: java::JavaKind,
+        is_abstract: bool,
+        supertypes: &[&str],
+    ) -> java::JavaClass {
+        java::JavaClass {
+            module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
+            package: package.to_string(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            methods: BTreeSet::new(),
+            overloads: Vec::new(),
+            fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
+            deprecated: false,
+            is_test: false,
+            kind,
+            visibility: java::Visibility::Public,
+            is_abstract,
+            functional_interface: false,
+            supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_enum_translating_a_plain_class_or_record_is_a_finding() {
+        use java::JavaKind::{Class, Enum, Interface, Record};
+        let dir = std::env::temp_dir().join(format!("xtask-enum-translation-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let rule = EnumTranslation {
+            index: JavaIndex {
+                classes: vec![
+                    class("clients.admin", &["DescribeTopicsResult"], Class, false, &[]),
+                    class("clients.admin", &["TopicRecord"], Record, false, &[]),
+                    class("clients.admin", &["OffsetSpec"], Class, false, &[]),
+                    class("clients.admin", &["OffsetSpec", "EarliestSpec"], Class, false, &["OffsetSpec"]),
+                    class("common", &["TopicCollection"], Class, true, &[]),
+                    class("common.metrics", &["MetricValueProvider"], Interface, false, &[]),
+                    class("clients.admin", &["AlterConfigOp", "OpType"], Enum, false, &[]),
+                    // A subclass in the test tree does not make a hierarchy.
+                    class("clients.admin", &["TestResult"], Class, false, &["DescribeTopicsResult"]),
+                ]
+                .into_iter()
+                .map(|mut c| {
+                    c.is_test = c.path == ["TestResult"];
+                    c
+                })
+                .collect(),
+            },
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `DescribeTopicsResult` is an enum but translates \
+                     `org.apache.kafka.clients.admin.DescribeTopicsResult`, a class that is neither a Java enum nor \
+                     extended by any class"
+                ),
+                format!(
+                    "{file}: `TopicRecord` is an enum but translates `org.apache.kafka.clients.admin.TopicRecord`, a \
+                     record that is neither a Java enum nor extended by any class"
+                ),
+            ]
+        );
+        // The six public enums with a class marker the index resolves.
+        assert_eq!(checked, 6);
+    }
+}
+
+#[cfg(test)]
+mod functional_interface_trait_tests {
+    use super::*;
+
+    /// A crate exercising every outcome of `check-functional-interface-trait`.
+    const FIXTURE_LIB: &str = r#"
+        pub mod producer {
+            #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
+            pub type Callback = Box<dyn FnOnce() + Send>;
+            #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer")]
+            pub struct KafkaProducer;
+            impl KafkaProducer {
+                #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#send")]
+                pub fn send(&self, callback: Callback) {}
+            }
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
+            pub trait OffsetCommitCallback {}
+            pub fn new(function: fn()) -> impl OffsetCommitCallback {}
+        }
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+            pub struct KafkaFuture;
+            impl KafkaFuture {
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
+                pub fn then_apply<F: Fn(u8) -> u8>(&self, function: F) {}
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#whenComplete(long)")]
+                pub fn when_complete_with_timeout(&self, timeout: i64) {}
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#hide")]
+                pub fn hide<F: Fn()>(&self, hidden: F) {}
+            }
+            #[doc(alias = "org.apache.kafka.common.Plain")]
+            pub type Plain = fn();
+            pub mod metrics {
+                mod metric_value_provider {
+                    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+                    pub enum MetricValueProvider { A }
+                }
+            }
+            pub mod utils {
+                #[doc(alias = "org.apache.kafka.common.utils.Utils$SwallowAction")]
+                pub type SwallowAction = fn();
+            }
+        }
+        mod ffi {
+            #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
+            pub struct kafka_common_metrics_Gauge_t;
+        }
+    "#;
+
+    fn overload(name: &str, params: &[&str]) -> java::Overload {
+        java::Overload {
+            name: name.to_string(),
+            params: params.iter().map(|s| s.to_string()).collect(),
+            deprecated: false,
+            visibility: java::Visibility::Public,
+            is_static: false,
+            is_default: false,
+            param_names: params.iter().map(|_| "p".to_string()).collect(),
+            returns_class: false,
+        }
+    }
+
+    fn class(package: &str, path: &[&str], functional: bool, overloads: Vec<java::Overload>) -> java::JavaClass {
+        java::JavaClass {
+            module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
+            package: package.to_string(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            methods: overloads.iter().map(|o| o.name.clone()).collect(),
+            overloads,
+            fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
+            deprecated: false,
+            is_test: false,
+            kind: if functional {
+                java::JavaKind::Interface
+            } else {
+                java::JavaKind::Class
+            },
+            visibility: java::Visibility::Public,
+            is_abstract: false,
+            functional_interface: functional,
+            supertypes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_public_functional_interface_not_translated_as_a_trait_is_a_finding() {
+        let dir = std::env::temp_dir().join(format!("xtask-functional-interface-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut hidden = class("common", &["KafkaFuture", "Hidden"], true, Vec::new());
+        hidden.visibility = java::Visibility::Package;
+        let mut plain = class("common", &["Plain"], false, Vec::new());
+        plain.kind = java::JavaKind::Interface;
+        let rule = FunctionalInterfaceTrait {
+            index: JavaIndex {
+                classes: vec![
+                    class("clients.producer", &["Callback"], true, Vec::new()),
+                    class(
+                        "clients.producer",
+                        &["KafkaProducer"],
+                        false,
+                        vec![overload("send", &["ProducerRecord", "Callback"])],
+                    ),
+                    class("clients.consumer", &["OffsetCommitCallback"], true, Vec::new()),
+                    class(
+                        "common",
+                        &["KafkaFuture"],
+                        false,
+                        vec![
+                            overload("thenApply", &["BaseFunction"]),
+                            overload("whenComplete", &["BiConsumer"]),
+                            overload("whenComplete", &["long"]),
+                            overload("hide", &["Hidden"]),
+                        ],
+                    ),
+                    class("common", &["KafkaFuture", "BaseFunction"], true, Vec::new()),
+                    // Taken only by the overload no Rust method translates.
+                    class("common", &["KafkaFuture", "BiConsumer"], true, Vec::new()),
+                    // Not `public`.
+                    hidden,
+                    // Not a functional interface.
+                    plain,
+                    class("common.metrics", &["MetricValueProvider"], true, Vec::new()),
+                    // Translated by the C FFI module only, and taken by nothing.
+                    class("common.metrics", &["Gauge"], true, Vec::new()),
+                    // `Utils` is not on the Public list.
+                    class("common.utils", &["Utils", "SwallowAction"], true, Vec::new()),
+                ],
+            },
+            public: [
+                "clients.producer.Callback",
+                "clients.producer.KafkaProducer",
+                "clients.consumer.OffsetCommitCallback",
+                "common.KafkaFuture",
+                "common.Plain",
+                "common.metrics.MetricValueProvider",
+                "common.metrics.Gauge",
+            ]
+            .iter()
+            .map(|c| format!("{}{c}", java::MARKER_PREFIX))
+            .collect(),
+            unsupported: BTreeSet::new(),
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `Callback` translates `clients.producer.Callback`, a public `@FunctionalInterface`, as a \
+                     type alias; it must be a trait"
+                ),
+                format!(
+                    "{file}: `KafkaFuture::then_apply` translates `common.KafkaFuture#thenApply`, which takes \
+                     `common.KafkaFuture$BaseFunction`, a public `@FunctionalInterface` that no trait translates"
+                ),
+                format!(
+                    "{file}: `MetricValueProvider` translates `common.metrics.MetricValueProvider`, a public \
+                     `@FunctionalInterface`, as an enum; it must be a trait"
+                ),
+            ]
+        );
+        // Callback, OffsetCommitCallback, BaseFunction, BiConsumer, MetricValueProvider and Gauge.
+        assert_eq!(checked, 6);
+    }
+
+    /// Traits for `check-functional-interface-trait`'s factory requirement.
+    const FACTORY_FIXTURE_LIB: &str = r#"
+        pub mod producer {
+            #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
+            pub trait Callback {}
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
+            pub trait OffsetCommitCallback {}
+            pub fn new<F: Fn()>(function: F) -> impl OffsetCommitCallback {}
+        }
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+            pub struct KafkaFuture;
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
+            pub trait BaseFunction<A, B> {}
+            #[expect(non_snake_case)]
+            pub fn BaseFunction_new<F>(function: F) -> impl BaseFunction<u8, u8> {}
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture$BiConsumer")]
+            pub trait BiConsumer<A, B> {}
+            pub fn new<F>(function: F) -> impl BiConsumer<u8, u8> {}
+            pub mod serialization {
+                #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
+                pub trait Deserializer<T> {}
+                pub fn new<F>(function: F) -> impl Deserializer<u8> {}
+                fn with_headers<F>(function: F) -> impl Deserializer<u8> {}
+            }
+            pub mod metrics {
+                pub mod metric_value_provider {
+                    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+                    pub trait MetricValueProvider {}
+                    pub fn new<F>(function: F) -> impl MetricValueProvider {}
+                }
+                pub mod gauge {
+                    #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
+                    pub trait Gauge {}
+                    pub fn new<F>(function: F) -> Box<dyn Gauge> {}
+                }
+            }
+        }
+    "#;
+
+    fn method(name: &str, params: &[(&str, &str)], is_default: bool) -> java::Overload {
+        java::Overload {
+            params: params.iter().map(|(t, _)| t.to_string()).collect(),
+            param_names: params.iter().map(|(_, n)| n.to_string()).collect(),
+            is_default,
+            ..overload(name, &[])
+        }
+    }
+
+    #[test]
+    fn test_functional_interface_trait_without_its_factories_is_a_finding() {
+        let dir = std::env::temp_dir().join(format!("xtask-functional-factory-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FACTORY_FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut static_deserialize = method("deserialize", &[("String", "topic")], false);
+        static_deserialize.is_static = true;
+        let mut gauge = class("common.metrics", &["Gauge"], true, Vec::new());
+        gauge.supertypes = vec!["MetricValueProvider".to_string()];
+        let rule = FunctionalInterfaceTrait {
+            index: JavaIndex {
+                classes: vec![
+                    class(
+                        "clients.producer",
+                        &["Callback"],
+                        true,
+                        vec![method(
+                            "onCompletion",
+                            &[("RecordMetadata", "metadata"), ("Exception", "exception")],
+                            false,
+                        )],
+                    ),
+                    class(
+                        "clients.consumer",
+                        &["OffsetCommitCallback"],
+                        true,
+                        vec![method(
+                            "onComplete",
+                            &[("Map", "offsets"), ("Exception", "exception")],
+                            false,
+                        )],
+                    ),
+                    class("common", &["KafkaFuture"], false, Vec::new()),
+                    class(
+                        "common",
+                        &["KafkaFuture", "BaseFunction"],
+                        true,
+                        vec![method("apply", &[("A", "a")], false)],
+                    ),
+                    class(
+                        "common",
+                        &["KafkaFuture", "BiConsumer"],
+                        true,
+                        vec![method("accept", &[("A", "a"), ("B", "b")], false)],
+                    ),
+                    class(
+                        "common.serialization",
+                        &["Deserializer"],
+                        true,
+                        vec![
+                            method("deserialize", &[("String", "topic"), ("byte[]", "data")], false),
+                            method(
+                                "deserialize",
+                                &[("String", "topic"), ("Headers", "headers"), ("byte[]", "data")],
+                                true,
+                            ),
+                            // The same added parameter: one factory serves both.
+                            method(
+                                "deserialize",
+                                &[("String", "topic"), ("Headers", "headers"), ("ByteBuffer", "data")],
+                                true,
+                            ),
+                            // A static or a default helper is no function shape.
+                            static_deserialize,
+                            method("close", &[], true),
+                        ],
+                    ),
+                    class(
+                        "common.metrics",
+                        &["MetricValueProvider"],
+                        true,
+                        vec![method("value", &[("MetricConfig", "config"), ("long", "now")], false)],
+                    ),
+                    gauge,
+                ],
+            },
+            public: [
+                "clients.producer.Callback",
+                "clients.consumer.OffsetCommitCallback",
+                "common.KafkaFuture",
+                "common.serialization.Deserializer",
+                "common.metrics.MetricValueProvider",
+                "common.metrics.Gauge",
+            ]
+            .iter()
+            .map(|c| format!("{}{c}", java::MARKER_PREFIX))
+            .collect(),
+            unsupported: BTreeSet::new(),
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `Callback` translates `clients.producer.Callback`, a public `@FunctionalInterface`, but \
+                     its module has no `pub fn new(function) -> impl Callback` for \
+                     `clients.producer.Callback#onCompletion(RecordMetadata,Exception)`"
+                ),
+                // A plain `new` does not serve a nested interface.
+                format!(
+                    "{file}: `BiConsumer` translates `common.KafkaFuture$BiConsumer`, a public \
+                     `@FunctionalInterface`, but its module has no `pub fn BiConsumer_new(function) -> impl \
+                     BiConsumer` for `common.KafkaFuture$BiConsumer#accept(A,B)`"
+                ),
+                // A private factory does not count.
+                format!(
+                    "{file}: `Deserializer` translates `common.serialization.Deserializer`, a public \
+                     `@FunctionalInterface`, but its module has no `pub fn with_headers(function) -> impl \
+                     Deserializer` for `common.serialization.Deserializer#deserialize(String,Headers,byte[])`"
+                ),
+                // Inherited from `MetricValueProvider`; a boxed return is not `impl Gauge`.
+                format!(
+                    "{file}: `Gauge` translates `common.metrics.Gauge`, a public `@FunctionalInterface`, but its \
+                     module has no `pub fn new(function) -> impl Gauge` for \
+                     `common.metrics.MetricValueProvider#value(MetricConfig,long)`"
+                ),
+            ]
+        );
+        assert_eq!(checked, 7);
+    }
+}
+
+#[cfg(test)]
+mod consumer_receiver_tests {
+    use super::*;
+
+    /// The findings over `lib`, written to its own temp dir `name` because the
+    /// tests run in parallel, and the number of methods checked.
+    fn run(name: &str, lib: &str) -> (usize, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("xtask-consumer-receiver-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), lib).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = ConsumerReceiver.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        (checked, findings)
+    }
+
+    #[test]
+    fn test_mut_receivers_and_the_three_shared_methods_pass() {
+        let (checked, findings) = run(
+            "pass",
+            r#"
+            pub trait Consumer {
+                fn assignment(&mut self) -> Vec<i32>;
+                fn poll(&mut self) -> impl std::future::Future<Output = ()> + Send;
+                fn wakeup(&self);
+                fn metrics(&self) -> Vec<i32>;
+                fn handle(&self) -> i32;
+            }
+            pub trait DynConsumer {
+                fn assignment(&mut self) -> Vec<i32>;
+                fn wakeup(&self);
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert_eq!(checked, 7);
+    }
+
+    #[test]
+    fn test_shared_receiver_on_a_guarded_method_is_reported() {
+        let (_, findings) = run(
+            "shared",
+            r#"
+            pub trait Consumer {
+                fn assignment(&self) -> Vec<i32>;
+                fn current_lag(&self, partition: i32) -> Option<i64>;
+                fn wakeup(&self);
+            }
+            pub trait DynConsumer {
+                fn paused(&self) -> Vec<i32>;
+                fn wakeup(&mut self);
+                fn build() -> Self where Self: Sized;
+            }
+            "#,
+        );
+        let expected = [
+            "`Consumer::assignment` takes `&self`; it must take `&mut self`",
+            "`Consumer::current_lag` takes `&self`; it must take `&mut self`",
+            "`DynConsumer::paused` takes `&self`; it must take `&mut self`",
+            "`DynConsumer::wakeup` takes `&mut self`; it must take `&self`",
+            "`DynConsumer::build` takes `no receiver`; it must take `&mut self`",
+        ];
+        for e in expected {
+            assert!(findings.iter().any(|f| f.contains(e)), "missing `{e}` in {findings:#?}");
+        }
+        assert_eq!(findings.len(), expected.len(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_missing_or_private_trait_is_reported() {
+        let (_, findings) = run(
+            "missing",
+            r#"
+            pub trait Consumer {
+                fn assignment(&mut self) -> Vec<i32>;
+            }
+            pub(crate) trait DynConsumer {
+                fn paused(&self) -> Vec<i32>;
+            }
+            "#,
+        );
+        assert_eq!(
+            findings,
+            vec!["no public trait `DynConsumer`; the rule checks its method receivers".to_string()]
+        );
     }
 }

@@ -33,7 +33,7 @@ class ConcurrentModificationError(RuntimeError):
 
     __module__ = "confluent_kafka"
 
-    _ffi_id: ClassVar[int] = -2  # kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION
+    _ffi_id: ClassVar[int] = -2  # kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION
 
     def __init__(
         self,

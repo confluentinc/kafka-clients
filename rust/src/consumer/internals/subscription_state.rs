@@ -1423,7 +1423,7 @@ impl SubscriptionState {
         }
         if !partitions_with_no_offsets.is_empty() {
             return Err(Error::ConsumerNoOffsetForPartition(
-                ConsumerNoOffsetForPartitionError::for_partitions(partitions_with_no_offsets),
+                ConsumerNoOffsetForPartitionError::with_partitions(partitions_with_no_offsets),
             ));
         }
         Ok(())

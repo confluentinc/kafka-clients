@@ -203,13 +203,13 @@ impl BufferPool {
         let wait_time_sensor = metrics
             .sensor(BufferPool::WAIT_TIME_SENSOR_NAME)
             .expect("registering bufferpool-wait-time sensor");
-        let rate_metric_name = metrics.metric_name_description_tags(
+        let rate_metric_name = metrics.metric_name_with_description_tags(
             "bufferpool-wait-ratio",
             metric_grp_name,
             "The fraction of time an appender waits for space allocation.",
             std::collections::BTreeMap::new(),
         );
-        let total_ns_metric_name = metrics.metric_name_description_tags(
+        let total_ns_metric_name = metrics.metric_name_with_description_tags(
             "bufferpool-wait-time-ns-total",
             metric_grp_name,
             "The total time in nanoseconds an appender waits for space allocation.",
@@ -228,13 +228,13 @@ impl BufferPool {
         let buffer_exhausted_sensor = metrics
             .sensor("buffer-exhausted-records")
             .expect("registering buffer-exhausted-records sensor");
-        let buffer_exhausted_rate_metric_name = metrics.metric_name_description_tags(
+        let buffer_exhausted_rate_metric_name = metrics.metric_name_with_description_tags(
             "buffer-exhausted-rate",
             metric_grp_name,
             "The average per-second number of record sends that are dropped due to buffer exhaustion",
             std::collections::BTreeMap::new(),
         );
-        let buffer_exhausted_total_metric_name = metrics.metric_name_description_tags(
+        let buffer_exhausted_total_metric_name = metrics.metric_name_with_description_tags(
             "buffer-exhausted-total",
             metric_grp_name,
             "The total number of record sends that are dropped due to buffer exhaustion",
@@ -530,7 +530,7 @@ impl BufferPool {
             ));
         }
         self.wait_time_sensor
-            .record_value_time_ms(time_ns as f64, self.time.milliseconds());
+            .record_with_value_time_ms(time_ns as f64, self.time.milliseconds());
         Ok(())
     }
 
@@ -589,7 +589,21 @@ impl BufferPool {
         // The wait duration is measured with `time.nanoseconds()` bracketing the wait, as in
         // Java, and recorded even when the wait ends in timeout / close (Java's `finally`).
         let start_wait_ns = self.time.nanoseconds();
-        let waiting_time_elapsed = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
+        // A zero budget never parks. Java's `moreMemory.await(0, NANOSECONDS)` returns
+        // `false` at once; `tokio::time::timeout(0, ..)` would instead register a timer
+        // and park this task until the runtime's time driver fires it, so the "would
+        // block" answer would depend on a runtime worker being free to mind the driver.
+        // `KafkaProducer::try_send` reaches here with a zero budget through `block_on`
+        // from a foreign thread (the C FFI, which keeps the Python GIL across the call),
+        // and the worker running the Sender may at that moment be waiting for that same
+        // GIL in a delivery callback: the timer never fired and both sides waited
+        // forever. Answering without a timer is what `try_send` promises, and what Java
+        // does.
+        let waiting_time_elapsed = if remaining.is_zero() {
+            true
+        } else {
+            tokio::time::timeout(remaining, more_memory.notified()).await.is_err()
+        };
         let end_wait_ns = self.time.nanoseconds();
         self.record_wait_time((end_wait_ns - start_wait_ns).max(0))?;
 
@@ -953,7 +967,8 @@ impl BufferPool {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#recordBufferExhausted")]
     pub(crate) fn record_buffer_exhausted(&self) {
         // Recorded outside the pool lock (value/timestamp are independent of pool state).
-        self.buffer_exhausted_sensor.record_value_time_ms(1.0, self.time.milliseconds());
+        self.buffer_exhausted_sensor
+            .record_with_value_time_ms(1.0, self.time.milliseconds());
     }
 
     /// Return previously-reserved non-pooled bytes to the pool and signal the next waiter. Takes
@@ -1213,6 +1228,29 @@ mod tests {
         );
     }
 
+    /// Rust-only: a zero budget answers `BufferExhausted` without a timer.
+    ///
+    /// `KafkaProducer::try_send` allocates with `max_block_ms = 0` through `block_on`
+    /// from a thread outside the runtime, and the C FFI does so while holding the
+    /// Python GIL; a timer there needs a runtime worker to fire it, and that worker
+    /// may be waiting for the GIL. The runtime below has no time driver at all, so a
+    /// `tokio::time::timeout` would panic ("A Tokio 1.x context was found, but timers
+    /// are disabled"): the test passes only if no timer is involved.
+    #[test]
+    fn test_zero_budget_gives_up_without_a_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(async {
+            let pool = BufferPool::new_for_test(2, 1);
+            let _buffer = pool.allocate(1, 0).await.unwrap();
+            let result = pool.allocate(2, 0).await;
+            assert!(
+                matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)),
+                "Should be a BufferExhausted error"
+            );
+            assert_eq!(0, pool.queued(), "the waiter must leave the queue on the way out");
+        });
+    }
+
     /// Translated from `BufferPoolTest.testBlockTimeout`.
     ///
     /// Verify that a failed allocation attempt due to not enough memory finishes soon
@@ -1409,8 +1447,12 @@ mod tests {
             "buffer-exhausted-rate",
             "buffer-exhausted-total",
         ] {
-            let mn =
-                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn = metrics.metric_name_with_description_tags(
+                name,
+                "producer-metrics",
+                "",
+                std::collections::BTreeMap::new(),
+            );
             assert!(metrics.metric(&mn).is_some(), "metric {name} should be registered");
         }
 
@@ -1420,7 +1462,7 @@ mod tests {
         let result = pool.allocate(2, 10).await;
         assert!(matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)));
 
-        let total_ns = metrics.metric_name_description_tags(
+        let total_ns = metrics.metric_name_with_description_tags(
             "bufferpool-wait-time-ns-total",
             "producer-metrics",
             "",
@@ -1430,7 +1472,7 @@ mod tests {
             metrics.metric(&total_ns).unwrap().measurable_value(0) > 0.0,
             "wait-time-ns-total should have recorded"
         );
-        let exhausted_total = metrics.metric_name_description_tags(
+        let exhausted_total = metrics.metric_name_with_description_tags(
             "buffer-exhausted-total",
             "producer-metrics",
             "",
@@ -2114,7 +2156,7 @@ mod chunk_allocation_tests {
         );
         assert_eq!(chunk_size as i64, p.available_memory(), "a failed attempt takes nothing");
         assert_eq!(0, p.queued(), "the non-blocking path never parks");
-        let exhausted_total = metrics.metric_name_description_tags(
+        let exhausted_total = metrics.metric_name_with_description_tags(
             "buffer-exhausted-total",
             "producer-metrics",
             "",

@@ -119,6 +119,7 @@ impl NewTopic {
     /// Set the configuration to use on the new topic. Returns `self` for
     /// chaining, mirroring Java's fluent `configs(...)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
     pub fn set_configs(mut self, configs: BTreeMap<String, String>) -> Self {
         self.configs = Some(configs);
         self

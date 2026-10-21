@@ -45,7 +45,7 @@ class CoordinatorLoadInProgressError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 14  # kafka_common_ErrorCode_COORDINATOR_LOAD_IN_PROGRESS
+    _ffi_id: ClassVar[int] = 14  # kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS
 
     def __init__(
         self,

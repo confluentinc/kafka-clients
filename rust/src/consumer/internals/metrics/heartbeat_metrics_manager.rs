@@ -79,7 +79,7 @@ impl HeartbeatMetricsManager {
             "The max time taken to receive a response to a heartbeat request",
         );
         heartbeat_sensor
-            .add_metric_name(heartbeat_response_time_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(heartbeat_response_time_max.clone(), Box::new(Max::new()))
             .expect("adding heartbeat-response-time-max");
 
         // windowed meters
@@ -140,7 +140,7 @@ impl HeartbeatMetricsManager {
 
     /// Java: `recordRequestLatency(long requestLatencyMs)`.
     pub(crate) fn record_request_latency(&self, request_latency_ms: i64) {
-        self.heartbeat_sensor.record_value(request_latency_ms as f64);
+        self.heartbeat_sensor.record_with_value(request_latency_ms as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

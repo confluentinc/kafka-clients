@@ -168,7 +168,8 @@ async fn create_topic_with_assignment(admin: &dyn Admin, topic: &str, assignment
 
 /// `cluster.createTopic(topic, partitions, replicas)`, which waits until every
 /// broker knows the topic; the leader wait is the client-observable half, and
-/// [`known_topic_metadata`] covers the other broker for the describes that follow.
+/// [`known_topic_metadata`] (or, after a recreate, [`recreated_topic_metadata`])
+/// covers the other broker for the describes that follow.
 async fn cluster_create_topic(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
     test_utils::create_topic(admin, topic, num_partitions, replication_factor).await;
     test_utils::wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
@@ -228,6 +229,27 @@ async fn topic_metadata(admin: &dyn Admin, topic: &str) -> Result<TopicDescripti
 /// two-broker cluster may not have applied the creation yet. Retrying the
 /// describe on that one error closes the window; any other error fails at once.
 async fn known_topic_metadata(admin: &dyn Admin, topic: &str) -> TopicDescription {
+    describe_until_current(admin, topic, None).await
+}
+
+/// [`known_topic_metadata`] for a topic the test has just deleted and recreated:
+/// also retries while the answering broker still describes the deleted topic,
+/// whose id was `deleted_id`.
+///
+/// Java's `cluster.createTopic` ends with `ensureConsistentMetadata`
+/// (`ClusterInstance.java:364, 371-378`), which waits until every broker has
+/// applied the controller's metadata log, so no broker still holds the deleted
+/// topic when `topicMetadata()` runs. [`verify_topic_deletion`] observes the
+/// deletion only through the broker answering `listTopics` and the brokers that
+/// held a replica: a broker that held none may not have applied it yet, and
+/// answers the describe with the old topic and its old id. A topic that kept its
+/// id still fails, once the retries time out.
+async fn recreated_topic_metadata(admin: &dyn Admin, topic: &str, deleted_id: Uuid) -> TopicDescription {
+    describe_until_current(admin, topic, Some(deleted_id)).await
+}
+
+/// The describe of [`known_topic_metadata`] and [`recreated_topic_metadata`].
+async fn describe_until_current(admin: &dyn Admin, topic: &str, deleted_id: Option<Uuid>) -> TopicDescription {
     let description = Mutex::new(None);
     test_utils::retry_on_error_with_timeout(DEFAULT_MAX_WAIT, || async {
         let result = admin
@@ -241,6 +263,12 @@ async fn known_topic_metadata(admin: &dyn Admin, topic: &str) -> TopicDescriptio
                 let found = all
                     .remove(topic)
                     .unwrap_or_else(|| panic!("describe {topic}: topic missing from the result"));
+                if deleted_id == Some(found.topic_id()) {
+                    return Err(format!(
+                        "describe {topic}: the answering broker still has the deleted topic, id {:?}",
+                        found.topic_id()
+                    ));
+                }
                 *description.lock().expect("description lock") = Some(found);
                 Ok(())
             },
@@ -389,7 +417,10 @@ async fn test_send_with_recreated_topic() {
     // Verify that the topic is deleted when no metadata request comes in
     verify_topic_deletion(admin.as_ref(), &topic).await;
     cluster_create_topic(admin.as_ref(), &topic, 1, 1).await;
-    assert_ne!(topic_id, known_topic_metadata(admin.as_ref(), &topic).await.topic_id());
+    assert_ne!(
+        topic_id,
+        recreated_topic_metadata(admin.as_ref(), &topic, topic_id).await.topic_id()
+    );
 
     // Producer should be able to send messages even after topic gets recreated
     let record_metadata = send_and_get(&producer, &topic, "value").await;
@@ -474,9 +505,11 @@ async fn test_send_while_topic_get_recreated() {
                 let _ = <TestProducer as Producer<String, Vec<u8>>>::send_with_callback(
                     &producer,
                     record(&topic, &format!("value{i}")),
-                    Some(Box::new(move |_metadata, _error| {
-                        num_acks.fetch_add(1, Ordering::SeqCst);
-                    })),
+                    Some(Box::new(
+                        move |_metadata: Option<&confluent_kafka::producer::RecordMetadata>, _error: Option<&Error>| {
+                            num_acks.fetch_add(1, Ordering::SeqCst);
+                        },
+                    )),
                 )
                 .await;
             }

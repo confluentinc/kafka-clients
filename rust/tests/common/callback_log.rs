@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use confluent_kafka::common::{Error, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerRebalanceListener, OffsetAndMetadata, OffsetCommitCallback};
+use confluent_kafka::consumer::{ConsumerRebalanceListener, DynConsumer, OffsetAndMetadata, OffsetCommitCallback};
 use confluent_kafka::producer::{Producer, ProducerRecord, RecordMetadata};
 
 /// `kind` value for `ConsumerRebalanceListener::on_partitions_assigned`.
@@ -155,7 +155,11 @@ struct LoggingCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for LoggingCommitCallback {
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         let mut entry = CallbackLogEntry {
             kind: KIND_COMMIT.to_string(),
             partitions: Vec::with_capacity(offsets.len()),
@@ -169,6 +173,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
                 .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), oam.offset());
         }
         push(&self.log, entry);
+        Ok(())
     }
 }
 
@@ -196,7 +201,7 @@ fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&Error>) -> C
 /// Obtained from [`crate::common::backend_factory::ConsumerBackendFactory::create_with_callback_log`]
 /// (the factory is the only place that has both the in-process pieces the native
 /// backend needs and the channel + server-side id the gRPC backends need —
-/// `Box<dyn Consumer>` erases all of it).
+/// `Box<dyn DynConsumer>` erases all of it).
 pub enum ConsumerCallbackLog {
     /// In-process log written by real Rust callbacks.
     Native(SharedLog),
@@ -225,7 +230,7 @@ impl ConsumerCallbackLog {
     /// releases it.
     pub async fn subscribe_with_logging_listener(
         &self,
-        consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
         topics: Vec<String>,
     ) -> Result<(), Error> {
         match self {
@@ -242,7 +247,7 @@ impl ConsumerCallbackLog {
     /// completion callback that appends a `"commit"` entry to this log.
     pub async fn commit_async_with_logging_callback(
         &self,
-        consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
@@ -304,13 +309,16 @@ impl ProducerCallbackLog {
         match self {
             ProducerCallbackLog::Native(log) => {
                 let log = Arc::clone(log);
-                let callback: confluent_kafka::producer::Callback =
-                    Box::new(move |metadata, error| push(&log, delivery_entry(metadata, error)));
+                let callback: Box<dyn confluent_kafka::producer::Callback> =
+                    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                        push(&log, delivery_entry(metadata, error))
+                    });
                 producer.send_with_callback(record, Some(callback)).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ProducerCallbackLog::Grpc(_) => {
-                let callback: confluent_kafka::producer::Callback = Box::new(|_, _| {});
+                let callback: Box<dyn confluent_kafka::producer::Callback> =
+                    Box::new(|_: Option<&RecordMetadata>, _: Option<&Error>| {});
                 producer.send_with_callback(record, Some(callback)).await
             },
         }

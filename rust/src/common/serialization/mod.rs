@@ -21,6 +21,9 @@ mod byte_array_deserializer;
 mod byte_array_serializer;
 mod bytes_deserializer;
 mod deserializer;
+mod dyn_deserializer;
+mod dyn_serializer;
+mod inline_future;
 mod string_deserializer;
 mod string_serializer;
 
@@ -28,8 +31,13 @@ pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
 pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
+pub use dyn_deserializer::DynDeserializer;
+pub use dyn_serializer::DynSerializer;
+pub use inline_future::InlineFuture;
 pub use string_deserializer::StringDeserializer;
 pub use string_serializer::StringSerializer;
+
+use std::borrow::Cow;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -38,12 +46,32 @@ use crate::common::header::RecordHeaders;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.serialization.Serializer<T>`.
 ///
+/// # Asynchronous methods
+///
+/// Every method returns a `Send` future, so a serializer can await I/O (a
+/// schema-registry lookup, for instance) without blocking the runtime.
+/// Implementations may write them as `async fn`. The trait is not
+/// dyn-compatible; [`DynSerializer`], which every `Serializer` implements, is
+/// its dyn-compatible companion, and the producer stores its serializers as
+/// `Box<dyn DynSerializer<K>>`. A call through `dyn` returns an
+/// [`InlineFuture`], which holds the future without allocating as long as it
+/// is small: a serializer that awaits a large operation only on a cache miss
+/// should `Box::pin` that operation alone.
+///
+/// # Borrowed output
+///
+/// The serialized bytes are a [`Cow`] that may borrow from `data`: a
+/// serializer whose input already is the bytes (`ByteArraySerializer`,
+/// `StringSerializer`) returns [`Cow::Borrowed`] and neither allocates nor
+/// copies (CLAUDE.md §14); one that builds the bytes returns [`Cow::Owned`].
+/// Either is Java's `byte[]` return.
+///
 /// # Type Parameters
 ///
 /// * `T` - Type to be serialized from. Use `?Sized` bounds to accept both
 ///   owned and borrowed forms (e.g., `Serializer<str>` accepts `&str`).
 #[doc(alias = "org.apache.kafka.common.serialization.Serializer")]
-pub trait Serializer<T: ?Sized> {
+pub trait Serializer<T: ?Sized>: Send + Sync {
     /// Convert `data` into a byte array.
     ///
     /// It is recommended to serialize `None` data to `None` byte array.
@@ -55,9 +83,18 @@ pub trait Serializer<T: ?Sized> {
     ///
     /// # Returns
     ///
-    /// Serialized bytes; may be `None`.
+    /// Serialized bytes, which may borrow from `data`; may be `None`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever error the serializer reports; the producer returns it from
+    /// `send`, or fails the record's future, as Java's `doSend` does.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
-    fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, Error>;
+    fn serialize<'a>(
+        &'a self,
+        topic: &'a str,
+        data: Option<&'a T>,
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a;
 
     /// Convert `data` into a byte array, with access to the record headers.
     ///
@@ -80,31 +117,19 @@ pub trait Serializer<T: ?Sized> {
     ///
     /// # Returns
     ///
-    /// Serialized bytes; may be `None`.
-    fn serialize_headers(
-        &self,
-        topic: &str,
-        _headers: &RecordHeaders,
-        data: Option<&T>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        self.serialize(topic, data)
-    }
-
-    /// Serialize owned data, avoiding a clone when the input is already bytes.
+    /// Serialized bytes, which may borrow from `data`; may be `None`.
     ///
-    /// The default implementation borrows `data` and delegates to
-    /// [`serialize_headers`](Serializer::serialize_headers).
-    /// Implementations for types that are already byte buffers (e.g. `Vec<u8>`)
-    /// can override this to pass ownership through without copying.
-    fn serialize_owned_headers(
-        &self,
-        topic: &str,
-        headers: &RecordHeaders,
-        data: Option<T>,
-    ) -> Result<Option<Vec<u8>>, Error>
-    where
-        T: Sized,
-    {
-        self.serialize_headers(topic, headers, data.as_ref())
+    /// # Errors
+    ///
+    /// As [`serialize`](Serializer::serialize).
+    #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
+    fn serialize_with_headers<'a>(
+        &'a self,
+        topic: &'a str,
+        headers: &'a RecordHeaders,
+        data: Option<&'a T>,
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+        let _ = headers;
+        self.serialize(topic, data)
     }
 }

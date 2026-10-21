@@ -49,7 +49,7 @@ use crate::common::record::TimestampType;
 /// The cost is paid only by callers that opt in to `PartialEq` types
 /// (e.g. tests using `i32` keys); users with non-`PartialEq` `K`/`V`
 /// continue to work because the bounds are gated by the derive.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct ConsumerRecord<K, V> {
     topic: Arc<str>,
@@ -83,6 +83,9 @@ pub struct ConsumerRecord<K, V> {
 /// partition at all. Construct it with [`ConsumerRecordOptionsBuilder::new`]
 /// and set them: [`ConsumerRecordOptionsBuilder::build`] returns an error if any of `topic`, `partition`, `offset`, `key`, `value` was not set.
 #[non_exhaustive]
+#[derive(Clone)]
+// the options of ConsumerRecord's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConsumerRecordOptions<K, V> {
     /// The topic this record is received from. Java's `topic`.
     pub(crate) topic: Arc<str>,
@@ -125,6 +128,8 @@ pub struct ConsumerRecordOptions<K, V> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConsumerRecordOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+// builds ConsumerRecordOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct ConsumerRecordOptionsBuilder<K, V> {
     topic: Option<Arc<str>>,
     partition: Option<i32>,

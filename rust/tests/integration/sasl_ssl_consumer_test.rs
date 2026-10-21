@@ -54,14 +54,14 @@ use crate::common::test_context::TestContext;
 
 /// Type alias for the bytes-typed `Consumer` trait object returned by
 /// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`.
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 /// Local byte-array deserializer (the crate exports `ByteArraySerializer` but
 /// no symmetric `ByteArrayDeserializer`); identical in behavior.
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -204,7 +204,7 @@ async fn test_sasl_ssl_consume_records() {
     const NUM_RECORDS: usize = 5;
     produce_records_sasl_ssl(&bootstrap, &ca_cert_pem, &tp, NUM_RECORDS).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, SASL_PASSWORD),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -216,7 +216,7 @@ async fn test_sasl_ssl_consume_records() {
         .await
         .expect("subscribe should succeed");
 
-    let records = consume_records(&mut *consumer, NUM_RECORDS).await;
+    let records = consume_records(&mut consumer, NUM_RECORDS).await;
     assert_eq!(
         records.len(),
         NUM_RECORDS,
@@ -245,7 +245,7 @@ async fn test_sasl_ssl_wrong_credentials() {
     let topic = ctx.topic("sasl_ssl_bad_creds_topic");
     let group_id = ctx.group_id("sasl_ssl_bad_creds_group");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, "wrong-password"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),

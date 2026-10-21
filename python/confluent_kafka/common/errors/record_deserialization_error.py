@@ -46,7 +46,7 @@ class RecordDeserializationError(SerializationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -27  # kafka_common_ErrorCode_RECORD_DESERIALIZATION
+    _ffi_id: ClassVar[int] = -27  # kafka_common_Error_RECORD_DESERIALIZATION
 
     class DeserializationExceptionOrigin(enum.Enum):
         """Java's nested enum ``RecordDeserializationException.DeserializationExceptionOrigin``."""
@@ -62,8 +62,8 @@ class RecordDeserializationError(SerializationError):
         offset: int,
         timestamp: int,
         timestamp_type: TimestampType,
-        key_buffer: bytes,
-        value_buffer: bytes,
+        key_buffer: bytes | None,
+        value_buffer: bytes | None,
         headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
         message: str,
         cause: BaseException | None,
@@ -100,11 +100,11 @@ class RecordDeserializationError(SerializationError):
         """Java's ``timestamp()``."""
         return self._timestamp
 
-    def key_buffer(self) -> memoryview:
+    def key_buffer(self) -> memoryview | None:
         """Java's ``keyBuffer()``."""
         return self._key_buffer
 
-    def value_buffer(self) -> memoryview:
+    def value_buffer(self) -> memoryview | None:
         """Java's ``valueBuffer()``."""
         return self._value_buffer
 

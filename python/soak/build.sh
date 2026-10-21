@@ -25,7 +25,7 @@
 # public yet, so on a host that cannot clone it, the sources arrive by scp.
 #
 # Ordering is mandatory. `pip install -e python` compiles the C
-# extension against rust/target/include/confluent_kafka.h and links
+# extension against rust/target/include/confluent_kafka_bindings.h and links
 # libconfluent_kafka from CONFLUENT_KAFKA_LIB_DIR, so cargo must run first.
 # This mirrors the repo's `make build-python` / python/Makefile.
 
@@ -148,8 +148,8 @@ fi
 # 2. Build the Rust client with the FFI feature
 #
 # Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
-# rust/target/include/confluent_kafka.h (the cbindgen header the C extension
-# includes).
+# rust/target/include/confluent_kafka_bindings.h (the cbindgen header of `_err`
+# twins the C extension includes).
 # ---------------------------------------------------------------------------
 CARGO_ARGS=(build --features ffi)
 [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
@@ -162,8 +162,8 @@ if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
 fi
-if [[ ! -f "$ROOT/rust/target/include/confluent_kafka.h" ]]; then
-    echo "ERROR: rust/target/include/confluent_kafka.h missing after the cargo build" >&2
+if [[ ! -f "$ROOT/rust/target/include/confluent_kafka_bindings.h" ]]; then
+    echo "ERROR: rust/target/include/confluent_kafka_bindings.h missing after the cargo build" >&2
     exit 1
 fi
 
@@ -199,7 +199,7 @@ CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
     "$PYTHON" -m pip install -e "$ROOT/python"
 
 # Fail loudly here rather than three days into a soak. Run from $ROOT (which
-# contains no confluent_kafka/ or admin.py) and assert the modules resolved
+# contains no confluent_kafka/) and assert the modules resolved
 # inside the tree we just built: `python -` puts the cwd first on sys.path, so
 # running this from another checkout's python/ would import that one
 # instead and the check would pass while the install was broken.
@@ -208,18 +208,19 @@ CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
 import os
 import sys
 
-import admin
+import confluent_kafka.admin
 import confluent_kafka.consumer
 import confluent_kafka.producer
 
 root = os.path.realpath(os.environ["ROOT"])
-for module in (confluent_kafka.producer, confluent_kafka.consumer, admin):
+for module in (confluent_kafka.producer, confluent_kafka.consumer,
+               confluent_kafka.admin):
     path = os.path.realpath(module.__file__)
     if not path.startswith(root + os.sep):
         sys.exit(">>> ERROR: {} resolved to {}, outside the tree just built "
                  "({})".format(module.__name__, path, root))
 print(">>> bindings import OK: confluent_kafka=%s admin=%s"
-      % (os.path.dirname(confluent_kafka.producer.__file__), admin.__file__))
+      % (os.path.dirname(confluent_kafka.producer.__file__), confluent_kafka.admin.__file__))
 
 # Import the soak client too: it additionally needs psutil and the
 # soak_metrics import, and a missing dependency or a syntax

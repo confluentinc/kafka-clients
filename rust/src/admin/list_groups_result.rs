@@ -27,7 +27,7 @@ use crate::common::{Error, KafkaFuture};
 /// `GroupListing`s and `Throwable`s and, via `thenApply`, splits it into the
 /// `all`/`valid`/`errors` futures. The Rust port models the mixed collection as
 /// `Vec<Result<GroupListing, Error>>` (a listing is `Ok`, an error is
-/// `Err`) and derives the three views lazily with `then_apply`/`then_apply_try`
+/// `Err`) and derives the three views lazily with `then_apply`
 /// — semantically identical (`all` fails with the first error; `valid`/`errors`
 /// never fail).
 #[derive(Clone, Debug)]
@@ -48,7 +48,7 @@ impl ListGroupsResult {
     /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<GroupListing>> {
-        self.source.then_apply_try(|results| {
+        self.source.then_apply(|results| {
             let mut valid = Vec::new();
             for result in results {
                 match result {
@@ -63,15 +63,17 @@ impl ListGroupsResult {
     /// A future yielding just the valid listings (never fails). Mirrors `valid()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<GroupListing>> {
-        self.source
-            .then_apply(|results| results.into_iter().filter_map(Result::ok).collect())
+        self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {
+            Ok(results.into_iter().filter_map(Result::ok).collect())
+        })
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
-        self.source
-            .then_apply(|results| results.into_iter().filter_map(Result::err).collect())
+        self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {
+            Ok(results.into_iter().filter_map(Result::err).collect())
+        })
     }
 }
 
@@ -86,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_and_errors_split() {
-        let source = KafkaFuture::completed(Ok(vec![
+        let source = KafkaFuture::completed_future(Ok(vec![
             Ok(listing("g1")),
             Err(Error::local_illegal_state("boom")),
             Ok(listing("g2")),
@@ -100,7 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_succeeds_when_no_errors() {
-        let source = KafkaFuture::completed(Ok(vec![Ok(listing("g1"))]));
+        let source = KafkaFuture::completed_future(Ok(vec![Ok(listing("g1"))]));
         let result = ListGroupsResult::new(source);
         assert_eq!(result.all().get().await.unwrap(), vec![listing("g1")]);
     }

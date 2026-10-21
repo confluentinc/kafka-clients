@@ -34,7 +34,7 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// operator sees a message and a stack trace. The nearest Rust equivalent is
 /// the panic payload, which for `panic!("...")` is a `String` or `&str`; any
 /// other payload type is opaque and reported as such.
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+pub(super) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
     payload
         .downcast_ref::<String>()
         .map(|s| s.as_str())
@@ -349,7 +349,7 @@ mod tests {
             for tp in records.partitions().cloned().collect::<Vec<_>>() {
                 if tp.partition() != self.state.filter_partition {
                     let recs: Vec<ConsumerRecord<i32, i32>> = records
-                        .records_partition(&tp)
+                        .records_with_partition(&tp)
                         .iter()
                         .map(|r| {
                             ConsumerRecord::with_options(

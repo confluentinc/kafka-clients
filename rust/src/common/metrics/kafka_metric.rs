@@ -36,7 +36,7 @@ pub struct KafkaMetric {
     metric_name: MetricName,
     config: Mutex<Arc<MetricConfig>>,
     time: Arc<dyn Time>,
-    metric_value_provider: MetricValueProvider,
+    metric_value_provider: Box<dyn MetricValueProvider>,
 }
 
 impl KafkaMetric {
@@ -52,7 +52,7 @@ impl KafkaMetric {
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#KafkaMetric")]
     pub(crate) fn new(
         metric_name: MetricName,
-        value_provider: MetricValueProvider,
+        value_provider: Box<dyn MetricValueProvider>,
         config: Arc<MetricConfig>,
         time: Arc<dyn Time>,
     ) -> Self {
@@ -71,6 +71,7 @@ impl KafkaMetric {
     }
 
     /// Set the metric config.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn set_config(&self, config: Arc<MetricConfig>) {
         *self.config.lock().expect("metric config mutex poisoned") = config;
     }
@@ -78,13 +79,13 @@ impl KafkaMetric {
     /// Determine if the metric value provider is of type `Measurable`.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#isMeasurable")]
     pub fn is_measurable(&self) -> bool {
-        matches!(self.metric_value_provider, MetricValueProvider::Measurable(_))
+        self.metric_value_provider.as_measurable().is_some()
     }
 
     /// Get the underlying [`Measurable`] value provider.
     ///
-    /// Returns [`Error::LocalIllegalState`] when the provider is a
-    /// [`MetricValueProvider::Gauge`] instead — Java's `measurable()` throws
+    /// Returns [`Error::LocalIllegalState`] when the provider is not a
+    /// [`Measurable`] — Java's `measurable()` throws
     /// `IllegalStateException("Not a measurable: " + class)` in that case
     /// (`KafkaMetric.java`). Per CLAUDE.md §12.2 an unchecked-but-recoverable
     /// Java exception becomes a `Result` rather than a panic.
@@ -96,12 +97,13 @@ impl KafkaMetric {
     /// value instead.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurable")]
     pub fn measurable(&self) -> Result<&dyn Measurable, Error> {
-        match &self.metric_value_provider {
-            MetricValueProvider::Measurable(m) => Ok(m.as_ref()),
-            MetricValueProvider::Gauge(_) => Err(Error::local_illegal_state(
-                "Not a measurable: the metric value provider is a Gauge",
-            )),
-        }
+        self.metric_value_provider.as_measurable().ok_or_else(|| {
+            // Java names the provider's class; a closure has no type name.
+            Error::local_illegal_state(match self.metric_value_provider.type_name() {
+                Some(name) => format!("Not a measurable: class {name}"),
+                None => "Not a measurable: the metric value provider is a closure".to_string(),
+            })
+        })
     }
 
     /// Take the metric and return the value, where the underlying metric provider
@@ -110,9 +112,9 @@ impl KafkaMetric {
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurableValue")]
     pub(crate) fn measurable_value(&self, time_ms: i64) -> f64 {
         let config = self.config();
-        match &self.metric_value_provider {
-            MetricValueProvider::Measurable(m) => m.measure(&config, time_ms),
-            MetricValueProvider::Gauge(_) => 0.0,
+        match self.metric_value_provider.as_measurable() {
+            Some(m) => m.measure(&config, time_ms),
+            None => 0.0,
         }
     }
 }
@@ -161,7 +163,7 @@ mod tests {
     use super::*;
     use crate::common::metrics::stats::Avg;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::{ClosureGauge, ClosureMeasurable, Stat};
+    use crate::common::metrics::{ClosureMeasurable, Stat, gauge};
     use crate::common::utils::MockTime;
     use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
@@ -174,12 +176,7 @@ mod tests {
     fn measurable_metric_value_and_measurable_value() {
         let value = Value::new();
         value.record(&MetricConfig::new(), 42.0, 0);
-        let metric = KafkaMetric::new(
-            name(),
-            MetricValueProvider::Measurable(Box::new(value)),
-            Arc::new(MetricConfig::new()),
-            Arc::new(SystemTime),
-        );
+        let metric = KafkaMetric::new(name(), Box::new(value), Arc::new(MetricConfig::new()), Arc::new(SystemTime));
         assert!(metric.is_measurable());
         assert_eq!(metric.metric_value(), MetricValue::Double(42.0));
         assert_eq!(metric.measurable_value(0), 42.0);
@@ -187,13 +184,8 @@ mod tests {
 
     #[test]
     fn gauge_metric_value_and_zero_measurable_value() {
-        let gauge = ClosureGauge::new(|_, _| MetricValue::String("hello".to_string()));
-        let metric = KafkaMetric::new(
-            name(),
-            MetricValueProvider::Gauge(Box::new(gauge)),
-            Arc::new(MetricConfig::new()),
-            Arc::new(SystemTime),
-        );
+        let gauge = gauge::new(|_, _| MetricValue::String("hello".to_string()));
+        let metric = KafkaMetric::new(name(), Box::new(gauge), Arc::new(MetricConfig::new()), Arc::new(SystemTime));
         assert!(!metric.is_measurable());
         assert_eq!(metric.metric_value(), MetricValue::String("hello".to_string()));
         // Non-measurable returns 0 from measurable_value, matching Java.
@@ -230,7 +222,7 @@ mod tests {
         value.record(&MetricConfig::new(), 7.0, 0);
         let metric = KafkaMetric::new(
             name(),
-            MetricValueProvider::Measurable(Box::new(value)),
+            Box::new(value),
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );
@@ -249,10 +241,10 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testIsMeasurableWithGaugeProvider")]
     fn test_is_measurable_with_gauge_provider() {
-        let gauge = ClosureGauge::new(|_, _| MetricValue::Double(0.0));
+        let gauge = gauge::new(|_, _| MetricValue::Double(0.0));
         let metric = KafkaMetric::new(
             name(),
-            MetricValueProvider::Gauge(Box::new(gauge)),
+            Box::new(gauge),
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );
@@ -273,10 +265,10 @@ mod tests {
         // Java's gauge is `Gauge<Integer> gauge = (c, now) -> 7` — a non-zero
         // value, so the asserted 0.0 comes from `measurableValue`'s
         // not-a-measurable branch and not from the gauge's own reading.
-        let gauge = ClosureGauge::new(|_, _| MetricValue::Int(7));
+        let gauge = gauge::new(|_, _| MetricValue::Int(7));
         let metric = KafkaMetric::new(
             name(),
-            MetricValueProvider::Gauge(Box::new(gauge)),
+            Box::new(gauge),
             Arc::new(MetricConfig::new()),
             Arc::clone(&time) as Arc<dyn Time>,
         );
@@ -297,10 +289,10 @@ mod tests {
         alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testKafkaMetricAcceptsNonMeasurableNonGaugeProvider"
     )]
     fn test_kafka_metric_accepts_non_measurable_non_gauge_provider() {
-        let gauge = ClosureGauge::new(|_, _| MetricValue::String("metric value provider".to_string()));
+        let gauge = gauge::new(|_, _| MetricValue::String("metric value provider".to_string()));
         let metric = KafkaMetric::new(
             name(),
-            MetricValueProvider::Gauge(Box::new(gauge)),
+            Box::new(gauge),
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );
@@ -318,7 +310,7 @@ mod tests {
     }
 
     /// Java's `testToStringOnLambdaOrAnonymousClass`.
-    fn assert_to_string_on_lambda_or_anonymous_class(metric_value_provider: MetricValueProvider) {
+    fn assert_to_string_on_lambda_or_anonymous_class(metric_value_provider: Box<dyn MetricValueProvider>) {
         let metric = KafkaMetric::new(
             metric_name_2(),
             metric_value_provider,
@@ -340,17 +332,17 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testToStringWithLambdaProvider")]
     fn test_to_string_with_lambda_provider() {
         let metric_value_provider = ClosureMeasurable::new(|_, _| 0.0);
-        assert_to_string_on_lambda_or_anonymous_class(MetricValueProvider::Measurable(Box::new(metric_value_provider)));
+        assert_to_string_on_lambda_or_anonymous_class(Box::new(metric_value_provider));
     }
 
     /// Java's anonymous `Measurable` subclass. Rust has no anonymous classes: an
     /// inline provider is a closure behind one of the adapters, so this exercises
-    /// the other adapter, `ClosureGauge`, which Java's `toString` likewise omits.
+    /// the other adapter, `gauge::new`, which Java's `toString` likewise omits.
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testToStringWithAnonymousClassProvider")]
     fn test_to_string_with_anonymous_class_provider() {
-        let metric_value_provider = ClosureGauge::new(|_, _| MetricValue::Double(0.0));
-        assert_to_string_on_lambda_or_anonymous_class(MetricValueProvider::Gauge(Box::new(metric_value_provider)));
+        let metric_value_provider = gauge::new(|_, _| MetricValue::Double(0.0));
+        assert_to_string_on_lambda_or_anonymous_class(Box::new(metric_value_provider));
     }
 
     #[test]
@@ -359,7 +351,7 @@ mod tests {
         let avg = Avg::new();
         let metric = KafkaMetric::new(
             metric_name_2(),
-            MetricValueProvider::Measurable(Box::new(avg)),
+            Box::new(avg),
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );
@@ -385,7 +377,7 @@ mod tests {
         let metrics = crate::common::metrics::Metrics::new();
         let sensor = metrics.sensor("s").unwrap();
         sensor
-            .add_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
+            .add_with_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
             .unwrap();
         let metric = metrics.metric(&metrics.metric_name("m", "g")).unwrap();
         let expected_suffix = format!("metricValueProvider={}]", std::any::type_name::<Avg>());

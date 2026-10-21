@@ -23,7 +23,7 @@
 //! - `partitions_assigned`: partitions assigned through
 //!   [`ConsumerRebalanceListener::on_partitions_assigned`].
 //! - `records_consumed`: a summary of records consumed in a single call to
-//!   [`Consumer::poll`].
+//!   [`Consumer::poll`](confluent_kafka::consumer::Consumer::poll).
 //! - `record_data`: the key, value, and offset of an individual consumed record
 //!   (only included if verbose output is enabled).
 //! - `offsets_committed`: the result of every offset commit (only included if
@@ -56,7 +56,7 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::{
-    Consumer, ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
+    ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords, DynConsumer,
     GroupProtocol, KafkaConsumer, OffsetAndMetadata, OffsetCommitCallback,
 };
 
@@ -343,8 +343,8 @@ impl OffsetsCommitted {
 /// the listener/callback, because a Java object reference is freely shareable.
 /// In Rust the driver ([`VerifiableConsumer`]) needs `&mut self` to call
 /// `poll`/`commit`/`close`, while the client's
-/// [`Consumer::subscribe_with_topics_listener`] and
-/// [`Consumer::commit_async_with_offsets_callback`] take
+/// [`Consumer::subscribe_with_topics_listener`](confluent_kafka::consumer::Consumer::subscribe_with_topics_listener) and
+/// [`Consumer::commit_async_with_offsets_callback`](confluent_kafka::consumer::Consumer::commit_async_with_offsets_callback) take
 /// `Arc<dyn ConsumerRebalanceListener>` / `Arc<dyn OffsetCommitCallback>` shared
 /// across the caller task. A single `&mut` owner
 /// cannot also be an `Arc<dyn …>`, so the shareable half is split out here.
@@ -369,8 +369,13 @@ impl EventReporter {
 impl OffsetCommitCallback for EventReporter {
     /// Java `onComplete` (lines 180-195): print `offsets_committed` with
     /// success/error derived from `exception`.
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         print_json(&OffsetsCommitted::from_commit(offsets, error));
+        Ok(())
     }
 }
 
@@ -398,12 +403,12 @@ impl ConsumerRebalanceListener for EventReporter {
 ///
 /// Holds the owned consumer (driven with `&mut self`) plus the shared
 /// [`EventReporter`] (the listener/commit-callback half — see
-/// [`EventReporter`]). `Box<dyn Consumer<String, String>>` is used directly
-/// rather than a type parameter (unlike the generic `VerifiableProducer`)
-/// because the client's [`Consumer`] trait is `#[async_trait]` and therefore
-/// `dyn`-compatible; tests substitute a boxed `MockConsumer`.
+/// [`EventReporter`]). `Box<dyn DynConsumer<String, String>>` is used directly
+/// rather than a type parameter (unlike the generic `VerifiableProducer`), so
+/// the production `KafkaConsumer` and the boxed `MockConsumer` the tests
+/// substitute share one type.
 pub struct VerifiableConsumer {
-    consumer: Box<dyn Consumer<String, String>>,
+    consumer: Box<dyn DynConsumer<String, String>>,
     // Java takes a `PrintStream out`; we always print to stdout via `print_json`
     // (Java always passes `System.out`).
     topic: String,
@@ -419,7 +424,7 @@ impl VerifiableConsumer {
     /// Construct a `VerifiableConsumer`. Mirrors Java's constructor (minus the
     /// `PrintStream out`, which is always stdout here).
     pub fn new(
-        consumer: Box<dyn Consumer<String, String>>,
+        consumer: Box<dyn DynConsumer<String, String>>,
         topic: String,
         max_messages: i32,
         use_auto_commit: bool,
@@ -485,10 +490,10 @@ impl VerifiableConsumer {
         let mut summaries: Vec<RecordSetSummary> = Vec::new();
 
         // Collect partitions up front so the immutable borrow of `records` for
-        // `partitions()` does not overlap the later `records_partition`.
+        // `partitions()` does not overlap the later `records_with_partition`.
         let partitions: Vec<TopicPartition> = records.partitions().cloned().collect();
         for tp in &partitions {
-            let all = records.records_partition(tp);
+            let all = records.records_with_partition(tp);
 
             // Java `subList(0, maxMessages - consumedMessages)` truncation.
             let partition_records: &[ConsumerRecord<String, String>] = if self.has_message_limit()
@@ -546,7 +551,7 @@ impl VerifiableConsumer {
     async fn commit_sync(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         match self.consumer.commit_sync_with_offsets(offsets.clone()).await {
             Ok(()) => {
-                self.reporter.on_complete(&offsets, None).await;
+                self.reporter.on_complete(&offsets, None).await?;
                 Ok(())
             },
             Err(e) if matches!(e, Error::Wakeup(_)) => {
@@ -557,7 +562,7 @@ impl VerifiableConsumer {
             },
             Err(e) if matches!(e, Error::FencedInstanceId(_)) => Err(e),
             Err(e) => {
-                self.reporter.on_complete(&offsets, Some(&e)).await;
+                self.reporter.on_complete(&offsets, Some(&e)).await?;
                 Ok(())
             },
         }
@@ -898,7 +903,7 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     );
 
     let config = ConsumerConfig::new(&props)?;
-    let consumer = KafkaConsumer::new::<String, String>(
+    let consumer = KafkaConsumer::<String, String>::new(
         config,
         Box::new(StringDeserializer::new()),
         Box::new(StringDeserializer::new()),
@@ -907,7 +912,7 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     // Java always constructs with `useAsyncCommit = false` (createFromArgs line
     // 716), so async commit is never taken even though the field exists.
     Ok(VerifiableConsumer::new(
-        consumer,
+        Box::new(consumer),
         parsed.topic,
         parsed.max_messages,
         parsed.use_auto_commit,
@@ -961,7 +966,7 @@ mod tests {
 
     // ---- construction helpers ----------------------------------------------
 
-    fn mock_consumer() -> Box<dyn Consumer<String, String>> {
+    fn mock_consumer() -> Box<dyn DynConsumer<String, String>> {
         Box::new(MockConsumer::<String, String>::new("earliest").unwrap())
     }
 

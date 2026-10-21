@@ -366,16 +366,10 @@ impl DefaultRecord {
                 "Invalid record size: {size_of_body} is negative."
             )));
         }
-        // Reject, before reading the body, any record whose declared
-        // (decompressed) body exceeds the configured per-record maximum
-        // (`DefaultRecord.java:295-301`). Java's guard also keeps an adversarial
-        // size from reaching `ByteBuffer.allocate`; the read below is bounded
-        // by `take` instead, so here it only gives Java's error.
-        if size_of_body > max_record_body_size {
-            return Err(InvalidRecordError::new(format!(
-                "Invalid record size: {size_of_body} exceeds the configured maximum record size of {max_record_body_size}."
-            )));
-        }
+        // In Java this check also keeps an adversarial size from reaching
+        // `ByteBuffer.allocate`; the read below is bounded by `take` instead, so
+        // here it only gives Java's error.
+        Self::check_record_body_size(size_of_body, max_record_body_size)?;
 
         // Java allocates the declared body size before reading a byte of it
         // (`DefaultRecord.java:302`). The size is read off the stream, so here the
@@ -402,6 +396,26 @@ impl DefaultRecord {
             base_sequence,
             log_append_time,
         )
+    }
+
+    /// Rejects, before any of the body is read, a record whose declared
+    /// (decompressed) body exceeds `max_record_body_size`
+    /// (`DefaultRecord.java:295-301`). [`Self::read_from_stream`] checks its
+    /// records with it, and so does the consumer, which reads a compressed
+    /// batch's records itself, so the two keep Java's check alike.
+    ///
+    /// # Errors
+    /// "Invalid record size: N exceeds the configured maximum record size of M."
+    pub(crate) fn check_record_body_size(
+        size_of_body: i32,
+        max_record_body_size: i32,
+    ) -> Result<(), InvalidRecordError> {
+        if size_of_body > max_record_body_size {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: {size_of_body} exceeds the configured maximum record size of {max_record_body_size}."
+            )));
+        }
+        Ok(())
     }
 
     /// Read a record body from a byte slice. The slice should contain exactly
@@ -484,7 +498,12 @@ impl DefaultRecord {
     /// Compute the total serialized size of a record with the given parameters.
     ///
     /// This includes the length prefix varint.
-    pub fn size_in_bytes_for(
+    ///
+    /// Java's static `sizeInBytes` overloads share their name with the instance
+    /// [`DefaultRecord::size_in_bytes`], which keeps it, so they are
+    /// `do_size_in_bytes_with_<params>` (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes(int,long,int,int,Header[])")]
+    pub fn do_size_in_bytes_with_key_size_value_size(
         offset_delta: i32,
         timestamp_delta: i64,
         key_size: i32,
@@ -497,8 +516,10 @@ impl DefaultRecord {
     }
 
     /// Compute the total serialized size from key/value slices.
-    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes")]
-    pub fn size_in_bytes_with_slices(
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes(int,long,ByteBuffer,ByteBuffer,Header[])"
+    )]
+    pub fn do_size_in_bytes_with_key_value(
         offset_delta: i32,
         timestamp_delta: i64,
         key: Option<&[u8]>,
@@ -507,7 +528,7 @@ impl DefaultRecord {
     ) -> i32 {
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
-        Self::size_in_bytes_for(offset_delta, timestamp_delta, key_size, value_size, headers)
+        Self::do_size_in_bytes_with_key_size_value_size(offset_delta, timestamp_delta, key_size, value_size, headers)
     }
 
     /// Compute the upper bound of the record size.
@@ -525,8 +546,9 @@ impl DefaultRecord {
 /// copying its key, value, or header bytes.
 ///
 /// Corresponds to the per-record data of Java's `DefaultRecord`, but the
-/// key/value/header bytes remain borrowed from the underlying fetch buffer
-/// (see `consumer-threading.md` §27). The header bytes are kept as the raw
+/// key/value/header bytes remain borrowed from the buffer it was parsed from,
+/// the fetch buffer or a compressed record's own (see
+/// `consumer-threading.md` §27). The header bytes are kept as the raw
 /// (unparsed) slice and decoded on demand by [`DefaultRecordRef::headers`] so
 /// that records whose headers are never read incur no header-parsing cost.
 #[derive(Clone, Debug)]
@@ -915,7 +937,7 @@ mod tests {
             assert_eq!(value.as_deref(), log_record.value());
             assert_eq!(hdrs.as_slice(), log_record.headers());
             assert_eq!(
-                DefaultRecord::size_in_bytes_with_slices(
+                DefaultRecord::do_size_in_bytes_with_key_value(
                     offset_delta,
                     timestamp_delta,
                     key.as_deref(),
@@ -1333,7 +1355,7 @@ mod tests {
             DefaultRecord::write_to(&mut out, offset_delta, timestamp_delta, Some(b"key"), Some(b"value"), &headers)
                 .unwrap();
 
-        let computed = DefaultRecord::size_in_bytes_with_slices(
+        let computed = DefaultRecord::do_size_in_bytes_with_key_value(
             offset_delta,
             timestamp_delta,
             Some(b"key"),

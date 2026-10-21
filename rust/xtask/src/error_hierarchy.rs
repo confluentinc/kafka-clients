@@ -16,7 +16,7 @@
 //!
 //! Reads the Java exception sources (Apache Kafka 4.4.0, under `kafka/`) and
 //! emits one Python class per Java exception class the FFI enum
-//! `kafka_common_ErrorCode_t` names, plus Java's abstract bases, the base
+//! `kafka_common_Error_e` names, plus Java's abstract bases, the base
 //! `KafkaException` and the Java built-in exceptions of the Types table, each as
 //! a `.py` plus `.pyi` file in the module of its Java package (CLAUDE.md, Python
 //! Binding Conventions, Modules and Errors). Every class keeps Java's `extends`
@@ -99,6 +99,17 @@ const EXCLUSIONS: &[&str] = &[
     "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerConfigException",
     "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerIllegalTokenException",
 ];
+
+/// FFI ids with no Java class, so no generated Python class: each is a Rust-only
+/// `Error` variant with no Java `extends` chain to translate.
+///
+/// - `LOCAL_CALLBACK` is `LocalCallbackError`, the error a binding reports when
+///   its own callback raised one of its language's errors
+///   (`kafka_common_Error_local_callback`). The client wraps it as Java wraps a
+///   listener's foreign `Throwable`, and the binding swaps its original
+///   exception back in from the error's `opaque`, so the user never sees a
+///   class for it.
+const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK"];
 
 /// `(ffi_id_constant, java_class_fqn)` — one row per concrete (non-abstract) Java
 /// exception class, i.e. one row per FFI id (all 166 enum ids except `NONE`, which
@@ -651,6 +662,18 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "LOCAL_TIMEOUT",
         &[&[], &[("String", "message")]],
     ),
+    // Java's `ExecutionException` is the checked exception `KafkaFuture.get()` throws;
+    // only its two public constructors (its no-argument and `(String)` ones are
+    // protected). The core models no id for it.
+    (
+        "java.util.concurrent.ExecutionException",
+        "java.lang.Exception",
+        "",
+        &[
+            &[("String", "message"), ("Throwable", "cause")],
+            &[("Throwable", "cause")],
+        ],
+    ),
     (
         "java.util.NoSuchElementException",
         "java.lang.RuntimeException",
@@ -827,15 +850,15 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
         if !enum_id_values.contains_key(*id) {
             anyhow::bail!(
                 "error hierarchy: BRIDGE names FFI id `{id}` (for `{fqn}`) that is not in \
-                 kafka_common_ErrorCode_t ({FFI_ENUM_SOURCE})"
+                 kafka_common_Error_e ({FFI_ENUM_SOURCE})"
             );
         }
     }
     for id in enum_id_values.keys() {
-        if id != "NONE" && !bridge_ids.contains(id.as_str()) {
+        if id != "NONE" && !RUST_ONLY_IDS.contains(&id.as_str()) && !bridge_ids.contains(id.as_str()) {
             anyhow::bail!(
                 "error hierarchy: FFI id `{id}` has no class in the BRIDGE table — every \
-                 kafka_common_ErrorCode_t id except NONE must map to one Java class"
+                 kafka_common_Error_e id except NONE must map to one Java class"
             );
         }
     }
@@ -1392,6 +1415,26 @@ impl Dflt {
     }
 }
 
+/// Parameters Java passes `null` for at a real call site although no shorter
+/// constructor defaults them, so the nullability rule of CLAUDE.md (Signatures,
+/// Nullability: "a required parameter is `T | None` ... when Java gives null a
+/// meaning for it") cannot be derived from the constructor alone: (Java class,
+/// parameter, evidence).
+const NULLABLE_EVIDENCE: [(&str, &str, &str); 2] = [
+    (
+        "org.apache.kafka.common.errors.RecordDeserializationException",
+        "key_buffer",
+        "CompletedFetch.newRecordDeserializationException passes record.key(), null for a record without a key \
+         (CompletedFetch.java:341-349, the call at :347; ShareCompletedFetch.java:369 likewise)",
+    ),
+    (
+        "org.apache.kafka.common.errors.RecordDeserializationException",
+        "value_buffer",
+        "CompletedFetch.newRecordDeserializationException passes record.value(), null for a tombstone \
+         (CompletedFetch.java:341-349, the call at :347; ShareCompletedFetch.java:369 likewise)",
+    ),
+];
+
 #[derive(Clone, Debug)]
 struct PyParam {
     name: String,
@@ -1404,6 +1447,9 @@ struct PyParam {
     /// constructor assigns null to the field this parameter fills), so the
     /// stubs of the forms that require it take `T | None` too.
     field_nullable: bool,
+    /// Java passes null for it at a real call site ([`NULLABLE_EVIDENCE`]), so
+    /// the constructor takes `T | None` and the getter returns `T | None`.
+    evidenced: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1773,7 +1819,8 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         let field_nullable = forms
             .iter()
             .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
-        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable });
+        let evidenced = NULLABLE_EVIDENCE.iter().any(|(c, q, _)| *c == info.java_fqn && q == p);
+        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable, evidenced });
     }
 
     // The java_forms table, replicated (`_args.java_forms`): a set of given
@@ -2011,8 +2058,12 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.";
 /// The Python base expression of a class.
 fn py_base(g: &Graph, info: &ClassInfo) -> String {
     if TERMINAL_BASES.contains(&info.parent_fqn.as_str()) {
+        // A Java unchecked exception subclasses `RuntimeError`, a checked one `Exception`;
+        // `TimeoutException` subclasses `builtins.TimeoutError` (CLAUDE.md, Types).
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
+        } else if info.parent_fqn == "java.lang.Exception" {
+            "Exception".into()
         } else {
             "RuntimeError".into()
         }
@@ -2142,7 +2193,7 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
     Ok(match &p.default {
         // A required cause is given as None for a null cause (CLAUDE.md,
         // Errors).
-        Dflt::Required if p.name == "cause" => format!("{}: {ty} | None", p.name),
+        Dflt::Required if p.name == "cause" || p.evidenced => format!("{}: {ty} | None", p.name),
         Dflt::Required => format!("{}: {ty}", p.name),
         Dflt::NoneDefault if ty == "Any" => format!("{}: Any = None", p.name),
         Dflt::NoneDefault => format!("{}: {ty} | None = None", p.name),
@@ -2165,7 +2216,7 @@ fn stub_param(
         // A required `message` or `cause` still takes Java's null (see the
         // model's `nullable`), so its stub says so; mypy otherwise rejects a
         // call the runtime accepts.
-        if (p.field_nullable || p.name == "message" || p.name == "cause") && ty != "Any" {
+        if (p.field_nullable || p.evidenced || p.name == "message" || p.name == "cause") && ty != "Any" {
             return Ok(format!("{}: {ty} | None", p.name));
         }
         return Ok(format!("{}: {ty}", p.name));
@@ -2277,7 +2328,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
             body.push("    # A bare KafkaException is reported as UNKNOWN_SERVER_ERROR; UnknownServerError".into());
             body.push("    # owns that id in the id -> class table.".into());
         }
-        body.push(format!("    _ffi_id: ClassVar[int] = {value}  # kafka_common_ErrorCode_{id}"));
+        body.push(format!("    _ffi_id: ClassVar[int] = {value}  # kafka_common_Error_{id}"));
     }
     for e in &info.java.enums {
         body.push(String::new());
@@ -2506,7 +2557,8 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 let fty = g
                     .field_type(&info.java_fqn, f)
                     .ok_or_else(|| anyhow::anyhow!("{}: getter of unknown field `{f}`", info.java_fqn))?;
-                if field_nullable(&model, &attr, &fty) {
+                let evidenced = model.params.iter().any(|q| q.evidenced && attr == format!("_{}", q.name));
+                if evidenced || field_nullable(&model, &attr, &fty) {
                     ret = format!("{ret} | None");
                 }
                 format!("return self.{attr}")
@@ -2828,6 +2880,113 @@ fn splice_block(current: &str, block: &str) -> String {
     }
 }
 
+/// Java's `Errors` enum, the source of each wire error code's default message.
+const ERRORS_SOURCE: &str = "kafka/clients/src/main/java/org/apache/kafka/common/protocol/Errors.java";
+
+/// Each `Errors` constant's code and default message (the string `Errors.exception()`'s
+/// cached instance carries, which `Errors.exception(null)` returns), in code order;
+/// `NONE`'s `null` is left out. The constants run from the first `NAME(` to the `;`
+/// closing the list, each `NAME(code, "literal" + "literal" | null, builder)`.
+fn errors_default_messages(repo_root: &Path) -> anyhow::Result<BTreeMap<i32, String>> {
+    let path = repo_root.join(ERRORS_SOURCE);
+    let src = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let start = src
+        .find("UNKNOWN_SERVER_ERROR(")
+        .ok_or_else(|| anyhow::anyhow!("{}: no UNKNOWN_SERVER_ERROR constant", path.display()))?;
+    let chars: Vec<char> = src[start..].chars().collect();
+    let bad = |what: &str, at: usize| anyhow::anyhow!("{}: {what} at offset {at} of the constants", path.display());
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    let mut out = BTreeMap::new();
+    let mut i = 0;
+    loop {
+        skip_ws(&mut i);
+        let name_start = i;
+        while i < chars.len() && (chars[i].is_ascii_uppercase() || chars[i].is_ascii_digit() || chars[i] == '_') {
+            i += 1;
+        }
+        if i == name_start || chars.get(i) != Some(&'(') {
+            return Err(bad("expected a constant", name_start));
+        }
+        i += 1;
+        skip_ws(&mut i);
+        let code_start = i;
+        if chars.get(i) == Some(&'-') {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        let code: i32 = chars[code_start..i]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .map_err(|_| bad("expected a code", code_start))?;
+        skip_ws(&mut i);
+        if chars.get(i) != Some(&',') {
+            return Err(bad("expected ','", i));
+        }
+        i += 1;
+        skip_ws(&mut i);
+        let mut message: Option<String> = None;
+        if chars[i..].starts_with(&['n', 'u', 'l', 'l']) {
+            i += 4;
+        } else {
+            let mut text = String::new();
+            loop {
+                if chars.get(i) != Some(&'"') {
+                    return Err(bad("expected a string literal", i));
+                }
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        return Err(bad("unsupported escape in a message", i));
+                    }
+                    text.push(chars[i]);
+                    i += 1;
+                }
+                i += 1;
+                skip_ws(&mut i);
+                if chars.get(i) == Some(&'+') {
+                    i += 1;
+                    skip_ws(&mut i);
+                    continue;
+                }
+                break;
+            }
+            message = Some(text);
+        }
+        // The builder, up to the constant's closing parenthesis.
+        let mut depth = 1;
+        while i < chars.len() && depth > 0 {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {},
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return Err(bad("unclosed constant", name_start));
+        }
+        if let Some(text) = message {
+            if out.insert(code, text).is_some() {
+                return Err(bad("duplicate code", code_start));
+            }
+        }
+        skip_ws(&mut i);
+        match chars.get(i) {
+            Some(',') => i += 1,
+            Some(';') => break,
+            _ => return Err(bad("expected ',' or ';'", i)),
+        }
+    }
+    Ok(out)
+}
+
 /// The generated files, so `check-generated` can compare.
 pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, String)>> {
     let classes = build_graph(repo_root)?;
@@ -2905,10 +3064,15 @@ pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, Strin
         .map(|c| format!("    (\"{}\", \"{}\", \"{}\"),", c.module_file(), c.py_name, c.java_fqn))
         .collect();
     rows.sort();
+    let messages: Vec<String> = errors_default_messages(repo_root)?
+        .into_iter()
+        .map(|(code, text)| format!("    {code}: {},", py_str_literal(&text)))
+        .collect();
     let registry = format!(
-        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class).\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n",
+        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class), and\nJava's ``Errors`` default message per wire error code.\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n\n# Java's ``Errors`` default message by wire code (``NONE`` has none): what\n# ``Errors.exception()`` and ``Errors.exception(null)`` carry. The FFI id of an API error\n# is its wire code.\nDEFAULT_MESSAGES: dict[int, str] = {{\n{}\n}}\n",
         PY_HEADER.trim_end(),
-        rows.join("\n")
+        rows.join("\n"),
+        messages.join("\n")
     );
     outputs.push((repo_root.join(PY_ROOT).join("confluent_kafka/_error_registry.py"), registry));
     Ok(outputs)
@@ -3161,19 +3325,19 @@ fn validate_exception_scan(repo_root: &Path, classes: &BTreeMap<String, ClassInf
     Ok(())
 }
 
-/// Extract the enumerator `(name, value)` pairs of `kafka_common_ErrorCode_t`
-/// (names without the `kafka_common_ErrorCode_` prefix) from the FFI source.
+/// Extract the enumerator `(name, value)` pairs of `kafka_common_Error_e`
+/// (names without the `kafka_common_Error_` prefix) from the FFI source.
 fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>> {
     let src = fs::read_to_string(repo_root.join(FFI_ENUM_SOURCE))?;
     let body = src
-        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .split_once("pub enum kafka_common_Error_e {")
         .map(|(_, rest)| rest)
-        .ok_or_else(|| anyhow::anyhow!("{FFI_ENUM_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("{FFI_ENUM_SOURCE}: kafka_common_Error_e not found"))?;
     let body = body.split_once("\n}").map(|(b, _)| b).unwrap_or(body);
     let mut ids = BTreeMap::new();
     for line in body.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") {
+        if let Some(rest) = line.strip_prefix("kafka_common_Error_") {
             if let Some((name, value)) = rest.split_once(" = ") {
                 let value: i32 = value.trim_end_matches(',').trim().parse()?;
                 ids.insert(name.to_string(), value);
@@ -3181,7 +3345,7 @@ fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>>
         }
     }
     if ids.is_empty() {
-        anyhow::bail!("{FFI_ENUM_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+        anyhow::bail!("{FFI_ENUM_SOURCE}: kafka_common_Error_e has no enumerators");
     }
     Ok(ids)
 }
@@ -3247,10 +3411,28 @@ mod tests {
     }
 
     #[test]
+    fn errors_default_messages_follow_errors_java() {
+        let messages = errors_default_messages(&repo_root()).expect("Errors.java must parse");
+        // UNKNOWN_SERVER_ERROR (-1) and codes 1..=136; NONE's null message is left out.
+        assert_eq!(messages.len(), 137);
+        assert!(!messages.contains_key(&0));
+        assert_eq!(
+            messages[&-1],
+            "The server experienced an unexpected error when processing the request."
+        );
+        assert_eq!(messages[&92], "A request illegally referred to the same resource twice.");
+        // A message Java splits over `+` concatenations is joined.
+        assert!(messages[&6].starts_with(
+            "For requests intended only for the leader, this error indicates that the broker is not the \
+             current leader. For requests intended for any replica,"
+        ));
+    }
+
+    #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
-        assert_eq!(classes.len(), 173);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins.
+        assert_eq!(classes.len(), 174);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
@@ -3271,6 +3453,8 @@ mod tests {
         assert_eq!(base("org.apache.kafka.clients.consumer.CommitFailedException"), "KafkaError");
         assert_eq!(base("org.apache.kafka.common.KafkaException"), "RuntimeError");
         assert_eq!(base("java.util.concurrent.TimeoutException"), "builtins.TimeoutError");
+        assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
+        assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"

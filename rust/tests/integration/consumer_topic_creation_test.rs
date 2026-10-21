@@ -47,19 +47,19 @@ use std::time::Instant;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -96,8 +96,14 @@ fn make_consumer(ctx: &TestContext, group_id: &str, allow_auto_create: bool) -> 
     ]);
     ctx.apply_security(&mut props);
     let config = ConsumerConfig::new(&props).expect("invalid test config");
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("KafkaConsumer::new should succeed")
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            config,
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
+    )
 }
 
 /// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms).

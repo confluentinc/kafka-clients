@@ -34,7 +34,7 @@ class TransactionAbortableError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 120  # kafka_common_ErrorCode_TRANSACTION_ABORTABLE
+    _ffi_id: ClassVar[int] = 120  # kafka_common_Error_TRANSACTION_ABORTABLE
 
     def __init__(
         self,

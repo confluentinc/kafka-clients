@@ -34,7 +34,7 @@ class InvalidCommitOffsetSizeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 28  # kafka_common_ErrorCode_INVALID_COMMIT_OFFSET_SIZE
+    _ffi_id: ClassVar[int] = 28  # kafka_common_Error_INVALID_COMMIT_OFFSET_SIZE
 
     def __init__(
         self,

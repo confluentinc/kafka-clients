@@ -34,7 +34,7 @@ class RebalanceInProgressError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 27  # kafka_common_ErrorCode_REBALANCE_IN_PROGRESS
+    _ffi_id: ClassVar[int] = 27  # kafka_common_Error_REBALANCE_IN_PROGRESS
 
     def __init__(
         self,

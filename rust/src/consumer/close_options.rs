@@ -55,15 +55,6 @@ pub struct CloseOptions {
 }
 
 impl CloseOptions {
-    /// Default timeout (milliseconds) applied when [`CloseOptions::timeout`] is
-    /// not set. In Java this constant lives in `ConsumerUtils`; we expose it here
-    /// for now and a later phase will move it to its canonical location and
-    /// re-export from there.
-    ///
-    /// NOTE: Phase 6 will move this constant to a `ConsumerUtils` translation
-    /// and re-export it here for backwards compatibility.
-    pub const DEFAULT_CLOSE_TIMEOUT_MS: u64 = 30_000;
-
     /// Create a new `CloseOptions` with default values.
     ///
     /// Equivalent to Java's private no-arg constructor.
@@ -77,8 +68,13 @@ impl CloseOptions {
     /// accepts a nullable `Duration` here and internally wraps it via
     /// `Optional.ofNullable`; Rust's type system makes `Duration` non-null,
     /// so for "no timeout, use default" callers should use
-    /// [`CloseOptions::default`] (or omit the call to `new_timeout`).
-    pub fn new_timeout(timeout: Duration) -> Self {
+    /// [`CloseOptions::default`] (or omit the call to `new_with_timeout`).
+    ///
+    /// The getter [`timeout`](Self::timeout) keeps Java's name and the instance
+    /// [`with_timeout`](Self::with_timeout) takes `with_timeout`, so this static
+    /// factory is `new_with_timeout` (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#timeout")]
+    pub fn new_with_timeout(timeout: Duration) -> Self {
         Self::empty().with_timeout(timeout)
     }
 
@@ -86,8 +82,12 @@ impl CloseOptions {
     /// membership operation.
     ///
     /// Corresponds to Java's static
-    /// `CloseOptions.groupMembershipOperation(GroupMembershipOperation)`.
-    pub fn new_group_membership_operation(operation: GroupMembershipOperation) -> Self {
+    /// `CloseOptions.groupMembershipOperation(GroupMembershipOperation operation)`.
+    /// The getter [`group_membership_operation`](Self::group_membership_operation)
+    /// keeps Java's name, so this static factory is `with_<parameters>`
+    /// (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation")]
+    pub fn with_operation(operation: GroupMembershipOperation) -> Self {
         Self::empty().with_group_membership_operation(operation)
     }
 
@@ -150,14 +150,14 @@ mod tests {
 
     #[test]
     fn test_timeout_constructor() {
-        let opts = CloseOptions::new_timeout(Duration::from_secs(1));
+        let opts = CloseOptions::new_with_timeout(Duration::from_secs(1));
         assert_eq!(opts.timeout(), Some(Duration::from_secs(1)));
         assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::Default);
     }
 
     #[test]
     fn test_group_membership_operation_constructor() {
-        let opts = CloseOptions::new_group_membership_operation(GroupMembershipOperation::LeaveGroup);
+        let opts = CloseOptions::with_operation(GroupMembershipOperation::LeaveGroup);
         assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::LeaveGroup);
         assert_eq!(opts.timeout(), None);
     }

@@ -56,6 +56,7 @@ impl SampledStatKind for WindowedCountKind {
 
 impl WindowedCount {
     /// Create a `WindowedCount`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedCount#WindowedCount")]
     pub fn new() -> Self {
         Self { inner: SampledStat::new(0.0, Box::new(WindowedCountKind)) }
     }

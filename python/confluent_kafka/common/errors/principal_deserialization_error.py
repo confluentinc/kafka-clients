@@ -38,7 +38,7 @@ class PrincipalDeserializationError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 97  # kafka_common_ErrorCode_PRINCIPAL_DESERIALIZATION_FAILURE
+    _ffi_id: ClassVar[int] = 97  # kafka_common_Error_PRINCIPAL_DESERIALIZATION_FAILURE
 
     def __init__(
         self,

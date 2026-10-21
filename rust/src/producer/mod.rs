@@ -14,7 +14,7 @@
 
 //! Producer types (org.apache.kafka.clients.producer)
 
-mod callback;
+pub mod callback;
 mod dyn_producer;
 pub(crate) mod internals;
 mod kafka_producer;
@@ -35,7 +35,14 @@ mod round_robin_partitioner;
 
 pub use callback::Callback;
 pub use dyn_producer::DynProducer;
+// The non-blocking send and its outcome are consumed only by the C FFI's
+// non-blocking send entry point; without the `ffi` feature nothing else names
+// them, and an unused `pub(crate)` re-export is a warning.
+#[cfg(feature = "ffi")]
+pub(crate) use dyn_producer::DynTrySend;
 pub use kafka_producer::KafkaProducer;
+#[cfg(feature = "ffi")]
+pub(crate) use kafka_producer::TrySendOutcome;
 #[cfg(test)]
 pub(crate) use mock_partitioner::MockPartitioner;
 pub use mock_producer::{MockProducer, MockProducerOptions, MockProducerOptionsBuilder};

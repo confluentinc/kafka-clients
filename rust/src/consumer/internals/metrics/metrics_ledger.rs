@@ -87,7 +87,7 @@ impl MetricsLedger {
     /// creates the name with the registry's default tags and records it.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.MetricsLedger#metricName")]
     pub(crate) fn metric_name(&self, name: &str, metric_group_name: &str, description: &str) -> MetricName {
-        let metric_name = self.metrics.metric_name_description(name, metric_group_name, description);
+        let metric_name = self.metrics.metric_name_with_description(name, metric_group_name, description);
         self.record_metric_name(&metric_name);
         metric_name
     }
@@ -103,7 +103,7 @@ impl MetricsLedger {
         template: &MetricNameTemplate,
         tags: BTreeMap<String, String>,
     ) -> Result<MetricName, Error> {
-        let metric_name = self.metrics.metric_instance_tags(template, tags)?;
+        let metric_name = self.metrics.metric_instance_with_tags(template, tags)?;
         self.record_metric_name(&metric_name);
         Ok(metric_name)
     }
@@ -114,7 +114,7 @@ impl MetricsLedger {
         &self,
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
-        metric_value_provider: MetricValueProvider,
+        metric_value_provider: Box<dyn MetricValueProvider>,
     ) {
         self.record_metric_name(&metric_name);
         self.metrics.add_metric_if_absent(metric_name, config, metric_value_provider);
@@ -127,7 +127,7 @@ impl MetricsLedger {
     /// Java where the throw skips the `add`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.MetricsLedger#addMetric")]
     pub(crate) fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
-        self.metrics.add_metric_measurable(metric_name.clone(), measurable)?;
+        self.metrics.add_metric_with_measurable(metric_name.clone(), measurable)?;
         self.record_metric_name(&metric_name);
         Ok(())
     }
@@ -215,7 +215,7 @@ mod tests {
 
         let sensor = ledger.sensor("s").expect("sensor");
         sensor
-            .add_metric_name(ledger.metric_name("s-avg", "g", "avg"), Box::new(Avg::new()))
+            .add_with_metric_name(ledger.metric_name("s-avg", "g", "avg"), Box::new(Avg::new()))
             .expect("add avg");
         ledger
             .add_metric(
@@ -235,7 +235,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let other = metrics.sensor("other").expect("sensor");
         other
-            .add_metric_name(metrics.metric_name("other-avg", "g"), Box::new(Avg::new()))
+            .add_with_metric_name(metrics.metric_name("other-avg", "g"), Box::new(Avg::new()))
             .expect("add avg");
         let ledger = MetricsLedger::new(Arc::clone(&metrics));
 
@@ -272,7 +272,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let name = metrics.metric_name("gauge", "g");
         metrics
-            .add_metric_measurable(name.clone(), Box::new(ClosureMeasurable::new(|_config, _now| 1.0)))
+            .add_metric_with_measurable(name.clone(), Box::new(ClosureMeasurable::new(|_config, _now| 1.0)))
             .expect("add metric");
         let ledger = MetricsLedger::new(Arc::clone(&metrics));
 

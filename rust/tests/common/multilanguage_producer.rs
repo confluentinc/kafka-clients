@@ -54,7 +54,7 @@ use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -234,12 +234,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     async fn send_with_callback(
         &self,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut client = self.client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
-            record: Some(producer_record_to_proto(record)),
+            record: Some(producer_record_to_proto(&record)),
             with_callback: callback.is_some(),
         };
         let response = client
@@ -259,11 +259,11 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         // we run the user's closure here with the decoded result.
         if let Some(cb) = callback {
             match &result {
-                Ok(metadata) => cb(Some(metadata), None),
-                Err(err) => cb(None, Some(err)),
+                Ok(metadata) => cb.on_completion(Some(metadata), None),
+                Err(err) => cb.on_completion(None, Some(err)),
             }
         }
-        Ok(KafkaFuture::completed(result))
+        Ok(KafkaFuture::completed_future(result))
     }
 
     async fn flush(&self) -> Result<(), Error> {
@@ -296,7 +296,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// this is a live producer in another language, NOT a mock, so reporting an
     /// empty map would misreport its state. Mirrors the consumer backend.
     ///
-    /// Each entry is rebuilt locally as a `ClosureGauge` returning the value the
+    /// Each entry is rebuilt locally as a `gauge::new` gauge returning the value the
     /// backend measured while serving the RPC. That is snapshot, not live,
     /// semantics — which is exactly what `Producer::metrics` documents.
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
@@ -358,18 +358,25 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
 // Wire <-> domain conversions
 // ---------------------------------------------------------------------------
 
-fn producer_record_to_proto(record: ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::ProducerRecord {
-    let (topic, partition, timestamp, headers, key, value) = record.into_parts();
+fn producer_record_to_proto(record: &ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::ProducerRecord {
     // Iterate inline so we don't have to name the internal RecordHeaders type;
     // the public Header trait gives us key() and value() accessors.
-    let headers = (&headers)
+    let headers = record
+        .headers()
         .into_iter()
         .map(|h| proto::Header {
             key: h.key().to_string(),
             value: h.value().map(|v| v.to_vec()).unwrap_or_default(),
         })
         .collect();
-    proto::ProducerRecord { topic, partition, timestamp, key, value, headers }
+    proto::ProducerRecord {
+        topic: record.topic().to_string(),
+        partition: record.partition(),
+        timestamp: record.timestamp(),
+        key: record.key().cloned(),
+        value: record.value().cloned(),
+        headers,
+    }
 }
 
 fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
@@ -384,10 +391,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
         None => MetricValue::Double(0.0),
     };
-    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let provider = gauge::new(move |_config, _now| value.clone());
     // A standalone registry mints the `KafkaMetric`, as Java code obtains one
     // (its constructor is public only "for testing"); the metric outlives it.
-    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, Box::new(provider));
     (name, metric)
 }
 
@@ -428,7 +435,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
     // `code` is the sole discriminator. It is the FFI error code
-    // (`kafka_common_ErrorCode_t`), which is injective over the client's error
+    // (`kafka_common_Error_e`), which is injective over the client's error
     // classes, so it identifies the class on its own — that is why the proto no
     // longer carries a `variant` field and neither server hand-matches message
     // text any more.
