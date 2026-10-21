@@ -8828,10 +8828,12 @@ mod tests {
         assert!(producer.chunked_accumulator.is_none());
     }
 
-    /// The producer compresses at the level its `compression.<type>.level` config
-    /// sets, as Java's `configureCompression` (`KafkaProducer.java:601-622`) builds
-    /// it, and at the type's default level when that is not set. It used to build
-    /// every codec at its default level.
+    /// The producer builds its compression at the level its
+    /// `compression.<type>.level` config sets, as Java's `configureCompression`
+    /// (`KafkaProducer.java:601-622`) does, and at the type's default level when
+    /// that is not set. It used to build every codec at its default level. For
+    /// lz4 this shows only that the level reaches the accumulator: the lz4 writer
+    /// does not use it (`Compression::wrap_for_output`).
     #[tokio::test]
     async fn test_producer_compresses_at_the_configured_level() {
         let cases = [

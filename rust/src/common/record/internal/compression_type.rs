@@ -181,7 +181,7 @@ impl CompressionType {
     ///
     /// For a type without compression levels, the error for Java's
     /// `UnsupportedOperationException`. The validator fails with
-    /// [`Error::Config`] and the message of the `ConfigException` Java's
+    /// [`Error::Config`] and the message of the `ConfigException` Java
     /// throws.
     #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#levelValidator")]
     pub(crate) fn level_validator(self) -> Result<impl Fn(&str, i32) -> Result<(), Error>, Error> {
