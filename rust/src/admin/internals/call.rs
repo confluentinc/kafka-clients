@@ -46,9 +46,11 @@ pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBu
 pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64, Option<&Node>) -> HandleResult + Send>;
 /// Terminal-failure hook for a [`Call`].
 pub(crate) type HandleFailureFn = Box<dyn FnMut(&Error) + Send>;
-/// Unsupported-version hook; returns `true` iff the call should be retried after
-/// a protocol downgrade (without spending a retry).
-pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut() -> bool + Send>;
+/// Unsupported-version hook, given the `UnsupportedVersionException` the call
+/// failed with; returns `true` iff the call should be retried after a protocol
+/// downgrade (without spending a retry). Mirrors
+/// `Call.handleUnsupportedVersionException(UnsupportedVersionException)`.
+pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut(&Error) -> bool + Send>;
 /// Retry hook invoked from `Call.fail`'s retriable branch (mirrors Java's
 /// `Call.maybeRetry`). Returns whether the runnable should re-queue this call or
 /// the hook has taken over (e.g. the [`AdminApiDriver`] re-issued requests).
@@ -72,6 +74,13 @@ pub(crate) enum MaybeRetryOutcome {
 pub(crate) enum HandleResult {
     /// Every per-key future was completed (terminal). No further action.
     Done,
+    /// The call is finished, and the runnable moves every call that is
+    /// assigned to a node but not yet sent back to the pending calls, so that
+    /// a new destination is chosen from the metadata just applied. Java's
+    /// metadata calls end their `handleResponse` with
+    /// `unassignUnsentCalls(node -> true)` (`KafkaAdminClient.java:1756`,
+    /// `:1799`), a method of the runnable a Rust hook cannot call.
+    UnassignUnsentCalls,
     /// Enqueue a fresh follow-up call (e.g. quota-exceeded retry topics). The
     /// current call is finished.
     NewCall(Box<Call>),
@@ -93,37 +102,49 @@ pub(crate) enum HandleResult {
 /// Corresponds to the `NodeProvider` implementations in `KafkaAdminClient`.
 pub(crate) enum NodeProvider {
     /// Targets the cluster controller (createTopics / deleteTopics /
-    /// createPartitions).
-    Controller,
+    /// createPartitions). Mirrors `ControllerNodeProvider`.
+    Controller {
+        /// Java's `ControllerNodeProvider(boolean supportsUseControllers)`
+        /// argument: whether a `bootstrap.controllers` client may send the call
+        /// (to the active controller). Java's no-argument constructor sets it to
+        /// `false`.
+        supports_use_controllers: bool,
+    },
     /// Targets the least-loaded broker (listTopics / describeTopics, driver
     /// lookup requests).
     LeastLoaded,
     /// Targets the least-loaded broker, or the active controller when the
     /// client uses `bootstrap.controllers` (KIP-919). Mirrors
-    /// `LeastLoadedBrokerOrActiveKController`. Because `bootstrap.controllers`
-    /// is unsupported here (`using_bootstrap_controllers()` is always false),
-    /// its `provide` behaves like [`NodeProvider::LeastLoaded`]; it differs only
-    /// in `supports_use_controllers`, used by `describeCluster` /
-    /// `describeConfigs` / `incrementalAlterConfigs`.
+    /// `LeastLoadedBrokerOrActiveKController`.
     LeastLoadedBrokerOrActiveKController,
     /// Targets the least-loaded node for the internal metadata refresh call.
     MetadataUpdate,
-    /// Targets a specific broker id (driver fulfillment requests).
+    /// Targets a specific node id (driver fulfillment requests).
     ///
     /// Mirrors `ConstantNodeIdProvider`.
-    ConstantNodeId(i32),
+    ConstantNodeId {
+        /// The id of the node to send the call to.
+        node_id: i32,
+        /// Java's `ConstantNodeIdProvider(int nodeId, boolean
+        /// supportsUseControllers)` argument: whether a `bootstrap.controllers`
+        /// client may send the call (to the controller with that id). Java's
+        /// one-argument constructor sets it to `false`.
+        supports_use_controllers: bool,
+    },
 }
 
 impl NodeProvider {
     /// Whether the provider may run when the client uses `bootstrap.controllers`
-    /// (KIP-919). Mirrors `NodeProvider.supportsUseControllers`.
+    /// (KIP-919). Mirrors `NodeProvider.supportsUseControllers`: fixed for
+    /// three providers, and the constructor argument of
+    /// `ControllerNodeProvider` and `ConstantNodeIdProvider`.
     pub(crate) fn supports_use_controllers(&self) -> bool {
         match self {
-            NodeProvider::Controller => false,
+            NodeProvider::Controller { supports_use_controllers } => *supports_use_controllers,
             NodeProvider::LeastLoaded => false,
             NodeProvider::LeastLoadedBrokerOrActiveKController => true,
             NodeProvider::MetadataUpdate => true,
-            NodeProvider::ConstantNodeId(_) => false,
+            NodeProvider::ConstantNodeId { supports_use_controllers, .. } => *supports_use_controllers,
         }
     }
 
@@ -158,7 +179,7 @@ impl NodeProvider {
                 }
                 Ok(least_loaded_node.node().cloned())
             },
-            NodeProvider::Controller => {
+            NodeProvider::Controller { .. } => {
                 if metadata_manager.is_ready()? {
                     match metadata_manager.controller() {
                         Some(node) => Ok(Some(node)),
@@ -183,13 +204,12 @@ impl NodeProvider {
             NodeProvider::LeastLoadedBrokerOrActiveKController => {
                 if metadata_manager.is_ready()? {
                     if metadata_manager.using_bootstrap_controllers() {
-                        match metadata_manager.controller() {
-                            Some(node) => Ok(Some(node)),
-                            None => {
-                                metadata_manager.request_update();
-                                Ok(None)
-                            },
-                        }
+                        // `return metadataManager.controller();`
+                        // (`KafkaAdminClient.java:901-902`): with no known
+                        // controller the call stays pending, and unlike
+                        // `ControllerNodeProvider` this provider does not
+                        // request a metadata update for it.
+                        Ok(metadata_manager.controller())
                     } else {
                         Ok(client.least_loaded_node(now).node().cloned())
                     }
@@ -198,7 +218,7 @@ impl NodeProvider {
                     Ok(None)
                 }
             },
-            NodeProvider::ConstantNodeId(node_id) => {
+            NodeProvider::ConstantNodeId { node_id, .. } => {
                 // Mirrors ConstantNodeIdProvider: if we can't find the node with
                 // the given id, schedule a metadata update and hope it appears.
                 if metadata_manager.is_ready()?
@@ -325,7 +345,7 @@ impl Call {
         }
     }
 
-    /// Creates an internal (metadata) call.
+    /// Creates an internal (metadata) call: Java's `Call(true, ..)`.
     pub(crate) fn new_internal(
         call_name: impl Into<String>,
         deadline_ms: i64,
@@ -333,6 +353,7 @@ impl Call {
         create_request_fn: CreateRequestFn,
         handle_response_fn: HandleResponseFn,
         handle_failure_fn: HandleFailureFn,
+        handle_unsupported_version_fn: HandleUnsupportedVersionFn,
     ) -> Self {
         let mut call = Self::new(
             call_name,
@@ -341,7 +362,7 @@ impl Call {
             create_request_fn,
             handle_response_fn,
             handle_failure_fn,
-            Box::new(|| false),
+            handle_unsupported_version_fn,
         );
         call.internal = true;
         call
@@ -390,9 +411,37 @@ impl Call {
         self.handle_failure(&error);
     }
 
-    /// Runs the unsupported-version hook; returns `true` iff the call should be
-    /// retried after a protocol downgrade.
-    pub(crate) fn handle_unsupported_version(&mut self) -> bool {
-        (self.handle_unsupported_version_fn)()
+    /// Runs the unsupported-version hook with the `UnsupportedVersionException`
+    /// the call failed with; returns `true` iff the call should be retried after
+    /// a protocol downgrade.
+    pub(crate) fn handle_unsupported_version(&mut self, error: &Error) -> bool {
+        (self.handle_unsupported_version_fn)(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `supportsUseControllers()` of each Java `NodeProvider`
+    /// (`KafkaAdminClient.java:788-917`): `MetadataUpdateNodeIdProvider` and
+    /// `LeastLoadedBrokerOrActiveKController` answer `true`,
+    /// `LeastLoadedNodeProvider` `false`, and `ControllerNodeProvider` /
+    /// `ConstantNodeIdProvider` answer what their constructor was given.
+    #[test]
+    fn supports_use_controllers_follows_the_java_providers() {
+        assert!(NodeProvider::MetadataUpdate.supports_use_controllers());
+        assert!(NodeProvider::LeastLoadedBrokerOrActiveKController.supports_use_controllers());
+        assert!(!NodeProvider::LeastLoaded.supports_use_controllers());
+        for flag in [false, true] {
+            assert_eq!(
+                NodeProvider::Controller { supports_use_controllers: flag }.supports_use_controllers(),
+                flag
+            );
+            assert_eq!(
+                NodeProvider::ConstantNodeId { node_id: 3, supports_use_controllers: flag }.supports_use_controllers(),
+                flag
+            );
+        }
     }
 }

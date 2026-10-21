@@ -31,13 +31,14 @@
 //! By **id** Java uses the Metadata API only (`handleDescribeTopicsByIds`), and
 //! so does this port.
 //!
-//! `bootstrap.controllers` (KIP-919) is unsupported in Phase 1, so the metadata
-//! refresh always uses the broker `Metadata` API (never `DescribeCluster`), and
-//! controller/least-loaded node selection never needs the
-//! `LeastLoadedBrokerOrActiveKController` provider.
+//! A client configured with `bootstrap.controllers` (KIP-919) talks to the
+//! controller quorum: it refreshes its metadata with `DescribeCluster` for the
+//! CONTROLLER endpoint instead of the `Metadata` API, and fails at once every
+//! call whose node provider cannot reach a controller, with an
+//! [`UnsupportedEndpointTypeError`](crate::common::errors::UnsupportedEndpointTypeError).
 
 use crate::admin::CreateTopicsResult;
-use crate::common::requests::DescribeClusterRequest;
+use crate::admin::EndpointType;
 use crate::common::requests::MetadataResponse;
 use crate::{kafka_debug, kafka_error, kafka_warn};
 use std::collections::HashMap;
@@ -60,6 +61,7 @@ use crate::DefaultHostResolver;
 use crate::DeleteAclsRequestData;
 use crate::DeleteTopicsRequestData;
 use crate::DescribeClusterRequestData;
+use crate::DescribeClusterResponseData;
 use crate::DescribeConfigsRequestData;
 use crate::DescribeLogDirsRequestData;
 use crate::DescribeTopicPartitionsRequestData;
@@ -79,6 +81,7 @@ use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, 
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::ApiError;
+use crate::common::errors::MismatchedEndpointTypeError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selectable;
@@ -282,11 +285,13 @@ impl KafkaAdminClient {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
-        // Mirrors Java: a set nodeId routes to that specific broker via
-        // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
-        // broker or the active controller.
+        // Mirrors Java: a set nodeId routes to that specific node via
+        // `new ConstantNodeIdProvider(options.nodeId().getAsInt(), true)`
+        // (`KafkaAdminClient.java:4653-4654`), a broker or, for a
+        // `bootstrap.controllers` client, a controller; otherwise the request
+        // goes to an arbitrary broker or the active controller.
         let node_provider = match options.node_id() {
-            Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+            Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
             None => NodeProvider::LeastLoadedBrokerOrActiveKController,
         };
 
@@ -338,7 +343,7 @@ impl KafkaAdminClient {
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         InternalDescribeFeaturesResult::new(public, node_api_versions_public)
@@ -374,9 +379,12 @@ impl KafkaAdminClient {
     /// # Errors
     ///
     /// Returns a Kafka error, `Failed to create new KafkaAdminClient`, whose
-    /// source is the failure: the bootstrap addresses cannot be resolved, the
-    /// channel builder cannot be created, or `default.api.timeout.ms` is set
-    /// explicitly below `request.timeout.ms`
+    /// source is the failure: neither or both of `bootstrap.servers` and
+    /// `bootstrap.controllers` are set
+    /// ([`determine_bootstrap_type`](Self::determine_bootstrap_type)), the
+    /// bootstrap addresses cannot be resolved, the channel builder cannot be
+    /// created, or `default.api.timeout.ms` is set explicitly below
+    /// `request.timeout.ms`
     /// ([`configure_default_api_timeout_ms`](Self::configure_default_api_timeout_ms)).
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
     pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
@@ -418,10 +426,10 @@ impl KafkaAdminClient {
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
-        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
-        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
-        // already rejected it, so it is always `bootstrap.servers`.
-        let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
+        // `boolean usingBootstrapControllers = determineBootstrapType(config)`
+        // (`KafkaAdminClient.java:582`), the first step inside `createInternal`'s
+        // `try`, so its `ConfigException` reaches the caller wrapped by `new`.
+        let using_bootstrap_controllers = Self::determine_bootstrap_type(&config)?;
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -429,15 +437,25 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
+            using_bootstrap_controllers,
             log_context.clone(),
         );
+
+        // Get the appropriate bootstrap configuration: Java's
+        // `bootstrapAddressesToUse` (`KafkaAdminClient.java:589-591`), used both
+        // for the synchronous DNS resolution below and for the `NetworkClient`'s
+        // bootstrap configuration, which also drives its rebootstrap.
+        let bootstrap: &[String] = if using_bootstrap_controllers {
+            config.bootstrap_controllers()
+        } else {
+            config.bootstrap_servers()
+        };
         // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
         // metadata manager, so any DNS failure surfaces as a ConfigException and no admin
         // client instance is created. A positive value opts in to asynchronous bootstrap
         // resolution, where resolution is deferred to the first poll.
         if config.bootstrap_resolve_timeout_ms() == 0 {
-            let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap, config.client_dns_lookup())?;
+            let addresses = ClientUtils::parse_and_validate_addresses(bootstrap, config.client_dns_lookup())?;
             metadata_manager.update(Cluster::bootstrap(&addresses), time.milliseconds());
         }
         // Otherwise, let NetworkClient::ensure_bootstrapped() handle it during the first poll
@@ -489,7 +507,7 @@ impl KafkaAdminClient {
             config.bootstrap_resolve_timeout_ms(),
             config.client_dns_lookup(),
             config.retry_backoff_ms(),
-            &bootstrap,
+            bootstrap,
         )?);
 
         crate::preview_warning::log_preview_warning(&log_context);
@@ -554,25 +572,23 @@ impl KafkaAdminClient {
     }
 
     /// Determines which bootstrap configuration to use based on the provided
-    /// lists. Validates that exactly one of `bootstrap.servers` or
+    /// config. Validates that exactly one of `bootstrap.servers` or
     /// `bootstrap.controllers` is configured.
     ///
     /// Returns `true` if using `bootstrap.controllers`, `false` if using
     /// `bootstrap.servers`.
     ///
-    /// Java takes the `AdminClientConfig` and reads both lists from it; the
-    /// Rust config does not keep `bootstrap.controllers` (no client can use
-    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
-    /// parses them.
+    /// Translated from `KafkaAdminClient.determineBootstrapType`
+    /// (`KafkaAdminClient.java:533-560`). An unset list reads as empty, as
+    /// Java's `null` does.
     ///
     /// # Errors
     ///
     /// [`Error::Config`] if both or neither bootstrap configurations are set.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
-    pub(crate) fn determine_bootstrap_type(
-        bootstrap_servers: &[String],
-        controller_servers: &[String],
-    ) -> Result<bool, Error> {
+    fn determine_bootstrap_type(config: &AdminClientConfig) -> Result<bool, Error> {
+        let bootstrap_servers = config.bootstrap_servers();
+        let controller_servers = config.bootstrap_controllers();
         if bootstrap_servers.is_empty() {
             if controller_servers.is_empty() {
                 Err(Error::config_message(format!(
@@ -592,6 +608,53 @@ impl KafkaAdminClient {
                 AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
             )))
         }
+    }
+
+    /// Builds the [`Cluster`] that a `DescribeCluster` response from the
+    /// CONTROLLER endpoint describes (KIP-919): the controllers as its nodes,
+    /// and the active controller as its controller (none when the response's
+    /// controller id names none of them).
+    ///
+    /// Translated from `KafkaAdminClient.parseDescribeClusterResponse`
+    /// (`KafkaAdminClient.java:1816-1840`), which the metadata refresh of a
+    /// `bootstrap.controllers` client calls.
+    ///
+    /// # Errors
+    ///
+    /// The response's error, as `ApiError.exception()` builds it, when the
+    /// response carries one; otherwise a
+    /// [`MismatchedEndpointTypeError`] when the response comes from an endpoint
+    /// other than CONTROLLER.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#parseDescribeClusterResponse")]
+    pub(crate) fn parse_describe_cluster_response(response: &DescribeClusterResponseData) -> Result<Cluster, Error> {
+        // `new ApiError(response.errorCode(), response.errorMessage())`;
+        // `apiError.isFailure()` -> `throw apiError.exception()`.
+        if Errors::for_code(response.error_code) != Errors::None {
+            return Err(api_error(response.error_code, &response.error_message));
+        }
+        if response.endpoint_type != EndpointType::Controller.id() {
+            return Err(Error::MismatchedEndpointType(MismatchedEndpointTypeError::new(format!(
+                "Expected response from CONTROLLER endpoint, but got response from endpoint type {}",
+                response.endpoint_type
+            ))));
+        }
+        let mut nodes = Vec::with_capacity(response.brokers.len());
+        let mut controller_node = None;
+        for node in &response.brokers {
+            let new_node = Node::with_rack(node.broker_id, node.host.clone(), node.port, node.rack.clone());
+            if node.broker_id == response.controller_id {
+                controller_node = Some(new_node.clone());
+            }
+            nodes.push(new_node);
+        }
+        Ok(Cluster::with_controller(
+            Some(response.cluster_id.clone()),
+            nodes,
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            controller_node,
+        ))
     }
 
     /// If a `default.api.timeout.ms` has been explicitly specified, raise an
@@ -853,9 +916,9 @@ impl KafkaAdminClient {
                     ));
                 }
                 let endpoint_type = if req_mm.using_bootstrap_controllers() {
-                    DescribeClusterRequest::ENDPOINT_TYPE_CONTROLLER
+                    EndpointType::Controller.id()
                 } else {
-                    DescribeClusterRequest::ENDPOINT_TYPE_BROKER
+                    EndpointType::Broker.id()
                 };
                 let mut data = DescribeClusterRequestData::new();
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
@@ -926,7 +989,7 @@ impl KafkaAdminClient {
 
         let uv_mm = mm.clone();
         let uv_use_metadata = Arc::clone(&use_metadata_request);
-        let handle_uv = Box::new(move || {
+        let handle_uv = Box::new(move |_error: &Error| {
             if uv_mm.using_bootstrap_controllers() {
                 return false;
             }
@@ -1094,11 +1157,11 @@ impl KafkaAdminClient {
                 let list_call = Call::new(
                     "listGroups",
                     deadline,
-                    NodeProvider::ConstantNodeId(node_id),
+                    NodeProvider::ConstantNodeId { node_id, supports_use_controllers: false },
                     create_list_request,
                     handle_list_response,
                     handle_list_failure,
-                    Box::new(|| false),
+                    Box::new(|_| false),
                 );
                 // Java: `runnable.call(new Call("listGroups", ..), now)`.
                 ctx.sender.call(list_call);
@@ -1113,7 +1176,7 @@ impl KafkaAdminClient {
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         public
@@ -1211,7 +1274,7 @@ impl KafkaAdminClient {
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         public
@@ -1371,7 +1434,7 @@ where
 {
     let RequestSpec { name, scope, keys, request, next_allowed_try_ms, deadline_ms, tries } = spec;
     let node_provider = match scope.destination_broker_id() {
-        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: false },
         None => NodeProvider::LeastLoaded,
     };
     // create_request: hand over the pre-built builder on first send; rebuild
@@ -1454,7 +1517,7 @@ where
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     );
     call.next_allowed_try_ms = next_allowed_try_ms;
     call.tries = tries;
@@ -1782,7 +1845,7 @@ fn get_create_acls_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -1844,7 +1907,7 @@ fn get_unregister_controller_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -1890,7 +1953,7 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -1935,7 +1998,7 @@ fn get_describe_client_quotas_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -1995,7 +2058,7 @@ fn get_alter_client_quotas_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2055,7 +2118,7 @@ fn get_describe_user_scram_credentials_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2135,11 +2198,11 @@ fn get_alter_user_scram_credentials_call(
     Call::new(
         "alterUserScramCredentials",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2267,7 +2330,7 @@ fn get_create_delegation_token_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2311,7 +2374,7 @@ fn get_renew_delegation_token_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2355,7 +2418,7 @@ fn get_expire_delegation_token_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2395,7 +2458,7 @@ fn get_describe_delegation_token_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2471,7 +2534,7 @@ fn get_delete_acls_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2643,11 +2706,12 @@ fn get_alter_partition_reassignments_call(
     Call::new(
         "alterPartitionReassignments",
         deadline,
-        NodeProvider::Controller,
+        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4073-4074`).
+        NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2724,11 +2788,12 @@ fn get_list_partition_reassignments_call(
     Call::new(
         "listPartitionReassignments",
         deadline,
-        NodeProvider::Controller,
+        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4209-4210`).
+        NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2850,8 +2915,10 @@ fn get_describe_configs_call(
         }
     });
 
+    // `node != null ? new ConstantNodeIdProvider(node, true) : new
+    // LeastLoadedBrokerOrActiveKController()` (`KafkaAdminClient.java:2854-2855`).
     let node_provider = match node {
-        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
         None => NodeProvider::LeastLoadedBrokerOrActiveKController,
     };
 
@@ -2862,7 +2929,7 @@ fn get_describe_configs_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -2966,11 +3033,11 @@ fn get_describe_log_dirs_call(
     Call::new(
         "describeLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3043,11 +3110,11 @@ fn get_alter_replica_log_dirs_call(
     Call::new(
         "alterReplicaLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3133,11 +3200,11 @@ fn get_describe_replica_log_dirs_call(
     Call::new(
         "describeReplicaLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3318,11 +3385,11 @@ fn get_create_topics_call(
     Call::new(
         "createTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3438,11 +3505,11 @@ fn get_create_partitions_call(
     Call::new(
         "createPartitions",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3552,11 +3619,11 @@ fn get_delete_topics_call(
     Call::new(
         "deleteTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3676,11 +3743,11 @@ fn get_delete_topics_with_ids_call(
     Call::new(
         "deleteTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -3845,7 +3912,7 @@ impl Admin for KafkaAdminClient {
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         ListTopicsResult::new(public)
@@ -4165,10 +4232,14 @@ impl Admin for KafkaAdminClient {
         options: AlterConfigsOptions,
     ) -> AlterConfigsResult {
         let mut all_futures: HashMap<ConfigResource, KafkaFuture<()>> = HashMap::new();
-        // BROKER_LOGGER requests always go to a specific broker; a non-default
-        // BROKER resource goes to that specific node; everything else goes to
-        // the least loaded broker (bootstrap.controllers is unsupported here,
-        // so the controller special-casing never triggers).
+        // BROKER_LOGGER requests always go to a specific, constant broker or controller node.
+        //
+        // BROKER resource changes for a specific (non-default) resource go to either that specific
+        // node (if using bootstrap.servers), or directly to the active controller (if using
+        // bootstrap.controllers)
+        //
+        // All other requests go to the least loaded broker (if using bootstrap.servers) or the
+        // active controller (if using bootstrap.controllers)
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
         for resource in configs.keys() {
@@ -4183,7 +4254,8 @@ impl Admin for KafkaAdminClient {
                     configs,
                     &options,
                     std::slice::from_ref(resource),
-                    NodeProvider::ConstantNodeId(node_id),
+                    // `new ConstantNodeIdProvider(node, true)` (`KafkaAdminClient.java:2986`).
+                    NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
                 );
                 all_futures.extend(futures);
             } else {
@@ -4246,7 +4318,7 @@ impl Admin for KafkaAdminClient {
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         ListConfigResourcesResult::new(public)
@@ -4425,11 +4497,11 @@ impl Admin for KafkaAdminClient {
         let call = Call::new(
             "electLeaders",
             deadline,
-            NodeProvider::Controller,
+            NodeProvider::Controller { supports_use_controllers: false },
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         ElectLeadersResult::new(public)
@@ -5293,11 +5365,12 @@ impl Admin for KafkaAdminClient {
         let call = Call::new(
             "updateFeatures",
             deadline,
-            NodeProvider::Controller,
+            // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4733-4734`).
+            NodeProvider::Controller { supports_use_controllers: true },
             create_request,
             handle_response,
             handle_failure,
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         self.submit(call);
         Ok(UpdateFeaturesResult::new(public))
@@ -5479,7 +5552,7 @@ fn get_describe_topics_by_names_call(
     let uv_supports = Arc::clone(&supports_disabling);
     // First UnsupportedVersion: downgrade to all-topics and retry (returns
     // true). A second one is a real failure (returns false).
-    let handle_uv = Box::new(move || uv_supports.swap(false, std::sync::atomic::Ordering::AcqRel));
+    let handle_uv = Box::new(move |_error: &Error| uv_supports.swap(false, std::sync::atomic::Ordering::AcqRel));
 
     Call::new(
         "describeTopics",
@@ -5678,7 +5751,7 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
 
     // `handleUnsupportedVersionException` (`KafkaAdminClient.java:2419-2424`):
     // issue the Metadata-API call through `runnable.call`, and return `false`.
-    let handle_uv = Box::new(move || {
+    let handle_uv = Box::new(move |_error: &Error| {
         let now = ctx.time.milliseconds();
         ctx.sender.call(get_describe_topics_by_names_call(
             Arc::clone(&topic_futures),
@@ -5802,7 +5875,7 @@ fn get_describe_topics_by_ids_call(
         create_request,
         handle_response,
         handle_failure,
-        Box::new(|| false),
+        Box::new(|_| false),
     )
 }
 
@@ -5812,7 +5885,12 @@ impl KafkaAdminClient {
     /// [`KafkaClient`] with a pre-seeded cluster and does **not** spawn the
     /// background task. The caller drives [`AdminClientRunnable::run_once`].
     ///
-    /// Mirrors Java's `AdminClientUnitTestEnv`.
+    /// Mirrors Java's `AdminClientUnitTestEnv`, including how it picks the
+    /// bootstrap mode: the client uses `bootstrap.controllers` when the config
+    /// sets that key, whatever `bootstrap.servers` holds, as
+    /// `config.containsKey(BOOTSTRAP_CONTROLLERS_CONFIG)` decides there
+    /// (`AdminClientUnitTestEnv.java:74-77`). Like Java's test constructor, it
+    /// does not run `determineBootstrapType`.
     pub(crate) fn create_for_test<C: KafkaClient + Send + 'static>(
         client: C,
         cluster: Cluster,
@@ -5826,7 +5904,7 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false,
+            config.user_configured(AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG),
             log_context.clone(),
         );
         metadata_manager.update(cluster, time.milliseconds());
@@ -6359,29 +6437,37 @@ mod tests {
         assert_eq!(results.all().get().await.unwrap_err().error(), Errors::SecurityDisabled);
     }
 
-    /// Translated from `KafkaAdminClientTest.testCreateAclsToController`.
+    /// Translated from `KafkaAdminClientConfigTest.testCreateAclsToController`.
     ///
-    /// Java sets `bootstrap.controllers`, which makes
-    /// `LeastLoadedBrokerOrActiveKController` route to the active controller and
-    /// refresh metadata via `DescribeCluster` between the NOT_CONTROLLER attempt
-    /// and the retry. On this branch `AdminMetadataManager` stubs
-    /// `using_bootstrap_controllers()` to `false`, so the provider behaves like
-    /// `LeastLoaded`: after clearing the controller it retries straight to a
-    /// least-loaded broker (no interposed metadata call). The observable
-    /// contract — retry after NOT_CONTROLLER, then success — is preserved.
+    /// A `bootstrap.controllers` client sends `createAcls` to the active
+    /// controller (node 0). The NOT_CONTROLLER answer clears it, the retry waits
+    /// for the interposed `DescribeCluster` refresh of the CONTROLLER endpoint,
+    /// and goes to the controller that refresh names (node 2).
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testCreateAclsToController")]
     async fn test_create_acls_to_controller() {
-        let (admin, mut runnable, time, _nodes) = env();
+        let (admin, mut runnable, time, nodes) = controller_env();
+        runnable.client_mut().prepare_response_from(
+            create_acls_response(vec![create_acls_result_error(Errors::NotController, "not controller")]),
+            &nodes[0],
+        );
+        // should retry the describe cluster to update the metadata
+        runnable.client_mut().prepare_response_matcher(
+            controller_metadata_request(),
+            prepare_describe_cluster_response(
+                0,
+                &nodes,
+                "mock-cluster",
+                2,
+                MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                true,
+            ),
+        );
+
+        // Test a call where we successfully create two ACLs.
         runnable
             .client_mut()
-            .prepare_response(create_acls_response(vec![create_acls_result_error(
-                Errors::NotController,
-                "not controller",
-            )]));
-        runnable
-            .client_mut()
-            .prepare_response(create_acls_response(vec![create_acls_result_ok()]));
+            .prepare_response_from(create_acls_response(vec![create_acls_result_ok()]), &nodes[2]);
 
         let results = admin.create_acls_with_options(&[acl1()], CreateAclsOptions::new());
         let keys: HashSet<AclBinding> = results.values().keys().cloned().collect();
@@ -6393,10 +6479,12 @@ mod tests {
             runnable.run_once().await;
             time.sleep(200);
         }
+        assert!(results.values()[&acl1()].is_done(), "the retry after the refresh must complete");
         for future in results.values().values() {
             future.get().await.unwrap();
         }
         results.all().get().await.unwrap();
+        assert_eq!(runnable.metadata_manager().controller().map(|node| node.id()), Some(2));
     }
 
     /// Translated from `KafkaAdminClientTest.testDeleteAcls`.
@@ -6466,24 +6554,36 @@ mod tests {
         assert_eq!(deleted, vec![acl1(), acl2()]);
     }
 
-    /// Translated from `KafkaAdminClientTest.testDeleteAclsToController`.
-    ///
-    /// As with `test_create_acls_to_controller`, `bootstrap.controllers` is
-    /// stubbed off on this branch so the NOT_CONTROLLER retry goes straight to a
-    /// least-loaded broker without an interposed metadata refresh.
+    /// Translated from `KafkaAdminClientConfigTest.testDeleteAclsToController`:
+    /// the `deleteAcls` twin of [`test_create_acls_to_controller`].
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testDeleteAclsToController")]
     async fn test_delete_acls_to_controller() {
-        let (admin, mut runnable, time, _nodes) = env();
+        let (admin, mut runnable, time, nodes) = controller_env();
         let mut not_controller = DeleteAclsFilterResult::new();
         not_controller.set_error_code(Errors::NotController.code());
         not_controller.set_error_message(Some("not controller".to_string()));
         runnable
             .client_mut()
-            .prepare_response(delete_acls_response(vec![not_controller]));
+            .prepare_response_from(delete_acls_response(vec![not_controller]), &nodes[0]);
+        // should retry the describe cluster to update the metadata
+        runnable.client_mut().prepare_response_matcher(
+            controller_metadata_request(),
+            prepare_describe_cluster_response(
+                0,
+                &nodes,
+                "mock-cluster",
+                2,
+                MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                true,
+            ),
+        );
+        // Test a call where there are no errors.
         let mut ok = DeleteAclsFilterResult::new();
         ok.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None)]);
-        runnable.client_mut().prepare_response(delete_acls_response(vec![ok]));
+        runnable
+            .client_mut()
+            .prepare_response_from(delete_acls_response(vec![ok]), &nodes[2]);
 
         let results = admin.delete_acls_with_options(&[filter1()], DeleteAclsOptions::new());
         for _ in 0..30 {
@@ -6493,8 +6593,13 @@ mod tests {
             runnable.run_once().await;
             time.sleep(200);
         }
+        assert!(
+            results.values()[&filter1()].is_done(),
+            "the retry after the refresh must complete"
+        );
         let deleted = results.all().get().await.unwrap();
         assert_eq!(deleted, vec![acl1()]);
+        assert_eq!(runnable.metadata_manager().controller().map(|node| node.id()), Some(2));
     }
 
     /// Behavior test: a binding with an indefinite (UNKNOWN) field fails only its
@@ -7871,7 +7976,7 @@ mod tests {
             Box::new(|_| Err(Error::kafka_message("not sent"))),
             Box::new(|_, _, _| HandleResult::Done),
             Box::new(move |error: &Error| *recorded.lock().unwrap() = Some(error.clone())),
-            Box::new(|| false),
+            Box::new(|_| false),
         );
         (call, failure)
     }
@@ -8020,24 +8125,77 @@ mod tests {
         );
     }
 
+    /// An admin config with `bootstrap.servers` and `bootstrap.controllers` set
+    /// to the given values (`None` leaves a key unset).
+    fn bootstrap_config(servers: Option<&str>, controllers: Option<&str>) -> AdminClientConfig {
+        let mut props = HashMap::new();
+        if let Some(servers) = servers {
+            props.insert(AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.to_string());
+        }
+        if let Some(controllers) = controllers {
+            props.insert(
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+                controllers.to_string(),
+            );
+        }
+        AdminClientConfig::new(&props).expect("the config accepts any bootstrap combination")
+    }
+
     /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
     /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
+    /// An empty list counts as unset.
     #[test]
     fn test_determine_bootstrap_type() {
-        let servers = vec!["localhost:9092".to_string()];
-        let none: Vec<String> = Vec::new();
-        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
-        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
+        let determine =
+            |servers, controllers| KafkaAdminClient::determine_bootstrap_type(&bootstrap_config(servers, controllers));
+        assert!(!determine(Some("localhost:9092"), None).unwrap());
+        assert!(!determine(Some("localhost:9092"), Some("")).unwrap());
+        assert!(determine(None, Some("localhost:9093")).unwrap());
+        assert!(determine(Some(" "), Some("localhost:9093")).unwrap());
+        for (servers, controllers) in [(None, None), (Some(""), Some(" "))] {
+            let error = determine(servers, controllers).unwrap_err();
+            assert!(matches!(error, Error::Config(_)), "got {error:?}");
+            assert_eq!(
+                error.message(),
+                "You must set either bootstrap.servers or bootstrap.controllers"
+            );
+        }
+        let error = determine(Some("localhost:9092"), Some("localhost:9093")).unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "got {error:?}");
         assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
-            "You must set either bootstrap.servers or bootstrap.controllers"
-        );
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
-                .unwrap_err()
-                .message(),
+            error.message(),
             "You cannot set both bootstrap.servers and bootstrap.controllers"
         );
+    }
+
+    /// Java runs `determineBootstrapType` inside `createInternal`'s `try`
+    /// (`KafkaAdminClient.java:582`), so a config with neither or both bootstrap
+    /// lists fails client creation with `KafkaException("Failed to create new
+    /// KafkaAdminClient", e)` whose cause is the `ConfigException`; the config
+    /// itself is accepted.
+    #[test]
+    fn construction_wraps_the_bootstrap_checks() {
+        let cases = [
+            (None, None, "You must set either bootstrap.servers or bootstrap.controllers"),
+            (
+                Some("localhost:9092"),
+                Some("localhost:9093"),
+                "You cannot set both bootstrap.servers and bootstrap.controllers",
+            ),
+        ];
+        for (servers, controllers, message) in cases {
+            let error = KafkaAdminClient::new(bootstrap_config(servers, controllers))
+                .err()
+                .expect("the bootstrap check must fail construction");
+            assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+            assert!(error.is_kafka_error(), "got {error:?}");
+            assert!(!error.is_api_error(), "got {error:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(cause.message(), message);
+        }
     }
 
     /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
@@ -8106,7 +8264,7 @@ mod tests {
                     panic!("injected panic inside the I/O loop");
                 }
             }),
-            Box::new(|| false),
+            Box::new(|_| false),
         ));
 
         // `run()` must return: the panic ends `process_requests`, and the `finally`
@@ -8153,7 +8311,7 @@ mod tests {
             Box::new(move |error| {
                 *sink.lock().unwrap() = Some(error.clone());
             }),
-            Box::new(|| false),
+            Box::new(|_| false),
         ));
 
         for _ in 0..30 {
@@ -10111,11 +10269,29 @@ mod tests {
         cluster_id: &str,
         authorized_ops: i32,
     ) -> ConcreteResponse {
+        prepare_describe_cluster_response(0, brokers, cluster_id, controller_id, authorized_ops, false)
+    }
+
+    /// Java's `KafkaAdminClientTestBase.prepareDescribeClusterResponse`: a
+    /// `sentToController` response states the CONTROLLER endpoint type;
+    /// otherwise it keeps the default, BROKER.
+    fn prepare_describe_cluster_response(
+        throttle_time_ms: i32,
+        brokers: &[Node],
+        cluster_id: &str,
+        controller_id: i32,
+        cluster_authorized_operations: i32,
+        sent_to_controller: bool,
+    ) -> ConcreteResponse {
         let mut data = DescribeClusterResponseData::new();
         data.set_error_code(Errors::None.code());
+        data.set_throttle_time_ms(throttle_time_ms);
         data.set_controller_id(controller_id);
         data.set_cluster_id(cluster_id.to_string());
-        data.set_cluster_authorized_operations(authorized_ops);
+        data.set_cluster_authorized_operations(cluster_authorized_operations);
+        if sent_to_controller {
+            data.set_endpoint_type(EndpointType::Controller.id());
+        }
         let wire_brokers = brokers
             .iter()
             .map(|n| {
@@ -15630,7 +15806,7 @@ mod tests {
                 Box::new(|_timeout_ms| unreachable!("a rejected call is never sent")),
                 Box::new(|_response, _now, _cur_node| HandleResult::Done),
                 Box::new(move |error| *captured.lock().unwrap() = Some(error.clone())),
-                Box::new(|| false),
+                Box::new(|_| false),
             )
         }
         let endpoint_message =
@@ -15671,6 +15847,831 @@ mod tests {
         assert!(shutdown.admit_new_call(true, &backoff, now, rejected(now, &captured)).is_none());
         let error = captured.lock().unwrap().take().expect("the call failed");
         assert!(matches!(error, Error::UnsupportedEndpointType(_)), "got {error:?}");
+    }
+
+    // --- bootstrap.controllers (KIP-919) -------------------------------------
+    //
+    // `KafkaAdminClientTest.testCallFailWithUnsupportedVersionExceptionDoesNotHaveConcurrentModificationException`
+    // is not translated. It replaces `AdminMetadataManager` with a Mockito mock
+    // whose `requestUpdate()` throws once, so that `Call.fail` re-adds the call
+    // to `pendingCalls` while `maybeDrainPendingCalls` iterates it. The Rust
+    // manager is a concrete type with no such seam, and the hazard cannot
+    // arise: `maybe_drain_pending_calls` takes the pending list out before it
+    // iterates, and appends what `fail_call` re-queues afterwards. The
+    // `AddRaftVoter` / `RemoveRaftVoter` tests, the other Java tests that set
+    // `bootstrap.controllers`, need RPCs this client does not have.
+
+    /// Java's `mockClientEnv(AdminClientConfig.BOOTSTRAP_CONTROLLERS_CONFIG,
+    /// "dummy")`: [`env_with_props`] with `bootstrap.controllers` set, so the
+    /// client talks to the controllers, which the three mock nodes stand for
+    /// (node 0 is the active controller). As in Java's `AdminClientUnitTestEnv`,
+    /// the config keeps `bootstrap.servers` too.
+    fn controller_env() -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        env_with_props(&[(AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG, "dummy")])
+    }
+
+    /// [`controller_env`] seeded with `cluster` instead of the three-node mock
+    /// cluster.
+    fn controller_env_with_cluster(
+        cluster: Cluster,
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = mock_time(1000);
+        let nodes = cluster.nodes().to_vec();
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
+        let props = HashMap::from([
+            (
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:9092".to_string(),
+            ),
+            (AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(), "dummy".to_string()),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        (admin, runnable, time, nodes)
+    }
+
+    /// A client that knows only its bootstrap address, as `new_inner` leaves
+    /// it, so its first call needs a metadata refresh: the bootstrap cluster of
+    /// `localhost:9093` (node -1). With `using_bootstrap_controllers` the config
+    /// sets `bootstrap.controllers` (to that address), otherwise only
+    /// `bootstrap.servers`. The three mock nodes are what the refresh can name.
+    fn bootstrapping_env(
+        using_bootstrap_controllers: bool,
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = mock_time(1000);
+        let (_cluster, nodes) = mock_cluster(3, 0);
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
+        let mut props = HashMap::from([(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "localhost:9092".to_string(),
+        )]);
+        if using_bootstrap_controllers {
+            props.insert(
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+                "localhost:9093".to_string(),
+            );
+        }
+        let config = AdminClientConfig::new(&props).unwrap();
+        let bootstrap = Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:9093".parse().unwrap())]);
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, bootstrap, &config, Arc::clone(&time) as Arc<dyn Time>);
+        (admin, runnable, time, nodes)
+    }
+
+    /// Matches the metadata refresh of a `bootstrap.controllers` client: a
+    /// `DescribeCluster` request for the CONTROLLER endpoint, without the
+    /// authorized operations (`makeControllerMetadataCall`,
+    /// `KafkaAdminClient.java:1735-1739`).
+    fn controller_metadata_request() -> crate::RequestMatcher {
+        Box::new(|request| {
+            matches!(
+                request,
+                AbstractRequest::DescribeCluster(request)
+                    if request.data().endpoint_type == EndpointType::Controller.id()
+                        && !request.data().include_cluster_authorized_operations
+                        && !request.data().include_fenced_brokers
+            )
+        })
+    }
+
+    /// Java's `UnsupportedEndpointTypeException` text for a call a
+    /// `bootstrap.controllers` client cannot send (`KafkaAdminClient.java:1711-1712`).
+    const UNSUPPORTED_ENDPOINT_MESSAGE: &str =
+        "This Admin API is not yet supported when communicating directly with the controller quorum.";
+
+    fn assert_unsupported_endpoint_type(api: &str, error: Error) {
+        assert!(matches!(error, Error::UnsupportedEndpointType(_)), "{api}: got {error:?}");
+        assert_eq!(error.message(), UNSUPPORTED_ENDPOINT_MESSAGE, "{api}");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testParseDescribeClusterResponseWithError`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testParseDescribeClusterResponseWithError")]
+    fn test_parse_describe_cluster_response_with_error() {
+        let message =
+            "The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER";
+        let mut data = DescribeClusterResponseData::new();
+        data.set_error_code(Errors::MismatchedEndpointType.code());
+        data.set_error_message(Some(message.to_string()));
+        let error = KafkaAdminClient::parse_describe_cluster_response(&data).unwrap_err();
+        assert!(matches!(error, Error::MismatchedEndpointType(_)), "got {error:?}");
+        assert_eq!(error.message(), message);
+    }
+
+    /// Translated from
+    /// `KafkaAdminClientTest.testParseDescribeClusterResponseWithUnexpectedEndpointType`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testParseDescribeClusterResponseWithUnexpectedEndpointType"
+    )]
+    fn test_parse_describe_cluster_response_with_unexpected_endpoint_type() {
+        let mut data = DescribeClusterResponseData::new();
+        data.set_endpoint_type(EndpointType::Broker.id());
+        let error = KafkaAdminClient::parse_describe_cluster_response(&data).unwrap_err();
+        assert!(matches!(error, Error::MismatchedEndpointType(_)), "got {error:?}");
+        assert_eq!(
+            error.message(),
+            "Expected response from CONTROLLER endpoint, but got response from endpoint type 1"
+        );
+    }
+
+    /// Translated from `KafkaAdminClientTest.testParseSuccessfulDescribeClusterResponse`
+    /// (`@ValueSource(booleans = {false, true})`).
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testParseSuccessfulDescribeClusterResponse")]
+    fn test_parse_successful_describe_cluster_response() {
+        for include_controller in [false, true] {
+            let mut data = DescribeClusterResponseData::new();
+            data.set_controller_id(if include_controller { 0 } else { -1 });
+            data.set_endpoint_type(EndpointType::Controller.id());
+            data.set_cluster_id("Ek8tjqq1QBWfnaoyHFZqDg".to_string());
+            data.set_brokers(
+                (0..3)
+                    .map(|id| {
+                        let mut broker = DescribeClusterBroker::new();
+                        broker.set_broker_id(id);
+                        broker.set_host(format!("controller{id}.com"));
+                        broker.set_port(9092);
+                        broker
+                    })
+                    .collect(),
+            );
+            let cluster = KafkaAdminClient::parse_describe_cluster_response(&data).unwrap();
+            if include_controller {
+                assert_eq!(cluster.controller().map(Node::id), Some(0));
+            } else {
+                assert!(cluster.controller().is_none());
+            }
+            assert_eq!(cluster.cluster_resource().cluster_id(), Some("Ek8tjqq1QBWfnaoyHFZqDg"));
+            assert_eq!(
+                HashSet::from([
+                    Node::new(0, "controller0.com".to_string(), 9092),
+                    Node::new(1, "controller1.com".to_string(), 9092),
+                    Node::new(2, "controller2.com".to_string(), 9092),
+                ]),
+                cluster.nodes().iter().cloned().collect::<HashSet<Node>>()
+            );
+        }
+    }
+
+    /// Translated from `KafkaAdminClientConfigTest.testIncrementalAlterConfigsToController`.
+    ///
+    /// The default BROKER resource of a `bootstrap.controllers` client goes to
+    /// the active controller (node 0). The NOT_CONTROLLER answer is followed by
+    /// the `DescribeCluster` refresh of the CONTROLLER endpoint, and the retry
+    /// goes to the controller it names (node 2).
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testIncrementalAlterConfigsToController")]
+    async fn test_incremental_alter_configs_to_controller() {
+        let (admin, mut runnable, time, nodes) = controller_env();
+
+        //test NOT_CONTROLLER error scenarios
+        runnable.client_mut().prepare_response_from(
+            incremental_alter_configs_response(vec![alter_configs_resource_response(
+                "",
+                config_resource::Type::Broker.id(),
+                Errors::NotController,
+                "not controller",
+            )]),
+            &nodes[0],
+        );
+
+        // should retry the describe cluster to update the metadata
+        runnable.client_mut().prepare_response_matcher(
+            controller_metadata_request(),
+            prepare_describe_cluster_response(
+                0,
+                &nodes,
+                "mock-cluster",
+                2,
+                MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                true,
+            ),
+        );
+
+        // `.setErrorMessage(ApiError.NONE.message())`, which is `null`.
+        let mut success = alter_configs_resource_response("", config_resource::Type::Broker.id(), Errors::None, "");
+        success.set_error_message(None);
+
+        let broker_resource = ConfigResource::new(config_resource::Type::Broker, String::new());
+        let alter_config_op1 = AlterConfigOp::new(
+            ConfigEntry::new("log.segment.bytes".to_string(), Some("1073741".to_string())),
+            OpType::Set,
+        );
+        let configs = HashMap::from([(broker_resource.clone(), vec![alter_config_op1])]);
+        runnable
+            .client_mut()
+            .prepare_response_from(incremental_alter_configs_response(vec![success]), &nodes[2]);
+        let result = admin.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
+        for _ in 0..30 {
+            if result.values()[&broker_resource].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        assert!(
+            result.values()[&broker_resource].is_done(),
+            "the retry after the refresh must complete"
+        );
+        result.all().get().await.unwrap();
+        assert_eq!(runnable.metadata_manager().controller().map(|node| node.id()), Some(2));
+    }
+
+    /// `AdminClientRunnable.call` (`KafkaAdminClient.java:1710-1713`): a
+    /// `bootstrap.controllers` client fails every call whose node provider
+    /// cannot reach a controller at once, with Java's message, and sends
+    /// nothing. Covers each provider that answers `false`: the least-loaded
+    /// node (`listTopics`, `listGroups`' broker lookup, the `AdminApiDriver`'s
+    /// coordinator lookup), the controller (`createTopics`, `electLeaders`) and
+    /// a constant broker id (`describeLogDirs`).
+    #[tokio::test]
+    async fn broker_only_apis_fail_with_unsupported_endpoint_type_in_controller_mode() {
+        let (admin, mut runnable, _time, _nodes) = controller_env();
+
+        // Each future is complete as soon as the call returns: the call is
+        // rejected when it is submitted.
+        let list_topics = admin.list_topics_with_options(ListTopicsOptions::new()).names();
+        assert!(list_topics.is_done(), "listTopics");
+        assert_unsupported_endpoint_type("listTopics", list_topics.get().await.unwrap_err());
+
+        let create_topics = admin
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor(
+                    "topic",
+                    Some(1),
+                    Some(1),
+                )],
+                CreateTopicsOptions::new(),
+            )
+            .all();
+        assert!(create_topics.is_done(), "createTopics");
+        assert_unsupported_endpoint_type("createTopics", create_topics.get().await.unwrap_err());
+
+        let describe_log_dirs = admin
+            .describe_log_dirs_with_options(&[0], DescribeLogDirsOptions::new())
+            .all_descriptions();
+        assert!(describe_log_dirs.is_done(), "describeLogDirs");
+        assert_unsupported_endpoint_type("describeLogDirs", describe_log_dirs.get().await.unwrap_err());
+
+        let partitions = HashSet::from([TopicPartition::new("topic", 0)]);
+        let elect_leaders = admin
+            .elect_leaders_with_options(ElectionType::Preferred, Some(partitions), ElectLeadersOptions::new())
+            .all();
+        assert!(elect_leaders.is_done(), "electLeaders");
+        assert_unsupported_endpoint_type("electLeaders", elect_leaders.get().await.unwrap_err());
+
+        // `findAllBrokers`' `handleFailure` wraps it
+        // (`KafkaAdminClient.java:3684-3688`).
+        let list_groups = admin.list_groups_with_options(ListGroupsOptions::new()).all();
+        assert!(list_groups.is_done(), "listGroups");
+        let error = list_groups.get().await.unwrap_err();
+        assert_eq!(error.message(), "Failed to find brokers to send ListGroups");
+        assert_unsupported_endpoint_type("listGroups", error.source().expect("the cause").clone());
+
+        let describe_groups = admin
+            .describe_consumer_groups_with_options(&["group".to_string()], DescribeConsumerGroupsOptions::new())
+            .all();
+        assert!(describe_groups.is_done(), "describeConsumerGroups");
+        assert_unsupported_endpoint_type("describeConsumerGroups", describe_groups.get().await.unwrap_err());
+
+        pump(&mut runnable, 5).await;
+        assert_eq!(runnable.client_mut().request_count(), 0, "nothing is sent");
+    }
+
+    /// The calls a `bootstrap.controllers` client may send: those whose Java
+    /// node provider is `ControllerNodeProvider(true)` or
+    /// `ConstantNodeIdProvider(node, true)` (`KafkaAdminClient.java:2855`,
+    /// `:2986`, `:4074`, `:4210`, `:4654`, `:4734`), and those using
+    /// `LeastLoadedBrokerOrActiveKController`, which go to the active
+    /// controller (node 0). Each is sent to the node Java sends it to.
+    #[tokio::test]
+    async fn controller_capable_apis_are_sent_in_controller_mode() {
+        type Issue = Box<dyn Fn(&KafkaAdminClient)>;
+        let partition = TopicPartition::new("topic", 0);
+        let broker_1 = ConfigResource::new(config_resource::Type::Broker, "1".to_string());
+        let broker_logger_1 = ConfigResource::new(config_resource::Type::BrokerLogger, "1".to_string());
+        let set = |name: &str| {
+            vec![AlterConfigOp::new(
+                ConfigEntry::new(name.to_string(), Some("1".to_string())),
+                OpType::Set,
+            )]
+        };
+        let cases: Vec<(&str, Issue, &'static ApiKeys, &str)> = vec![
+            (
+                "alterPartitionReassignments",
+                Box::new(move |admin: &KafkaAdminClient| {
+                    let reassignments =
+                        HashMap::from([(partition.clone(), Some(NewPartitionReassignment::new(vec![1, 2]).unwrap()))]);
+                    admin.alter_partition_reassignments_with_options(
+                        &reassignments,
+                        AlterPartitionReassignmentsOptions::new(),
+                    );
+                }),
+                &ApiKeys::ALTER_PARTITION_REASSIGNMENTS,
+                "0",
+            ),
+            (
+                "listPartitionReassignments",
+                Box::new(|admin: &KafkaAdminClient| {
+                    admin.list_partition_reassignments_with_options(ListPartitionReassignmentsOptions::new());
+                }),
+                &ApiKeys::LIST_PARTITION_REASSIGNMENTS,
+                "0",
+            ),
+            (
+                "updateFeatures",
+                Box::new(|admin: &KafkaAdminClient| {
+                    let updates = HashMap::from([(
+                        "test_feature".to_string(),
+                        FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap(),
+                    )]);
+                    admin
+                        .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                        .unwrap();
+                }),
+                &ApiKeys::UPDATE_FEATURES,
+                "0",
+            ),
+            (
+                "describeConfigs by node",
+                Box::new({
+                    let broker_1 = broker_1.clone();
+                    move |admin: &KafkaAdminClient| {
+                        admin.describe_configs_with_options(
+                            std::slice::from_ref(&broker_1),
+                            DescribeConfigsOptions::new(),
+                        );
+                    }
+                }),
+                &ApiKeys::DESCRIBE_CONFIGS,
+                "1",
+            ),
+            (
+                "incrementalAlterConfigs to a broker logger",
+                Box::new({
+                    let configs = HashMap::from([(broker_logger_1, set("kafka.server.KafkaApis"))]);
+                    move |admin: &KafkaAdminClient| {
+                        admin.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
+                    }
+                }),
+                &ApiKeys::INCREMENTAL_ALTER_CONFIGS,
+                "1",
+            ),
+            (
+                // A specific BROKER resource goes to the active controller, not to
+                // the node it names (`KafkaAdminClient.java:2980-2984`).
+                "incrementalAlterConfigs to a broker",
+                Box::new({
+                    let configs = HashMap::from([(broker_1, set("log.segment.bytes"))]);
+                    move |admin: &KafkaAdminClient| {
+                        admin.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
+                    }
+                }),
+                &ApiKeys::INCREMENTAL_ALTER_CONFIGS,
+                "0",
+            ),
+            (
+                "describeFeatures with a node id",
+                Box::new(|admin: &KafkaAdminClient| {
+                    admin.describe_features_with_options(DescribeFeaturesOptions::new().set_node_id(1));
+                }),
+                &ApiKeys::API_VERSIONS,
+                "1",
+            ),
+            (
+                "describeCluster",
+                Box::new(|admin: &KafkaAdminClient| {
+                    admin.describe_cluster_with_options(DescribeClusterOptions::new());
+                }),
+                &ApiKeys::DESCRIBE_CLUSTER,
+                "0",
+            ),
+            (
+                "createAcls",
+                Box::new(|admin: &KafkaAdminClient| {
+                    admin.create_acls_with_options(&[acl1()], CreateAclsOptions::new());
+                }),
+                &ApiKeys::CREATE_ACLS,
+                "0",
+            ),
+            (
+                "unregisterController",
+                Box::new(|admin: &KafkaAdminClient| {
+                    admin.unregister_controller_with_options(1, UnregisterControllerOptions::new());
+                }),
+                &ApiKeys::UNREGISTER_CONTROLLER,
+                "0",
+            ),
+        ];
+        for (api, issue, api_key, destination) in cases {
+            let (admin, mut runnable, _time, _nodes) = controller_env();
+            issue(&admin);
+            pump(&mut runnable, 5).await;
+            let requests = runnable.client_mut().requests();
+            assert_eq!(requests.len(), 1, "{api}");
+            assert_eq!(requests[0].api_key(), api_key, "{api}");
+            assert_eq!(requests[0].destination(), destination, "{api}");
+        }
+    }
+
+    /// `describeCluster` asks a `bootstrap.controllers` client's controllers to
+    /// describe the CONTROLLER endpoint (`KafkaAdminClient.java:2598-2599`), and
+    /// cannot ask them for fenced brokers (`:2593-2595`): the `createRequest`
+    /// failure is wrapped as an internal error, as `sendEligibleCalls` wraps it.
+    #[tokio::test]
+    async fn describe_cluster_describes_the_controller_endpoint_in_controller_mode() {
+        let (admin, mut runnable, _time, _nodes) = controller_env();
+        let _result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+        pump_until_request_queued(&mut runnable).await;
+        match runnable.client_mut().requests_mut()[0].request_builder_mut().build().unwrap() {
+            AbstractRequest::DescribeCluster(request) => {
+                assert_eq!(request.data().endpoint_type, EndpointType::Controller.id());
+            },
+            other => panic!("expected a DescribeCluster request, got {other:?}"),
+        }
+
+        let (admin, mut runnable, _time, _nodes) = controller_env();
+        let result =
+            admin.describe_cluster_with_options(DescribeClusterOptions::new().set_include_fenced_brokers(true));
+        pump(&mut runnable, 5).await;
+        assert!(result.nodes().is_done());
+        let error = result.nodes().get().await.unwrap_err();
+        assert!(
+            error.message().starts_with("Internal error sending listNodes to "),
+            "got {:?}",
+            error.message()
+        );
+        let cause = error.source().expect("the createRequest failure is the cause");
+        assert!(matches!(cause, Error::LocalIllegalArgument(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "Cannot request fenced brokers from controller endpoint");
+        assert_eq!(runnable.client_mut().request_count(), 0, "nothing is sent");
+    }
+
+    /// `makeControllerMetadataCall` (`KafkaAdminClient.java:1730-1770`): a
+    /// `bootstrap.controllers` client that only knows its bootstrap address
+    /// refreshes its metadata with `DescribeCluster` for the CONTROLLER
+    /// endpoint, takes the controllers it names as its nodes and the active
+    /// one as its controller, and then sends the waiting call to that
+    /// controller.
+    #[tokio::test]
+    async fn the_controller_metadata_refresh_describes_the_controller_endpoint() {
+        let (admin, mut runnable, _time, nodes) = bootstrapping_env(true);
+        let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+
+        pump_until_request_queued(&mut runnable).await;
+        {
+            let requests = runnable.client_mut().requests_mut();
+            assert_eq!(requests.len(), 1);
+            match requests[0].request_builder_mut().build().unwrap() {
+                AbstractRequest::DescribeCluster(request) => {
+                    assert_eq!(request.data().endpoint_type, EndpointType::Controller.id());
+                    assert!(!request.data().include_cluster_authorized_operations);
+                },
+                other => panic!("expected the DescribeCluster metadata refresh, got {other:?}"),
+            }
+        }
+        runnable.client_mut().respond(prepare_describe_cluster_response(
+            0,
+            &nodes,
+            "mock-cluster",
+            1,
+            MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+            true,
+        ));
+
+        // The waiting `describeCluster` call goes to the active controller.
+        pump_until_request_queued(&mut runnable).await;
+        let manager = runnable.metadata_manager();
+        assert!(manager.is_ready().unwrap());
+        assert_eq!(manager.controller().map(|node| node.id()), Some(1));
+        let mut ids: Vec<i32> = manager.updater().fetch_nodes().iter().map(Node::id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2]);
+        {
+            let requests = runnable.client_mut().requests_mut();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].destination(), "1");
+            match requests[0].request_builder_mut().build().unwrap() {
+                AbstractRequest::DescribeCluster(request) => {
+                    assert_eq!(request.data().endpoint_type, EndpointType::Controller.id());
+                },
+                other => panic!("expected the describeCluster call, got {other:?}"),
+            }
+        }
+        runnable.client_mut().respond(prepare_describe_cluster_response(
+            0,
+            &nodes,
+            "mock-cluster",
+            1,
+            MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+            true,
+        ));
+        pump(&mut runnable, 3).await;
+        assert!(result.controller().is_done());
+        assert_eq!(result.controller().get().await.unwrap().map(|node| node.id()), Some(1));
+        assert_eq!(result.nodes().get().await.unwrap().len(), 3);
+    }
+
+    /// `makeControllerMetadataCall`'s `handleResponse`
+    /// (`KafkaAdminClient.java:1742-1750`): a refresh answered by a BROKER
+    /// endpoint fails with `parseDescribeClusterResponse`'s
+    /// `MismatchedEndpointTypeException`, which `updateFailed` keeps as fatal
+    /// (`RequestUtils.isFatalException`), so the waiting call fails with it.
+    #[tokio::test]
+    async fn a_broker_endpoint_answer_fails_the_controller_metadata_refresh() {
+        let (admin, mut runnable, _time, nodes) = bootstrapping_env(true);
+        let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+        runnable.client_mut().prepare_response_matcher(
+            controller_metadata_request(),
+            prepare_describe_cluster_response(
+                0,
+                &nodes,
+                "mock-cluster",
+                1,
+                MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                false,
+            ),
+        );
+        pump(&mut runnable, 5).await;
+
+        let message = "Expected response from CONTROLLER endpoint, but got response from endpoint type 1";
+        assert!(result.nodes().is_done(), "the waiting call fails");
+        let error = result.nodes().get().await.unwrap_err();
+        assert!(matches!(error, Error::MismatchedEndpointType(_)), "got {error:?}");
+        assert_eq!(error.message(), message);
+        let error = runnable.metadata_manager().is_ready().unwrap_err();
+        assert!(matches!(error, Error::MismatchedEndpointType(_)), "got {error:?}");
+        assert_eq!(runnable.client_mut().request_count(), 0, "nothing else is sent");
+    }
+
+    /// Both metadata calls override `handleUnsupportedVersionException` with
+    /// `metadataManager.updateFailed(e)` (`KafkaAdminClient.java:1759-1763`,
+    /// `:1802-1806`). It matters when the `UnsupportedVersionException` arrives
+    /// past the call's deadline: `Call.fail` then ends in
+    /// `handleTimeoutFailure`, whose `TimeoutException` is not fatal, so only the
+    /// hook keeps the fatal error, and `isReady()` reports it.
+    #[tokio::test]
+    async fn a_late_unsupported_version_failure_of_a_metadata_call_is_kept() {
+        for using_bootstrap_controllers in [false, true] {
+            let (admin, mut runnable, time, _nodes) = bootstrapping_env(using_bootstrap_controllers);
+            assert_eq!(
+                runnable.metadata_manager().using_bootstrap_controllers(),
+                using_bootstrap_controllers
+            );
+            // The response arrives once the default `request.timeout.ms` (the
+            // metadata call's deadline) has passed.
+            let advanced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let poll_time = Arc::clone(&time);
+            runnable
+                .client_mut()
+                .advance_time_during_poll(Some(Arc::new(move |_timeout_ms| {
+                    if !advanced.swap(true, Ordering::AcqRel) {
+                        poll_time.sleep(30_001);
+                    }
+                })));
+            runnable.client_mut().prepare_unsupported_version_response();
+            let _result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+            pump(&mut runnable, 1).await;
+
+            let error = runnable.metadata_manager().is_ready().unwrap_err();
+            assert!(
+                matches!(error, Error::UnsupportedVersion(_)),
+                "controllers {using_bootstrap_controllers}: got {error:?}"
+            );
+        }
+    }
+
+    /// `LeastLoadedBrokerOrActiveKController.provide` returns
+    /// `metadataManager.controller()` for a `bootstrap.controllers` client
+    /// (`KafkaAdminClient.java:901-902`): with no known controller the call
+    /// stays pending, and the provider, unlike `ControllerNodeProvider`, does
+    /// not request a metadata update for it.
+    #[tokio::test]
+    async fn no_known_controller_leaves_the_call_pending_without_a_metadata_refresh() {
+        let (cluster, _nodes) = mock_cluster(3, -1);
+        assert!(cluster.controller().is_none());
+        let (admin, mut runnable, time, _nodes) = controller_env_with_cluster(cluster);
+        let result = admin.describe_acls_with_options(&filter1(), DescribeAclsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        assert!(!result.values().is_done());
+        assert_eq!(runnable.client_mut().request_count(), 0, "nothing is sent, not even a refresh");
+        assert!(
+            runnable.metadata_manager().metadata_fetch_delay_ms(time.milliseconds()) > 0,
+            "no metadata update is requested"
+        );
+    }
+
+    /// A client whose controller (node 0) is throttled, so a call bound to it
+    /// waits, while a metadata refresh goes to node 1 (`MockClient`'s
+    /// least-loaded node is the first of its nodes that is not backing off).
+    /// With `using_bootstrap_controllers` the config also sets
+    /// `bootstrap.controllers`.
+    fn throttled_controller_env(
+        using_bootstrap_controllers: bool,
+    ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
+        let time = mock_time(1000);
+        let (_cluster, nodes) = mock_cluster(3, 0);
+        let client_nodes = vec![nodes[1].clone(), nodes[2].clone(), nodes[0].clone()];
+        let cluster = Cluster::with_controller(
+            Some("mock-cluster".to_string()),
+            client_nodes.clone(),
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Some(nodes[0].clone()),
+        );
+        let mut client = MockClient::with_static_nodes(client_nodes, Arc::clone(&time) as Arc<dyn Time>);
+        client.throttle(&nodes[0], 10_000);
+        let mut props = HashMap::from([(
+            AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "localhost:9092".to_string(),
+        )]);
+        if using_bootstrap_controllers {
+            props.insert(AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(), "dummy".to_string());
+        }
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        (admin, runnable, time, nodes)
+    }
+
+    /// Both metadata calls end their `handleResponse` with
+    /// `unassignUnsentCalls(node -> true)` (`KafkaAdminClient.java:1756`,
+    /// `:1799`): a call assigned to a node that is not ready yet goes back to
+    /// the pending calls, so the refreshed metadata picks its node. The
+    /// controller-bound call waits on the throttled node 0; the refresh names
+    /// node 2 the controller, and the call goes there instead of waiting out
+    /// node 0.
+    #[tokio::test]
+    async fn a_metadata_refresh_unassigns_the_unsent_calls() {
+        for using_bootstrap_controllers in [false, true] {
+            let mode = if using_bootstrap_controllers {
+                "controllers"
+            } else {
+                "servers"
+            };
+            let (admin, mut runnable, _time, nodes) = throttled_controller_env(using_bootstrap_controllers);
+
+            // A call bound to the controller: `createAcls` goes to the active
+            // controller of a `bootstrap.controllers` client, `createTopics` to
+            // the controller of a broker client.
+            let done: Box<dyn Fn() -> bool> = if using_bootstrap_controllers {
+                let result = admin.create_acls_with_options(&[acl1()], CreateAclsOptions::new());
+                runnable
+                    .client_mut()
+                    .prepare_response_from(create_acls_response(vec![create_acls_result_ok()]), &nodes[2]);
+                Box::new(move || result.all().is_done())
+            } else {
+                let result = admin.create_topics_with_options(
+                    &[NewTopic::with_num_partitions_replication_factor(
+                        "topic",
+                        Some(1),
+                        Some(1),
+                    )],
+                    CreateTopicsOptions::new(),
+                );
+                runnable.client_mut().prepare_response_from(
+                    create_response(vec![create_result("topic", Errors::None, None)]),
+                    &nodes[2],
+                );
+                Box::new(move || result.all().is_done())
+            };
+            pump(&mut runnable, 2).await;
+            assert!(!done(), "{mode}: the call waits for the throttled controller");
+            assert_eq!(runnable.client_mut().request_count(), 0, "{mode}");
+
+            // Something asks for fresh metadata; the refresh names node 2.
+            if using_bootstrap_controllers {
+                runnable.client_mut().prepare_response_matcher(
+                    controller_metadata_request(),
+                    prepare_describe_cluster_response(
+                        0,
+                        &nodes,
+                        "mock-cluster",
+                        2,
+                        MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                        true,
+                    ),
+                );
+            } else {
+                runnable.client_mut().prepare_response_matcher(
+                    Box::new(|request| matches!(request, AbstractRequest::Metadata(_))),
+                    ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                        &nodes,
+                        Some("mock-cluster"),
+                        2,
+                        Vec::new(),
+                    )),
+                );
+            }
+            runnable.metadata_manager().request_update();
+            pump(&mut runnable, 3).await;
+
+            assert_eq!(
+                runnable.metadata_manager().controller().map(|node| node.id()),
+                Some(2),
+                "{mode}"
+            );
+            assert!(
+                done(),
+                "{mode}: the call is sent to the new controller without waiting for node 0"
+            );
+        }
+    }
+
+    /// `makeControllerMetadataCall`'s `handleResponse` returns right after
+    /// `handleFailure(e)` when `parseDescribeClusterResponse` throws
+    /// (`KafkaAdminClient.java:1747-1750`), before `unassignUnsentCalls`: a call
+    /// already assigned to a node stays assigned, and keeps waiting for it,
+    /// instead of failing with the error the failed refresh left behind.
+    #[tokio::test]
+    async fn a_failed_controller_metadata_refresh_leaves_the_unsent_calls_assigned() {
+        let (admin, mut runnable, _time, nodes) = throttled_controller_env(true);
+        let result = admin.create_acls_with_options(&[acl1()], CreateAclsOptions::new());
+        pump(&mut runnable, 2).await;
+
+        runnable.client_mut().prepare_response_matcher(
+            controller_metadata_request(),
+            prepare_describe_cluster_response(
+                0,
+                &nodes,
+                "mock-cluster",
+                2,
+                MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                false,
+            ),
+        );
+        runnable.metadata_manager().request_update();
+        pump(&mut runnable, 3).await;
+
+        let error = runnable.metadata_manager().is_ready().unwrap_err();
+        assert!(matches!(error, Error::MismatchedEndpointType(_)), "got {error:?}");
+        assert!(!result.all().is_done(), "the call still waits for node 0");
+        assert_eq!(runnable.metadata_manager().controller().map(|node| node.id()), Some(0));
+    }
+
+    /// `bootstrap.controllers` alone builds a client that talks to the
+    /// controllers (KIP-919): `createInternal` uses the controllers list for
+    /// the bootstrap cluster and the `NetworkClient`'s bootstrap configuration
+    /// (`bootstrapAddressesToUse`, `KafkaAdminClient.java:589-591`), and fails a
+    /// call the controllers cannot serve at once.
+    #[tokio::test]
+    async fn bootstrap_controllers_alone_builds_a_client() {
+        let fetched_addresses = |admin: &KafkaAdminClient| -> Vec<(String, i32)> {
+            admin
+                .shared
+                .metadata_manager
+                .updater()
+                .fetch_nodes()
+                .iter()
+                .map(|node| (node.host().to_string(), node.port()))
+                .collect()
+        };
+
+        let admin = KafkaAdminClient::new(bootstrap_config(None, Some("127.0.0.1:9093")))
+            .expect("bootstrap.controllers alone builds a client");
+        assert!(admin.shared.metadata_manager.using_bootstrap_controllers());
+        assert_eq!(fetched_addresses(&admin), vec![("127.0.0.1".to_string(), 9093)]);
+        let error = admin
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap_err();
+        assert_unsupported_endpoint_type("listTopics", error);
+        admin.close_with_timeout(Duration::ZERO).await;
+
+        let admin = KafkaAdminClient::new(bootstrap_config(Some("127.0.0.1:9092"), None)).expect("a broker client");
+        assert!(!admin.shared.metadata_manager.using_bootstrap_controllers());
+        assert_eq!(fetched_addresses(&admin), vec![("127.0.0.1".to_string(), 9092)]);
+        admin.close_with_timeout(Duration::ZERO).await;
+
+        // `bootstrap.resolve.timeout.ms` > 0 (KIP-909): the `NetworkClient`
+        // resolves the controllers list itself, on its first poll.
+        let mut props = HashMap::from([
+            (
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+                "127.0.0.1:9093".to_string(),
+            ),
+            (
+                AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "10000".to_string(),
+            ),
+        ]);
+        props.insert(AdminClientConfig::RETRY_BACKOFF_MS_CONFIG.to_string(), "10".to_string());
+        let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).unwrap()).expect("an async-bootstrap client");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !admin.shared.metadata_manager.is_bootstrapped() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the NetworkClient bootstraps from the controllers list");
+        assert_eq!(fetched_addresses(&admin), vec![("127.0.0.1".to_string(), 9093)]);
+        admin.close_with_timeout(Duration::ZERO).await;
     }
 
     // --- rebootstrap (KIP-899 / KIP-1102) ------------------------------------
@@ -16435,7 +17436,7 @@ mod tests {
                 Box::new(|_timeout_ms| unreachable!("the call is never sent")),
                 Box::new(|_response, _now, _cur_node| HandleResult::Done),
                 Box::new(move |error| *captured.lock().unwrap() = Some(error.clone())),
-                Box::new(|| false),
+                Box::new(|_| false),
             )
         };
 
@@ -17142,7 +18143,7 @@ mod tests {
                     panic!("injected panic inside the I/O loop");
                 }
             }),
-            Box::new(|| false),
+            Box::new(|_| false),
         ));
         tokio::time::timeout(Duration::from_secs(10), runnable.run())
             .await
