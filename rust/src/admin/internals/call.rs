@@ -132,18 +132,28 @@ impl NodeProvider {
     /// Returns `Ok(Some(node))` when a node is assigned, `Ok(None)` when the
     /// call must stay pending (metadata not ready / no available node), and
     /// `Err(_)` when the call should fail (a stored fatal metadata error).
+    ///
+    /// `metadata_recovery_strategy` is the client's `metadata.recovery.strategy`, which
+    /// Java's `MetadataUpdateNodeIdProvider` reads from the enclosing `KafkaAdminClient`.
     pub(crate) fn provide<C: KafkaClient>(
         &self,
         metadata_manager: &AdminMetadataManager,
         client: &C,
+        metadata_recovery_strategy: MetadataRecoveryStrategy,
         now: i64,
     ) -> Result<Option<Node>, Error> {
         match self {
             NodeProvider::MetadataUpdate => {
-                // Mirrors MetadataUpdateNodeIdProvider (rebootstrap only applies
-                // under MetadataRecoveryStrategy::Rebootstrap, deferred here).
-                let _ = MetadataRecoveryStrategy::None;
-                Ok(client.least_loaded_node(now).node().cloned())
+                // Mirrors MetadataUpdateNodeIdProvider: once bootstrapped, when no
+                // node is available or ready, fall back to the bootstrap servers.
+                let least_loaded_node = client.least_loaded_node(now);
+                if metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+                    && metadata_manager.is_bootstrapped()
+                    && !least_loaded_node.has_node_available_or_connection_ready()
+                {
+                    metadata_manager.rebootstrap(now);
+                }
+                Ok(least_loaded_node.node().cloned())
             },
             NodeProvider::Controller => {
                 if metadata_manager.is_ready()? {
@@ -381,5 +391,107 @@ impl Call {
     /// retried after a protocol downgrade.
     pub(crate) fn handle_unsupported_version(&mut self) -> bool {
         (self.handle_unsupported_version_fn)()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::MockClient;
+    use crate::common::Cluster;
+    use crate::common::utils::internals::LogContext;
+    use crate::common::utils::{MockTime, Time};
+
+    const NOW: i64 = 1_000_000;
+    const TRIGGER_MS: i64 = 1000;
+
+    fn bootstrap_cluster() -> Cluster {
+        let address: SocketAddr = "127.0.0.1:8121".parse().unwrap();
+        Cluster::bootstrap(&[("localhost".to_string(), address)])
+    }
+
+    fn broker_cluster(nodes: &[Node]) -> Cluster {
+        Cluster::with_invalid_topics_controller(
+            Some("mockClusterId".to_string()),
+            nodes.to_vec(),
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            nodes.first().cloned(),
+        )
+    }
+
+    /// A manager that bootstrapped and then learnt three brokers, with no
+    /// metadata attempt in progress.
+    fn bootstrapped_manager() -> (AdminMetadataManager, Vec<Node>) {
+        let nodes: Vec<Node> = (0..3).map(|i| Node::new(i, "localhost".to_string(), 9092 + i)).collect();
+        let manager = AdminMetadataManager::new(100, 60_000, false, LogContext::empty());
+        manager.update(bootstrap_cluster(), NOW - 10);
+        manager.update(broker_cluster(&nodes), NOW - 5);
+        (manager, nodes)
+    }
+
+    fn client(nodes: Vec<Node>) -> MockClient {
+        MockClient::with_static_nodes(nodes, Arc::new(MockTime::new()) as Arc<dyn Time>)
+    }
+
+    /// Whether `provide` rebootstrapped: `rebootstrap(now)` puts the bootstrap
+    /// node back and starts a new attempt at `now`.
+    fn rebootstrapped(manager: &AdminMetadataManager) -> bool {
+        manager.node_by_id(-1).is_some() && manager.needs_rebootstrap(NOW + TRIGGER_MS + 1, TRIGGER_MS)
+    }
+
+    /// `MetadataUpdateNodeIdProvider.provide()` (`KafkaAdminClient.java:790-799`):
+    /// under `REBOOTSTRAP`, once bootstrapped, no node available or ready means
+    /// rebootstrapping with the bootstrap cluster.
+    #[test]
+    fn test_metadata_update_provider_rebootstraps_when_no_node_is_available() {
+        let (manager, _nodes) = bootstrapped_manager();
+        let provided = NodeProvider::MetadataUpdate
+            .provide(&manager, &client(Vec::new()), MetadataRecoveryStrategy::Rebootstrap, NOW)
+            .unwrap();
+        assert_eq!(provided, None);
+        assert!(rebootstrapped(&manager));
+        assert!(
+            !manager.needs_rebootstrap(NOW + TRIGGER_MS, TRIGGER_MS),
+            "the attempt starts at `now`"
+        );
+    }
+
+    #[test]
+    fn test_metadata_update_provider_does_not_rebootstrap_under_none() {
+        let (manager, nodes) = bootstrapped_manager();
+        let provided = NodeProvider::MetadataUpdate
+            .provide(&manager, &client(Vec::new()), MetadataRecoveryStrategy::None, NOW)
+            .unwrap();
+        assert_eq!(provided, None);
+        assert!(!rebootstrapped(&manager));
+        assert_eq!(manager.node_by_id(nodes[2].id()), Some(nodes[2].clone()));
+    }
+
+    #[test]
+    fn test_metadata_update_provider_does_not_rebootstrap_before_bootstrap() {
+        let manager = AdminMetadataManager::new(100, 60_000, false, LogContext::empty());
+        assert!(!manager.is_bootstrapped());
+        let provided = NodeProvider::MetadataUpdate
+            .provide(&manager, &client(Vec::new()), MetadataRecoveryStrategy::Rebootstrap, NOW)
+            .unwrap();
+        assert_eq!(provided, None);
+        assert!(!manager.needs_rebootstrap(NOW + TRIGGER_MS + 1, TRIGGER_MS));
+    }
+
+    #[test]
+    fn test_metadata_update_provider_does_not_rebootstrap_with_an_available_node() {
+        let (manager, nodes) = bootstrapped_manager();
+        let provided = NodeProvider::MetadataUpdate
+            .provide(&manager, &client(nodes.clone()), MetadataRecoveryStrategy::Rebootstrap, NOW)
+            .unwrap();
+        assert_eq!(provided, Some(nodes[0].clone()));
+        assert!(!rebootstrapped(&manager));
     }
 }

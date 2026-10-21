@@ -70,7 +70,6 @@ use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
-use crate::MetadataRecoveryStrategy;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -82,7 +81,6 @@ use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
-use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
@@ -474,22 +472,26 @@ impl KafkaAdminClient {
         selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        let mut client = NetworkClient::with_metadata_updater(
+        // `ClientUtils.createNetworkClient` (`ClientUtils.java:291-317`): the socket
+        // buffers, `metadata.recovery.strategy` and
+        // `metadata.recovery.rebootstrap.trigger.ms` come from the config.
+        let mut client = NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
             selector,
             metadata_manager.updater(),
             &client_id,
             100, // max in-flight requests per connection (admin sends <= 1 per node)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            USE_DEFAULT_BUFFER_SIZE,
-            USE_DEFAULT_BUFFER_SIZE,
+            config.send_buffer_bytes(),
+            config.receive_buffer_bytes(),
             config.request_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_max_ms(),
             true, // discover_broker_versions
             api_versions,
             DefaultHostResolver::new(),
-            MetadataRecoveryStrategy::None,
+            config.metadata_recovery_rebootstrap_trigger_ms(),
+            config.metadata_recovery_strategy(),
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
@@ -555,6 +557,7 @@ impl KafkaAdminClient {
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
+            config.metadata_recovery_strategy(),
             Arc::clone(&time),
             Arc::clone(&shutdown),
             log_context.clone(),
@@ -7934,6 +7937,74 @@ mod tests {
             "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
              updateFailed(e) makes it"
         );
+    }
+
+    /// `makeBrokerMetadataCall.handleResponse` (`KafkaAdminClient.java:1792-1795`):
+    /// a top-level `REBOOTSTRAP_REQUIRED` calls `initiateRebootstrap()` instead of
+    /// `update(response.buildCluster(), now)`, so the next `NetworkClient` poll
+    /// rebootstraps at once whatever `metadata.recovery.rebootstrap.trigger.ms` is.
+    #[tokio::test]
+    async fn a_rebootstrap_required_metadata_response_initiates_a_rebootstrap() {
+        let (_admin, mut runnable, time, nodes) = env();
+
+        runnable.metadata_manager().request_update();
+        let mut data = crate::MetadataResponseData::new();
+        data.set_error_code(Errors::RebootstrapRequired.code());
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(MetadataResponse::with_version(
+                data,
+                crate::common::protocol::ApiKeys::METADATA.latest_version(),
+            )));
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            runnable.client_mut().num_awaiting_responses(),
+            0,
+            "the internal metadata call must have been issued and answered"
+        );
+
+        // `initiateRebootstrap` sets the attempt start to 0, which Java's
+        // wall-clock `now` puts far beyond any trigger. The mock clock started at
+        // 1000, so a trigger of `now - 1` is due only for a start before 1 ms: the
+        // attempt started at 1000 or later would not explain it.
+        let now = time.milliseconds();
+        assert!(runnable.metadata_manager().needs_rebootstrap(now, now - 1));
+        // `buildCluster()` was not applied: the cluster is still the three brokers.
+        assert_eq!(runnable.metadata_manager().node_by_id(nodes[2].id()), Some(nodes[2].clone()));
+    }
+
+    /// The counterpart: an ordinary metadata response is applied with `update`,
+    /// which clears the attempt start, so no rebootstrap is due.
+    #[tokio::test]
+    async fn an_ordinary_metadata_response_does_not_initiate_a_rebootstrap() {
+        let (_admin, mut runnable, time, nodes) = env();
+
+        runnable.metadata_manager().request_update();
+        // Two of the three brokers, so the test can see `update` ran.
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes[..2],
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )));
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        assert_eq!(runnable.client_mut().num_awaiting_responses(), 0);
+        assert_eq!(runnable.metadata_manager().node_by_id(nodes[2].id()), None, "update ran");
+        assert!(!runnable.metadata_manager().needs_rebootstrap(time.milliseconds(), 0));
     }
 
     // --- listTopics ----------------------------------------------------------

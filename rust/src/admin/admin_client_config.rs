@@ -51,7 +51,7 @@ use crate::common::config::config_def::{
 };
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
-use crate::{ClientDnsLookup, CommonClientConfigs};
+use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 
 /// Java's `AdminClientConfig.CONFIG`, built in its static initializer.
 static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
@@ -264,9 +264,13 @@ pub struct AdminClientConfig {
     reconnect_backoff_ms: i64,
     reconnect_backoff_max_ms: i64,
     connections_max_idle_ms: i64,
+    send_buffer_bytes: i32,
+    receive_buffer_bytes: i32,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
     socket_connection_setup_timeout_max_ms: i64,
+    metadata_recovery_strategy: MetadataRecoveryStrategy,
+    metadata_recovery_rebootstrap_trigger_ms: i64,
     metadata_cluster_check_enable: bool,
 
     // --- Security ---
@@ -305,9 +309,13 @@ impl fmt::Debug for AdminClientConfig {
             reconnect_backoff_ms,
             reconnect_backoff_max_ms,
             connections_max_idle_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
             metadata_max_age_ms,
             socket_connection_setup_timeout_ms,
             socket_connection_setup_timeout_max_ms,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
             metadata_cluster_check_enable,
             security_protocol,
             sasl_config,
@@ -327,9 +335,16 @@ impl fmt::Debug for AdminClientConfig {
             .field("reconnect_backoff_ms", reconnect_backoff_ms)
             .field("reconnect_backoff_max_ms", reconnect_backoff_max_ms)
             .field("connections_max_idle_ms", connections_max_idle_ms)
+            .field("send_buffer_bytes", send_buffer_bytes)
+            .field("receive_buffer_bytes", receive_buffer_bytes)
             .field("metadata_max_age_ms", metadata_max_age_ms)
             .field("socket_connection_setup_timeout_ms", socket_connection_setup_timeout_ms)
             .field("socket_connection_setup_timeout_max_ms", socket_connection_setup_timeout_max_ms)
+            .field("metadata_recovery_strategy", metadata_recovery_strategy)
+            .field(
+                "metadata_recovery_rebootstrap_trigger_ms",
+                metadata_recovery_rebootstrap_trigger_ms,
+            )
             .field("metadata_cluster_check_enable", metadata_cluster_check_enable)
             .field("security_protocol", security_protocol)
             .field("sasl_config", sasl_config)
@@ -491,10 +506,19 @@ impl AdminClientConfig {
         let reconnect_backoff_ms = values.long(Self::RECONNECT_BACKOFF_MS_CONFIG)?;
         let reconnect_backoff_max_ms = values.long(Self::RECONNECT_BACKOFF_MAX_MS_CONFIG)?;
         let connections_max_idle_ms = values.long(Self::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
+        let send_buffer_bytes = values.int(CommonClientConfigs::SEND_BUFFER_CONFIG)?;
+        let receive_buffer_bytes = values.int(CommonClientConfigs::RECEIVE_BUFFER_CONFIG)?;
         let metadata_max_age_ms = values.long(Self::METADATA_MAX_AGE_CONFIG)?;
         let socket_connection_setup_timeout_ms = values.long(Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG)?;
         let socket_connection_setup_timeout_max_ms =
             values.long(CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?;
+        // The validator accepted the strategy case-insensitively, as `forName`
+        // reads it (`KafkaAdminClient.java:699`).
+        let strategy = values.string(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG)?;
+        let metadata_recovery_strategy =
+            MetadataRecoveryStrategy::for_name(strategy).map_err(Error::local_illegal_argument)?;
+        let metadata_recovery_rebootstrap_trigger_ms =
+            values.long(CommonClientConfigs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG)?;
         let metadata_cluster_check_enable = values.boolean(Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG)?;
         let protocol = values.string(Self::SECURITY_PROTOCOL_CONFIG)?;
         // The validator accepted `protocol` case-insensitively.
@@ -531,9 +555,13 @@ impl AdminClientConfig {
             reconnect_backoff_ms,
             reconnect_backoff_max_ms,
             connections_max_idle_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
             metadata_max_age_ms,
             socket_connection_setup_timeout_ms,
             socket_connection_setup_timeout_max_ms,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
             metadata_cluster_check_enable,
             security_protocol,
             sasl_config,
@@ -733,6 +761,17 @@ impl AdminClientConfig {
         self.connections_max_idle_ms
     }
 
+    /// `send.buffer.bytes`, the socket send buffer (`-1` for the OS default).
+    pub(crate) fn send_buffer_bytes(&self) -> i32 {
+        self.send_buffer_bytes
+    }
+
+    /// `receive.buffer.bytes`, the socket receive buffer (`-1` for the OS
+    /// default).
+    pub(crate) fn receive_buffer_bytes(&self) -> i32 {
+        self.receive_buffer_bytes
+    }
+
     /// `metadata.max.age.ms`.
     pub(crate) fn metadata_max_age_ms(&self) -> i64 {
         self.metadata_max_age_ms
@@ -748,6 +787,19 @@ impl AdminClientConfig {
         self.socket_connection_setup_timeout_max_ms
     }
 
+    /// `metadata.recovery.strategy`: whether the client re-resolves
+    /// `bootstrap.servers` when it cannot reach any known broker
+    /// (`KafkaAdminClient.java:699`).
+    pub(crate) fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy {
+        self.metadata_recovery_strategy
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms`: how long a metadata update
+    /// may go unanswered before the client rebootstraps.
+    pub(crate) fn metadata_recovery_rebootstrap_trigger_ms(&self) -> i64 {
+        self.metadata_recovery_rebootstrap_trigger_ms
+    }
+
     /// `metadata.cluster.check.enable` (KIP-1242): whether the client sends the
     /// cluster id and node id it expects in ApiVersions so the broker can detect
     /// a misrouted connection.
@@ -756,9 +808,7 @@ impl AdminClientConfig {
     /// (`ClientUtils.createNetworkClient`), but, also as in Java, it has no
     /// effect on the admin client: the admin's metadata updater does not
     /// override `MetadataUpdater.clusterId()` (`AdminMetadataManager.java`), so
-    /// the expected cluster id is never known. This client additionally runs
-    /// the admin `NetworkClient` with `metadata.recovery.strategy=none`, under
-    /// which the check is skipped.
+    /// the expected cluster id is never known.
     pub(crate) fn metadata_cluster_check_enable(&self) -> bool {
         self.metadata_cluster_check_enable
     }
@@ -949,6 +999,34 @@ mod tests {
         );
     }
 
+    /// The client reads the socket buffers and the metadata recovery settings
+    /// (`ClientUtils.createNetworkClient`, `KafkaAdminClient.java:561-562`), with
+    /// `AdminClientConfig`'s defaults: 128 KiB / 64 KiB buffers, `rebootstrap` and
+    /// 300000 ms.
+    #[test]
+    fn test_network_client_settings() {
+        let config = AdminClientConfig::new(&bootstrap_props()).unwrap();
+        assert_eq!(config.send_buffer_bytes(), 128 * 1024);
+        assert_eq!(config.receive_buffer_bytes(), 64 * 1024);
+        assert_eq!(config.metadata_recovery_strategy(), MetadataRecoveryStrategy::Rebootstrap);
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms(), 300_000);
+
+        let mut props = bootstrap_props();
+        props.insert("send.buffer.bytes".to_string(), "-1".to_string());
+        props.insert("receive.buffer.bytes".to_string(), "4096".to_string());
+        props.insert("metadata.recovery.strategy".to_string(), "NONE".to_string());
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "1000".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.send_buffer_bytes(), -1);
+        assert_eq!(config.receive_buffer_bytes(), 4096);
+        assert_eq!(config.metadata_recovery_strategy(), MetadataRecoveryStrategy::None);
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms(), 1000);
+
+        // What the client reads is marked used, so `log_unused` leaves it out.
+        config.mark_read_keys_used();
+        assert!(config.unused().is_empty(), "{:?}", config.unused());
+    }
+
     /// The numeric validators of Java's define chain
     /// (`AdminClientConfig.java:166-319`), each value just below its bound.
     #[test]
@@ -1067,7 +1145,7 @@ mod tests {
     fn test_unused_and_ignore() {
         let mut props = bootstrap_props();
         props.insert("request.timeout.ms".to_string(), "5000".to_string());
-        props.insert("send.buffer.bytes".to_string(), "1000".to_string());
+        props.insert("metrics.num.samples".to_string(), "3".to_string());
         props.insert("some.unknown.key".to_string(), "x".to_string());
         props.insert("ssl.keystore.location".to_string(), "/k".to_string());
         let config = AdminClientConfig::new(&props).unwrap();
@@ -1080,17 +1158,17 @@ mod tests {
             config.unused(),
             HashSet::from([
                 "bootstrap.servers".to_string(),
-                "send.buffer.bytes".to_string(),
+                "metrics.num.samples".to_string(),
                 "ssl.keystore.location".to_string(),
             ])
         );
 
         // The client reads `bootstrap.servers`; the `ssl.*` keys only for an
-        // SSL protocol, and `send.buffer.bytes` not at all.
+        // SSL protocol, and `metrics.num.samples` not at all.
         config.mark_read_keys_used();
         assert_eq!(
             config.unused(),
-            HashSet::from(["send.buffer.bytes".to_string(), "ssl.keystore.location".to_string()])
+            HashSet::from(["metrics.num.samples".to_string(), "ssl.keystore.location".to_string()])
         );
         // A copy for one more client has its own used set, as each client
         // built from one C handle does.
@@ -1106,7 +1184,7 @@ mod tests {
         assert_eq!(
             ssl.unused(),
             HashSet::from([
-                "send.buffer.bytes".to_string(),
+                "metrics.num.samples".to_string(),
                 "some.unknown.key".to_string(),
                 "ssl.keystore.password".to_string(),
             ])

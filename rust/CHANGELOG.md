@@ -177,9 +177,19 @@ breaking changes.
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
   did not use: `These configurations '[a, b]' were supplied but are not used
   yet.` It used to log neither. The line also lists keys Java reads and this
-  client does not yet (`send.buffer.bytes`, `receive.buffer.bytes`, the
-  `metrics.*` keys, `enable.metrics.push`, `metadata.recovery.*`), and the
+  client does not yet (the `metrics.*` keys and `enable.metrics.push`), and the
   `ssl.*` / `sasl.*` keys when `security.protocol` does not use them.
+- **Behaviour change:** the admin client follows `metadata.recovery.strategy`,
+  whose default is Java's `rebootstrap`, where it always ran as `none`. Once
+  bootstrapped, it goes back to the `bootstrap.servers` addresses when no
+  known broker is available or ready, when a metadata update has gone
+  unanswered for `metadata.recovery.rebootstrap.trigger.ms` (300000 ms by
+  default), and at once on a `REBOOTSTRAP_REQUIRED` metadata response. Set
+  `metadata.recovery.strategy=none` for the previous behaviour.
+- `send.buffer.bytes` (default 128 KiB) and `receive.buffer.bytes` (64 KiB)
+  size the admin client's sockets; it used the operating system's defaults.
+  These two keys and the `metadata.recovery.*` keys are no longer listed among
+  the unused configurations.
 - `socket.connection.setup.timeout.max.ms` is honoured; the admin client used
   `socket.connection.setup.timeout.ms` for both bounds.
 
