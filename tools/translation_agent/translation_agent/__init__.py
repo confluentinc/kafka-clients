@@ -19,4 +19,4 @@ See `tools/translation_agent/README.md` for usage and the design at
 `design/history/Milestone-7/DESIGN-translation-agent.md` for context.
 """
 
-__version__ = "4.4.0a1"
+__version__ = "4.4.0a1.dev1"
