@@ -196,28 +196,28 @@ static inline void assert_ok(kafka_common_Error_t *err, const char *what) {
  * only while another call holds the consumer, as Java's `acquire()` throws
  * `ConcurrentModificationException`. These wrappers are for a test reading
  * with nothing else in flight: any error fails the test. */
-static inline kafka_List_t *consumer_assignment(const kafka_consumer_Consumer_t *consumer) {
+static inline kafka_List_t *consumer_assignment(kafka_consumer_Consumer_t *consumer) {
     kafka_common_Error_t *err = NULL;
     kafka_List_t *out = kafka_consumer_Consumer_assignment(consumer, &err);
     assert_ok(err, "assignment");
     return out;
 }
 
-static inline kafka_List_t *consumer_subscription(const kafka_consumer_Consumer_t *consumer) {
+static inline kafka_List_t *consumer_subscription(kafka_consumer_Consumer_t *consumer) {
     kafka_common_Error_t *err = NULL;
     kafka_List_t *out = kafka_consumer_Consumer_subscription(consumer, &err);
     assert_ok(err, "subscription");
     return out;
 }
 
-static inline kafka_List_t *consumer_paused(const kafka_consumer_Consumer_t *consumer) {
+static inline kafka_List_t *consumer_paused(kafka_consumer_Consumer_t *consumer) {
     kafka_common_Error_t *err = NULL;
     kafka_List_t *out = kafka_consumer_Consumer_paused(consumer, &err);
     assert_ok(err, "paused");
     return out;
 }
 
-static inline int64_t consumer_current_lag(const kafka_consumer_Consumer_t *consumer,
+static inline int64_t consumer_current_lag(kafka_consumer_Consumer_t *consumer,
                                            const kafka_common_TopicPartition_t *tp) {
     kafka_common_Error_t *err = NULL;
     int64_t out = kafka_consumer_Consumer_current_lag(consumer, tp, &err);
@@ -226,11 +226,35 @@ static inline int64_t consumer_current_lag(const kafka_consumer_Consumer_t *cons
 }
 
 static inline kafka_consumer_ConsumerGroupMetadata_t *consumer_group_metadata(
-    const kafka_consumer_Consumer_t *consumer) {
+    kafka_consumer_Consumer_t *consumer) {
     kafka_common_Error_t *err = NULL;
     kafka_consumer_ConsumerGroupMetadata_t *out = kafka_consumer_Consumer_group_metadata(consumer, &err);
     assert_ok(err, "group_metadata");
     return out;
+}
+
+/* What a `current_lag_cb` completion observed: the lag (-1 for Java's empty
+ * `OptionalLong`, or beside an error) and the owned error, if any, kept for
+ * the test to classify and free. Both twins' completions
+ * (`kafka_consumer_Consumer_current_lag_cb_t`,
+ * `kafka_consumer_ConsumerHandle_current_lag_cb_t`) share this shape. */
+typedef struct {
+    atomic_int fired;
+    int64_t value;
+    kafka_common_Error_t *error;
+} lag_completion_t;
+
+static inline void lag_completion_init(lag_completion_t *c) {
+    c->value = 0;
+    c->error = NULL;
+    atomic_init(&c->fired, 0);
+}
+
+static inline void on_lag(int64_t value, kafka_common_Error_t *error, void *opaque) {
+    lag_completion_t *c = (lag_completion_t *)opaque;
+    c->value = value;
+    c->error = error;
+    atomic_fetch_add(&c->fired, 1);
 }
 
 #endif /* CONFLUENT_KAFKA_TEST_SUPPORT_H */

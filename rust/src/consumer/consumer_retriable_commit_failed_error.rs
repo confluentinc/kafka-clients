@@ -58,7 +58,7 @@ impl ConsumerRetriableCommitFailedError {
     /// (`RetriableCommitFailedException.java:42-43`). CLAUDE.md §2 bars the word
     /// "exception" from Rust code including message text, so this says "error"
     /// instead. The two strings differ by that one word and nothing else.
-    pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
+    pub(crate) const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
         "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
 
     /// Create the error with the given message —

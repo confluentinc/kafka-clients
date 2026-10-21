@@ -54,7 +54,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
@@ -212,17 +212,12 @@ pub struct MultilanguageConsumer {
     consumer_id: u64,
     client: ConsumerServiceClient<Channel>,
     backend: &'static str,
-    client_id: String,
 }
 
 impl MultilanguageConsumer {
     /// Connect to `channel` and create a server-side consumer from `config`
     /// (empty config selects a MockConsumer server-side).
     pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
-        let client_id = config
-            .get("client.id")
-            .cloned()
-            .unwrap_or_else(|| format!("multilanguage-{backend}"));
         let mut client = ConsumerServiceClient::new(channel);
         let response = client
             .create_consumer(proto::CreateConsumerRequest { config })
@@ -232,7 +227,7 @@ impl MultilanguageConsumer {
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
-        Ok(Self { consumer_id: response.consumer_id, client, backend, client_id })
+        Ok(Self { consumer_id: response.consumer_id, client, backend })
     }
 
     /// The server-local consumer id. Needed by
@@ -400,7 +395,7 @@ enum TpListOp {
 
 impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     // ── non-blocking state reads (sync in the trait) ──
-    fn assignment(&self) -> HashSet<TopicPartition> {
+    fn assignment(&mut self) -> HashSet<TopicPartition> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -420,7 +415,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn subscription(&self) -> HashSet<String> {
+    fn subscription(&mut self) -> HashSet<String> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -438,7 +433,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn paused(&self) -> HashSet<TopicPartition> {
+    fn paused(&mut self) -> HashSet<TopicPartition> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -458,7 +453,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata> {
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
@@ -478,12 +473,8 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         MultilanguageGroupMetadata::register(response, self.client.clone(), backend)
     }
 
-    fn client_id(&self) -> &str {
-        &self.client_id
-    }
-
-    fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
-        unimplemented!("current_lag is not supported on the gRPC multilanguage backend")
+    async fn current_lag(&mut self, _topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        Err(self.unsupported("current_lag"))
     }
 
     fn wakeup(&self) {
@@ -511,7 +502,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         // is a live consumer in another language, NOT a mock, so reporting an
         // empty map would misreport its state.
         //
-        // Each entry is rebuilt locally as a `ClosureGauge` returning the value
+        // Each entry is rebuilt locally as a `gauge::new` gauge returning the value
         // the backend measured while serving the RPC. That is snapshot, not
         // live, semantics — which is exactly what `Consumer::metrics`
         // documents ("a point-in-time snapshot taken under the registry lock
@@ -857,7 +848,7 @@ fn offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, Offse
 
 /// Rebuilds one `metrics()` entry from its proto form.
 ///
-/// The measured value is wrapped in a [`ClosureGauge`] that returns the
+/// The measured value is wrapped in a [`gauge::new`] gauge that returns the
 /// snapshotted reading, so the resulting [`KafkaMetric`] satisfies the trait's
 /// `Arc<KafkaMetric>` value type while preserving snapshot semantics (see
 /// `MultilanguageConsumer::metrics`). A `Gauge` provider is used for every kind,
@@ -875,10 +866,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
         None => MetricValue::Double(0.0),
     };
-    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let provider = gauge::new(move |_config, _now| value.clone());
     // A standalone registry mints the `KafkaMetric`, as Java code obtains one
     // (its constructor is public only "for testing"); the metric outlives it.
-    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, Box::new(provider));
     (name, metric)
 }
 

@@ -1065,10 +1065,13 @@ mod tests {
     }
 
     fn test_config() -> ConsumerConfig {
-        ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
-            .set_client_id("test-client")
-            .set_group_id(GROUP_ID)
-            .set_request_timeout_ms(REQUEST_TIMEOUT_MS)
+        ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            client_id: "test-client".to_string(),
+            group_id: Some(GROUP_ID.to_string()),
+            request_timeout_ms: REQUEST_TIMEOUT_MS,
+            ..Default::default()
+        }
     }
 
     /// Helper builder for a `FindCoordinator` `UnsentRequest` targeting

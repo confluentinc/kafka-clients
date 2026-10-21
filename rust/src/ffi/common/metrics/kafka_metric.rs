@@ -281,7 +281,7 @@ mod tests {
     use super::*;
     use crate::common::MetricValue;
     use crate::common::metrics::stats::Avg;
-    use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics};
+    use crate::common::metrics::{Metrics, gauge};
     use crate::common::utils::MockTime;
     use crate::ffi::common::kafka_common_Error_destroy;
     use crate::ffi::common::metric::{
@@ -382,7 +382,7 @@ mod tests {
         let metric = metrics.add_metric_if_absent(
             metrics.metric_name("gauge", "g"),
             None,
-            MetricValueProvider::Gauge(Box::new(ClosureGauge::new(|_: &MetricConfig, _| MetricValue::Int(1)))),
+            Box::new(gauge::new(|_: &MetricConfig, _| MetricValue::Int(1))),
         );
         let handle = box_kafka_metric(metric);
         // SAFETY: Test code: `handle` comes from `box_kafka_metric` and is destroyed once, at the

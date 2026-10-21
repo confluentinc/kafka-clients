@@ -576,6 +576,9 @@ class MockConsumerCore(Generic[K, V]):
                           timeout: Duration | None = None) -> int:
         return self._c_position(partition, timeout)
 
+    async def _a_current_lag(self, topic_partition: TopicPartition) -> int | None:
+        return self._c_current_lag(topic_partition)
+
     async def _a_committed(self, partitions: Iterable[TopicPartition],
                            timeout: Duration | None = None
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:

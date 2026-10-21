@@ -76,7 +76,10 @@ other 85, each named, are not, with the reason:
   ``requireStable``: an old broker), ``testPollAuthenticationFailure`` (a SASL
   authentication failure; the test broker has no SASL listener) and
   ``testConstructorFailsOnNetworkClientConstructorFailure`` (a mocked
-  ``NetworkClient`` constructor);
+  ``NetworkClient`` constructor), and ``testCurrentLag`` (a ``ListOffsets``
+  answer held back to observe the lag before and after it; the core's
+  translation is ``test_current_lag`` in ``rust/src/consumer/kafka_consumer.rs``,
+  and the broker module checks the lag ``end_offsets()`` leaves);
 - metrics: the KIP-1076 metric subscription is not generated
   (``testSubscribingCustomMetricsDoesntAffectConsumerMetrics``,
   ``testSubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics``,
@@ -103,8 +106,7 @@ other 85, each named, are not, with the reason:
 - not generated or dropped: ``testClientInstanceId``,
   ``testClientInstanceIdInvalidTimeout`` and
   ``testClientInstanceIdNoTelemetryReporterRegistered`` (``clientInstanceId`` is
-  not generated, its entry point being missing); ``testCurrentLag``
-  (``current_lag()`` always returns ``None``, Rust-core gap 3); and
+  not generated, its entry point being missing); and
   ``testSubscriptionOnNullPattern`` for the dropped ``java.util.regex.Pattern``
   overloads (``testSubscriptionOnEmptyPattern`` runs as its ``SubscriptionPattern``
   counterpart);
@@ -1072,6 +1074,49 @@ def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
         (error,) = raised
         assert isinstance(error, KafkaTimeoutError)
         assert str(error) == TIMED["position"][1].format(200)
+
+
+def test_current_lag_waits_for_the_background_task() -> None:
+    # Java's currentLag sends a CurrentLagEvent and waits for its answer
+    # (addAndGet): the sync class waits on the _cb form. No end offset is known,
+    # so the lag is not either; an unassigned partition is the IllegalStateError
+    # SubscriptionState raises.
+    unassigned = TopicPartition(topic=TOPIC, partition=7)
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        assert consumer.current_lag(topic_partition=TP0) is None
+        with pytest.raises(IllegalStateError) as e:
+            consumer.current_lag(topic_partition=unassigned)
+        assert str(e.value) == f"No current assignment for partition {unassigned}"
+
+
+def test_current_lag_inside_a_callback_goes_through_the_handle(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Inside a callback the consumer is held by the call delivering it, so
+    # current_lag reaches it through the ConsumerHandle's blocking form, as
+    # Java's callback calls the consumer on the same thread.
+    calls: list[tuple[Any, ...]] = []
+    handle_current_lag = _lib.ConsumerHandle_current_lag
+
+    def recording(*args: Any) -> Any:
+        calls.append(args[1:])
+        return handle_current_lag(*args)
+
+    monkeypatch.setattr(_lib, "ConsumerHandle_current_lag", recording)
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        answered: list[object] = []
+
+        def callback(offsets: Any, exception: Any) -> None:
+            try:
+                answered.append(consumer.current_lag(topic_partition=TP0))
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                answered.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=callback)
+        consumer.commit(offsets={})
+        assert answered == [None]
+        assert calls == [(TOPIC, 0)]
 
 
 @pytest.mark.parametrize("method", sorted(NEGATIVE))
@@ -2078,9 +2123,9 @@ def test_async_consumer_surface_without_a_broker() -> None:
             await consumer.seek(partition=TP0, offset=-1)
         assert str(e.value) == "seek offset must not be a negative number"
         await consumer.seek(partition=TP0, offset_and_metadata=OffsetAndMetadata(offset=3))
-        # A plain def (its entry point has no _async form); nothing fetched,
-        # so the lag is not known.
-        assert consumer.current_lag(topic_partition=TP0) is None
+        # Awaited (its entry point has a _cb form); no end offset is known
+        # yet, so the lag is not either.
+        assert await consumer.current_lag(topic_partition=TP0) is None
         with pytest.raises(IllegalArgumentError):
             await consumer.poll(timeout=-1)
         with pytest.raises(IllegalArgumentError) as e:
@@ -2098,7 +2143,7 @@ def test_async_consumer_surface_without_a_broker() -> None:
         with pytest.raises(IllegalStateError):
             consumer.assignment()
         with pytest.raises(IllegalStateError) as e:
-            consumer.current_lag(topic_partition=TP0)
+            await consumer.current_lag(topic_partition=TP0)
         assert str(e.value) == CLOSED
 
     asyncio.run(main())
@@ -2114,11 +2159,15 @@ def test_async_concurrent_use_on_one_loop_meets_the_guard() -> None:
         # acquireAndEnsureOpen() guards, with Java's message.
         reads: list[Callable[[], object]] = [
             consumer.assignment, consumer.subscription, consumer.paused,
-            consumer.group_metadata, lambda: consumer.current_lag(topic_partition=TP0)]
+            consumer.group_metadata]
         for read in reads:
             with pytest.raises(ConcurrentModificationError) as e:
                 read()
             assert str(e.value) == "KafkaConsumer is not safe for multi-threaded access."
+        # current_lag waits on its _cb form, which the guard refuses the same way.
+        with pytest.raises(ConcurrentModificationError) as e:
+            await consumer.current_lag(topic_partition=TP0)
+        assert str(e.value) == "KafkaConsumer is not safe for multi-threaded access."
         # Java's metrics() takes no acquire(): it answers.
         assert isinstance(consumer.metrics(), dict)
         consumer.wakeup()
@@ -2545,7 +2594,7 @@ def test_a_call_left_on_a_closed_loop_does_not_hold_the_consumer_for_other_threa
         hold_completion: Any, stopped_loop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # Gap 39: an awaiting call left on another thread's loop, which closes,
     # holds its use of the consumer for that thread. A call that does not wait
-    # (assignment(), subscription(), paused(), current_lag(), metrics(), …)
+    # (assignment(), subscription(), paused(), metrics(), …)
     # from this thread used to raise ConcurrentModificationError until a
     # waiting call or close() ended that use; the guard every call passes
     # (_Use) now ends it first, as _run_async and close() do.

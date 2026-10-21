@@ -21,7 +21,7 @@
 use bytes::Bytes;
 
 use crate::common::Error;
-use crate::common::header::Headers;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::Deserializer;
 
 /// Deserializes byte arrays into refcounted [`bytes::Bytes`].
@@ -29,15 +29,15 @@ use crate::common::serialization::Deserializer;
 /// This is the zero-copy counterpart to
 /// [`ByteArrayDeserializer`](crate::common::serialization::ByteArrayDeserializer):
 /// where the latter must copy the borrowed `&[u8]` into an owned `Vec<u8>`,
-/// `BytesDeserializer` slices the buffer that owns the record's bytes
-/// ([`deserialize_from_shared`](Deserializer::deserialize_from_shared)) so the
-/// returned `Bytes` shares it (consumer-threading.md §27): the fetched records
-/// buffer for an uncompressed batch, the buffer the record was decompressed
-/// into for a compressed one. No per-record key/value copy occurs on the
-/// receive path.
+/// `BytesDeserializer` returns the record's key/value as the consumer hands it
+/// to [`deserialize_with_headers_bytes`](Deserializer::deserialize_with_headers_bytes):
+/// a refcounted slice of the buffer that owns the record's bytes
+/// (consumer-threading.md §27) — the fetched records buffer for an uncompressed
+/// batch, the buffer the record was decompressed into for a compressed one. No
+/// per-record key/value copy occurs on the receive path.
 ///
 /// The plain [`deserialize`](Deserializer::deserialize) entry point (used when
-/// no shared source is available, e.g. unit tests) still copies via
+/// no shared buffer is available, e.g. unit tests) still copies via
 /// [`Bytes::copy_from_slice`], matching the §27 "safe copy fallback" contract.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -53,76 +53,58 @@ impl BytesDeserializer {
 }
 
 impl Deserializer<Bytes> for BytesDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, Error> {
+    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, Error> {
         // Fallback path: no shared owning buffer available, so copy.
         Ok(Bytes::copy_from_slice(data))
     }
 
-    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, Error> {
-        // Zero-copy: `data` is a subslice of `source` (the fetched records
-        // buffer, or the buffer a compressed record was decompressed into),
-        // so `slice_ref` hands out a refcounted view
-        // into the same allocation with no copy. `slice_ref` requires `data`
-        // to lie within `source`'s allocation, which the receive path
-        // guarantees (the key/value bytes are borrowed from `source`).
-        Ok(source.slice_ref(data))
-    }
-
-    fn deserialize_from_shared_with_headers(
+    async fn deserialize_with_headers_bytes(
         &self,
         _topic: &str,
-        _headers: &dyn Headers,
-        source: &Bytes,
-        data: &[u8],
+        _headers: &RecordHeaders,
+        data: &Bytes,
     ) -> Result<Bytes, Error> {
-        // ByteArray semantics ignore headers; keep the zero-copy slice path
-        // (the trait default would route through the copying `deserialize`).
-        Ok(source.slice_ref(data))
+        // Zero-copy: `data` is already a refcounted slice of the buffer that
+        // owns the record's bytes, so handing out a clone bumps a refcount and
+        // copies nothing. Bytes semantics ignore headers.
+        Ok(data.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::RecordHeaders;
 
-    #[test]
-    fn test_deserialize_copy_fallback() {
+    #[tokio::test]
+    async fn test_deserialize_copy_fallback() {
         let de = BytesDeserializer::new();
         let data = b"my bytes";
-        let result = de.deserialize("topic", data.as_slice()).unwrap();
+        let result = de.deserialize("topic", data.as_slice()).await.unwrap();
         assert_eq!(&result[..], b"my bytes");
+        assert_ne!(
+            result.as_ptr(),
+            data.as_ptr(),
+            "the plain form has no shared buffer to slice, so it copies"
+        );
     }
 
-    #[test]
-    fn test_deserialize_empty() {
+    #[tokio::test]
+    async fn test_deserialize_empty() {
         let de = BytesDeserializer::new();
-        let result = de.deserialize("topic", &[]).unwrap();
+        let result = de.deserialize("topic", &[]).await.unwrap();
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_deserialize_from_shared_is_zero_copy() {
+    #[tokio::test]
+    async fn test_deserialize_with_headers_bytes_is_zero_copy() {
         let de = BytesDeserializer::new();
         let source = Bytes::from(vec![0u8, 1, 2, 3, 4, 5, 6, 7]);
-        // A subslice borrowed from the source allocation.
-        let data: &[u8] = &source[2..5];
-        let result = de.deserialize_from_shared("topic", &source, data).unwrap();
+        // A subslice of the source allocation, as the receive path passes it.
+        let data = source.slice(2..5);
+        let headers = RecordHeaders::new();
+        let result = de.deserialize_with_headers_bytes("topic", &headers, &data).await.unwrap();
         assert_eq!(&result[..], &[2, 3, 4]);
         // The returned Bytes shares the source allocation (same data ptr).
-        assert_eq!(result.as_ptr(), data.as_ptr());
-    }
-
-    #[test]
-    fn test_deserialize_from_shared_headers_delegates() {
-        let de = BytesDeserializer::new();
-        let source = Bytes::from(vec![9u8, 8, 7, 6]);
-        let data: &[u8] = &source[1..3];
-        let headers = RecordHeaders::new();
-        let result = de
-            .deserialize_from_shared_with_headers("topic", &headers, &source, data)
-            .unwrap();
-        assert_eq!(&result[..], &[8, 7]);
-        assert_eq!(result.as_ptr(), data.as_ptr());
+        assert_eq!(result.as_ptr(), source[2..].as_ptr());
     }
 }
