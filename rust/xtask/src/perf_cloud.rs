@@ -20,9 +20,10 @@
 //!
 //! A run compares the clients of one **client group** (all of them, or the
 //! ones `--clients` selects) on a list of tests: presets from [`TESTS_FILE`]
-//! (`--tests`), or one test given by its settings (`--scenario`) and named
-//! after them. Each test runs every selected client (an **arm**), one after
-//! another, against the same cluster:
+//! (`--tests`), a named list of them from [`BATCHES_FILE`] (`--batch`), or
+//! one test given by its settings (`--scenario`) and named after them. The
+//! tests run one after another, and each runs every selected client (an
+//! **arm**), one after another, against the same cluster:
 //!
 //! - `rust`: Rust (native), librdkafka (C) and Java. Rust and Java are each
 //!   compared with librdkafka, the baseline; Rust is never compared with
@@ -39,7 +40,7 @@
 //!
 //! Subcommands:
 //!
-//! - `list` prints the tests file.
+//! - `list` prints the tests and the batches.
 //! - `check` validates a run (group, clients, tests, durations) and prints
 //!   its time estimate, failing above `--budget-min`. It needs no cluster, so
 //!   a caller can run it before provisioning one: a typo or an over-long list
@@ -100,6 +101,9 @@ use crate::chaos_matrix::{group_running, now_utc, package_root, signal_group, st
 
 /// The tests that can be named in a run, relative to the repository root.
 const TESTS_FILE: &str = "tools/perf-cloud/tests.txt";
+
+/// Named lists of those tests (`--batch`), relative to the repository root.
+const BATCHES_FILE: &str = "tools/perf-cloud/batches.txt";
 
 /// Setup time per arm on top of warmup and measurement: topic creation and
 /// deletion, client start-up, the harnesses' 10 s cooldown sampling.
@@ -168,6 +172,7 @@ const HARNESS_VARS: &[&str] = &[
     "JOIN_TIMEOUT_SECONDS",
     "KAFKA_BIN",
     "KEY_SIZE",
+    "LIBRDKAFKA_BATCH",
     "LIBRDKAFKA_PYTHON",
     "LIMIT_RPS",
     "LINGER_MS",
@@ -243,13 +248,14 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 const HELP: &str = "cargo xtask perf-cloud <subcommand>
 
   list                     Print the tests that can be run (tools/perf-cloud/tests.txt)
-  check  --group G [--clients C,C] (--tests ID,ID | --scenario S)
+                           and the batches of them (tools/perf-cloud/batches.txt)
+  check  --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
          [--duration-min N] [--warmup-min N] [--budget-min N] [--ingress-mb-s N]
                            Validate a run and print its time estimate; fail when
                            it exceeds --budget-min, warn about fixed-rate tests
                            near the cluster's --ingress-mb-s
   build  --group G         Build the group's harnesses
-  run    --group G [--clients C,C] (--tests ID,ID | --scenario S)
+  run    --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
          [--duration-min N] [--warmup-min N]
          --bootstrap HOST:PORT --kafka-bin DIR --results-dir DIR
          [--topic-prefix P] [--push-artifacts]
@@ -264,6 +270,8 @@ const HELP: &str = "cargo xtask perf-cloud <subcommand>
   Python clients, sync and async). C is `all` (the default) or the group's
   clients to run: rust, librdkafka, java / python-sync-rust,
   python-sync-librdkafka, python-async-rust, python-async-librdkafka.
+  B is a batch of the group's tests, run one after another on the same cluster,
+  e.g. producer-basic-perf-python.
   S is one test given by its settings, as in the tests file, e.g.
   \"WORKLOAD=producer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 ACKS=all\"
   or \"WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000\"; it is
@@ -662,6 +670,9 @@ const PRODUCING: &[Workload] = &[Workload::Producer, Workload::Transactional];
 /// Those defaults agree: a 1-byte `fetch.min.bytes`, a 500 ms wait, 1 MiB per
 /// partition and 500 records per poll (librdkafka has no `max.poll.records`;
 /// its harnesses consume batches of `MAX_POLL_RECORDS`, 500 by default).
+/// `LIBRDKAFKA_BATCH` changes how the librdkafka clients alone read (see
+/// [`LibrdkafkaRead`]): the others always poll batches of up to
+/// `max.poll.records`.
 const SETTINGS: &[Setting] = &[
     number_setting("PARTITIONS", Kind::Positive, 10_000, ALL),
     // Bytes; see also MAX_RECORD_BYTES.
@@ -699,7 +710,31 @@ const SETTINGS: &[Setting] = &[
     ),
     // The C consumer harness allocates an array of this many entries.
     number_setting("MAX_POLL_RECORDS", Kind::Positive, 1_000_000, &[Workload::Consumer]),
+    // Records; 0 polls one at a time. The same array as MAX_POLL_RECORDS.
+    number_setting("LIBRDKAFKA_BATCH", Kind::Count, 1_000_000, &[Workload::Consumer]),
 ];
+
+/// How the librdkafka clients (C, and Python on librdkafka) read in a
+/// consumer test: `LIBRDKAFKA_BATCH=0` polls one record at a time
+/// (`rd_kafka_consumer_poll`, Python's `Consumer.poll()`), `LIBRDKAFKA_BATCH=N`
+/// consumes batches of N (`rd_kafka_consume_batch_queue`, Python's
+/// `Consumer.consume(num_messages=N)`). Unset, they consume batches of
+/// `MAX_POLL_RECORDS` (500 by default), the most records a Rust or Java poll
+/// returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibrdkafkaRead {
+    Poll,
+    Batch(u64),
+}
+
+impl LibrdkafkaRead {
+    fn of(test: &PerfTest) -> Option<LibrdkafkaRead> {
+        match lookup_number(&test.settings, "LIBRDKAFKA_BATCH")? {
+            0 => Some(LibrdkafkaRead::Poll),
+            n => Some(LibrdkafkaRead::Batch(n)),
+        }
+    }
+}
 
 /// The largest record (key plus value, in bytes) a test may produce: under
 /// the clients' default 1 MiB request size (Java's and the Rust client's
@@ -795,6 +830,18 @@ impl PerfTest {
                 self.id
             );
         }
+        // Their harnesses count the warmup in records, LIMIT_RPS × the warmup
+        // seconds (`consumer_args`), which an unbounded load does not give.
+        if self.workload == Workload::Consumer && self.number("LIMIT_RPS") == 0 {
+            if let Some(arm) = arms.iter().find(|a| matches!(a, Arm::Rust | Arm::Java | Arm::Librdkafka)) {
+                bail!(
+                    "test `{}`: a consumer test with an unbounded load (LIMIT_RPS=0) runs only the Python clients, \
+                     whose warmup is timed; the {} client counts its warmup in records at LIMIT_RPS",
+                    self.id,
+                    arm.id()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -804,6 +851,8 @@ impl PerfTest {
         let mut env: Vec<(String, String)> = self
             .settings
             .iter()
+            // Read by the driver, below and in `consumer_args`.
+            .filter(|(k, _)| k != "LIBRDKAFKA_BATCH")
             .map(|(k, v)| {
                 let v = if k == "ENABLE_IDEMPOTENCE" {
                     arm.idempotence_value(v == "true").to_string()
@@ -827,6 +876,19 @@ impl PerfTest {
             && self.setting("MAX_IN_FLIGHT").is_none()
         {
             env.push(("MAX_IN_FLIGHT".to_string(), IDEMPOTENT_MAX_IN_FLIGHT.to_string()));
+        }
+        // The Python harness's librdkafka backend reads MAX_POLL_RECORDS as
+        // its consume() batch only (librdkafka has no max.poll.records), and
+        // POLL_SINGLE as one poll() per record.
+        if matches!(arm, Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka) {
+            match LibrdkafkaRead::of(self) {
+                Some(LibrdkafkaRead::Poll) => env.push(("POLL_SINGLE".to_string(), "True".to_string())),
+                Some(LibrdkafkaRead::Batch(n)) => {
+                    env.retain(|(k, _)| k != "MAX_POLL_RECORDS");
+                    env.push(("MAX_POLL_RECORDS".to_string(), n.to_string()));
+                },
+                None => {},
+            }
         }
         env
     }
@@ -966,12 +1028,6 @@ fn parse_settings<'a>(
              at most {IDEMPOTENT_MAX_IN_FLIGHT}"
         );
     }
-    if workload == Workload::Consumer && number("LIMIT_RPS") == Some(0) {
-        bail!(
-            "{what}: WORKLOAD=consumer needs LIMIT_RPS above 0: the clients read a load produced at that rate, \
-             and an unbounded producer would measure the producer"
-        );
-    }
     if get("TXN_MODE") == Some("eos") && number("LIMIT_RPS") == Some(0) {
         bail!(
             "{what}: TXN_MODE=eos needs LIMIT_RPS above 0: each client's source topic is first filled with LIMIT_RPS \
@@ -1046,6 +1102,11 @@ fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
     }
     if let Some(n) = number("MAX_POLL_RECORDS") {
         parts.push(format!("maxpoll{n}"));
+    }
+    match number("LIBRDKAFKA_BATCH") {
+        Some(0) => parts.push("librdkafka-poll".to_string()),
+        Some(n) => parts.push(format!("librdkafka-batch{n}")),
+        None => {},
     }
     if workload == Workload::Transactional {
         parts.push(format!("{}-per-txn", number("RECORDS_PER_TRANSACTION").unwrap_or(100)));
@@ -1164,12 +1225,89 @@ fn select_tests(all: &[PerfTest], list: &str, group: Group) -> anyhow::Result<Ve
     Ok(selected)
 }
 
+/// A line of [`BATCHES_FILE`]: tests of [`TESTS_FILE`] that run one after
+/// another, on one cluster, under one name.
+#[derive(Debug, Clone, PartialEq)]
+struct Batch {
+    name: String,
+    group: Group,
+    /// Ids of tests that apply to `group`, in the order they run.
+    tests: Vec<String>,
+}
+
+/// Parse the batches file against the `tests` it names: `<name> <group>
+/// <test-id> ...` per line, `#` starts a comment.
+fn parse_batches(text: &str, tests: &[PerfTest]) -> anyhow::Result<Vec<Batch>> {
+    let mut batches: Vec<Batch> = Vec::new();
+    for (index, raw_line) in text.lines().enumerate() {
+        let line_no = index + 1;
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let batch = parse_batch_line(line, tests).with_context(|| format!("{BATCHES_FILE}:{line_no}"))?;
+        if batches.iter().any(|b| b.name == batch.name) {
+            bail!("{BATCHES_FILE}:{line_no}: batch `{}` is defined twice", batch.name);
+        }
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+fn parse_batch_line(line: &str, tests: &[PerfTest]) -> anyhow::Result<Batch> {
+    let mut words = line.split_whitespace();
+    let name = words.next().unwrap_or_default().to_string();
+    // The same rules as a test id: it names the run in CI.
+    validate_test_id(&name).map_err(|_| {
+        anyhow::anyhow!(
+            "invalid batch name `{name}`: use lowercase letters, digits and `-`, at most {MAX_TEST_ID_LEN} \
+             characters, not starting with `-`"
+        )
+    })?;
+    let group_word = words
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("batch `{name}` names no client group"))?;
+    let group = Group::parse(group_word).with_context(|| format!("batch `{name}`"))?;
+    let ids: Vec<&str> = words.collect();
+    if ids.is_empty() {
+        bail!("batch `{name}` names no tests");
+    }
+    let selected = select_tests(tests, &ids.join(","), group).with_context(|| format!("batch `{name}`"))?;
+    Ok(Batch { name, group, tests: selected.into_iter().map(|t| t.id).collect() })
+}
+
+fn load_batches(tests: &[PerfTest]) -> anyhow::Result<Vec<Batch>> {
+    let path = repo_root().join(BATCHES_FILE);
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    parse_batches(&text, tests)
+}
+
+/// The tests of the batch `name`, which must be for `group`.
+fn select_batch(all: &[PerfTest], batches: &[Batch], name: &str, group: Group) -> anyhow::Result<Vec<PerfTest>> {
+    let Some(batch) = batches.iter().find(|b| b.name == name) else {
+        let names: Vec<&str> = batches.iter().map(|b| b.name.as_str()).collect();
+        bail!("unknown batch `{name}` (known: {})", names.join(", "));
+    };
+    if batch.group != group {
+        bail!(
+            "batch `{name}` runs the {} group's clients, not the {} group's (--group)",
+            batch.group.name(),
+            group.name()
+        );
+    }
+    select_tests(all, &batch.tests.join(","), group)
+}
+
 fn list() -> anyhow::Result<()> {
     let tests = load_tests()?;
     println!("Tests in {TESTS_FILE}:");
     for t in &tests {
         let groups: Vec<&str> = t.groups.iter().map(|g| g.name()).collect();
-        println!("  {:<40} {:<12} {}", t.id, groups.join(","), report::scenario(t));
+        println!("  {:<46} {:<12} {}", t.id, groups.join(","), report::scenario(t));
+    }
+    println!("\nBatches in {BATCHES_FILE} (--batch), each test in turn on one cluster:");
+    for b in &load_batches(&tests)? {
+        println!("  {:<46} {:<12} {}", b.name, b.group.name(), b.tests.join(" "));
     }
     Ok(())
 }
@@ -1183,6 +1321,8 @@ struct RunOptions {
     /// The group's arms to run (`--clients`), in the group's order.
     arms: Vec<Arm>,
     tests: Vec<PerfTest>,
+    /// The batch (`--batch`) the tests are, if any.
+    batch: Option<String>,
     duration_min: u64,
     warmup_min: u64,
     /// `check` only: the most minutes the tests may take, and the cluster's
@@ -1201,6 +1341,7 @@ const SHARED_FLAGS: &[&str] = &[
     "--group",
     "--clients",
     "--tests",
+    "--batch",
     "--scenario",
     "--duration-min",
     "--warmup-min",
@@ -1223,11 +1364,16 @@ impl RunOptions {
         let arms = group.select_arms(flags.get("--clients").map_or("all", String::as_str))?;
         let duration_min = minutes(&flags, "--duration-min", 1, MAX_DURATION_MINUTES)?.unwrap_or(30);
         let warmup_min = minutes(&flags, "--warmup-min", 0, MAX_WARMUP_MINUTES)?.unwrap_or(5);
-        let tests = match (flags.get("--tests"), flags.get("--scenario")) {
-            (Some(list), None) => select_tests(&load_tests()?, list, group)?,
-            (None, Some(scenario)) => vec![parse_scenario(scenario, group)?],
-            (Some(_), Some(_)) => bail!("give either --tests or --scenario, not both"),
-            (None, None) => bail!("--tests or --scenario is required"),
+        let batch = flags.get("--batch").cloned();
+        let tests = match (flags.get("--tests"), batch.as_deref(), flags.get("--scenario")) {
+            (Some(list), None, None) => select_tests(&load_tests()?, list, group)?,
+            (None, Some(name), None) => {
+                let all = load_tests()?;
+                select_batch(&all, &load_batches(&all)?, name, group)?
+            },
+            (None, None, Some(scenario)) => vec![parse_scenario(scenario, group)?],
+            (None, None, None) => bail!("--tests, --batch or --scenario is required"),
+            _ => bail!("give one of --tests, --batch and --scenario"),
         };
         for test in &tests {
             test.check_arms(&arms)?;
@@ -1263,6 +1409,7 @@ impl RunOptions {
             group,
             arms,
             tests,
+            batch,
             duration_min,
             warmup_min,
             budget_min,
@@ -1374,14 +1521,18 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
     if let Some(ingress) = options.ingress_mb_s {
         println!("Cluster ingress limit: ~{ingress:.0} MB/s");
     }
-    println!("Tests ({}), in order:", options.tests.len());
+    match &options.batch {
+        Some(batch) => println!("Batch {batch}: {} tests, in order:", options.tests.len()),
+        None => println!("Tests ({}), in order:", options.tests.len()),
+    }
     let mut warnings = Vec::new();
     for t in &options.tests {
         if let (Some(mb_s), Some(ingress)) = (t.rate_mb_s(), options.ingress_mb_s) {
             if mb_s > ingress {
                 bail!(
                     "{}: its fixed rate, {mb_s:.0} MB/s, is above the cluster's ~{ingress:.0} MB/s ingress, so no \
-                     client could hold it; lower LIMIT_RPS, or set LIMIT_RPS=0 for an unbounded producer test",
+                     client could hold it; use a larger cluster or lower LIMIT_RPS (LIMIT_RPS=0 for an unbounded producer \
+                     test)",
                     t.id
                 );
             }
@@ -2022,6 +2173,7 @@ fn run_info(options: &RunOptions) -> RunInfo {
         }
     }
     for (label, value) in [
+        ("Batch", options.batch.clone()),
         ("Agent AZ ID", env("AGENT_AZ_ID")),
         ("Cluster size", env("PERF_CLUSTER_SIZE")),
         ("Cluster ingress limit", ingress.map(|mb| format!("{mb:.0} MB/s"))),
@@ -2575,10 +2727,22 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         (warmup_flag, warmup_records.to_string()),
         ("--results-file", ctx.dir.join("results.json").display().to_string()),
     ];
+    let librdkafka_read = if ctx.arm == Arm::Librdkafka {
+        LibrdkafkaRead::of(test)
+    } else {
+        None
+    };
     for (key, flag) in settings {
+        // Its batch is LIBRDKAFKA_BATCH when the test sets that.
+        if *key == "MAX_POLL_RECORDS" && librdkafka_read.is_some() {
+            continue;
+        }
         if let Some(value) = test.setting(key) {
             pairs.push((flag, value.to_string()));
         }
+    }
+    if let Some(LibrdkafkaRead::Batch(n)) = librdkafka_read {
+        pairs.push(("--max-poll-records", n.to_string()));
     }
     match ctx.arm {
         Arm::Rust | Arm::Librdkafka => {
@@ -2602,6 +2766,9 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         Arm::Librdkafka => args.push("--no-produce".to_string()),
         _ => {},
     }
+    if librdkafka_read == Some(LibrdkafkaRead::Poll) {
+        args.push("--single-poll".to_string());
+    }
     args
 }
 
@@ -2621,9 +2788,24 @@ const LIBRDKAFKA_CONSUMER_FLAGS: &[(&str, &str)] = &[
     ("MAX_POLL_RECORDS", "--max-poll-records"),
 ];
 
+/// The records an unbounded load may produce per second: more than one
+/// `kafka-producer-perf-test.sh` reaches, so the harness, stopped first, ends
+/// the run. Kept small enough for the script, which samples latencies every
+/// `--num-records` / 500,000 records in an `int`.
+const UNBOUNDED_LOAD_MAX_RPS: u64 = 10_000_000;
+
+/// The load generator's `--num-records` and `--throughput` for `seconds` of
+/// records at `rate` msg/s; `rate` 0 is unbounded (`--throughput -1`).
+fn load_records_and_throughput(rate: u64, seconds: u64) -> (String, String) {
+    match rate {
+        0 => (UNBOUNDED_LOAD_MAX_RPS.saturating_mul(seconds).to_string(), "-1".to_string()),
+        rate => (rate.saturating_mul(seconds).to_string(), rate.to_string()),
+    }
+}
+
 /// Kafka's `kafka-producer-perf-test.sh` producing a consumer test's load
-/// into the arm's topic at `LIMIT_RPS`, with the test's `VALUE_SIZE` and
-/// `COMPRESSION_TYPE`. It starts before the harness and stops after it, so
+/// into the arm's topic at `LIMIT_RPS`, or as fast as it can for
+/// `LIMIT_RPS=0`, with the test's `VALUE_SIZE` and `COMPRESSION_TYPE`. It starts before the harness and stops after it, so
 /// every client reads the same load from the same producer. It runs on this
 /// machine, so the records' CreateTime and the consumer's clock agree: a
 /// consumer's latency is end to end. Its output goes to the arm's `load.log`.
@@ -2640,17 +2822,17 @@ impl LoadGenerator {
     /// could read them all, so a generator that ends first has failed.
     fn start(ctx: &ArmContext<'_>, seconds: u64, log: &ArmLog, log_path: PathBuf) -> anyhow::Result<LoadGenerator> {
         let test = ctx.test;
-        let rate = test.number("LIMIT_RPS");
+        let (records, throughput) = load_records_and_throughput(test.number("LIMIT_RPS"), seconds);
         let mut command = Command::new(ctx.kafka_bin.join("kafka-producer-perf-test.sh"));
         command
             .arg("--topic")
             .arg(&ctx.topic)
             .arg("--num-records")
-            .arg(rate.saturating_mul(seconds).to_string())
+            .arg(records)
             .arg("--record-size")
             .arg(test.number("VALUE_SIZE").to_string())
             .arg("--throughput")
-            .arg(rate.to_string())
+            .arg(throughput)
             .arg("--producer.config")
             .arg(ctx.client_properties)
             // As the EC2 runs. A consumer sees a record once it is
@@ -3121,6 +3303,117 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
+    fn parses_the_batches_file() {
+        let tests = parse_tests(SAMPLE).unwrap();
+        let batches = parse_batches(
+            "# comment\nboth  rust  producer-max producer-fixed  # trailing\n\npython-only python producer-fixed\n",
+            &tests,
+        )
+        .unwrap();
+        assert_eq!(
+            batches,
+            [
+                Batch {
+                    name: "both".to_string(),
+                    group: Group::Rust,
+                    tests: strings(&["producer-max", "producer-fixed"]),
+                },
+                Batch {
+                    name: "python-only".to_string(),
+                    group: Group::Python,
+                    tests: strings(&["producer-fixed"]),
+                },
+            ]
+        );
+        assert!(parse_batches("# none\n", &tests).unwrap().is_empty());
+        for (text, message) in [
+            ("Bad rust producer-max", "invalid batch name `Bad`"),
+            ("b", "batch `b` names no client group"),
+            ("b java producer-max", "unknown client group `java`"),
+            ("b rust", "batch `b` names no tests"),
+            ("b rust producer-nope", "unknown test `producer-nope`"),
+            (
+                "b python producer-max",
+                "test `producer-max` does not apply to client group `python` (only rust)",
+            ),
+            ("b rust producer-max producer-max", "test `producer-max` is listed twice"),
+            ("b rust producer-max\nb rust producer-fixed", "batch `b` is defined twice"),
+        ] {
+            let e = format!("{:#}", parse_batches(text, &tests).unwrap_err());
+            assert!(e.starts_with(BATCHES_FILE), "{text}: {e}");
+            assert!(e.contains(message), "{text}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_checked_in_batches_file_is_valid() {
+        let tests = load_tests().unwrap();
+        let batches = load_batches(&tests).unwrap();
+        for name in ["producer-basic-perf-python", "consumer-basic-perf-python"] {
+            let batch = batches.iter().find(|b| b.name == name).unwrap();
+            assert_eq!(batch.group, Group::Python, "{name}");
+            for id in &batch.tests {
+                let test = tests.iter().find(|t| &t.id == id).unwrap();
+                test.check_arms(Group::Python.arms()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn selects_a_batch() {
+        let all = parse_tests(SAMPLE).unwrap();
+        let batches = parse_batches("b rust producer-max producer-fixed\n", &all).unwrap();
+        let picked = select_batch(&all, &batches, "b", Group::Rust).unwrap();
+        let ids: Vec<&str> = picked.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["producer-max", "producer-fixed"]);
+        let err = select_batch(&all, &batches, "c", Group::Rust).unwrap_err().to_string();
+        assert_eq!(err, "unknown batch `c` (known: b)");
+        let err = select_batch(&all, &batches, "b", Group::Python).unwrap_err().to_string();
+        assert_eq!(err, "batch `b` runs the rust group's clients, not the python group's (--group)");
+    }
+
+    #[test]
+    fn runs_a_batch_by_name() {
+        let parse = |args: &[&str]| RunOptions::parse(&strings(args), false);
+        let options = parse(&["--group", "python", "--batch", "producer-basic-perf-python"]).unwrap();
+        assert_eq!(options.batch.as_deref(), Some("producer-basic-perf-python"));
+        let ids: Vec<&str> = options.tests.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "producer-max-1kb-200p",
+                "producer-max-1kb-36p-lz4",
+                "producer-fixed-100k-1kb-200p",
+                "producer-max-1kb-200p-key100b",
+            ]
+        );
+        check(&options).unwrap();
+        let options = parse(&["--group", "python", "--tests", "producer-max-1kb-200p"]).unwrap();
+        assert_eq!(options.batch, None);
+        let err = |args: &[&str]| parse(args).err().unwrap().to_string();
+        assert_eq!(
+            err(&["--group", "rust", "--batch", "producer-basic-perf-python"]),
+            "batch `producer-basic-perf-python` runs the python group's clients, not the rust group's (--group)"
+        );
+        assert_eq!(
+            err(&[
+                "--group",
+                "python",
+                "--batch",
+                "producer-basic-perf-python",
+                "--tests",
+                "producer-max-1kb-200p"
+            ]),
+            "give one of --tests, --batch and --scenario"
+        );
+        assert_eq!(
+            err(&["--group", "python", "--batch", "b", "--scenario", "PARTITIONS=1"]),
+            "give one of --tests, --batch and --scenario"
+        );
+        assert_eq!(err(&["--group", "python"]), "--tests, --batch or --scenario is required");
+    }
+
+    #[test]
     fn parses_flags_and_switches() {
         let flags = parse_flags(
             &strings(&["--group", "rust", "--tests=a,b", "--push-artifacts"]),
@@ -3172,6 +3465,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             group,
             arms: group.arms().to_vec(),
             tests: vec![test; tests],
+            batch: None,
             duration_min,
             warmup_min: 5,
             budget_min: None,
@@ -3233,8 +3527,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         let err = check(&with_test(fast, Some(240.0))).unwrap_err().to_string();
         assert_eq!(
             err,
-            "t: its fixed rate, 307 MB/s, is above the cluster's ~240 MB/s ingress, so no client could hold it; lower \
-             LIMIT_RPS, or set LIMIT_RPS=0 for an unbounded producer test"
+            "t: its fixed rate, 307 MB/s, is above the cluster's ~240 MB/s ingress, so no client could hold it; use a \
+             larger cluster or lower LIMIT_RPS (LIMIT_RPS=0 for an unbounded producer test)"
         );
         check(&with_test(fast, Some(600.0))).unwrap();
         // Unknown ingress, or an unbounded test: nothing to compare.
@@ -3313,6 +3607,15 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 FETCH_MAX_WAIT_MS=100 MAX_PARTITION_FETCH_BYTES=4194304"
             ),
             "consumer-fixed-1500-100b-36p-lz4-fetchwait100ms-partfetch4mb"
+        );
+        // How the librdkafka clients read.
+        assert_eq!(
+            id("WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000 LIBRDKAFKA_BATCH=0"),
+            "consumer-fixed-300k-1kb-200p-librdkafka-poll"
+        );
+        assert_eq!(
+            id("WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=1000 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000"),
+            "consumer-fixed-1k-1kb-36p-maxpoll4500-librdkafka-batch4000"
         );
         // Too long: cut, with a hash of the whole name.
         let long = id(
@@ -3404,14 +3707,20 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             ),
             ("WORKLOAD=consumer FETCH_MIN_BYTES=0", "FETCH_MIN_BYTES=0"),
             ("WORKLOAD=consumer MAX_POLL_RECORDS=0", "MAX_POLL_RECORDS=0"),
+            (
+                "LIBRDKAFKA_BATCH=0",
+                "--scenario: LIBRDKAFKA_BATCH applies to consumer tests only (WORKLOAD=consumer)",
+            ),
+            (
+                "WORKLOAD=consumer LIBRDKAFKA_BATCH=1000001",
+                "LIBRDKAFKA_BATCH=1000001: expected a whole number up to 1000000",
+            ),
         ] {
             let e = err(&format!("{base} {extra}"));
             assert!(e.contains(message), "{extra}: {e}");
         }
         let e = err("WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
         assert!(e.contains("TXN_MODE=eos needs LIMIT_RPS above 0"), "{e}");
-        let e = err("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
-        assert!(e.contains("WORKLOAD=consumer needs LIMIT_RPS above 0"), "{e}");
         assert_eq!(err("PARTITIONS=1 VALUE_SIZE=1"), "--scenario must set LIMIT_RPS");
         // Accepted: idempotence with acks=all / -1 and at most 5 in flight,
         // and the transactional settings.
@@ -3422,6 +3731,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "WORKLOAD=transactional ABORT_RATE=1.0",
             "WORKLOAD=consumer COMPRESSION_TYPE=lz4 FETCH_MIN_BYTES=1 FETCH_MAX_WAIT_MS=0 \
              MAX_PARTITION_FETCH_BYTES=1048576 MAX_POLL_RECORDS=500",
+            "WORKLOAD=consumer LIBRDKAFKA_BATCH=0",
+            "WORKLOAD=consumer MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000",
         ] {
             parse_scenario(&format!("{base} {ok}"), Group::Rust).unwrap();
         }
@@ -3441,6 +3752,37 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         );
         test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
         test.check_arms(Group::Python.arms()).unwrap();
+    }
+
+    #[test]
+    fn an_unbounded_consumer_load_runs_only_the_python_clients() {
+        let test = parse_scenario("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Group::Python).unwrap();
+        assert_eq!(test.id, "consumer-max-1b-1p");
+        test.check_arms(Group::Python.arms()).unwrap();
+        for arm in [Arm::Rust, Arm::Java, Arm::Librdkafka] {
+            let err = test.check_arms(&[arm]).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "test `consumer-max-1b-1p`: a consumer test with an unbounded load (LIMIT_RPS=0) runs only the \
+                     Python clients, whose warmup is timed; the {} client counts its warmup in records at LIMIT_RPS",
+                    arm.id()
+                )
+            );
+        }
+        // A fixed load is for every client.
+        let fixed = parse_scenario("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1", Group::Rust).unwrap();
+        fixed.check_arms(Group::Rust.arms()).unwrap();
+    }
+
+    #[test]
+    fn sizes_the_load_generator() {
+        assert_eq!(load_records_and_throughput(300, 60), ("18000".to_string(), "300".to_string()));
+        assert_eq!(load_records_and_throughput(0, 60), ("600000000".to_string(), "-1".to_string()));
+        // The script's latency sampling interval, records / 500,000, fits its
+        // int for any run the budget allows (a day).
+        let (records, _) = load_records_and_throughput(0, 24 * 3600);
+        assert!(records.parse::<u64>().unwrap() / 500_000 <= i32::MAX as u64);
     }
 
     #[test]
@@ -3699,6 +4041,64 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         for arm in Group::Rust.arms() {
             assert!(!args(*arm).contains("hunter2"), "{arm:?}");
         }
+    }
+
+    #[test]
+    fn tells_the_librdkafka_clients_how_to_read() {
+        let base = "WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 MAX_POLL_RECORDS=4500";
+        let poll = format!("{base} LIBRDKAFKA_BATCH=0");
+        let batch = format!("{base} LIBRDKAFKA_BATCH=4000");
+        let args = |scenario: &str, arm: Arm| consumer_args_for(scenario, arm).join(" ");
+        // The C client: one record per poll, or its own batch in place of
+        // MAX_POLL_RECORDS.
+        let c_poll = args(&poll, Arm::Librdkafka);
+        assert!(c_poll.ends_with("--no-produce --single-poll"), "{c_poll}");
+        assert!(!c_poll.contains("--max-poll-records"), "{c_poll}");
+        let c_batch = args(&batch, Arm::Librdkafka);
+        assert!(c_batch.contains("--max-poll-records 4000 "), "{c_batch}");
+        assert!(!c_batch.contains("4500") && !c_batch.contains("--single-poll"), "{c_batch}");
+        assert!(args(base, Arm::Librdkafka).contains("--max-poll-records 4500 "));
+        // Rust and Java keep MAX_POLL_RECORDS.
+        for arm in [Arm::Rust, Arm::Java] {
+            for scenario in [&poll, &batch] {
+                let a = args(scenario, arm);
+                assert!(
+                    a.contains("--max-poll-records 4500 ") && !a.contains("--single-poll"),
+                    "{arm:?}: {a}"
+                );
+            }
+        }
+        // Python: the librdkafka backend through POLL_SINGLE or its batch,
+        // the Rust backend unchanged; no harness reads LIBRDKAFKA_BATCH.
+        let env = |scenario: &str, arm: Arm| -> Vec<(String, String)> {
+            parse_scenario(scenario, Group::Python).unwrap().env_for(arm)
+        };
+        let get = |env: &[(String, String)], key: &str| -> Vec<String> {
+            env.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone()).collect()
+        };
+        for arm in [Arm::PythonSyncLibrdkafka, Arm::PythonAsyncLibrdkafka] {
+            let polled = env(&poll, arm);
+            assert_eq!(get(&polled, "POLL_SINGLE"), ["True"], "{arm:?}");
+            let batched = env(&batch, arm);
+            assert_eq!(get(&batched, "MAX_POLL_RECORDS"), ["4000"], "{arm:?}");
+            assert!(get(&batched, "POLL_SINGLE").is_empty(), "{arm:?}");
+            assert_eq!(get(&env(base, arm), "MAX_POLL_RECORDS"), ["4500"], "{arm:?}");
+        }
+        for arm in [Arm::PythonSyncRust, Arm::PythonAsyncRust] {
+            for scenario in [&poll, &batch] {
+                let e = env(scenario, arm);
+                assert_eq!(get(&e, "MAX_POLL_RECORDS"), ["4500"], "{arm:?}");
+                assert!(get(&e, "POLL_SINGLE").is_empty(), "{arm:?}");
+            }
+        }
+        for arm in Group::Python.arms().iter().chain(Group::Rust.arms()) {
+            for scenario in [&poll, &batch] {
+                assert!(get(&env(scenario, *arm), "LIBRDKAFKA_BATCH").is_empty(), "{arm:?}");
+            }
+        }
+        // The C harness parses the switch.
+        let c = fs::read_to_string(repo_root().join("rust/consumer-perf/compare/librdkafka_e2e.c")).unwrap();
+        assert!(c.contains("\"--single-poll\""));
     }
 
     /// Each option the driver gives a consumer harness is one the harness
