@@ -151,7 +151,8 @@ pub struct SslConfigs {
 
     /// Password for the trust store file.
     /// Corresponds to `ssl.truststore.password`, which Java defines as
-    /// `Type.PASSWORD` (`SslConfigs.java:140`).
+    /// `Type.PASSWORD` (`SslConfigs.java:140`). Only PEM stores are supported,
+    /// so `SslFactory::new` rejects it, as Java does for PEM.
     pub(crate) truststore_password: Option<Password>,
 
     /// Trusted certificates in PEM format (alternative to `truststore_location`).
@@ -170,7 +171,8 @@ pub struct SslConfigs {
 
     /// Password for the key store file.
     /// Corresponds to `ssl.keystore.password`, which Java defines as
-    /// `Type.PASSWORD` (`SslConfigs.java:133`).
+    /// `Type.PASSWORD` (`SslConfigs.java:133`). Only PEM stores are supported,
+    /// so `SslFactory::new` rejects it, as Java does for PEM.
     pub(crate) keystore_password: Option<Password>,
 
     /// Private key in PEM format (alternative to `keystore_location`).
@@ -190,7 +192,8 @@ pub struct SslConfigs {
 
     /// Password for the private key.
     /// Corresponds to `ssl.key.password`, which Java defines as
-    /// `Type.PASSWORD` (`SslConfigs.java:134`).
+    /// `Type.PASSWORD` (`SslConfigs.java:134`). Encrypted private keys are
+    /// not supported, so `SslFactory::new` rejects it.
     pub(crate) key_password: Option<Password>,
 
     /// Endpoint identification algorithm for hostname verification.

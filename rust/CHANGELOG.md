@@ -254,6 +254,15 @@ breaking changes.
   clear error, naming `GSSAPI`, instead of a misleading "requires a username"
   or a broker-side handshake failure: set `sasl.mechanism=PLAIN`. An empty
   mechanism keeps Java's `ConfigError`.
+- **Breaking (Rust, C API, Python):** with TLS on (`SSL`, `SASL_SSL`), the
+  clients' constructors now reject the passwords the SSL factory cannot use,
+  with a `ConfigError` `Failed to create channel builder: ...`, instead of
+  accepting and ignoring them: `ssl.keystore.password` and
+  `ssl.truststore.password`, which Java rejects with PEM stores (the only
+  ones this client supports), with Java's messages; and `ssl.key.password`,
+  because encrypted PEM private keys are not supported (an encrypted key used
+  to fail with `No private key found in inline keystore key`). Unlike Java,
+  the store passwords are rejected even when no store is configured.
 
 ### C API
 

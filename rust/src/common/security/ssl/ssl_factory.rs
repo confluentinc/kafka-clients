@@ -71,6 +71,8 @@ impl SslFactory {
     ///
     /// Returns an error if:
     /// - The truststore or keystore format is not PEM (JKS/PKCS12 are unsupported)
+    /// - `ssl.keystore.password`, `ssl.truststore.password` or `ssl.key.password`
+    ///   is set (see [`validate_pem_passwords`])
     /// - PEM files cannot be read or parsed
     /// - No valid certificates are found in the truststore
     /// - The private key cannot be loaded or is missing when a client cert is provided
@@ -84,6 +86,7 @@ impl SslFactory {
         // Validate store formats
         validate_store_format(&ssl_config.truststore_type, "truststore")?;
         validate_store_format(&ssl_config.keystore_type, "keystore")?;
+        validate_pem_passwords(ssl_config)?;
 
         // Build root cert store
         let root_store = build_root_cert_store(ssl_config)?;
@@ -151,6 +154,55 @@ impl SslFactory {
     pub fn client_config(&self) -> &Arc<ClientConfig> {
         &self.client_config
     }
+}
+
+/// Rejects the passwords this factory cannot use. Only PEM stores get past
+/// [`validate_store_format`], and:
+///
+/// - `ssl.keystore.password` cannot be set with PEM, translating
+///   `DefaultSslEngineFactory.createKeystore` (`DefaultSslEngineFactory.java:289`
+///   for an inline `ssl.keystore.key`, `:296` for a `ssl.keystore.location`,
+///   each with its own message);
+/// - `ssl.truststore.password` cannot be set with PEM, translating
+///   `DefaultSslEngineFactory.createTruststore` (`:316`, `:321`);
+/// - `ssl.key.password` is Rust-only: Java decrypts an encrypted PEM private key
+///   (an `EncryptedPrivateKeyInfo`) with it (`DefaultSslEngineFactory.java:505-520`),
+///   which this factory does not implement. Rejecting it here, rather than
+///   failing later with `No private key found in inline keystore key`, names
+///   the actual cause.
+///
+/// Deviation: Java runs the two store-password checks only inside
+/// `createKeystore` / `createTruststore`, i.e. when a store is configured;
+/// here they run whenever the password is set, because a set password that no
+/// code reads would be accepted and ignored.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] with the messages above; the clients report
+/// it as a `ConfigError` (`Failed to create channel builder: ...`).
+fn validate_pem_passwords(ssl_config: &SslConfigs) -> io::Result<()> {
+    if ssl_config.keystore_password.is_some() {
+        let message = if ssl_config.keystore_key.is_some() {
+            "SSL key store password cannot be specified with PEM format, only key password may be specified."
+        } else {
+            "SSL key store password cannot be specified with PEM format, only key password may be specified"
+        };
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+    }
+    if ssl_config.truststore_password.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SSL trust store password cannot be specified for PEM format.",
+        ));
+    }
+    if ssl_config.key_password.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ssl.key.password is not supported by this client: encrypted PEM private keys cannot be decrypted; \
+             provide an unencrypted PKCS#8 key",
+        ));
+    }
+    Ok(())
 }
 
 /// Validates that a store format is PEM. Returns an error for JKS or PKCS12.
@@ -539,6 +591,66 @@ Dlqddi21TOtLHuQuxJqlASFSCzYesT3OIQz7zxb8jS6ESF3YmwZLzTX+GD7TxWcZ
 AW5Pv9kQ+0OdOQ+xjJfk9XN4iPkWupwYtLPM3LY1tleJVEf9ZNgXr9e6zkY+iMW+
 B2V9lhUZNk+pRjtJw9unpXsM
 -----END PRIVATE KEY-----";
+
+    /// `validate_pem_passwords`: each password is rejected with its message,
+    /// and the PEM stores still build with no password set.
+    #[test]
+    fn test_pem_passwords_rejected() {
+        let message = |config: &SslConfigs| SslFactory::new(config).unwrap_err().to_string();
+
+        // `DefaultSslEngineFactory.java:296`: a key store file.
+        let config = SslConfigs {
+            keystore_location: Some("/path/to/keystore.pem".to_string()),
+            keystore_password: Some(Password::new("secret")),
+            ..SslConfigs::default()
+        };
+        assert_eq!(
+            message(&config),
+            "SSL key store password cannot be specified with PEM format, only key password may be specified"
+        );
+        // `:289`: an inline key, with Java's trailing period.
+        let config = SslConfigs {
+            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            keystore_password: Some(Password::new("secret")),
+            ..SslConfigs::default()
+        };
+        assert_eq!(
+            message(&config),
+            "SSL key store password cannot be specified with PEM format, only key password may be specified."
+        );
+        // `:316` / `:321`, and also without a store configured (deviation).
+        for truststore_certificates in [Some(Password::new(TEST_CA_CERT)), None] {
+            let config = SslConfigs {
+                truststore_certificates,
+                truststore_password: Some(Password::new("changeit")),
+                ..SslConfigs::default()
+            };
+            assert_eq!(message(&config), "SSL trust store password cannot be specified for PEM format.");
+        }
+        let config = SslConfigs {
+            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            key_password: Some(Password::new("keypass")),
+            ..SslConfigs::default()
+        };
+        let err = SslFactory::new(&config).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "ssl.key.password is not supported by this client: encrypted PEM private keys cannot be decrypted; \
+             provide an unencrypted PKCS#8 key"
+        );
+
+        // The same PEM stores without a password build.
+        let config = SslConfigs {
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            ..SslConfigs::default()
+        };
+        SslFactory::new(&config).unwrap();
+    }
 
     #[test]
     fn test_build_with_system_roots() {
