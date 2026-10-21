@@ -25,6 +25,9 @@
 //! - `metric.reporters`, a list of classes: a configuration never takes a
 //!   class (CLAUDE.md §2).
 //! - `security.providers`: Java's JCA security providers have no counterpart.
+//! - `config.providers`: config providers are not translated, so the key is
+//!   left undefined and a value set for it is reported as unused, rather than
+//!   accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -225,15 +228,9 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             true,
             Importance::Low,
         )
-        // Defined and validated as in Java; the providers it names are not
-        // resolved (config providers are not translated).
-        .define_with_validator(
-            AdminClientConfig::CONFIG_PROVIDERS_CONFIG,
-            Type::List,
-            Vec::<String>::new(),
-            ValidList::any_non_duplicate_values(true, false),
-            Importance::Low,
-        )
+    // Java ends the chain with `config.providers`
+    // (`AdminClientConfig.java:310-315`); it is left undefined until config
+    // providers are translated.
 });
 
 /// The AdminClient configuration class, which also contains constants for
@@ -409,8 +406,6 @@ impl AdminClientConfig {
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
-    /// Config key: `config.providers`
-    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
 
     /// Creates a config from a property map: Java's `AdminClientConfig(Map)`.
     ///
@@ -1100,11 +1095,10 @@ mod tests {
             "metadata.cluster.check.enable",
             "ssl.truststore.type",
             "sasl.mechanism",
-            AdminClientConfig::CONFIG_PROVIDERS_CONFIG,
         ] {
             assert!(names.contains(key), "{key}");
         }
-        for key in ["metric.reporters", "security.providers"] {
+        for key in ["metric.reporters", "security.providers", "config.providers"] {
             assert!(!names.contains(key), "{key}");
         }
     }
@@ -1320,32 +1314,6 @@ mod tests {
             .unwrap();
             assert_eq!(addresses.len(), 2, "{value:?}");
         }
-    }
-
-    /// `config.providers` is defined as in Java (`AdminClientConfig.java:310-315`):
-    /// an empty list by default, validated by
-    /// `ValidList.anyNonDuplicateValues(true, false)`.
-    #[test]
-    fn test_config_providers_valid_list() {
-        let config = AdminClientConfig::new(&bootstrap_props()).unwrap();
-        assert_eq!(
-            Some(&[][..]),
-            config.get_list(AdminClientConfig::CONFIG_PROVIDERS_CONFIG).unwrap()
-        );
-        let mut props = bootstrap_props();
-        props.insert(AdminClientConfig::CONFIG_PROVIDERS_CONFIG.to_string(), "a,,b".to_string());
-        match AdminClientConfig::new(&props) {
-            Err(Error::Config(e)) => {
-                assert_eq!(e.message(), "Configuration 'config.providers' values must not be empty.")
-            },
-            other => panic!("expected a ConfigError, got {other:?}"),
-        }
-        props.insert(AdminClientConfig::CONFIG_PROVIDERS_CONFIG.to_string(), "a,a".to_string());
-        let config = AdminClientConfig::new(&props).unwrap();
-        assert_eq!(
-            Some(&["a".to_string()][..]),
-            config.get_list(AdminClientConfig::CONFIG_PROVIDERS_CONFIG).unwrap()
-        );
     }
 
     /// `bootstrap.servers` is validated with Java's

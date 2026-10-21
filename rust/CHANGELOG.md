@@ -49,9 +49,8 @@ breaking changes.
 - New `ProducerConfig` constants for keys Java's `ProducerConfig` names:
   `COMPRESSION_GZIP_LEVEL_CONFIG`, `COMPRESSION_LZ4_LEVEL_CONFIG`,
   `COMPRESSION_ZSTD_LEVEL_CONFIG`, `ENABLE_METRICS_PUSH_CONFIG`,
-  `SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG`,
-  `SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG` and
-  `CONFIG_PROVIDERS_CONFIG`.
+  `SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG` and
+  `SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG`.
 - The producer logs its configuration values at INFO when it is built, as
   Java's does, and then, in one INFO line, the supplied keys it did not use:
   `These configurations '[a, b]' were supplied but are not used yet.` This
@@ -148,8 +147,7 @@ breaking changes.
   `request.timeout.ms`, `retries`, `default.api.timeout.ms`,
   `metrics.sample.window.ms` or `metadata.recovery.rebootstrap.trigger.ms`;
   `send.buffer.bytes` / `receive.buffer.bytes` below `-1`;
-  `metrics.num.samples` below `1`; an empty element in `config.providers`,
-  which is now defined, as in Java; and a `metrics.recording.level` or
+  `metrics.num.samples` below `1`; and a `metrics.recording.level` or
   `metadata.recovery.strategy` outside Java's values.
 - `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
@@ -157,7 +155,6 @@ breaking changes.
   `unused`, `ignore`, `log_unused`, and the static
   `config_names`. Its `PartialEq` / `Hash` compare the
   properties it was built from, as Java's `equals` / `hashCode` do.
-- New `AdminClientConfig::CONFIG_PROVIDERS_CONFIG`, for `config.providers`.
 - The admin client logs its configuration values at INFO when it is built, as
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
   did not use: `These configurations '[a, b]' were supplied but are not used
@@ -227,7 +224,9 @@ breaking changes.
   them); how Java's `Object` config values are typed; and, in C, an
   `__as_AbstractConfig` view. The class-valued keys
   (`ssl.engine.factory.class`, the `sasl.*.class` keys) stay undefined, as
-  configurations never take a class.
+  configurations never take a class. `config.providers` stays undefined too
+  until config providers are translated, so a value set for it is listed as
+  unused instead of being accepted and ignored.
 - **Breaking:** `DynSerializer`, `DynDeserializer` and `InlineFuture` are no
   longer public. They are the crate's own way of holding a serde behind one
   type without a heap allocation per record; since the clients now take serdes

@@ -29,8 +29,9 @@
 //!   is chosen with the Rust-only `partitioner.type` key or set with
 //!   [`ProducerConfig::set_partitioner`].
 //! - `security.providers`: Java's JCA security providers have no counterpart.
-//! - `config.providers` is defined, as Java defines it, but config providers
-//!   are not translated, so it is never read.
+//! - `config.providers`: config providers are not translated, so the key is
+//!   left undefined and a value set for it is reported as unused, rather than
+//!   accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -450,13 +451,9 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             true,
             Importance::Low,
         )
-        .define_with_validator(
-            ProducerConfig::CONFIG_PROVIDERS_CONFIG,
-            Type::List,
-            Vec::<String>::new(),
-            ValidList::any_non_duplicate_values(true, false),
-            Importance::Low,
-        )
+    // Java ends the chain with `config.providers` (`ProducerConfig.java`
+    // 613-618);
+    // it is left undefined until config providers are translated.
 });
 
 /// Configuration for the Kafka Producer.
@@ -1084,8 +1081,6 @@ impl ProducerConfig {
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
     /// Config key: `socket.connection.setup.timeout.max.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str = "socket.connection.setup.timeout.max.ms";
-    /// Config key: `config.providers`
-    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
 
     /// Creates a config from a property map: Java's `ProducerConfig(Map)` and
     /// `ProducerConfig(Properties)`.
@@ -3086,7 +3081,6 @@ mod tests {
             Some(&["localhost:9999".to_string()][..]),
             config.get_list(ProducerConfig::BOOTSTRAP_SERVERS_CONFIG).unwrap()
         );
-        assert_eq!(Some(&[][..]), config.get_list(ProducerConfig::CONFIG_PROVIDERS_CONFIG).unwrap());
         assert_eq!(
             "Configuration 'batch.size' is of type INT, not LONG",
             config.get_long(ProducerConfig::BATCH_SIZE_CONFIG).unwrap_err().message()
@@ -3119,7 +3113,6 @@ mod tests {
             ProducerConfig::COMPRESSION_LZ4_LEVEL_CONFIG,
             ProducerConfig::COMPRESSION_ZSTD_LEVEL_CONFIG,
             ProducerConfig::ENABLE_METRICS_PUSH_CONFIG,
-            ProducerConfig::CONFIG_PROVIDERS_CONFIG,
             SaslConfigs::SASL_MECHANISM,
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
         ] {
@@ -3132,6 +3125,7 @@ mod tests {
             "metric.reporters",
             "interceptor.classes",
             "security.providers",
+            "config.providers",
         ] {
             assert!(!names.contains(key), "{key}");
         }

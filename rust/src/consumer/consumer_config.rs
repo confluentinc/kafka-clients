@@ -34,8 +34,9 @@
 //!   `partition.assignment.strategy` with `group.protocol=consumer` is still
 //!   rejected, as Java rejects it.
 //! - `security.providers`: Java's JCA security providers have no counterpart.
-//! - `config.providers` is defined, as Java defines it, but config providers
-//!   are not translated, so it is never read.
+//! - `config.providers`: config providers are not translated, so the key is
+//!   left undefined and a value set for it is reported as unused, rather than
+//!   accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -398,13 +399,8 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             share_acquire_mode_validator(),
             Importance::Medium,
         )
-        .define_with_validator(
-            ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
-            Type::List,
-            Vec::<String>::new(),
-            ValidList::any_non_duplicate_values(true, false),
-            Importance::Low,
-        )
+    // Java ends the chain with `config.providers` (`ConsumerConfig.java`
+    // 740-745); it is left undefined until config providers are translated.
 });
 
 /// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
@@ -967,9 +963,6 @@ impl ConsumerConfig {
     pub const SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: &'static str = "share.acknowledgement.mode";
     /// Config key: `share.acquire.mode`.
     pub const SHARE_ACQUIRE_MODE_CONFIG: &'static str = "share.acquire.mode";
-
-    /// Config key: `config.providers`.
-    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
 
     /// Creates a config from a property map: Java's `ConsumerConfig(Map)`.
     ///
@@ -2021,35 +2014,6 @@ mod tests {
         );
     }
 
-    /// The consumer's other list keys use
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
-    /// 449, 707): empty elements are rejected, duplicates are removed, and an
-    /// empty list is allowed.
-    #[test]
-    fn test_other_list_configs_valid_list() {
-        for key in [ConsumerConfig::CONFIG_PROVIDERS_CONFIG] {
-            let with = |value: &str| {
-                HashMap::from([
-                    ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
-                    (key.to_string(), value.to_string()),
-                ])
-            };
-            for (value, expected) in [
-                ("a,,b", format!("Configuration '{key}' values must not be empty.")),
-                (",,", format!("Configuration '{key}' values must not be empty.")),
-            ] {
-                match ConsumerConfig::new(&with(value)) {
-                    Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{key}={value:?}"),
-                    other => panic!("expected a ConfigError for {key}={value:?}, got {other:?}"),
-                }
-            }
-            assert!(ConsumerConfig::new(&with("")).is_ok(), "{key}");
-            assert!(ConsumerConfig::new(&with("a, b")).is_ok(), "{key}");
-            // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
-            assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
-        }
-    }
-
     /// Props with `bootstrap.servers` plus the given extra keys.
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
         let mut props = base_props();
@@ -2850,7 +2814,6 @@ mod tests {
             Some(&["localhost:9092".to_string()][..]),
             config.get_list(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG).unwrap()
         );
-        assert_eq!(Some(&[][..]), config.get_list(ConsumerConfig::CONFIG_PROVIDERS_CONFIG).unwrap());
         assert_eq!(Some("g"), config.get_string(ConsumerConfig::GROUP_ID_CONFIG).unwrap());
         assert_eq!(
             "Configuration 'max.poll.records' is of type INT, not LONG",
@@ -2879,7 +2842,6 @@ mod tests {
             ConsumerConfig::GROUP_PROTOCOL_CONFIG,
             ConsumerConfig::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
-            ConsumerConfig::CONFIG_PROVIDERS_CONFIG,
             SaslConfigs::SASL_MECHANISM,
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
         ] {
@@ -2888,6 +2850,7 @@ mod tests {
         for key in [
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
             "security.providers",
+            "config.providers",
             "key.deserializer",
             "metric.reporters",
             "interceptor.classes",
