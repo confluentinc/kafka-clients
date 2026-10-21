@@ -639,14 +639,15 @@ impl ConsumerConfig {
         let props = HashMap::from([(Self::BOOTSTRAP_SERVERS_CONFIG.to_string(), "localhost:9092".to_string())]);
         let config =
             AbstractConfig::new(&CONFIG, string_originals(&props), false).expect("the ConfigDef defaults are valid");
-        let mut defaults = Self::from_abstract(config).expect("the ConfigDef defaults are valid");
+        let mut defaults = Self::from_abstract(config, false).expect("the ConfigDef defaults are valid");
         defaults.bootstrap_servers = Vec::new();
         defaults
     }
 
     /// Reads the typed fields from the parsed values, recording the keys read
-    /// in `read_keys`.
-    fn from_abstract(config: AbstractConfig) -> Result<Self, Error> {
+    /// in `read_keys`. With `log_warnings` false (a copy) it makes the same
+    /// reads but does not log that `ssl.cipher.suites` is ignored.
+    fn from_abstract(config: AbstractConfig, log_warnings: bool) -> Result<Self, Error> {
         let mut values = ValuesReader::new(&config);
         let bootstrap_servers = values.list(Self::BOOTSTRAP_SERVERS_CONFIG)?.to_vec();
         let client_dns_lookup = ClientDnsLookup::parse_config_value(values.string(Self::CLIENT_DNS_LOOKUP_CONFIG)?)?;
@@ -712,7 +713,7 @@ impl ConsumerConfig {
         // for a protocol that uses them (`ChannelBuilders.clientChannelBuilder`),
         // so only then are they marked used.
         let mut ssl_values = ValuesReader::new(&config);
-        let ssl_config = SslConfigs::from_values(&mut ssl_values)?;
+        let ssl_config = SslConfigs::from_values(&mut ssl_values, log_warnings)?;
         if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
             values.append(ssl_values);
         }
@@ -1016,10 +1017,13 @@ impl ConsumerConfig {
     /// (CLAUDE.md §3).
     ///
     /// Java's client logs nothing about the configuration it is given, so the
-    /// copy logs nothing either: it makes the post-processing's reads, marking
-    /// the same keys used, but none of its warnings (the reconnect and retry
-    /// backoff, the connection setup timeout, `connections.max.idle.ms` below
-    /// `max.poll.interval.ms`), and not `new`'s TLS hostname-verification
+    /// copy logs none of the warnings [`Self::new`] logs: it makes the same
+    /// parse and the same reads, marking the same keys used and failing the
+    /// same way, but logs neither the parse's warning that a list's duplicate
+    /// values are removed, nor the post-processing's warnings (the reconnect
+    /// and retry backoff, the connection setup timeout,
+    /// `connections.max.idle.ms` below `max.poll.interval.ms`), nor that
+    /// `ssl.cipher.suites` is ignored, nor `new`'s TLS hostname-verification
     /// warning. The client given the copy logs its one unused-keys line
     /// ([`Self::log_unused`]), as Java's client constructor does.
     ///
@@ -1038,17 +1042,20 @@ impl ConsumerConfig {
     /// Java's `ConsumerConfig(Map)` without its logging: parses `originals`
     /// and post-processes them, `resolved_client_id` standing in for the
     /// sequence number `client.id` would take. With a `resolved_client_id`
-    /// (a copy) the post-processing logs nothing.
+    /// (a copy) nothing is logged: not the parse's duplicate-values warning,
+    /// not the post-processing's lines, not the `ssl.cipher.suites` warning.
     fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
-        let config = AbstractConfig::with_hooks(
+        let log_warnings = resolved_client_id.is_none();
+        let config = AbstractConfig::with_hooks_and_log_warnings(
             &CONFIG,
             originals,
             false,
+            log_warnings,
             "ConsumerConfig",
             |originals| originals,
             |config| Self::post_process_parsed_config(config, resolved_client_id),
         )?;
-        Self::from_abstract(config)
+        Self::from_abstract(config, log_warnings)
     }
 
     /// Java's `ConsumerConfig.postProcessParsedConfig`: the values that
@@ -2117,13 +2124,16 @@ mod tests {
         assert_eq!(config.copy_for_client().unwrap().client_id(), "mine");
     }
 
-    /// `new` logs each post-processing warning once; a copy for one more
-    /// client logs none of them, as Java's client logs nothing about the
-    /// config it is given, but makes the same reads, so its used set is
-    /// `new`'s.
+    /// `new` logs each configuration warning once (the parse's duplicate
+    /// values, the post-processing's, the ignored `ssl.cipher.suites`); a copy
+    /// for one more client logs none of them, as Java's client logs nothing
+    /// about the config it is given, but makes the same reads, so its used set
+    /// is `new`'s.
     #[test]
-    fn test_copy_for_client_logs_no_post_process_warning() {
+    fn test_copy_for_client_logs_no_configuration_warning() {
         let props = props_with(&[
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
             (ConsumerConfig::GROUP_ID_CONFIG, "copy-log-group"),
             (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "classic"),
             (ConsumerConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
@@ -2145,10 +2155,12 @@ mod tests {
         assert_eq!(
             warnings(&new_lines),
             [
+                "Configuration key \"bootstrap.servers\"",
                 "Configuration 'retry.backoff.ms' with",
                 "Configuration 'socket.connection.setup.timeout.ms' with",
                 "Disabling exponential reconnect",
                 "Configuration 'connections.max.idle.ms' with",
+                "ssl.cipher.suites is not",
             ],
             "{new_lines:?}"
         );
