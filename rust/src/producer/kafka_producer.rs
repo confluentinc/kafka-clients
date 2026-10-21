@@ -992,12 +992,7 @@ impl<K, V> KafkaProducer<K, V> {
         // (CLAUDE.md §7).
 
         // 3. Derive compression from config
-        //    Translated from KafkaProducer.configureCompression().
-        // NOTE: Java also applies the per-codec level configs here
-        // (`compression.gzip.level` / `.lz4.level` / `.zstd.level`); those
-        // `ProducerConfig` keys are not translated yet, so every codec is built
-        // at its default level.
-        let compression = Compression::of(config.compression_type).build();
+        let compression = Self::configure_compression(&config)?;
 
         // 4. The system clock, Java's `Time.SYSTEM`
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -1497,6 +1492,23 @@ impl<K, V> KafkaProducer<K, V> {
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
         (metrics, producer_metrics)
+    }
+
+    /// Builds the compression of `compression.type`, at the level of its
+    /// `compression.<type>.level` config for gzip, lz4 and zstd.
+    ///
+    /// # Errors
+    ///
+    /// The level builder's error for a level out of range, which
+    /// [`ProducerConfig::new`] has already rejected.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#configureCompression")]
+    fn configure_compression(config: &ProducerConfig) -> Result<Compression, Error> {
+        Ok(match config.compression_type {
+            CompressionType::Gzip => Compression::gzip().level(config.compression_gzip_level)?.build(),
+            CompressionType::Lz4 => Compression::lz4().level(config.compression_lz4_level)?.build(),
+            CompressionType::Zstd => Compression::zstd().level(config.compression_zstd_level)?.build(),
+            compression_type => Compression::of(compression_type).build(),
+        })
     }
 
     /// Returns `linger.ms` as the `i32` the accumulator works with.
@@ -6259,7 +6271,7 @@ mod tests {
             ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
-                Compression::of(config.compression_type).build(),
+                KafkaProducer::<String, String>::configure_compression(&config).expect("valid compression"),
                 KafkaProducer::<String, String>::linger_ms(&config),
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
@@ -8114,7 +8126,7 @@ mod tests {
         ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
-            Compression::of(config.compression_type).build(),
+            KafkaProducer::<String, String>::configure_compression(&config).expect("valid compression"),
             KafkaProducer::<String, String>::linger_ms(&config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
@@ -8814,6 +8826,49 @@ mod tests {
             KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
                 .expect("the full-strategy fallback supports compression");
         assert!(producer.chunked_accumulator.is_none());
+    }
+
+    /// The producer compresses at the level its `compression.<type>.level` config
+    /// sets, as Java's `configureCompression` (`KafkaProducer.java:601-622`) builds
+    /// it, and at the type's default level when that is not set. It used to build
+    /// every codec at its default level.
+    #[tokio::test]
+    async fn test_producer_compresses_at_the_configured_level() {
+        let cases = [
+            (
+                "gzip",
+                ProducerConfig::COMPRESSION_GZIP_LEVEL_CONFIG,
+                "1",
+                Compression::gzip().level(1).unwrap().build(),
+            ),
+            (
+                "lz4",
+                ProducerConfig::COMPRESSION_LZ4_LEVEL_CONFIG,
+                "17",
+                Compression::lz4().level(17).unwrap().build(),
+            ),
+            (
+                "zstd",
+                ProducerConfig::COMPRESSION_ZSTD_LEVEL_CONFIG,
+                "19",
+                Compression::zstd().level(19).unwrap().build(),
+            ),
+        ];
+        for (compression_type, key, level, expected) in cases {
+            let config =
+                ProducerConfig::new(&guard_props(&[("compression.type", compression_type), (key, level)])).unwrap();
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("constructs");
+            assert_eq!(expected, producer.accumulator.compression, "{key}={level}");
+
+            let config = ProducerConfig::new(&guard_props(&[("compression.type", compression_type)])).unwrap();
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("constructs");
+            let default = Compression::of(CompressionType::for_name(compression_type).unwrap()).build();
+            assert_eq!(default, producer.accumulator.compression, "{compression_type} without {key}");
+        }
     }
 
     /// KAFKA-2121 for the KIP-1332 check: the compression `ConfigException` is raised inside
