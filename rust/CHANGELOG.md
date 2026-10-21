@@ -161,9 +161,10 @@ breaking changes.
   key stays undefined until it is: a value set for it is listed among the
   unused configurations, where `AdminClientConfig::new` used to fail. Without
   `bootstrap.servers` the configuration now builds, as Java's does, and the
-  client's constructor fails with `Failed to create new KafkaAdminClient`
-  caused by `ClientUtils`'s `ConfigError` `No resolvable bootstrap urls given
-  in bootstrap.servers`, the producer's and the consumer's message, where
+  client's constructor fails, whatever `bootstrap.resolve.timeout.ms` is, with
+  `Failed to create new KafkaAdminClient` caused by `ClientUtils`'s
+  `ConfigError` `No resolvable bootstrap urls given in bootstrap.servers`, the
+  producer's and the consumer's message, where
   `AdminClientConfig::new` used to fail with Java's
   `KafkaAdminClient.determineBootstrapType` message `You must set either
   bootstrap.servers or bootstrap.controllers`.

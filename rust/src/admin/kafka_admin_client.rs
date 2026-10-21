@@ -419,14 +419,24 @@ impl KafkaAdminClient {
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
         // Java's `bootstrapAddressesToUse`, chosen by `determineBootstrapType`
-        // (`KafkaAdminClient.java:533-560`). `bootstrap.controllers` is not
-        // defined, so it is always `bootstrap.servers`, and there is nothing to
-        // determine. Deviation: Java fails an empty `bootstrap.servers` there
-        // with "You must set either bootstrap.servers or bootstrap.controllers";
-        // here the empty list reaches `ClientUtils::parse_and_validate_addresses`
-        // and fails with its "No resolvable bootstrap urls given in
-        // bootstrap.servers", as the producer and the consumer do.
+        // (`KafkaAdminClient.java:533-560`, called at `:582`). `bootstrap.controllers`
+        // is not defined, so it is always `bootstrap.servers`. Java fails an
+        // empty list there, before it looks at `bootstrap.resolve.timeout.ms`
+        // (`:597`), so construction fails in both resolution modes; so does
+        // this one. Deviation: Java's message is "You must set either
+        // bootstrap.servers or bootstrap.controllers", which names a key this
+        // client does not define; this one is `ClientUtils`'s "No resolvable
+        // bootstrap urls given in bootstrap.servers", which the synchronous
+        // mode gives for an empty list anyway, as the producer and the
+        // consumer do. A whitespace-only value is an empty list, as Java's
+        // `ConfigDef` parses it.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
+        if bootstrap.is_empty() {
+            return Err(Error::config_message(format!(
+                "No resolvable bootstrap urls given in {}",
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -7571,18 +7581,35 @@ mod tests {
     }
 
     /// Without `bootstrap.servers` (and with no `bootstrap.controllers`, which
-    /// `AdminClientConfig` does not define) the constructor fails in
-    /// `ClientUtils.parseAndValidateAddresses`, wrapped as every construction
-    /// failure is. Deviation from Java, whose `determineBootstrapType` fails
-    /// first with "You must set either bootstrap.servers or
-    /// bootstrap.controllers": with no controllers key there is nothing to
-    /// determine, and the message is the one the producer and consumer give.
+    /// `AdminClientConfig` does not define) the constructor fails, wrapped as
+    /// every construction failure is, whatever `bootstrap.resolve.timeout.ms`
+    /// is: Java's `determineBootstrapType` runs before the resolution-mode
+    /// branch. Deviation from Java's message, "You must set either
+    /// bootstrap.servers or bootstrap.controllers": with no controllers key the
+    /// message is the one `ClientUtils` gives, as the producer and consumer do.
     #[test]
     fn test_missing_bootstrap_fails_creation() {
+        let positive_timeout = || {
+            HashMap::from([(
+                AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "1000".to_string(),
+            )])
+        };
+        let with_positive_timeout = |key: &str, value: &str| {
+            let mut props = positive_timeout();
+            props.insert(key.to_string(), value.to_string());
+            props
+        };
         for props in [
             HashMap::new(),
             HashMap::from([("bootstrap.servers".to_string(), " ".to_string())]),
             HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]),
+            // Java checks before the `bootstrap.resolve.timeout.ms` branch
+            // (`KafkaAdminClient.java:582` before `:597`), so the asynchronous
+            // mode fails at construction too.
+            positive_timeout(),
+            with_positive_timeout("bootstrap.servers", " "),
+            with_positive_timeout("bootstrap.controllers", "c:9093"),
         ] {
             let config = AdminClientConfig::new(&props).unwrap();
             let error = KafkaAdminClient::new(config).err().expect("creation must fail");

@@ -31,7 +31,8 @@
 //! - `bootstrap.controllers`: bootstrapping through the controllers (KIP-919)
 //!   is not implemented, so the key is left undefined and a value set for it
 //!   is reported as unused. Without `bootstrap.servers` the client then fails
-//!   to build with `ClientUtils`'s "No resolvable bootstrap urls given in
+//!   to build, whatever `bootstrap.resolve.timeout.ms` is, as Java's does:
+//!   with `ClientUtils`'s "No resolvable bootstrap urls given in
 //!   bootstrap.servers", where Java's `KafkaAdminClient.determineBootstrapType`
 //!   says "You must set either bootstrap.servers or bootstrap.controllers".
 //!
@@ -428,7 +429,7 @@ impl AdminClientConfig {
     /// `ConfigDef`'s message, or if a SASL `security.protocol` has an empty
     /// `sasl.mechanism`. An empty `bootstrap.servers` is accepted here, as in
     /// Java; the client built from it fails (see
-    /// [`KafkaAdminClient::new`](crate::admin::KafkaAdminClient::new)).
+    /// [`KafkaAdminClient`](crate::admin::KafkaAdminClient)).
     ///
     /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
     /// returns a
@@ -969,11 +970,9 @@ mod tests {
     }
 
     /// Translated from `AdminClientConfigTest.testDefaultMetadataRecoveryStrategy`.
-    /// Rust needs `bootstrap.servers`: `determineBootstrapType` runs when the
-    /// config is built here (see [`AdminClientConfig::new`]).
     #[test]
     fn test_default_metadata_recovery_strategy() {
-        let config = AdminClientConfig::new(&bootstrap_props()).unwrap();
+        let config = AdminClientConfig::new(&HashMap::new()).unwrap();
         assert_eq!(
             config
                 .get_string(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG)
@@ -985,11 +984,10 @@ mod tests {
     /// Translated from `AdminClientConfigTest.testInvalidMetadataRecoveryStrategy`.
     #[test]
     fn test_invalid_metadata_recovery_strategy() {
-        let mut props = bootstrap_props();
-        props.insert(
+        let props = HashMap::from([(
             CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(),
             "abc".to_string(),
-        );
+        )]);
         let err = AdminClientConfig::new(&props).unwrap_err();
         assert!(err.is_config_error());
         assert!(
