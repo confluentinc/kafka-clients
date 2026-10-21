@@ -28,6 +28,8 @@
 //!
 //! ## Translated
 //!
+//! - `testAdminRebootstrap` (line 56) → `test_admin_rebootstrap`
+//! - `testAdminRebootstrapDisabled` (line 86) → `test_admin_rebootstrap_disabled`
 //! - `testProducerRebootstrap` (line 116) → `test_producer_rebootstrap`
 //! - `testProducerRebootstrapDisabled` (line 151) → `test_producer_rebootstrap_disabled`
 //! - `testConsumerRebootstrap` (line 231) → `test_consumer_rebootstrap`
@@ -37,13 +39,11 @@
 //!
 //! - `testClassicConsumerRebootstrap` / `testClassicConsumerRebootstrapDisabled`
 //!   — classic-protocol arms (`consumer-threading.md` §20).
-//! - `testAdminRebootstrap` / `testAdminRebootstrapDisabled` — not in this
-//!   phase's scope (test-parity PLAN Phase 19 covers the producer and consumer).
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, NewTopic};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
@@ -74,9 +74,20 @@ fn rebootstrap_cluster_config() -> ClusterConfig {
     ]))
 }
 
-/// Java `clusterInstance.admin()`.
-fn admin(bootstrap: &str) -> Box<dyn Admin> {
-    let props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
+/// The `@ClusterTest` of the admin tests: two brokers, one isolated controller
+/// and `offsets.topic.replication.factor=2`. Unlike the producer and consumer
+/// tests, Java does not enable unclean leader election for these.
+fn admin_rebootstrap_cluster_config() -> ClusterConfig {
+    ClusterConfig::kraft_dedicated(REPLICAS as u16, 1).set_server_properties(BTreeMap::from([(
+        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(),
+        "2".to_string(),
+    )]))
+}
+
+/// Java `clusterInstance.admin(overrides)`, bootstrapping against every broker.
+fn admin(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn Admin> {
+    let mut props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
+    props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
@@ -139,6 +150,96 @@ async fn wait_for_one_polled_record(consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>
     }
 }
 
+/// `admin.createTopics(List.of(new NewTopic(TOPIC, PARTITIONS, (short) REPLICAS)))`
+/// with its result ignored, as Java ignores it: with broker 0 down, the topic
+/// cannot get its two replicas, and the tests only need `listTopics` to answer.
+fn create_topic_ignoring_the_result(admin: &dyn Admin, topic: &str) {
+    let _ = admin.create_topics(&[NewTopic::with_num_partitions_replication_factor(
+        topic,
+        Some(PARTITIONS),
+        Some(REPLICAS),
+    )]);
+}
+
+/// Translated from `ClientRebootstrapTest.testAdminRebootstrap`
+/// (`ClientRebootstrapTest.java:56`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_admin_rebootstrap() {
+    let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
+    let topic = ctx.topic(TOPIC);
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let timeout = Duration::from_secs(60);
+
+    ctx.cluster().shutdown_broker(BROKER0).await;
+
+    let admin = admin(&bootstrap, &[]);
+    create_topic_ignoring_the_result(admin.as_ref(), &topic);
+
+    // Only the broker 1 is available for the admin client during the bootstrap.
+    admin
+        .list_topics()
+        .names()
+        .get_with_timeout(timeout)
+        .await
+        .expect("listTopics while only broker 1 is up");
+
+    ctx.cluster().shutdown_broker(BROKER1).await;
+    ctx.cluster().start_broker(BROKER0).await;
+
+    // The broker 1, originally cached during the bootstrap, is offline.
+    // However, the broker 0 from the bootstrap list is online.
+    // Should be able to list topics again.
+    admin
+        .list_topics()
+        .names()
+        .get_with_timeout(timeout)
+        .await
+        .expect("listTopics after rebootstrapping to broker 0");
+    admin.close().await;
+}
+
+/// Translated from `ClientRebootstrapTest.testAdminRebootstrapDisabled`
+/// (`ClientRebootstrapTest.java:86`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_admin_rebootstrap_disabled() {
+    let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
+    let topic = ctx.topic(TOPIC);
+    let bootstrap = ctx.bootstrap_servers().to_string();
+
+    ctx.cluster().shutdown_broker(BROKER0).await;
+
+    let admin = admin(&bootstrap, &[("metadata.recovery.strategy", "none")]);
+    create_topic_ignoring_the_result(admin.as_ref(), &topic);
+
+    // Only the broker 1 is available for the admin client during the bootstrap.
+    admin
+        .list_topics()
+        .names()
+        .get_with_timeout(Duration::from_secs(60))
+        .await
+        .expect("listTopics while only broker 1 is up");
+
+    ctx.cluster().shutdown_broker(BROKER1).await;
+    ctx.cluster().start_broker(BROKER0).await;
+
+    // The broker 1, originally cached during the bootstrap, is offline.
+    // As a result, the admin client will throw a TimeoutException when trying to get list of the topics.
+    //
+    // Java's `KafkaFuture.get(5, SECONDS)` throws `java.util.concurrent.TimeoutException`,
+    // whose Rust counterpart is `Error::LocalTimeout` (see `KafkaFuture::get_with_timeout`).
+    // `names()` is a `then_apply` view of the listings future, which names itself
+    // in the message.
+    match admin.list_topics().names().get_with_timeout(Duration::from_secs(5)).await {
+        Err(err @ Error::LocalTimeout(_)) => assert_eq!(
+            err.to_string(),
+            Error::local_timeout("Timed out waiting for KafkaFuture.then_apply after 5000 ms").to_string()
+        ),
+        other => panic!("expected a local TimeoutException, got {other:?}"),
+    }
+    // Since the brokers cached during the bootstrap are offline, the admin client needs to wait the default timeout for other threads.
+    admin.close_with_timeout(Duration::ZERO).await;
+}
+
 /// Translated from `ClientRebootstrapTest.testProducerRebootstrap`
 /// (`ClientRebootstrapTest.java:116`).
 #[tokio::test(flavor = "multi_thread")]
@@ -147,7 +248,7 @@ async fn test_producer_rebootstrap() {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
-        let admin = admin(&bootstrap);
+        let admin = admin(&bootstrap, &[]);
         create_topic(admin.as_ref(), &topic, PARTITIONS, REPLICAS).await;
         admin.close().await;
     }
@@ -177,7 +278,7 @@ async fn test_producer_rebootstrap_disabled() {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
-        let admin = admin(&bootstrap);
+        let admin = admin(&bootstrap, &[]);
         create_topic(admin.as_ref(), &topic, PARTITIONS, REPLICAS).await;
         admin.close().await;
     }
@@ -220,7 +321,7 @@ async fn consumer_rebootstrap(ctx: &mut TestContext) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
-        let admin = admin(&bootstrap);
+        let admin = admin(&bootstrap, &[]);
         create_topic(admin.as_ref(), &topic, PARTITIONS, REPLICAS).await;
         admin.close().await;
     }
@@ -270,7 +371,7 @@ async fn consumer_rebootstrap_disabled(ctx: &mut TestContext) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
-        let admin = admin(&bootstrap);
+        let admin = admin(&bootstrap, &[]);
         create_topic(admin.as_ref(), &topic, PARTITIONS, REPLICAS).await;
         admin.close().await;
     }
