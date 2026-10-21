@@ -3125,7 +3125,14 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        // Java's reachable failure here is `SslFactory.configure` throwing
+        // `ConfigException` (`SslFactory.java:104-107`) — the missing-argument
+        // `IllegalArgumentException`s in `ChannelBuilders.create` cannot be reached
+        // from a `ConsumerConfig`, which always supplies both sub-configs. So the
+        // class is `ConfigException`, inside the `KafkaException` hierarchy;
+        // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
+        // Same as `KafkaProducer::new` and `KafkaAdminClient`.
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -8763,6 +8770,54 @@ mod tests {
         assert_eq!(
             "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
              alphanumerics, '.', '_' and '-'",
+            cause.message()
+        );
+    }
+
+    /// A channel-builder failure (here an unreadable truststore) is Java's
+    /// `ConfigException` (`SslFactory.java:104-107`), the cause of the
+    /// "Failed to construct kafka consumer" wrap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_builder_failure_is_a_config_error() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("security.protocol".to_string(), "SSL".to_string()),
+            (
+                "ssl.truststore.location".to_string(),
+                "/nonexistent/kafka-clients-test/truststore.pem".to_string(),
+            ),
+        ]);
+        let config = ConsumerConfig::new(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an unreadable truststore must fail construction");
+
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err
+            .kafka_error()
+            .and_then(|e| e.source())
+            .expect("the channel-builder failure is the cause");
+        assert!(cause.is_config_error(), "cause must be a ConfigError, got: {cause:?}");
+        assert!(cause.is_kafka_error(), "{cause:?}");
+        assert!(
+            cause.message().starts_with("Failed to create channel builder: "),
+            "{}",
             cause.message()
         );
     }

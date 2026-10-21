@@ -136,6 +136,12 @@ breaking changes.
   Java's does, and then, in one INFO line, the supplied keys it did not use:
   `These configurations '[a, b]' were supplied but are not used yet.` This
   replaces the warning logged per unknown key.
+- **Breaking (Rust, C API, Python):** a consumer whose channel builder cannot
+  be created (for example an unreadable `ssl.truststore.location`) now fails
+  `KafkaConsumer::new` with a `ConfigError` cause, Java's `ConfigException`,
+  as the producer and the admin client already did, instead of
+  `LocalIllegalArgumentError`; the outer "Failed to construct kafka consumer"
+  error is unchanged.
 
 ### Admin client
 
