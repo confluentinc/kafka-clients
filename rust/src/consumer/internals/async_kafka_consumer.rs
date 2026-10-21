@@ -3114,8 +3114,9 @@ where
         // Java line 433 — `ChannelBuilder channelBuilder =
         // ClientUtils.createChannelBuilder(config, time, logContext)`. Selects
         // the channel builder from `security.protocol` + `ssl.*` / `sasl.*`
-        // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN
-        // only. Errors surface as a `Error` from the ctor (no panic).
+        // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL). SASL mechanism PLAIN
+        // only: `ConsumerConfig` already rejected any other one when it was
+        // built. Errors surface as a `Error` from the ctor (no panic).
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol,
             Some(&config.ssl_config),

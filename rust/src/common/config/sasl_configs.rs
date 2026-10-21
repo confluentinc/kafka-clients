@@ -20,6 +20,12 @@
 //! scope for the current milestone). For SASL PLAIN we only need a minimal
 //! subset.
 //!
+//! `sasl.mechanism` keeps Java's definition and its `GSSAPI` default, but PLAIN
+//! is the only mechanism this client implements: under a SASL
+//! `security.protocol` the client configurations reject any other value when
+//! they are built (`CommonClientConfigs::post_validate_supported_sasl_mechanism`),
+//! so `sasl.mechanism=PLAIN` must be set explicitly.
+//!
 //! **Excluded Java constants (out of scope):**
 //! - All `SASL_KERBEROS_*` — Kerberos not supported
 //! - All `SASL_OAUTHBEARER_*` — OAuth not supported

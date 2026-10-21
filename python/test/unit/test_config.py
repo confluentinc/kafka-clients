@@ -225,6 +225,26 @@ def test_bad_number_text_reaches_the_core() -> None:
     assert str(exc.value).startswith("Invalid value abc for configuration linger.ms")
 
 
+def test_unsupported_sasl_mechanism_is_rejected_by_the_core() -> None:
+    # PLAIN is the only SASL mechanism the core implements: under a SASL
+    # security.protocol any other one, Java's GSSAPI default included, fails
+    # the client's construction with the core's LocalUnsupportedOperationError.
+    from confluent_kafka import UnsupportedOperationError
+    from confluent_kafka.producer import KafkaProducer
+
+    with pytest.raises(UnsupportedOperationError) as exc:
+        KafkaProducer(configs={"bootstrap.servers": "localhost:1",
+                               "security.protocol": "SASL_PLAINTEXT",
+                               "sasl.mechanism": "SCRAM-SHA-256"})
+    assert str(exc.value) == (
+        "SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only PLAIN is")
+    with pytest.raises(UnsupportedOperationError) as exc:
+        KafkaProducer(configs={"bootstrap.servers": "localhost:1",
+                               "security.protocol": "SASL_SSL"})
+    assert str(exc.value) == (
+        "SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is")
+
+
 def test_prepare_uses_the_client_config_def() -> None:
     assert "max.poll.records" in _config_types.CONSUMER
     assert "max.poll.records" not in _config_types.PRODUCER

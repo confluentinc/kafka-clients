@@ -235,6 +235,19 @@ breaking changes.
   to change. Code that held a `Box<dyn DynSerializer<K>>` passes the serializer
   itself to the constructor; code that implemented `Serializer` or
   `Deserializer` is unaffected.
+- **Breaking (Rust, C API, Python):** under a SASL `security.protocol`
+  (`SASL_PLAINTEXT`, `SASL_SSL`), a `sasl.mechanism` other than `PLAIN`, the
+  one mechanism this client implements, now fails `ProducerConfig::new`,
+  `ConsumerConfig::new` and `AdminClientConfig::new` (and so the clients'
+  constructors) with `LocalUnsupportedOperationError`
+  `SASL mechanism '<m>' is not supported by this client; only PLAIN is`,
+  instead of failing at authentication. For SCRAM over `SASL_PLAINTEXT` the old
+  path sent the password in cleartext as a PLAIN token before the broker
+  rejected it. `sasl.mechanism` keeps Java's `GSSAPI` default, so a SASL
+  configuration that leaves it unset now fails at construction with this
+  clear error, naming `GSSAPI`, instead of a misleading "requires a username"
+  or a broker-side handshake failure: set `sasl.mechanism=PLAIN`. An empty
+  mechanism keeps Java's `ConfigError`.
 
 ### C API
 

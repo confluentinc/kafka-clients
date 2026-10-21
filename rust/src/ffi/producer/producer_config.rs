@@ -448,7 +448,9 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_destroy(self_: *mut kafka
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
+    use crate::ffi::common::{
+        kafka_common_Error__enum, kafka_common_Error_destroy, kafka_common_Error_e, kafka_common_Error_message,
+    };
     use crate::ffi::producer::round_robin_partitioner::{
         kafka_producer_RoundRobinPartitioner__as_Partitioner, kafka_producer_RoundRobinPartitioner_destroy,
         kafka_producer_RoundRobinPartitioner_new,
@@ -678,5 +680,34 @@ mod tests {
             kafka_producer_RoundRobinPartitioner_destroy(partitioner);
             kafka_producer_ProducerConfig_destroy(std::ptr::null_mut());
         }
+    }
+
+    /// A SASL `security.protocol` with a mechanism other than `PLAIN` fails
+    /// `new` with `LOCAL_UNSUPPORTED_OPERATION`, Java's
+    /// `UnsupportedOperationException`.
+    #[test]
+    fn new_rejects_an_unsupported_sasl_mechanism() {
+        let props = box_string_map([
+            ("bootstrap.servers", "localhost:9092"),
+            ("security.protocol", "SASL_PLAINTEXT"),
+            ("sasl.mechanism", "SCRAM-SHA-256"),
+        ]);
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a valid slot pointing at null, the map is destroyed once
+        // after `new` copied it, and the error is read and then destroyed once by `take_error`.
+        unsafe {
+            let out = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            kafka_Map_destroy(props);
+            assert!(out.is_null());
+            assert!(!err.is_null());
+            assert_eq!(
+                kafka_common_Error__enum(err),
+                kafka_common_Error_e::kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION
+            );
+        }
+        assert_eq!(
+            take_error(&mut err),
+            "SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only PLAIN is"
+        );
     }
 }

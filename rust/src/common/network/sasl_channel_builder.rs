@@ -20,7 +20,9 @@
 //! `PlaintextTransportLayer` (for `SASL_PLAINTEXT`) or `SslTransportLayer`
 //! (for `SASL_SSL`), paired with a `SaslClientAuthenticator`.
 //!
-//! This is a simplified client-only translation that supports PLAIN mechanism.
+//! This is a simplified client-only translation that supports the PLAIN
+//! mechanism only; the client configurations reject any other `sasl.mechanism`
+//! when they are built (`CommonClientConfigs::post_validate_supported_sasl_mechanism`).
 //! Server-side logic (JAAS contexts, callback handlers, login managers) is omitted.
 
 use super::ChannelBuilder;

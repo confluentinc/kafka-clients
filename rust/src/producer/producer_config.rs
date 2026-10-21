@@ -1177,6 +1177,7 @@ impl ProducerConfig {
     ) -> Result<ConfigMap, Error> {
         let log_lines = resolved_client_id.is_none();
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
+        CommonClientConfigs::post_validate_supported_sasl_mechanism(config)?;
         CommonClientConfigs::warn_disabling_exponential_backoff(config, log_lines)?;
         let mut refined_configs =
             CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values(), log_lines);
@@ -2431,6 +2432,8 @@ mod tests {
     fn test_case_insensitive_security_protocol() {
         let mut props = base_props();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        // Only `PLAIN` is accepted under a SASL protocol (`post_validate_supported_sasl_mechanism`).
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.security_protocol, SecurityProtocol::SaslSsl);
@@ -2450,6 +2453,65 @@ mod tests {
         assert_eq!(config.sasl_config.mechanism, "PLAIN");
         assert_eq!(config.sasl_config.resolve_username(), Some("alice"));
         assert_eq!(config.sasl_config.resolve_password(), Some("secret"));
+    }
+
+    /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
+    /// a SASL `security.protocol` needs `sasl.mechanism=PLAIN`; any other
+    /// mechanism, the `GSSAPI` default included, fails the build with
+    /// `LocalUnsupportedOperationError`, while an empty one keeps Java's
+    /// `ConfigError`. Under `PLAINTEXT` the mechanism is inert, as in Java.
+    #[test]
+    fn test_unsupported_sasl_mechanism_rejected() {
+        let jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password=\"p\";";
+        let build = |extra: &[(&str, &str)]| {
+            let mut props = base_props();
+            for (k, v) in extra {
+                props.insert((*k).to_string(), (*v).to_string());
+            }
+            ProducerConfig::new(&props)
+        };
+
+        let err = build(&[
+            ("security.protocol", "SASL_PLAINTEXT"),
+            ("sasl.mechanism", "SCRAM-SHA-256"),
+            ("sasl.jaas.config", jaas),
+        ])
+        .unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "LocalUnsupportedOperationError: SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only \
+             PLAIN is"
+        );
+
+        // The default mechanism is Java's `GSSAPI`.
+        let err = build(&[("security.protocol", "SASL_SSL")]).unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "LocalUnsupportedOperationError: SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is"
+        );
+
+        // Case-sensitive, as Java's mechanism names are.
+        let err = build(&[("security.protocol", "SASL_PLAINTEXT"), ("sasl.mechanism", "plain")]).unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+
+        build(&[("security.protocol", "PLAINTEXT")]).unwrap();
+        build(&[
+            ("security.protocol", "SASL_PLAINTEXT"),
+            ("sasl.mechanism", "PLAIN"),
+            ("sasl.jaas.config", jaas),
+        ])
+        .unwrap();
+
+        // An empty mechanism fails Java's check first.
+        let err = build(&[("security.protocol", "SASL_PLAINTEXT"), ("sasl.mechanism", "")]).unwrap_err();
+        assert!(err.is_config_error(), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "ConfigError: Invalid value null for configuration sasl.mechanism: When the security.protocol \
+             configuration enables SASL, mechanism must be non-null and non-empty string."
+        );
     }
 
     #[test]

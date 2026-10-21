@@ -368,7 +368,8 @@ impl KafkaAdminClient {
     ///
     /// Mirrors `KafkaAdminClient.createInternal`. Selects the channel builder
     /// from `security.protocol` + `ssl.*` / `sasl.*` (PLAINTEXT / SSL /
-    /// SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN only.
+    /// SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN only, any other one
+    /// being rejected when the `AdminClientConfig` is built.
     ///
     /// # Errors
     ///
@@ -445,7 +446,7 @@ impl KafkaAdminClient {
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
         // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
-        // PLAIN only. Mirrors `ClientUtils.createChannelBuilder(config, time,
+        // PLAIN only (`AdminClientConfig` rejected any other one). Mirrors `ClientUtils.createChannelBuilder(config, time,
         // logContext)` as used by `KafkaAdminClient.createInternal`.
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol(),

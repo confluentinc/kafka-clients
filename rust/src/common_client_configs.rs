@@ -322,6 +322,44 @@ impl CommonClientConfigs {
         }
         Ok(())
     }
+
+    /// Rust-only, no Java counterpart: a SASL `security.protocol` needs
+    /// `sasl.mechanism` to be `PLAIN`, the one mechanism this client
+    /// implements. It runs after [`Self::post_validate_sasl_mechanism_config`],
+    /// so an empty mechanism keeps Java's error.
+    ///
+    /// The Java client supports every standard mechanism (`GSSAPI`, `PLAIN`,
+    /// `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`) through
+    /// `javax.security.sasl`; this client's authenticator only builds a PLAIN
+    /// token. Another mechanism is therefore rejected when the configuration
+    /// is built, before any credential is read or any byte is sent: accepted,
+    /// it would be named in the handshake and then answered with a PLAIN
+    /// token, which for SCRAM over `SASL_PLAINTEXT` sends the password in
+    /// cleartext (DoD #7). Mechanism names are compared case-sensitively, as
+    /// Java's are. Under any other `security.protocol` the key is inert, as in
+    /// Java.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalUnsupportedOperation`] `SASL mechanism '<m>' is not
+    /// supported by this client; only PLAIN is`, or the error of a getter.
+    pub(crate) fn post_validate_supported_sasl_mechanism(config: &AbstractConfig) -> Result<(), Error> {
+        let security_protocol = config
+            .get_string(Self::SECURITY_PROTOCOL_CONFIG)?
+            .and_then(SecurityProtocol::for_name);
+        if !matches!(
+            security_protocol,
+            Some(SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl)
+        ) {
+            return Ok(());
+        }
+        match config.get_string(SaslConfigs::SASL_MECHANISM)? {
+            Some(mechanism) if mechanism != "PLAIN" => Err(Error::local_unsupported_operation(format!(
+                "SASL mechanism '{mechanism}' is not supported by this client; only PLAIN is"
+            ))),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Java's `long x = config.getLong(key)`. A `null` value fails Java's
