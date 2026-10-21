@@ -6,11 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "confluent-kafka"
 version = "4.4.0a1.dev1"
 description = "Python bindings for the Confluent Kafka Rust client"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Confluent Inc."}
 ]
+
+[project.urls]
+Repository = "https://github.com/confluentinc/kafka-clients"
 
 [project.optional-dependencies]
 # No PyPI confluent-kafka here: it installs the same top-level package
@@ -30,13 +34,11 @@ dev = [
 
 [tool.setuptools]
 # The ``confluent_kafka`` package, one module per Java package (CLAUDE.md,
-# Python Binding Conventions, Modules). The legacy
-# top-level ``producer.py`` / ``consumer.py`` / ``_error_code.py`` modules were
-# retired in P6 once the package covered their surface; the remaining top-level
-# modules are the gRPC integration-test
-# servers (``grpc_server`` / ``grpc_server_async`` / ``grpc_translate``, and
-# ``grpc_chaos`` with the chaos-harness workloads both servers serve), which
-# now import the ``confluent_kafka`` package.
+# Python Binding Conventions, Modules), and nothing else. The gRPC
+# integration-test servers next to it (``grpc_server``, ``grpc_server_async``,
+# ``grpc_translate``, ``grpc_chaos``) are not installed: they need ``grpc`` and
+# generated ``*_pb2`` modules the wheel does not ship, the Docker images copy
+# them in, and their unit test imports them from this directory.
 packages = [
     "confluent_kafka",
     "confluent_kafka.admin",
@@ -52,7 +54,6 @@ packages = [
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ]
-py-modules = ["grpc_chaos", "grpc_server", "grpc_server_async", "grpc_translate"]
 
 [tool.setuptools.package-data]
 # The generated error modules' .pyi stubs, and the PEP 561 marker: the package

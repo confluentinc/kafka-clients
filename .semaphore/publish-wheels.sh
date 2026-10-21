@@ -258,9 +258,8 @@ if problems:
     sys.exit("\n".join(problems))
 PYTHON
 
-    # `twine check` checks the metadata of each wheel as the index will. It
-    # warns that the package has no long description, which does not block the
-    # upload.
+    # `twine check` checks the metadata of each wheel as the index will,
+    # including that the long description (python/README.md) renders.
     python -m pip install twine==6.1.0 || refuse "could not install twine"
     python -m twine check "${work}/upload"/*.whl || refuse "twine check failed"
 
