@@ -18,18 +18,23 @@
 #           transactional only:
 #             RECORDS_PER_TRANSACTION  ABORT_RATE (0 to 1, e.g. 0.5)
 #             NUM_TRANSACTIONAL_PRODUCERS  TXN_MODE (produce|eos; eos needs LIMIT_RPS > 0)
-#           consumer only (LIMIT_RPS > 0: the clients read a load Kafka's
-#           kafka-producer-perf-test.sh produces at that rate, with VALUE_SIZE
-#           and COMPRESSION_TYPE; unset settings keep the client defaults):
+#           consumer only (the clients read a load Kafka's
+#           kafka-producer-perf-test.sh produces at LIMIT_RPS, with VALUE_SIZE
+#           and COMPRESSION_TYPE; LIMIT_RPS=0, as fast as it can, is for the
+#           python group only; unset settings keep the client defaults):
 #             FETCH_MIN_BYTES (B)  FETCH_MAX_WAIT_MS  MAX_PARTITION_FETCH_BYTES (B)
 #             MAX_POLL_RECORDS
+#             LIBRDKAFKA_BATCH how the librdkafka clients alone read: 0 polls
+#                              one record at a time (poll()), N consumes
+#                              batches of N (consume_batch); unset, batches of
+#                              MAX_POLL_RECORDS (500 by default)
 #           Unset settings take each harness's own default (these differ, e.g.
 #           MAX_IN_FLIGHT); set them to pin them. With the librdkafka (C)
 #           client, BATCH_SIZE must be at least 1024: below it the C harnesses
 #           use 1 MiB batches.
 #
 # `cargo xtask perf-cloud check --group G --tests ID,ID` validates a list and
-# prints its time estimate.
+# prints its time estimate. batches.txt names lists of these tests.
 
 # 10k msg/s of 1 KiB values (~10 MB/s): latency at a fixed, comfortable load.
 producer-fixed-10k-1kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024
@@ -46,3 +51,28 @@ txn-fixed-10k-1kb-200p       rust,python  WORKLOAD=transactional PARTITIONS=200 
 # 10k msg/s of 1 KiB values read as they are produced: end-to-end latency, CPU
 # and memory of the consumers at a fixed load, with the client defaults.
 consumer-fixed-10k-1kb-200p  rust,python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000
+
+# 100k msg/s of 1 KiB values (~102 MB/s): latency at a high fixed load.
+producer-fixed-100k-1kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=100000 BATCH_SIZE=1024
+
+# Unbounded lz4-compressed 1 KiB values into 36 partitions: compression's cost
+# at peak throughput.
+producer-max-1kb-36p-lz4  rust,python  PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 BATCH_SIZE=1024 COMPRESSION_TYPE=lz4
+
+# Unbounded 1 KiB values with 100 B keys: the keyed partitioning path.
+producer-max-1kb-200p-key100b  rust,python  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024
+
+# 1 KiB values produced as fast as one producer can and read as they are
+# produced, the librdkafka clients polling one record at a time: end-to-end
+# latency at the highest load. Python only: the other consumer harnesses count
+# their warmup in records at a fixed rate.
+consumer-max-1kb-200p-librdkafka-poll  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 LIBRDKAFKA_BATCH=0
+
+# 500 msg/s of 10 KiB values (~5 MB/s), the librdkafka clients polling one
+# record at a time: end-to-end latency of larger records at a low load.
+consumer-fixed-500-10kb-200p-librdkafka-poll  rust,python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=10240 LIMIT_RPS=500 LIBRDKAFKA_BATCH=0
+
+# The unbounded load with fetches tuned for throughput: 4 MiB fetch.min.bytes
+# and max.partition.fetch.bytes, the Rust-backed clients polling up to 4,500
+# records, the librdkafka ones consuming batches of 4,000. Python only, as above.
+consumer-max-1kb-200p-fetch-tuned  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
