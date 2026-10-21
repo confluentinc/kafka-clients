@@ -9441,7 +9441,7 @@ mod tests {
 
     /// `buffer.memory=0` builds a producer, as Java's `atLeast(0)` validator
     /// and `BufferPool` constructor allow, and each send fails in
-    /// `ensureValidRecordSize` (`KafkaProducer.java:1243-1251`) with Java's
+    /// `ensureValidRecordSize` (`KafkaProducer.java:1243-1253`) with Java's
     /// message, under both allocation strategies. Construction used to panic
     /// with "Buffer pool memory must be positive".
     #[tokio::test(flavor = "multi_thread")]
@@ -9470,6 +9470,11 @@ mod tests {
             let producer =
                 KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
                     .expect("a producer with no buffer memory constructs");
+            assert_eq!(
+                strategy == ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+                producer.chunked_accumulator.is_some(),
+                "{strategy}: the accumulator this strategy selects"
+            );
             let future = producer
                 .send(ProducerRecord::new(TOPIC.to_string(), Some("value".to_string())))
                 .await
