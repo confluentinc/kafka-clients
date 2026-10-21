@@ -93,6 +93,17 @@ impl Wake for ConnectWaker {
     }
 }
 
+/// The WARN logged when the channel cannot be built after the handshake finished: Java's
+/// `NetworkClient.initiateConnect` line for a `connect()` that threw, with the cause.
+///
+/// Tests assert on this text instead of capturing the log (the `log` crate's logger is
+/// process-wide). The item-level `deny(dead_code)` fails the non-test build if the WARN stops
+/// calling this function.
+#[deny(dead_code)]
+fn channel_build_failure_message(id: &str, cause: &io::Error) -> String {
+    format!("Error connecting to node {id}: {cause}")
+}
+
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
 ///
 /// This is the data structure that gives the selector Java NIO
@@ -540,7 +551,7 @@ impl Selector {
                     // Java builds the channel inside `connect()`, so this failure is thrown to
                     // `NetworkClient.initiateConnect`, which logs it at warn with its cause.
                     Err(e) => {
-                        kafka_warn!(self.log_context, "Error connecting to node {}: {}", id, e);
+                        kafka_warn!(self.log_context, "{}", channel_build_failure_message(&id, &e));
                         self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
                     },
                 },
@@ -2710,22 +2721,6 @@ mod tests {
         selector.close().await;
     }
 
-    static CAPTURED_LOGS: StdMutex<Vec<(log::Level, String)>> = StdMutex::new(Vec::new());
-
-    struct CapturingLogger;
-
-    impl log::Log for CapturingLogger {
-        fn enabled(&self, _metadata: &log::Metadata) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record) {
-            CAPTURED_LOGS.lock().unwrap().push((record.level(), record.args().to_string()));
-        }
-
-        fn flush(&self) {}
-    }
-
     struct FailingChannelBuilder;
 
     impl ChannelBuilder for FailingChannelBuilder {
@@ -2746,17 +2741,20 @@ mod tests {
     /// Java builds the channel inside `connect()`, so a failure there reaches
     /// `NetworkClient.initiateConnect`, which logs it at WARN with its cause. A failure to build the
     /// channel after the handshake must not be reduced to a debug line.
+    ///
+    /// The log line itself is not captured: the `log` crate's logger is process-wide and can be
+    /// installed only once, and the `ffi` tests install `env_logger` into this same test binary
+    /// (the same reason `NetworkClient`'s redaction test gives). So the test asserts on the exact
+    /// text of `channel_build_failure_message`, which the WARN writes, for the very failure the
+    /// selector then reports as a disconnect. The function's `#[deny(dead_code)]` fails the
+    /// non-test build if the WARN stops calling it.
     #[tokio::test]
     async fn test_channel_build_failure_is_logged_at_warn_with_its_cause() {
-        log::set_logger(&CapturingLogger).ok();
-        log::set_max_level(log::LevelFilter::Warn);
-
         let server = EchoServer::new().await.unwrap();
-        let log_context = LogContext::new("[selector-build-failure-test] ");
-        let mut selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::new(
+            super::NetworkReceive::UNLIMITED,
             CONNECTION_MAX_IDLE_MS,
             Box::new(FailingChannelBuilder),
-            log_context,
         );
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         selector
@@ -2775,12 +2773,10 @@ mod tests {
             ChannelState::NOT_CONNECTED,
             *selector.disconnected().get("0").expect("the failure is reported")
         );
-        let logs = CAPTURED_LOGS.lock().unwrap();
-        assert!(
-            logs.iter().any(|(level, message)| *level == log::Level::Warn
-                && message.starts_with("[selector-build-failure-test] ")
-                && message.contains("Error connecting to node 0: channel builder exploded")),
-            "expected a WARN with the cause, got: {logs:?}"
+        let cause = io::Error::other("channel builder exploded");
+        assert_eq!(
+            "Error connecting to node 0: channel builder exploded",
+            channel_build_failure_message("0", &cause)
         );
     }
 
