@@ -2213,10 +2213,16 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
     assert_error_message(err, "Not implemented yet");
     kafka_Map_destroy(values);
     /* `all()` surfaces one of the per-key failures; which one follows the
-     * map's key order, which is not part of the contract. */
+     * map's key order, which is not part of the contract (Java's
+     * `KafkaFuture.allOf` reports the first failure in its futures' HashMap
+     * order). The two failures are not one family: the unknown topic's is an
+     * `ApiException`, the logger's an `UnsupportedOperationException`, so
+     * accept either of them rather than a common predicate. */
     kafka_common_KafkaFuture_t *all = kafka_admin_DescribeConfigsResult_all(result);
     kafka_common_Error_t *all_err = get_err(all);
-    TEST_ASSERT_TRUE(kafka_common_Error_is_api_error(all_err));
+    const int32_t all_code = kafka_common_Error__enum(all_err);
+    TEST_ASSERT_TRUE(all_code == kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION ||
+                     all_code == kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION);
     kafka_common_Error_destroy(all_err);
     kafka_common_KafkaFuture_destroy(all);
     kafka_admin_DescribeConfigsResult_destroy(result);
