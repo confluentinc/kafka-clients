@@ -26,6 +26,7 @@ use super::Config;
 /// The result of the `Admin::describe_configs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult")]
 pub struct DescribeConfigsResult {
     futures: HashMap<ConfigResource, KafkaFuture<Config>>,

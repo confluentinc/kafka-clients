@@ -21,7 +21,7 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from confluent_kafka import _throwable
 from confluent_kafka._args import MISSING
@@ -33,6 +33,8 @@ class UnsupportedOperationError(NotImplementedError):
     """Java's built-in ``java.lang.UnsupportedOperationException``."""
 
     __module__ = "confluent_kafka"
+
+    _ffi_id: ClassVar[int] = -31  # kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION
 
     def __init__(
         self,

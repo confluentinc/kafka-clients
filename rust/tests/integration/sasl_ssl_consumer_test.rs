@@ -142,8 +142,8 @@ fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> Producer
 async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build SASL_SSL test producer");
 
@@ -206,8 +206,8 @@ async fn test_sasl_ssl_consume_records() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, SASL_PASSWORD),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed for SASL_SSL");
 
@@ -247,8 +247,8 @@ async fn test_sasl_ssl_wrong_credentials() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, "wrong-password"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed (config is structurally valid)");
 

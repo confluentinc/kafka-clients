@@ -27,7 +27,9 @@
 //! through the `&mut self` dispatch surface. `wakeup()` is callable from
 //! any task because it takes `&self` and uses an atomic flag.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -75,6 +77,20 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 /// constructor only forwards `offsetResetStrategy.toString()`, so Rust callers
 /// pass the `auto.offset.reset` string (`"earliest"`, `"latest"`, `"none"`) to
 /// [`MockConsumer::new`] instead.
+///
+/// # Threads
+///
+/// Like [`KafkaConsumer`](crate::consumer::KafkaConsumer), the mock is `Send`
+/// but not `Sync` (`consumer-threading.md` §2): it can move to another task,
+/// but it cannot be shared between them. Another task reaches it through
+/// [`Consumer::handle`].
+///
+/// ```compile_fail,E0277
+/// use confluent_kafka::consumer::MockConsumer;
+///
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<MockConsumer<String, String>>();
+/// ```
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
@@ -121,6 +137,19 @@ pub struct MockConsumer<K, V> {
     should_rebalance: Arc<AtomicBool>,
     /// `i64::MAX` is the "no cap" sentinel mirroring Java's `Long.MAX_VALUE`.
     max_poll_records: i64,
+    /// Zero-sized: keeps the mock `Send` and makes it `!Sync` whatever its
+    /// other fields are, as `KafkaConsumer` (see `Threads` above).
+    not_sync: PhantomData<Cell<()>>,
+}
+
+impl<K, V> std::fmt::Debug for MockConsumer<K, V> {
+    /// Whether the mock is closed; the records and offsets it holds are not
+    /// printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockConsumer")
+            .field("closed", &self.closed())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<K, V> MockConsumer<K, V> {
@@ -158,6 +187,7 @@ impl<K, V> MockConsumer<K, V> {
             closed: Arc::new(AtomicBool::new(false)),
             should_rebalance: Arc::new(AtomicBool::new(false)),
             max_poll_records: i64::MAX,
+            not_sync: PhantomData,
         }
     }
 
@@ -568,6 +598,19 @@ impl<K, V> MockConsumer<K, V> {
                 ConsumerNoOffsetForPartitionError::new(tp.clone()),
             ))
         }
+    }
+}
+
+/// Rust-only: releases the rebalance listener. A listener that captured
+/// [`Consumer::handle`] holds the shared `SubscriptionState` through the
+/// handle, and that state stores the listener, so without this the cycle would
+/// outlive the mock; Java's garbage collector frees the same graph. The
+/// release waits for the drop rather than `close()`, because Java's
+/// `rebalance` and `losePartitions` still run the listener on a closed mock
+/// (`MockConsumer.java:129-172` make no `ensureNotClosed()` check).
+impl<K, V> Drop for MockConsumer<K, V> {
+    fn drop(&mut self) {
+        self.subs().register_rebalance_listener(None);
     }
 }
 
@@ -1037,12 +1080,12 @@ where
         &mut self,
         _timestamps_to_search: HashMap<TopicPartition, i64>,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        // Java line 534-537 throws UnsupportedOperationException("Not
-        // implemented yet."). Rust analog is Error::unsupported_version
-        // (`admin-client.md` §9). That rule requires a *faithful* translation
-        // and DoD #3 makes the message text part of the contract, so the text
-        // is Java's verbatim rather than a Rust-side restatement.
-        Err(Error::unsupported_version("Not implemented yet."))
+        // Java throws UnsupportedOperationException("Not implemented yet.")
+        // (`MockConsumer.java:611`), translated as Error::LocalUnsupportedOperation
+        // (`admin-client.md` §9). DoD #3 makes the message text part of the
+        // contract, so the text is Java's verbatim rather than a Rust-side
+        // restatement.
+        Err(Error::local_unsupported_operation("Not implemented yet."))
     }
 
     async fn offsets_for_times_with_timeout(
@@ -1302,7 +1345,8 @@ mod tests {
     use super::*;
 
     /// `MockConsumer` has the same thread shape as `KafkaConsumer`: it can
-    /// move to another task but not be shared (`consumer-threading.md` §2).
+    /// move to another task but not be shared (`consumer-threading.md` §2),
+    /// through its `not_sync` marker.
     #[test]
     fn mock_consumer_is_send_and_not_sync() {
         use crate::test_thread_safety::{is_send, is_sync};
@@ -1454,11 +1498,9 @@ mod tests {
 
     /// Java's `MockConsumer.offsetsForTimes` throws
     /// `UnsupportedOperationException("Not implemented yet.")`
-    /// (`MockConsumer.java:610-612`). The message text is part of the contract
-    /// (DoD #3), and `admin-client.md` §9 sanctions the
-    /// `UnsupportedOperationException` -> `unsupported_version` mapping only as
-    /// a *faithful* translation — so the text must be Java's, not a Rust-side
-    /// restatement.
+    /// (`MockConsumer.java:611`), translated as
+    /// [`Error::LocalUnsupportedOperation`]. The message text is part of the
+    /// contract (DoD #3), so it must be Java's, not a Rust-side restatement.
     #[tokio::test]
     async fn offsets_for_times_reports_javas_not_implemented_message() {
         let mut consumer: MockConsumer<String, String> =
@@ -1467,6 +1509,7 @@ mod tests {
             .offsets_for_times(HashMap::new())
             .await
             .expect_err("Java's mock does not implement this");
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
         assert_eq!("Not implemented yet.", err.message());
     }
 
@@ -1718,6 +1761,60 @@ mod tests {
         // The commit recorded the consumed position (read directly: the
         // mock's `committed()` answers 0 for a partition no longer assigned).
         assert_eq!(*c.lock_committed(), offsets(&tp, 2));
+    }
+
+    /// A listener that captured the mock's handle is freed with the mock, and
+    /// until the drop it still runs on a closed mock, as Java's `rebalance`
+    /// makes no `ensureNotClosed()` check (`MockConsumer.java:129-145`).
+    #[tokio::test]
+    async fn listener_capturing_the_handle_is_freed_with_the_mock() {
+        struct Sentinel(Arc<AtomicBool>);
+        impl Drop for Sentinel {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct HandleListener {
+            _handle: ConsumerHandle,
+            _sentinel: Sentinel,
+            assigned: Arc<Mutex<Vec<TopicPartition>>>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for HandleListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                self.assigned.lock().unwrap().extend_from_slice(partitions);
+                Ok(())
+            }
+        }
+
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let assigned = Arc::new(Mutex::new(Vec::new()));
+        let subscriptions = Arc::downgrade(&c.subscriptions);
+        c.subscribe_with_topics_listener(
+            vec!["test".to_string()],
+            Arc::new(HandleListener {
+                _handle: c.handle(),
+                _sentinel: Sentinel(Arc::clone(&dropped)),
+                assigned: Arc::clone(&assigned),
+            }),
+        )
+        .await
+        .expect("subscribe");
+        c.close().await.expect("close");
+
+        let tp = tp_of("test");
+        c.rebalance(std::slice::from_ref(&tp)).await.expect("rebalance");
+        assert_eq!(*assigned.lock().unwrap(), vec![tp]);
+        assert!(!dropped.load(Ordering::SeqCst), "the listener is released only by the drop");
+
+        drop(c);
+        assert!(dropped.load(Ordering::SeqCst), "listener still referenced");
+        assert_eq!(0, subscriptions.strong_count(), "SubscriptionState still referenced");
     }
 
     /// An error the callback returns (Java's `onComplete` throwing) propagates

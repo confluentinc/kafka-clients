@@ -23,6 +23,8 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::util::into_c_string;
+use std::ffi::c_char;
 use std::time::Duration;
 
 use crate::consumer::{CloseOptions, GroupMembershipOperation};
@@ -152,6 +154,22 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__e
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
+}
+
+/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
+/// with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_to_string(
+    self_: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out and its name copied into an owned string.
+    into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
 /// `CloseOptions.timeout(Duration timeout)`, the static factory: an owned

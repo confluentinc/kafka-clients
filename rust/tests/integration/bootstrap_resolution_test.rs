@@ -71,8 +71,8 @@ async fn test_producer_unresolvable_bootstrap_with_positive_timeout() {
     ]);
     let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         ProducerConfig::new(&props).expect("valid config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -102,8 +102,8 @@ async fn test_consumer_unresolvable_bootstrap_with_positive_timeout() {
     ]);
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("a positive timeout defers resolution, so construction succeeds");
     consumer
@@ -182,8 +182,8 @@ async fn test_clients_bootstrap_asynchronously_with_positive_timeout() {
     async_bootstrap(&mut producer_props);
     let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         ProducerConfig::new(&producer_props).expect("valid config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("producer");
     let record = ProducerRecord::with_key(topic.clone(), Some(b"key".to_vec()), Some(b"value".to_vec()));
@@ -202,8 +202,8 @@ async fn test_clients_bootstrap_asynchronously_with_positive_timeout() {
     consumer_props.insert("auto.offset.reset".to_string(), "earliest".to_string());
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&consumer_props).expect("valid config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("consumer");
     consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");

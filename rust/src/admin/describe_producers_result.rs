@@ -24,7 +24,7 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 /// The producer state of a single partition.
 ///
 /// Corresponds to `DescribeProducersResult.PartitionProducerState`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState")]
 pub struct PartitionProducerState {
     active_producers: Vec<ProducerState>,

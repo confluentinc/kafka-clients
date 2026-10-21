@@ -19,7 +19,7 @@
 /// A description of a replica on a particular broker.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ReplicaInfo`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo")]
 pub struct ReplicaInfo {
     size: i64,

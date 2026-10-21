@@ -455,8 +455,9 @@ static void test_mock_consumer_concurrency_guard(void) {
     err = NULL;
 
     /* The state reads take the guard too, as Java's acquireAndEnsureOpen():
-     * rejected, returning the failure value (NULL; -1 for current_lag, which
-     * is also the empty lag, so the error is what tells them apart). */
+     * rejected, returning the failure value (NULL; 0 for current_lag, which
+     * is also the empty lag, so the error is what tells them apart, and
+     * *out_lag is left unwritten). */
     kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer, &err);
     assert_concurrent_modification(err);
     err = NULL;
@@ -469,10 +470,12 @@ static void test_mock_consumer_concurrency_guard(void) {
     assert_concurrent_modification(err);
     err = NULL;
     TEST_ASSERT_NULL(paused);
-    int64_t lag = kafka_consumer_Consumer_current_lag(f.consumer, tp, &err);
+    int64_t lag = 7;
+    int8_t lag_present = kafka_consumer_Consumer_current_lag(f.consumer, tp, &lag, &err);
     assert_concurrent_modification(err);
     err = NULL;
-    TEST_ASSERT_EQUAL_INT64(-1, lag);
+    TEST_ASSERT_EQUAL_INT8(0, lag_present);
+    TEST_ASSERT_EQUAL_INT64(7, lag);
     kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(f.consumer, &err);
     assert_concurrent_modification(err);
     err = NULL;
@@ -1343,17 +1346,33 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     kafka_consumer_Consumer_current_lag_cb(f.consumer, tp, on_lag, &done);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
     TEST_ASSERT_NULL(done.error);
+    TEST_ASSERT_EQUAL_INT8(1, done.present);
     TEST_ASSERT_EQUAL_INT64(55, done.value);
+
+    /* A position past the log end gives a negative lag, still present: no
+     * value of the lag could stand for Java's empty OptionalLong. */
+    kafka_common_Error_t *seek_err = NULL;
+    kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 60, &seek_err);
+    assert_ok(seek_err, "seek");
+    TEST_ASSERT_EQUAL_INT64(-5, consumer_current_lag(f.consumer, tp));
+    lag_completion_init(&done);
+    kafka_consumer_Consumer_current_lag_cb(f.consumer, tp, on_lag, &done);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
+    TEST_ASSERT_NULL(done.error);
+    TEST_ASSERT_EQUAL_INT8(1, done.present);
+    TEST_ASSERT_EQUAL_INT64(-5, done.value);
     kafka_common_TopicPartition_destroy(tp);
 
     /* An unassigned partition: caught up while no end offset is set; with one,
      * Java's position(tp) throws IllegalArgumentException, so the blocking
-     * form returns -1 beside the error and the twin delivers it. */
+     * form returns 0 beside the error and the twin delivers it. */
     kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("test", 9);
     TEST_ASSERT_EQUAL_INT64(0, consumer_current_lag(f.consumer, other));
     update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 9, 5);
     kafka_common_Error_t *err = NULL;
-    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_Consumer_current_lag(f.consumer, other, &err));
+    int64_t unwritten = 7;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_Consumer_current_lag(f.consumer, other, &unwritten, &err));
+    TEST_ASSERT_EQUAL_INT64(7, unwritten);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
@@ -1362,7 +1381,8 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     lag_completion_init(&done);
     kafka_consumer_Consumer_current_lag_cb(f.consumer, other, on_lag, &done);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &done.fired, 1));
-    TEST_ASSERT_EQUAL_INT64(-1, done.value);
+    TEST_ASSERT_EQUAL_INT8(0, done.present);
+    TEST_ASSERT_EQUAL_INT64(0, done.value);
     TEST_ASSERT_NOT_NULL(done.error);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(done.error));
     kafka_common_Error_destroy(done.error);
@@ -1440,6 +1460,100 @@ static void test_mock_consumer_close_with_options(void) {
     fixture_destroy(&f);
 }
 
+/* Each enum's `_to_string` prints the Java constant's name, as Java's inherited
+ * `Enum.toString()` does. */
+static void test_consumer_enums_to_string_print_the_java_constant_name(void) {
+    assert_owned_string("REMAIN_IN_GROUP", kafka_consumer_CloseOptions_GroupMembershipOperation_to_string(
+                                               kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group()));
+    assert_owned_string("VALUE", kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string(
+                                     kafka_common_RecordDeserializationError_DeserializationErrorOrigin_value()));
+    assert_owned_string("TRACE", kafka_common_metrics_Sensor_RecordingLevel_to_string(
+                                     kafka_common_metrics_Sensor_RecordingLevel_trace()));
+}
+
+/* The stats print Java's `toString()`: `SampledStat`'s for `Avg`, `Max`, `Min`,
+ * `WindowedCount` and `WindowedSum`, `CumulativeSum`'s for `CumulativeCount`,
+ * `Rate`'s for `SimpleRate`, the doubles as Java's `Double.toString`; the
+ * assignor's `Subscription` and `Assignment` print theirs, collections as
+ * Java's `List.toString()`. */
+static void test_metrics_stats_and_assignor_to_string_follow_java(void) {
+    const char *empty_window = "SampledStat(initialValue=0.0, current=0, samples=[])";
+    const char *empty_rate = "Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))";
+
+    kafka_common_metrics_stats_Avg_t *avg = kafka_common_metrics_stats_Avg_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_Avg_to_string(avg));
+    kafka_common_metrics_stats_Avg_destroy(avg);
+    kafka_common_metrics_stats_Max_t *max = kafka_common_metrics_stats_Max_new();
+    assert_owned_string("SampledStat(initialValue=-Infinity, current=0, samples=[])",
+                        kafka_common_metrics_stats_Max_to_string(max));
+    kafka_common_metrics_stats_Max_destroy(max);
+    kafka_common_metrics_stats_Min_t *min = kafka_common_metrics_stats_Min_new();
+    assert_owned_string("SampledStat(initialValue=1.7976931348623157E308, current=0, samples=[])",
+                        kafka_common_metrics_stats_Min_to_string(min));
+    kafka_common_metrics_stats_Min_destroy(min);
+    kafka_common_metrics_stats_WindowedCount_t *wcount = kafka_common_metrics_stats_WindowedCount_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_WindowedCount_to_string(wcount));
+    kafka_common_metrics_stats_WindowedCount_destroy(wcount);
+    kafka_common_metrics_stats_WindowedSum_t *wsum = kafka_common_metrics_stats_WindowedSum_new();
+    assert_owned_string(empty_window, kafka_common_metrics_stats_WindowedSum_to_string(wsum));
+    kafka_common_metrics_stats_WindowedSum_destroy(wsum);
+
+    kafka_common_metrics_stats_CumulativeSum_t *csum = kafka_common_metrics_stats_CumulativeSum_with_value(1.5);
+    assert_owned_string("CumulativeSum(total=1.5)", kafka_common_metrics_stats_CumulativeSum_to_string(csum));
+    kafka_common_metrics_stats_CumulativeSum_destroy(csum);
+    kafka_common_metrics_stats_CumulativeCount_t *ccount = kafka_common_metrics_stats_CumulativeCount_new();
+    assert_owned_string("CumulativeSum(total=0.0)", kafka_common_metrics_stats_CumulativeCount_to_string(ccount));
+    kafka_common_metrics_stats_CumulativeCount_destroy(ccount);
+
+    kafka_common_metrics_stats_Rate_t *rate = kafka_common_metrics_stats_Rate_new();
+    assert_owned_string(empty_rate, kafka_common_metrics_stats_Rate_to_string(rate));
+    kafka_common_metrics_stats_Rate_destroy(rate);
+    kafka_common_metrics_stats_SimpleRate_t *simple = kafka_common_metrics_stats_SimpleRate_new();
+    assert_owned_string(empty_rate, kafka_common_metrics_stats_SimpleRate_to_string(simple));
+    kafka_common_metrics_stats_SimpleRate_destroy(simple);
+
+    kafka_common_MetricName_t *rate_name = kafka_common_MetricName_new("rate", "g", "d", NULL);
+    kafka_common_MetricName_t *total_name = kafka_common_MetricName_new("total", "g", "d", NULL);
+    kafka_common_metrics_stats_Meter_t *meter = kafka_common_metrics_stats_Meter_new(rate_name, total_name);
+    assert_owned_string("Meter(rate=Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[])), "
+                        "total=CumulativeSum(total=0.0), "
+                        "rateMetricName=MetricName [name=rate, group=g, description=d, tags={}], "
+                        "totalMetricName=MetricName [name=total, group=g, description=d, tags={}])",
+                        kafka_common_metrics_stats_Meter_to_string(meter));
+    kafka_common_metrics_stats_Meter_destroy(meter);
+    kafka_common_MetricName_destroy(rate_name);
+    kafka_common_MetricName_destroy(total_name);
+
+    kafka_common_metrics_stats_SampledStat_Sample_t *sample =
+        kafka_common_metrics_stats_SampledStat_Sample_new(2.5, 7);
+    assert_owned_string("Sample(value=2.5, eventCount=0, startTimeMs=7, lastEventMs=7, initialValue=2.5, "
+                        "timeWindowMs=-1)",
+                        kafka_common_metrics_stats_SampledStat_Sample_to_string(sample));
+    kafka_common_metrics_stats_SampledStat_Sample_destroy(sample);
+
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"a");
+    kafka_List_add(topics, (void *)"b");
+    kafka_consumer_ConsumerPartitionAssignor_Subscription_t *subscription =
+        kafka_consumer_ConsumerPartitionAssignor_Subscription_new(topics);
+    assert_owned_string("Subscription(topics=[a, b], ownedPartitions=[], groupInstanceId=null, generationId=-1, "
+                        "rackId=null)",
+                        kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string(subscription));
+    kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(subscription);
+    kafka_List_destroy(topics);
+
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("a", 0);
+    kafka_List_t *partitions = kafka_List_new();
+    kafka_List_add(partitions, tp);
+    kafka_consumer_ConsumerPartitionAssignor_Assignment_t *assignment =
+        kafka_consumer_ConsumerPartitionAssignor_Assignment_new(partitions);
+    assert_owned_string("Assignment(partitions=[a-0])",
+                        kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string(assignment));
+    kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy(assignment);
+    kafka_List_destroy(partitions);
+    kafka_common_TopicPartition_destroy(tp);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
@@ -1471,5 +1585,7 @@ int main(void) {
     RUN_TEST(test_mock_consumer_current_lag_and_metrics);
     RUN_TEST(test_mock_consumer_close);
     RUN_TEST(test_mock_consumer_close_with_options);
+    RUN_TEST(test_consumer_enums_to_string_print_the_java_constant_name);
+    RUN_TEST(test_metrics_stats_and_assignor_to_string_follow_java);
     return UNITY_END();
 }

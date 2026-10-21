@@ -19,7 +19,7 @@
 /// Options for `Admin::list_consumer_group_offsets_with_group_specs`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions")]
 pub struct ListConsumerGroupOffsetsOptions {
     timeout_ms: Option<i32>,

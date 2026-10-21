@@ -88,14 +88,7 @@ impl PartialEq for ClientQuotaEntity {
 // where `Map.hashCode()` is the order-independent sum of its entry hashes.
 impl Hash for ClientQuotaEntity {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut acc: u64 = 0;
-        for (k, v) in &self.entries {
-            let mut entry_hasher = std::collections::hash_map::DefaultHasher::new();
-            k.hash(&mut entry_hasher);
-            v.hash(&mut entry_hasher);
-            acc = acc.wrapping_add(entry_hasher.finish());
-        }
-        state.write_u64(acc);
+        crate::common::utils::Utils::hash_unordered(&self.entries, state);
     }
 }
 

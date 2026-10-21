@@ -25,6 +25,7 @@ use crate::common::TopicPartitionReplica;
 /// The result of the `Admin::describe_replica_log_dirs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult")]
 pub struct DescribeReplicaLogDirsResult {
     futures: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>,
@@ -59,7 +60,7 @@ impl DescribeReplicaLogDirsResult {
 /// Log directory information for a replica of a partition on a given broker.
 ///
 /// Corresponds to `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo")]
 pub struct ReplicaLogDirInfo {
     current_replica_log_dir: Option<String>,

@@ -1446,8 +1446,9 @@ impl RecordAccumulator {
     /// The callback rides back out on the error, for the same reason
     /// `try_append` returns it on the batch-is-full path: the record was not
     /// appended, so nothing else owns it, and it is `do_send_bytes` — not the
-    /// accumulator — that decides whether an error fires it. The
-    /// `Box<dyn FnOnce>` cannot be cloned, so handing it back is the only way.
+    /// accumulator — that decides whether an error fires it. A
+    /// `Box<dyn Callback>` is not `Clone` and fires once, so handing it back is
+    /// the only way.
     pub(crate) fn closed_while_send_in_progress(callback: Option<Box<dyn Callback>>) -> Box<AppendFailure> {
         AppendFailure::boxed(Error::kafka_message("Producer closed while send in progress"), callback)
     }

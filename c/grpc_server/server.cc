@@ -2316,16 +2316,15 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     const int32_t epoch = kafka_consumer_ConsumerRecord_leader_epoch(rec);
     if (epoch >= 0) dst->set_leader_epoch(epoch);
     // headers(): BORROWED from the record. The RecordHeaders handle is only
-    // enumerable through its `Headers` view, whose accessor takes a mutable
-    // pointer although nothing below writes, hence the const_cast; the view
+    // enumerable through its `Headers` view, which `__as_Headers` hands out
+    // for the read-only handle; nothing below writes through it, and the view
     // itself is borrowed and never destroyed. toArray() is an owned list of
     // BORROWED RecordHeader handles (never destroyed on their own).
     const kafka_common_header_internals_RecordHeaders_t* headers =
         kafka_consumer_ConsumerRecord_headers(rec);
     if (headers != nullptr) {
       kafka_common_header_Headers_t* headers_view =
-          kafka_common_header_internals_RecordHeaders__as_Headers(
-              const_cast<kafka_common_header_internals_RecordHeaders_t*>(headers));
+          kafka_common_header_internals_RecordHeaders__as_Headers(headers);
       kafka_List_t* all = kafka_common_header_Headers_to_array(headers_view);
       const int32_t hn = kafka_List_size(all);
       for (int32_t i = 0; i < hn; i++) {

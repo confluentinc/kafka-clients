@@ -19,7 +19,7 @@
 /// Options for `Admin::delete_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions")]
 pub struct DeleteTopicsOptions {
     timeout_ms: Option<i32>,

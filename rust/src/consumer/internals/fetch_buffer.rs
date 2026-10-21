@@ -77,10 +77,23 @@ struct FetchBufferInner {
     /// fetch out to work on it; without this marker the partition would read
     /// as unbuffered for that whole window, and the background task could
     /// fetch it again at the stale position, which is the duplicate fetch
-    /// KAFKA-15529 fixes. The fetch is put back after the position update and
-    /// the drain, so the background task then sees the consumed fetch together
+    /// KAFKA-15529 fixes. The fetch is put back once read, or, read to the
+    /// end, held in `exhausted_fetches` until the collector has moved the
+    /// position, so the background task sees the consumed fetch only together
     /// with the new position.
     checked_out_next_in_line: Option<TopicPartition>,
+    /// The fetches a `collect_fetch` call has read to the end and whose
+    /// partitions' positions it has not yet moved, drained by
+    /// [`FetchBuffer::drain_exhausted`] once it has.
+    ///
+    /// Rust-only (no Java field). Java's `collectFetch` moves a partition's
+    /// position and drains its exhausted fetch in the same step (KAFKA-15529),
+    /// with no deserializer in between. The Rust collector moves every
+    /// position only after its last deserializer has returned, so an exhausted
+    /// fetch waits here: still unconsumed, its partition stays in
+    /// [`FetchBuffer::buffered_partitions`] and the background task does not
+    /// fetch it again from the position not yet moved.
+    exhausted_fetches: Vec<CompletedFetch>,
     closed: bool,
 }
 
@@ -268,6 +281,46 @@ impl FetchBuffer {
         guard.checked_out_next_in_line = None;
     }
 
+    /// Holds `completed_fetch`, which the collector has read to the end, until
+    /// [`Self::drain_exhausted`], keeping its partition buffered (see
+    /// `FetchBufferInner::exhausted_fetches`). Forgets the fetch handed out by
+    /// [`Self::take_next_in_line_fetch`], as [`Self::set_next_in_line_fetch`]
+    /// does.
+    ///
+    /// Rust-only: Java drains such a fetch at once (`FetchCollector.java:189-193`).
+    pub(crate) fn hold_exhausted(&self, completed_fetch: CompletedFetch) {
+        let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        guard.exhausted_fetches.push(completed_fetch);
+        guard.checked_out_next_in_line = None;
+    }
+
+    /// Drains the fetches [`Self::hold_exhausted`] holds, so their partitions
+    /// can be fetched again: Java's `completedFetch.drain()` of an exhausted
+    /// fetch (`FetchCollector.java:189-193`), which follows the position update
+    /// (KAFKA-15529).
+    ///
+    /// The fetches are drained outside the buffer lock, since a drain locks
+    /// the `SubscriptionState`; their partitions are then fetched from the
+    /// positions already moved.
+    pub(crate) fn drain_exhausted(&self) {
+        let mut held = {
+            let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+            if guard.exhausted_fetches.is_empty() {
+                return;
+            }
+            std::mem::take(&mut guard.exhausted_fetches)
+        };
+        for cf in &mut held {
+            cf.drain();
+        }
+        held.clear();
+        // Give the allocation back, so the next call holds without allocating.
+        let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        if guard.exhausted_fetches.is_empty() {
+            guard.exhausted_fetches = held;
+        }
+    }
+
     /// Awaits until the buffer is woken up (data added or explicit wakeup)
     /// or `timeout` elapses.
     ///
@@ -362,6 +415,14 @@ impl FetchBuffer {
         {
             guard.checked_out_next_in_line = None;
         }
+        guard.exhausted_fetches.retain_mut(|cf| {
+            if partitions.contains(&cf.partition) {
+                true
+            } else {
+                cf.drain();
+                false
+            }
+        });
     }
 
     /// Returns the set of partitions for which we have data in the buffer,
@@ -381,6 +442,9 @@ impl FetchBuffer {
             out.insert(partition.clone());
         }
         for cf in &guard.completed_fetches {
+            out.insert(cf.partition.clone());
+        }
+        for cf in guard.exhausted_fetches.iter().filter(|cf| !cf.is_consumed()) {
             out.insert(cf.partition.clone());
         }
         out

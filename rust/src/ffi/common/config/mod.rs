@@ -14,7 +14,9 @@
 
 //! `kafka_common_config_*`: the public classes of `org.apache.kafka.common.config`
 //! (CLAUDE.md §4): `ConfigResource` with its nested `Type` enum, and
-//! `SslClientAuth`.
+//! `SslClientAuth`; and the shared bodies of the client configurations'
+//! getters (`config_getters`).
 
+pub(crate) mod config_getters;
 pub(crate) mod config_resource;
 pub(crate) mod ssl_client_auth;

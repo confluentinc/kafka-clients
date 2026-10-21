@@ -68,6 +68,7 @@ use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::Time;
+use crate::common::utils::Utils;
 use crate::common::utils::internals::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerConfig;
@@ -135,8 +136,8 @@ enum BgJoin {
 }
 
 /// A `Clone + Send + Sync` handle to a consumer that exposes
-/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) **and** the reentrant-safe consumer operations,
-/// callable from a task or thread other than the one owning the consumer.
+/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup), callable from any task or thread, **and** the
+/// reentrant-safe consumer operations, callable from inside a callback the consumer is running.
 ///
 /// **No Java class counterpart — it recovers a Java capability.** Java's
 /// `Consumer` reference is itself a freely-shareable, thread-safe
@@ -238,7 +239,7 @@ enum BgJoin {
 /// [`wakeup`](Self::wakeup) and the sync reads (`assignment`, `paused`,
 /// `group_metadata`) are not gated: Java's
 /// `wakeup()` is callable from any thread by contract, and the reads take
-/// the same short locks the owning consumer's `&self` getters do.
+/// the same short locks the owning consumer's getters do.
 ///
 /// A handle from a `MockConsumer` is not gated either: Java's `MockConsumer`
 /// has no `acquire()`, and the mock handle's commits commit into the mock
@@ -255,6 +256,13 @@ enum BgJoin {
 #[doc(alias = "rust-only")]
 pub struct ConsumerHandle {
     inner: ConsumerHandleInner,
+}
+
+impl std::fmt::Debug for ConsumerHandle {
+    /// A view of a consumer; it has no identifier of its own.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsumerHandle").finish_non_exhaustive()
+    }
 }
 
 /// Shared state captured by a [`ConsumerHandle`] for an
@@ -321,7 +329,7 @@ enum ConsumerHandleInner {
     /// ones without offsets commit the mock's consumed positions
     /// (`commitSync(subscriptions.allConsumed())`).
     /// The mock has no bg task / event pipeline, so the other async ops are
-    /// not wired (they return an `unsupported_version` error — the mock test
+    /// not wired (they return a `local_unsupported_operation` error — the mock test
     /// surface drives the concrete `MockConsumer` directly). `closed`,
     /// `should_rebalance` and `last_poll_timeout` are the mock's own, read by
     /// the C binding while an operation borrows the mock.
@@ -382,9 +390,20 @@ impl ConsumerHandle {
     /// [`Consumer::group_metadata`](crate::consumer::Consumer::group_metadata)
     /// via the consumer's shared group-metadata slot; on a `MockConsumer`
     /// handle, Java's `MockConsumer.groupMetadata()` sentinel values.
+    ///
+    /// # Panics
+    ///
+    /// On a consumer without `group.id`, with Java's `InvalidGroupIdException`
+    /// message, as the consumer's own `group_metadata` does (Java's
+    /// `throwIfGroupIdNotDefined()`, `AsyncKafkaConsumer.java:1529-1537`). The
+    /// handle does not check for a closed consumer: the consumer's closed flag
+    /// is its own, not shared with the handle.
     pub fn group_metadata(&self) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
         match &self.inner {
-            ConsumerHandleInner::Async(state) => group_metadata_from(&state.group_metadata, state.group_id.as_deref()),
+            ConsumerHandleInner::Async(state) => {
+                panic_if_group_id_not_defined(state.group_id.as_deref());
+                group_metadata_from(&state.group_metadata)
+            },
             ConsumerHandleInner::Mock { .. } => crate::consumer::mock_consumer::mock_group_metadata(),
         }
     }
@@ -819,7 +838,7 @@ impl ConsumerHandle {
                 state.ensure_in_callback()?;
                 Ok(state)
             },
-            ConsumerHandleInner::Mock { .. } => Err(Error::unsupported_version(
+            ConsumerHandleInner::Mock { .. } => Err(Error::local_unsupported_operation(
                 "ConsumerHandle async operations are not supported on a MockConsumer handle; \
                  drive the MockConsumer directly.",
             )),
@@ -862,28 +881,18 @@ impl ConsumerHandle {
 
 /// Java's `groupMetadata()` body (`AsyncKafkaConsumer.java:1559-1562`) over
 /// the consumer's shared slot, shared by [`AsyncKafkaConsumer::group_metadata`]
-/// and [`ConsumerHandle::group_metadata`]: the seeded metadata, or, for a
-/// groupless consumer whose slot was never seeded, a groupless stub. Only the
-/// handle reaches the stub: [`AsyncKafkaConsumer::group_metadata`] first
-/// panics with Java's `InvalidGroupIdException` message when `group.id` is
-/// absent, as Java's `throwIfGroupIdNotDefined()` throws.
+/// and [`ConsumerHandle::group_metadata`]. Both first run
+/// [`panic_if_group_id_not_defined`], and the slot is seeded at construction
+/// whenever `group.id` is set (`initialize_group_metadata`, Java `:533`), so
+/// it is never empty here.
 fn group_metadata_from(
     slot: &Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>,
-    group_id: Option<&str>,
 ) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
     let guard = slot.lock().unwrap();
-    match guard.as_ref() {
-        Some(meta) => Arc::clone(meta) as Arc<dyn crate::consumer::ConsumerGroupMetadata>,
-        None => {
-            // Groupless (assignment-only) consumer: the slot was never
-            // seeded — `initialize_group_metadata` returns `None` when
-            // `group.id` is absent (Java `:849`). The consumer's own getter
-            // has already panicked with Java's `InvalidGroupIdException`
-            // message; only `ConsumerHandle::group_metadata` gets here, and
-            // it returns a groupless stub.
-            Arc::new(ConsumerGroupMetadataImpl::new(group_id.unwrap_or_default().to_string()))
-        },
-    }
+    let meta = guard
+        .as_ref()
+        .expect("the group-metadata slot is seeded at construction whenever group.id is set");
+    Arc::clone(meta) as Arc<dyn crate::consumer::ConsumerGroupMetadata>
 }
 
 /// Locks a `MockConsumer`'s shared state as the mock itself does, recovering
@@ -1960,6 +1969,20 @@ where
     commit_state: Arc<AsyncCommitState>,
 }
 
+impl<K, V> std::fmt::Debug for AsyncKafkaConsumer<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// The identifiers Java's log context prints, `clientId` and `groupId`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncKafkaConsumer")
+            .field("client_id", &self.client_id)
+            .field("group_id", &self.group_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Tracks the state of the currently-inflight `AsyncPoll` event.
 ///
 /// Mirrors Java's `AsyncPollEvent` field: it carries the event's
@@ -2047,6 +2070,16 @@ fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Er
         return Err(Error::invalid_group_id(GROUP_ID_NOT_DEFINED_MSG));
     }
     Ok(())
+}
+
+/// The panicking form of [`return_error_if_group_id_not_defined`] for the
+/// sync `group_metadata` getters of the consumer and its [`ConsumerHandle`],
+/// which have no error channel: a missing `group.id` is a programming error
+/// (CLAUDE.md §12.5), reported with Java's `InvalidGroupIdException` message.
+fn panic_if_group_id_not_defined(group_id: Option<&str>) {
+    if let Err(error) = return_error_if_group_id_not_defined(group_id) {
+        panic!("{}", error.message());
+    }
 }
 
 /// Takes an event's result if the background task has already delivered it,
@@ -2739,6 +2772,70 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub positions_validator: Arc<PositionsValidator>,
 }
 
+/// Closes the consumer's deserializers when construction fails after they were
+/// wrapped, as the `catch (Throwable t)` of Java's constructor does
+/// (`AsyncKafkaConsumer.java:596-602`): it calls `close(Duration.ZERO,
+/// LEAVE_GROUP, true)`, whose `closeQuietly(deserializers, "consumer
+/// deserializers", firstException)` (`:1679`) closes them and only logs a
+/// failure, since `swallowException` is `true`.
+///
+/// Rust-only (DoD #7): an RAII stand-in for that `catch`. `new_inner` returns
+/// through many `?`s after the wrap; holding the deserializers in this guard
+/// covers every one of them, and any step added later. The guard is declared
+/// before every other component built after the wrap, so on an error those are
+/// dropped first and the guard's `Arc` is the only one left when it closes the
+/// deserializers. Nothing else of Java's `close(Duration.ZERO, ..)` applies:
+/// `new_inner` disarms the guard when it hands the deserializers to the
+/// `FetchCollector`, after its last fallible step, and only then spawns the
+/// background task's `std::thread`. So no task or socket exists on any error
+/// path, and the rest is released on drop.
+///
+/// `new` is synchronous and [`Deserializers::close`] is async, so the close
+/// runs through [`Utils::close_quietly_from_sync`], which the producer's
+/// constructor shares for its serializers.
+struct CloseDeserializersOnError<K: 'static, V: 'static> {
+    deserializers: Option<Arc<Deserializers<K, V>>>,
+}
+
+impl<K, V> CloseDeserializersOnError<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn new(deserializers: Arc<Deserializers<K, V>>) -> Self {
+        Self { deserializers: Some(deserializers) }
+    }
+
+    /// Construction succeeded: hands the deserializers on, so nothing closes
+    /// them here.
+    fn disarm(mut self) -> Arc<Deserializers<K, V>> {
+        self.deserializers.take().expect("the guard is disarmed once")
+    }
+}
+
+impl<K: 'static, V: 'static> Drop for CloseDeserializersOnError<K, V> {
+    fn drop(&mut self) {
+        let Some(deserializers) = self.deserializers.take() else {
+            return;
+        };
+        let Some(mut deserializers) = Arc::into_inner(deserializers) else {
+            // Unreachable: every clone belongs to a component built after the
+            // guard, all of which are dropped before it.
+            log::error!("Failed to close consumer deserializers: they are still shared");
+            return;
+        };
+        Utils::close_quietly_from_sync(
+            Box::pin(async move {
+                if let Err(error) = deserializers.close().await {
+                    // Java's `closeQuietly` (`Utils.java:1143-1152`).
+                    log::error!("Failed to close consumer deserializers: {error}");
+                }
+            }),
+            "consumer deserializers",
+        );
+    }
+}
+
 impl<K, V> AsyncKafkaConsumer<K, V>
 where
     K: Send + Sync + 'static,
@@ -2801,10 +2898,12 @@ where
     /// reproduces that; [`Self::new_inner`] holds the body.
     ///
     /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
-    /// release partially-built resources (KAFKA-2121) — has no counterpart
-    /// here: every fallible step in `new_inner` precedes the `tokio::spawn`,
-    /// which happens inside the infallible `with_components`, so no
-    /// resource needing shutdown exists yet on any error path.
+    /// release partially-built resources (KAFKA-2121) — closes the
+    /// deserializers once they are wrapped (see `CloseDeserializersOnError`).
+    /// `new_inner` spawns the background task's `std::thread` only after
+    /// `deserializers.disarm()`, which follows its last fallible step, so no
+    /// task or socket needs shutting down on any error path.
+    ///
     /// # Java's no-deserializer constructors are deliberately not translated
     ///
     /// Java's public entry point is `KafkaConsumer`, which has four
@@ -2875,17 +2974,23 @@ where
         use crate::consumer::internals::RequestManagers;
         use crate::consumer::internals::TopicMetadataRequestManager;
 
+        // Java's `ConsumerConfig` is built with `doLog = true`, which logs
+        // every parsed value (`AbstractConfig.logAll`).
+        config.log_values();
         log::debug!("Initializing the Kafka consumer");
 
         // Java's `KafkaConsumer` passes `Time.SYSTEM`, and the constructor
         // hands that one instance to every component it builds.
         let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
 
-        // A config built with `ConsumerConfig::default()` and the fluent
-        // setters never went through `ConsumerConfig::new`, so it may still
-        // carry an empty `client.id`. Java's config is immutable and always
-        // finalised by `postProcessParsedConfig`; construction is the Rust
-        // equivalent point, so apply the same `maybeOverrideClientId` rule.
+        // `ConsumerConfig::new`, the only public way to build a config, already
+        // derives `client.id`. A crate-internal config built from
+        // `ConsumerConfig::defaults()` with its fields written directly (the
+        // unit tests do this) skips `new` and may still carry an empty
+        // `client.id`. Java's config is immutable and always finalised by
+        // `postProcessParsedConfig`; construction is the Rust equivalent
+        // point, so apply the same `maybeOverrideClientId` rule. It is
+        // idempotent on a config `new` built.
         config.maybe_override_client_id()?;
 
         // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
@@ -2927,8 +3032,11 @@ where
             Arc::new(Mutex::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
 
         // Java line 410 — `deserializers = new Deserializers<>(...)`.
-        let deserializers: Arc<Deserializers<K, V>> =
-            Arc::new(Deserializers::new(key_deserializer, value_deserializer));
+        // From here on, a failed construction closes them (Java's catch,
+        // `AsyncKafkaConsumer.java:596-602`); see `CloseDeserializersOnError`.
+        // Declared before every later component, so it is dropped after them.
+        let deserializers =
+            CloseDeserializersOnError::new(Arc::new(Deserializers::new(key_deserializer, value_deserializer)));
 
         // Java line 412-414 — `clusterResourceListeners`. Phase-11
         // deferral keeps notifier wiring as a no-op (`ClusterResourceListeners::new()`).
@@ -3027,8 +3135,9 @@ where
         // Java line 433 — `ChannelBuilder channelBuilder =
         // ClientUtils.createChannelBuilder(config, time, logContext)`. Selects
         // the channel builder from `security.protocol` + `ssl.*` / `sasl.*`
-        // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN
-        // only. Errors surface as a `Error` from the ctor (no panic).
+        // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL). SASL mechanism PLAIN
+        // only: `ConsumerConfig` already rejected any other one when it was
+        // built. Errors surface as a `Error` from the ctor (no panic).
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol,
             Some(&config.ssl_config),
@@ -3037,7 +3146,14 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        // Java's reachable failure here is `SslFactory.configure` throwing
+        // `ConfigException` (`SslFactory.java:104-107`) — the missing-argument
+        // `IllegalArgumentException`s in `ChannelBuilders.create` cannot be reached
+        // from a `ConsumerConfig`, which always supplies both sub-configs. So the
+        // class is `ConfigException`, inside the `KafkaException` hierarchy;
+        // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
+        // Same as `KafkaProducer::new` and `KafkaAdminClient`.
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -3610,7 +3726,8 @@ where
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             fetch_config,
-            deserializers,
+            // Every fallible step is behind us.
+            deserializers.disarm(),
             Arc::clone(&fetch_metrics_manager),
             Arc::clone(&time),
         ));
@@ -3732,6 +3849,10 @@ where
         // struct are the SAME instance, mirroring Java's single
         // `memberStateListener`.
 
+        // `AsyncKafkaConsumer.java:593`: `config.logUnused()`, after every
+        // component has read its keys.
+        config.mark_read_keys_used();
+        config.log_unused();
         let components = AsyncKafkaConsumerComponents {
             config,
             client_id,
@@ -4025,10 +4146,8 @@ where
     /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         self.panic_if_closed();
-        if let Err(error) = self.return_error_if_group_id_not_defined() {
-            panic!("{}", error.message());
-        }
-        group_metadata_from(&self.group_metadata, self.group_id.as_deref())
+        panic_if_group_id_not_defined(self.group_id.as_deref());
+        group_metadata_from(&self.group_metadata)
     }
 
     /// Returns the [`ConsumerStateNotifier`] this consumer expects to
@@ -6936,6 +7055,23 @@ where
             record(&mut first_error, "Failed to close consumer deserializers", err);
         }
 
+        // Rust-only: release the rebalance listener. The last callback ran in
+        // step 4 or 5 and the background task has been joined, so nothing
+        // invokes it any more. A listener that captured `consumer.handle()`
+        // holds the handle state, and through it the `SubscriptionState` that
+        // stores the listener: without this the cycle would keep the listener,
+        // the subscription state and the metrics registry alive after the
+        // consumer is dropped. Java's garbage collector frees the same graph,
+        // so Java's `close()` has no counterpart step.
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_rebalance_listener(None);
+        *self
+            .rebalance_listener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -7514,7 +7650,10 @@ mod tests {
         group_instance_id: Option<&str>,
         invoker_interceptors: Vec<Box<dyn crate::consumer::ConsumerInterceptor<Vec<u8>, Vec<u8>>>>,
     ) -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
-        let mut config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let mut config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         config.client_id = "test-client".to_string();
         config.group_id = group_id.map(str::to_string);
         config.group_instance_id = group_instance_id.map(str::to_string);
@@ -8383,8 +8522,7 @@ mod tests {
             Box::new(TestStringDeserializer),
             Box::new(TestStringDeserializer),
         )
-        .err()
-        .expect("an unparseable bootstrap address must fail construction");
+        .expect_err("an unparseable bootstrap address must fail construction");
 
         // Java's message, verbatim.
         assert_eq!("Failed to construct kafka consumer", err.message());
@@ -8430,8 +8568,8 @@ mod tests {
         ]);
         let mut consumer = KafkaConsumer::<String, String>::new(
             ConsumerConfig::new(&props).unwrap(),
-            Box::new(StringDeserializer),
-            Box::new(StringDeserializer),
+            StringDeserializer,
+            StringDeserializer,
         )
         .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -8455,7 +8593,7 @@ mod tests {
         assert!(elapsed < Duration::from_secs(5), "close_with_options(1 s) took {elapsed:?}");
     }
 
-    /// A config built inside the crate from `ConsumerConfig::default()` skips
+    /// A config built inside the crate from `ConsumerConfig::defaults()` skips
     /// `ConsumerConfig::new`, so the constructor derives the `client.id` with
     /// the same `maybeOverrideClientId` rule instead of sending an empty id.
     #[tokio::test(flavor = "multi_thread")]
@@ -8473,7 +8611,7 @@ mod tests {
         let config = ConsumerConfig {
             bootstrap_servers: vec!["127.0.0.1:1".to_string()],
             group_id: Some("g".to_string()),
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         };
         assert_eq!(
             config.client_id(),
@@ -8641,8 +8779,7 @@ mod tests {
             Box::new(TestStringDeserializer),
             Box::new(TestStringDeserializer),
         )
-        .err()
-        .expect("an invalid group.instance.id must fail construction");
+        .expect_err("an invalid group.instance.id must fail construction");
 
         assert_eq!("Failed to construct kafka consumer", err.message());
         let source = std::error::Error::source(&err).expect("the validation failure must be the cause");
@@ -8652,6 +8789,53 @@ mod tests {
         assert_eq!(
             "Group instance id is invalid: 'bad/id' contains one or more characters other than ASCII \
              alphanumerics, '.', '_' and '-'",
+            cause.message()
+        );
+    }
+
+    /// A channel-builder failure (here an unreadable truststore) is Java's
+    /// `ConfigException` (`SslFactory.java:104-107`), the cause of the
+    /// "Failed to construct kafka consumer" wrap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_builder_failure_is_a_config_error() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("security.protocol".to_string(), "SSL".to_string()),
+            (
+                "ssl.truststore.location".to_string(),
+                "/nonexistent/kafka-clients-test/truststore.pem".to_string(),
+            ),
+        ]);
+        let config = ConsumerConfig::new(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect_err("an unreadable truststore must fail construction");
+
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err
+            .kafka_error()
+            .and_then(|e| e.source())
+            .expect("the channel-builder failure is the cause");
+        assert!(cause.is_config_error(), "cause must be a ConfigError, got: {cause:?}");
+        assert!(cause.is_kafka_error(), "{cause:?}");
+        assert!(
+            cause.message().starts_with("Failed to create channel builder: "),
+            "{}",
             cause.message()
         );
     }
@@ -9731,6 +9915,18 @@ mod tests {
     async fn group_metadata_panics_without_group_id() {
         let (mut consumer, _handles) = make_test_consumer_without_group_id();
         let _ = crate::consumer::Consumer::group_metadata(&mut consumer);
+    }
+
+    /// `ConsumerHandle::group_metadata` runs the consumer's own
+    /// `throwIfGroupIdNotDefined` check, so without a `group.id` it panics
+    /// with the same `InvalidGroupIdException` message.
+    #[tokio::test]
+    #[should_panic(
+        expected = "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer configuration."
+    )]
+    async fn consumer_handle_group_metadata_panics_without_group_id() {
+        let (consumer, _handles) = make_test_consumer_without_group_id();
+        let _ = consumer.handle().group_metadata();
     }
 
     /// Java: `testSubscribeGeneratesEvent` (Java line 1191-1200) —

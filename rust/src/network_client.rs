@@ -441,7 +441,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
     }
 
-    /// Creates a new `NetworkClient` with an external `MetadataUpdater`.
+    /// Creates a new `NetworkClient` with an external `MetadataUpdater` that
+    /// never rebootstraps on the trigger timer (see
+    /// [`Self::with_metadata_updater_rebootstrap_trigger_ms`]).
     ///
     /// # Arguments
     ///
@@ -481,6 +483,70 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         metadata_recovery_strategy: MetadataRecoveryStrategy,
         log_context: LogContext,
     ) -> Self {
+        Self::with_metadata_updater_rebootstrap_trigger_ms(
+            selector,
+            metadata_updater,
+            client_id,
+            max_in_flight_requests_per_connection,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            socket_send_buffer,
+            socket_receive_buffer,
+            default_request_timeout_ms,
+            connection_setup_timeout_ms,
+            connection_setup_timeout_max_ms,
+            discover_broker_versions,
+            api_versions,
+            host_resolver,
+            i64::MAX,
+            metadata_recovery_strategy,
+            log_context,
+        )
+    }
+
+    /// Creates a new `NetworkClient` with an external `MetadataUpdater` and a
+    /// rebootstrap trigger.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - The selector for network I/O
+    /// * `metadata_updater` - The external metadata updater
+    /// * `client_id` - The client ID
+    /// * `max_in_flight_requests_per_connection` - Maximum in-flight requests per connection
+    /// * `reconnect_backoff_ms` - Reconnect backoff in milliseconds
+    /// * `reconnect_backoff_max_ms` - Maximum reconnect backoff in milliseconds
+    /// * `socket_send_buffer` - Socket send buffer size
+    /// * `socket_receive_buffer` - Socket receive buffer size
+    /// * `default_request_timeout_ms` - Default request timeout in milliseconds
+    /// * `connection_setup_timeout_ms` - Connection setup timeout in milliseconds
+    /// * `connection_setup_timeout_max_ms` - Maximum connection setup timeout in milliseconds
+    /// * `discover_broker_versions` - Whether to discover broker versions
+    /// * `api_versions` - API versions instance
+    /// * `host_resolver` - Host resolver implementation
+    /// * `rebootstrap_trigger_ms` - Rebootstrap trigger timeout in milliseconds
+    /// * `metadata_recovery_strategy` - Metadata recovery strategy
+    /// * `log_context` - Contextual log prefix
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
+    pub fn with_metadata_updater_rebootstrap_trigger_ms(
+        selector: S,
+        metadata_updater: Box<dyn MetadataUpdater>,
+        client_id: &str,
+        max_in_flight_requests_per_connection: usize,
+        reconnect_backoff_ms: i64,
+        reconnect_backoff_max_ms: i64,
+        socket_send_buffer: i32,
+        socket_receive_buffer: i32,
+        default_request_timeout_ms: i32,
+        connection_setup_timeout_ms: i64,
+        connection_setup_timeout_max_ms: i64,
+        discover_broker_versions: bool,
+        api_versions: Arc<ApiVersions>,
+        host_resolver: H,
+        rebootstrap_trigger_ms: i64,
+        metadata_recovery_strategy: MetadataRecoveryStrategy,
+        log_context: LogContext,
+    ) -> Self {
         Self {
             selector,
             connection_states: ClusterConnectionStates::new(
@@ -498,7 +564,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             correlation: 0,
             default_request_timeout_ms,
             reconnect_backoff_ms,
-            rebootstrap_trigger_ms: i64::MAX,
+            rebootstrap_trigger_ms,
             metadata_recovery_strategy,
             metadata_cluster_check_enable: false,
             discover_broker_versions,
@@ -4170,6 +4236,83 @@ mod tests {
             version_after_second_rebootstrap > version_after_request,
             "Expected second rebootstrap to increment update_version"
         );
+    }
+
+    /// The admin's `NetworkClient` delegates the trigger to `AdminMetadataManager`
+    /// through its `MetadataUpdater` (`AdminMetadataManager.AdminMetadataUpdater`):
+    /// under `rebootstrap`, a metadata attempt unanswered for longer than
+    /// `metadata.recovery.rebootstrap.trigger.ms` rebootstraps the manager; under
+    /// `none` it never does.
+    #[tokio::test]
+    async fn test_rebootstrap_through_the_admin_metadata_updater() {
+        use crate::admin::internals::AdminMetadataManager;
+        use crate::common::Cluster;
+        use std::collections::HashSet;
+
+        let rebootstrap_trigger_ms: i64 = 1000;
+        for strategy in [MetadataRecoveryStrategy::Rebootstrap, MetadataRecoveryStrategy::None] {
+            let manager = AdminMetadataManager::new(50, 60_000, false, LogContext::empty());
+            let mut now = 10_000_i64;
+            manager.update(
+                Cluster::bootstrap(&[("127.0.0.1".to_string(), std::net::SocketAddr::from(([127, 0, 0, 1], 9999)))]),
+                now,
+            );
+            let brokers = vec![Node::new(0, "localhost".to_string(), 9092)];
+            manager.update(
+                Cluster::with_invalid_topics_controller(
+                    Some("mock".to_string()),
+                    brokers.clone(),
+                    Vec::new(),
+                    HashSet::new(),
+                    HashSet::new(),
+                    HashSet::new(),
+                    None,
+                ),
+                now,
+            );
+            let mut client = NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
+                MockSelector::new(),
+                manager.updater(),
+                "mock",
+                usize::MAX,
+                RECONNECT_BACKOFF_MS_TEST,
+                0,
+                64 * 1024,
+                64 * 1024,
+                DEFAULT_REQUEST_TIMEOUT_MS,
+                CONNECTION_SETUP_TIMEOUT_MS_TEST,
+                CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+                false,
+                Arc::new(ApiVersions::new()),
+                TestHostResolver::new(),
+                rebootstrap_trigger_ms,
+                strategy,
+                LogContext::empty(),
+            );
+            client.set_mock_time();
+
+            manager.transition_to_update_pending(now);
+            client.poll(0, now).await;
+            now += rebootstrap_trigger_ms;
+            client.poll(0, now).await;
+            assert_eq!(manager.node_by_id(-1), None, "{strategy:?}: not due at the trigger itself");
+
+            now += 1;
+            client.poll(0, now).await;
+            let rebootstrapped = manager.node_by_id(-1).is_some();
+            assert_eq!(
+                rebootstrapped,
+                strategy == MetadataRecoveryStrategy::Rebootstrap,
+                "{strategy:?}: rebootstrapped = {rebootstrapped}"
+            );
+            if rebootstrapped {
+                assert_eq!(manager.node_by_id(0), None, "the bootstrap cluster replaced the brokers");
+                assert!(
+                    !manager.needs_rebootstrap(now + rebootstrap_trigger_ms, rebootstrap_trigger_ms),
+                    "the rebootstrap starts a new attempt at `now`"
+                );
+            }
+        }
     }
 
     /// Translated from `NetworkClientTest.testInflightRequestsDuringRebootstrap`.

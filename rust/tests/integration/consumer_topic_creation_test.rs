@@ -97,12 +97,8 @@ fn make_consumer(ctx: &TestContext, group_id: &str, allow_auto_create: bool) -> 
     ctx.apply_security(&mut props);
     let config = ConsumerConfig::new(&props).expect("invalid test config");
     Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            config,
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
-        )
-        .expect("KafkaConsumer::new should succeed"),
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(config, ByteArrayDeserializer, ByteArrayDeserializer)
+            .expect("KafkaConsumer::new should succeed"),
     )
 }
 

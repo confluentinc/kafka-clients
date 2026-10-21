@@ -1070,7 +1070,7 @@ mod tests {
             client_id: "test-client".to_string(),
             group_id: Some(GROUP_ID.to_string()),
             request_timeout_ms: REQUEST_TIMEOUT_MS,
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         }
     }
 

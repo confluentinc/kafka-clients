@@ -42,6 +42,15 @@ pub struct NamedMeasurable {
     stat: Arc<dyn Measurable>,
 }
 
+impl std::fmt::Debug for NamedMeasurable {
+    /// The name only; the stat is a trait object.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedMeasurable")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NamedMeasurable {
     /// Create a `NamedMeasurable`.
     #[doc(alias = "org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable#NamedMeasurable")]

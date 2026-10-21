@@ -20,7 +20,7 @@
 /// `Admin::create_partitions`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.NewPartitions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.NewPartitions")]
 pub struct NewPartitions {
     total_count: i32,

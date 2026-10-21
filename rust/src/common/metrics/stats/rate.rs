@@ -28,6 +28,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// sample windows. Alternative [`SampledStat`] implementations can be provided,
 /// however, to record the rate of occurrences (e.g. the count of values measured
 /// over the time interval) or other such values.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate")]
 pub struct Rate {
     unit: TimeUnit,
@@ -148,9 +149,28 @@ impl Measurable for Rate {
     }
 }
 
+impl std::fmt::Display for Rate {
+    /// Java's `toString()`, which `SimpleRate` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rate(unit={}, stat={})", self.unit.name(), self.stat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Rate::new().to_string(),
+            "Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))"
+        );
+        assert_eq!(
+            Rate::with_unit(TimeUnit::Milliseconds).to_string(),
+            "Rate(unit=MILLISECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[]))"
+        );
+    }
     use crate::common::metrics::internals::MetricsUtils;
     use crate::common::utils::MockTime;
     use crate::common::utils::Time;

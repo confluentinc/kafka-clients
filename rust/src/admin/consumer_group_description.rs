@@ -29,7 +29,7 @@ use crate::common::{GroupState, GroupType, Node};
 /// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
 /// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
 /// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct ConsumerGroupDescription {
     group_id: String,
@@ -148,9 +148,68 @@ impl ConsumerGroupDescription {
     }
 }
 
+impl std::fmt::Display for ConsumerGroupDescription {
+    /// Java's `toString()`: an absent coordinator, operation set or epoch
+    /// prints as `null`, and the operations as Java's `[A, B]`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let members = self.members.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .map_or_else(|| "null".to_string(), ToString::to_string);
+        let operations = self.authorized_operations.as_ref().map_or_else(
+            || "null".to_string(),
+            |operations| {
+                format!(
+                    "[{}]",
+                    operations.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            },
+        );
+        let null_or = |epoch: Option<i32>| epoch.map_or_else(|| "null".to_string(), |e| e.to_string());
+        write!(
+            f,
+            "(groupId={}, isSimpleConsumerGroup={}, members={}, partitionAssignor={}, type={}, groupState={}, \
+             coordinator={}, authorizedOperations={}, groupEpoch={}, targetAssignmentEpoch={})",
+            self.group_id,
+            self.is_simple_consumer_group,
+            members,
+            self.partition_assignor,
+            self.group_type,
+            self.group_state,
+            coordinator,
+            operations,
+            null_or(self.group_epoch),
+            null_or(self.target_assignment_epoch),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        let description = ConsumerGroupDescription::new(
+            "g",
+            false,
+            Vec::new(),
+            "range",
+            GroupType::Consumer,
+            GroupState::Stable,
+            None,
+            Some(BTreeSet::from([AclOperation::Write, AclOperation::Read])),
+            Some(3),
+            None,
+        );
+        assert_eq!(
+            description.to_string(),
+            "(groupId=g, isSimpleConsumerGroup=false, members=, partitionAssignor=range, type=Consumer, \
+             groupState=Stable, coordinator=null, authorizedOperations=[READ, WRITE], groupEpoch=3, \
+             targetAssignmentEpoch=null)"
+        );
+    }
 
     /// Translated from `ConsumerGroupDescriptionTest.testGroupState`.
     #[test]

@@ -26,6 +26,15 @@
 //! call would break the receive path's allocation budget
 //! (`consumer-threading.md` §27).
 //!
+//! Unlike `DynProducer` it is crate-private: the crate only takes
+//! deserializers in, through the `impl Deserializer<K>` parameters of
+//! `KafkaConsumer::new`, which box them once, and never hands one out, so no
+//! caller needs to name the companion, and keeping it private leaves the
+//! dispatch free to change (`check-dyn-compatible`). The C binding, whose
+//! deserializers are trait objects already, passes its boxes to the
+//! crate-private `KafkaConsumer::with_boxed_deserializers` instead of boxing
+//! them again.
+//!
 //! A method added to [`Deserializer`] goes in three places here: the trait,
 //! the blanket impl and the impl on `dyn DynDeserializer`. `cargo xtask
 //! lint-custom` (`check-dyn-forwarding`) fails until all three forward it.
@@ -40,8 +49,9 @@ use crate::common::serialization::Deserializer;
 use crate::common::serialization::InlineFuture;
 
 mod private {
-    // Deliberately unnameable: it seals `DynDeserializer` to `Deserializer` implementors.
-    #[expect(unnameable_types)]
+    // Seals `DynDeserializer` to `Deserializer` implementors. Nothing outside
+    // this module can name it, which `unnameable_types` would report if the
+    // companion were public; it is crate-private, so the lint stays quiet.
     pub trait Sealed<T> {}
 }
 
@@ -68,20 +78,7 @@ impl<T, D: super::Deserializer<T>> private::Sealed<T> for D {}
 /// ambiguous, since both define it; call it as
 /// `DynDeserializer::deserialize(&*deserializer, topic, data)`, or import only
 /// one of the two traits.
-///
-/// ```
-/// use confluent_kafka::common::serialization::{DynDeserializer, StringDeserializer};
-///
-/// # #[tokio::main(flavor = "current_thread")]
-/// # async fn main() {
-/// let deserializer: Box<dyn DynDeserializer<String>> = Box::new(StringDeserializer::new());
-/// let value = DynDeserializer::deserialize(&*deserializer, "topic", b"value").await.unwrap();
-/// assert_eq!("value", value);
-/// # }
-/// ```
-// the dyn-compatible companion of the `Deserializer` trait (CLAUDE.md §3)
-#[doc(alias = "rust-only")]
-pub trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static {
+pub(crate) trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static {
     /// See [`Deserializer::deserialize`].
     ///
     /// # Errors
@@ -237,6 +234,15 @@ mod tests {
     async fn test_dyn_deserializer_is_a_deserializer() {
         let boxed: Box<dyn DynDeserializer<String>> = Box::new(StringDeserializer::new());
         assert_eq!("value", through_generic(&*boxed, b"value").await);
+    }
+
+    /// A direct call through the companion, named in full to avoid the
+    /// ambiguity with `Deserializer::deserialize`.
+    #[tokio::test]
+    async fn test_call_through_the_companion() {
+        let deserializer: Box<dyn DynDeserializer<String>> = Box::new(StringDeserializer::new());
+        let value = DynDeserializer::deserialize(&*deserializer, "topic", b"value").await.unwrap();
+        assert_eq!("value", value);
     }
 
     #[tokio::test]

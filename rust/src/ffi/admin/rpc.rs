@@ -739,8 +739,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
     // are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this
     // call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each a live
     // `const kafka_admin_RecordsToDelete_t *` handle no other call mutates meanwhile, as
-    // `records_to_delete_ref` requires; each value is copied out before the call returns.
-    let records_to_delete_ = unsafe { tp_keyed(records_to_delete, |p| *records_to_delete_ref(p as *const _)) };
+    // `records_to_delete_ref` requires; each value is cloned before the call returns.
+    let records_to_delete_ = unsafe { tp_keyed(records_to_delete, |p| records_to_delete_ref(p as *const _).clone()) };
     let result = client.call(|admin| admin.delete_records(&records_to_delete_));
     box_delete_records_result(result, &client.future_ctx())
 }
@@ -772,8 +772,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
     // are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this
     // call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each a live
     // `const kafka_admin_RecordsToDelete_t *` handle no other call mutates meanwhile, as
-    // `records_to_delete_ref` requires; each value is copied out before the call returns.
-    let records_to_delete_ = unsafe { tp_keyed(records_to_delete, |p| *records_to_delete_ref(p as *const _)) };
+    // `records_to_delete_ref` requires; each value is cloned before the call returns.
+    let records_to_delete_ = unsafe { tp_keyed(records_to_delete, |p| records_to_delete_ref(p as *const _).clone()) };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DeleteRecordsOptions_t` handle that no other call mutates during this one, so no
     // setter runs on it while it is cloned, as `delete_records_options_ref` requires.
@@ -2003,10 +2003,10 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
     // whose keys are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated
     // during this call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only,
     // each a `const kafka_admin_OffsetSpec_t *` singleton, or an owned handle not yet destroyed
-    // that no other call frees meanwhile, as `offset_spec_value_of` requires; each value is copied
-    // out.
+    // that no other call frees meanwhile, as `offset_spec_value_of` requires; each value is cloned
+    // out, so the borrow ends within the call.
     let topic_partition_offsets_ =
-        unsafe { tp_keyed(topic_partition_offsets, |p| offset_spec_value_of(p as *const _)) };
+        unsafe { tp_keyed(topic_partition_offsets, |p| offset_spec_value_of(p as *const _).clone()) };
     let result = client.call(|admin| admin.list_offsets(&topic_partition_offsets_));
     box_list_offsets_result(result, &client.future_ctx())
 }
@@ -2038,10 +2038,10 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
     // whose keys are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated
     // during this call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only,
     // each a `const kafka_admin_OffsetSpec_t *` singleton, or an owned handle not yet destroyed
-    // that no other call frees meanwhile, as `offset_spec_value_of` requires; each value is copied
-    // out.
+    // that no other call frees meanwhile, as `offset_spec_value_of` requires; each value is cloned
+    // out, so the borrow ends within the call.
     let topic_partition_offsets_ =
-        unsafe { tp_keyed(topic_partition_offsets, |p| offset_spec_value_of(p as *const _)) };
+        unsafe { tp_keyed(topic_partition_offsets, |p| offset_spec_value_of(p as *const _).clone()) };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_ListOffsetsOptions_t` handle that no other call mutates during this one, so no
     // setter runs on it while it is cloned, as `list_offsets_options_ref` requires.
@@ -3461,8 +3461,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_FeatureUpdate_t *` handle no other call mutates meanwhile, as
-    // `feature_update_ref` requires; each value is copied out before the call returns.
-    let feature_updates_ = unsafe { string_keyed(feature_updates, |p| *feature_update_ref(p as *const _)) };
+    // `feature_update_ref` requires; each value is cloned before the call returns.
+    let feature_updates_ = unsafe { string_keyed(feature_updates, |p| feature_update_ref(p as *const _).clone()) };
     let result = client.call(|admin| admin.update_features(&feature_updates_));
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(result, out_err, |r| box_update_features_result(r, &client.future_ctx())) }
@@ -3496,8 +3496,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_FeatureUpdate_t *` handle no other call mutates meanwhile, as
-    // `feature_update_ref` requires; each value is copied out before the call returns.
-    let feature_updates_ = unsafe { string_keyed(feature_updates, |p| *feature_update_ref(p as *const _)) };
+    // `feature_update_ref` requires; each value is cloned before the call returns.
+    let feature_updates_ = unsafe { string_keyed(feature_updates, |p| feature_update_ref(p as *const _).clone()) };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_UpdateFeaturesOptions_t` handle that no other call mutates during this one, so
     // no setter runs on it while it is cloned, as `update_features_options_ref` requires.
