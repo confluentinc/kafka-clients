@@ -37,6 +37,9 @@
 //! - `config.providers`: config providers are not translated, so the key is
 //!   left undefined and a value set for it is reported as unused, rather than
 //!   accepted and ignored.
+//! - `enable.metrics.push`: KIP-714 client telemetry is not implemented, so
+//!   the key is left undefined and a value set for it is reported as unused,
+//!   rather than accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -230,7 +233,8 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::Low,
         )
-        .define(ConsumerConfig::ENABLE_METRICS_PUSH_CONFIG, Type::Boolean, true, Importance::Low)
+        // Java defines `enable.metrics.push` here (`ConsumerConfig.java:570-574`);
+        // it is left undefined until KIP-714 client telemetry is implemented.
         .define_with_validator(
             ConsumerConfig::AUTO_OFFSET_RESET_CONFIG,
             Type::String,
@@ -949,8 +953,6 @@ impl ConsumerConfig {
     /// Default value of `allow.auto.create.topics`.
     pub const DEFAULT_ALLOW_AUTO_CREATE_TOPICS: bool = true;
 
-    /// Config key: `enable.metrics.push`.
-    pub const ENABLE_METRICS_PUSH_CONFIG: &'static str = "enable.metrics.push";
     /// Config key: `metrics.sample.window.ms`.
     pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &'static str = "metrics.sample.window.ms";
     /// Config key: `metrics.num.samples`.
@@ -2923,6 +2925,7 @@ mod tests {
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
             "security.providers",
             "config.providers",
+            "enable.metrics.push",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",
@@ -2964,6 +2967,19 @@ mod tests {
             config.unused()
         );
         config.log_unused();
+    }
+
+    /// `enable.metrics.push` is not defined until KIP-714 client telemetry is
+    /// implemented, so a value set for it is only reported as unused.
+    #[test]
+    fn test_enable_metrics_push_is_unused() {
+        let config = ConsumerConfig::new(&props_with(&[("enable.metrics.push", "true")])).unwrap();
+        config.mark_read_keys_used();
+        assert_eq!(HashSet::from(["enable.metrics.push".to_string()]), config.unused());
+        assert_eq!(
+            "Unknown configuration 'enable.metrics.push'",
+            config.get_boolean("enable.metrics.push").unwrap_err().message()
+        );
     }
 
     /// Java's `equals` / `hashCode` compare the originals.

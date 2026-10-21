@@ -35,6 +35,9 @@
 //!   with `ClientUtils`'s "No resolvable bootstrap urls given in
 //!   bootstrap.servers", where Java's `KafkaAdminClient.determineBootstrapType`
 //!   says "You must set either bootstrap.servers or bootstrap.controllers".
+//! - `enable.metrics.push`: KIP-714 client telemetry is not implemented, so
+//!   the key is left undefined and a value set for it is reported as unused,
+//!   rather than accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -124,12 +127,9 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::High,
         )
-        .define(
-            CommonClientConfigs::ENABLE_METRICS_PUSH_CONFIG,
-            Type::Boolean,
-            false,
-            Importance::Low,
-        )
+        // Java defines `enable.metrics.push` here
+        // (`AdminClientConfig.java:213-217`); it is left undefined until KIP-714
+        // client telemetry is implemented.
         .define_with_validator(
             AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG,
             Type::Int,
@@ -911,6 +911,17 @@ mod tests {
         assert!(config.unused().contains("bootstrap.controllers"));
     }
 
+    /// `enable.metrics.push` is not defined until KIP-714 client telemetry is
+    /// implemented, so a value set for it is only reported as unused.
+    #[test]
+    fn enable_metrics_push_is_unused() {
+        let mut props = bootstrap_props();
+        props.insert("enable.metrics.push".to_string(), "true".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        config.mark_read_keys_used();
+        assert_eq!(config.unused(), HashSet::from(["enable.metrics.push".to_string()]));
+    }
+
     #[test]
     fn overrides_and_unknown_keys() {
         let mut props = HashMap::new();
@@ -1090,7 +1101,11 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.get_int("request.timeout.ms").unwrap(), Some(30_000));
         assert_eq!(config.get_long("metadata.max.age.ms").unwrap(), Some(300_000));
-        assert_eq!(config.get_boolean("enable.metrics.push").unwrap(), Some(false));
+        assert_eq!(config.get_boolean("metadata.cluster.check.enable").unwrap(), Some(true));
+        assert_eq!(
+            config.get_boolean("enable.metrics.push").unwrap_err().message(),
+            "Unknown configuration 'enable.metrics.push'"
+        );
         assert_eq!(config.get_string("client.id").unwrap(), Some("admin-1"));
         assert_eq!(config.get_list("bootstrap.servers").unwrap(), Some(&["a:9092".to_string()][..]));
         assert_eq!(
@@ -1129,6 +1144,7 @@ mod tests {
             "security.providers",
             "config.providers",
             "bootstrap.controllers",
+            "enable.metrics.push",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",

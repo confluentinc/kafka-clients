@@ -32,6 +32,9 @@
 //! - `config.providers`: config providers are not translated, so the key is
 //!   left undefined and a value set for it is reported as unused, rather than
 //!   accepted and ignored.
+//! - `enable.metrics.push`: KIP-714 client telemetry is not implemented, so
+//!   the key is left undefined and a value set for it is reported as unused,
+//!   rather than accepted and ignored.
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -315,7 +318,8 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::High,
         )
-        .define(ProducerConfig::ENABLE_METRICS_PUSH_CONFIG, Type::Boolean, true, Importance::Low)
+        // Java defines `enable.metrics.push` here (`ProducerConfig.java:477-481`);
+        // it is left undefined until KIP-714 client telemetry is implemented.
         .define_with_validator(
             ProducerConfig::MAX_BLOCK_MS_CONFIG,
             Type::Long,
@@ -1074,8 +1078,6 @@ impl ProducerConfig {
     pub const COMPRESSION_LZ4_LEVEL_CONFIG: &'static str = "compression.lz4.level";
     /// Config key: `compression.zstd.level`
     pub const COMPRESSION_ZSTD_LEVEL_CONFIG: &'static str = "compression.zstd.level";
-    /// Config key: `enable.metrics.push`
-    pub const ENABLE_METRICS_PUSH_CONFIG: &'static str = "enable.metrics.push";
     /// Config key: `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
     /// Config key: `socket.connection.setup.timeout.max.ms`
@@ -3173,7 +3175,6 @@ mod tests {
             ProducerConfig::COMPRESSION_GZIP_LEVEL_CONFIG,
             ProducerConfig::COMPRESSION_LZ4_LEVEL_CONFIG,
             ProducerConfig::COMPRESSION_ZSTD_LEVEL_CONFIG,
-            ProducerConfig::ENABLE_METRICS_PUSH_CONFIG,
             SaslConfigs::SASL_MECHANISM,
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
             "ssl.cipher.suites",
@@ -3188,6 +3189,7 @@ mod tests {
             "interceptor.classes",
             "security.providers",
             "config.providers",
+            "enable.metrics.push",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",
@@ -3229,6 +3231,19 @@ mod tests {
             config.unused()
         );
         config.log_unused();
+    }
+
+    /// `enable.metrics.push` is not defined until KIP-714 client telemetry is
+    /// implemented, so a value set for it is only reported as unused.
+    #[test]
+    fn test_enable_metrics_push_is_unused() {
+        let config = ProducerConfig::new(&props_with(&[("enable.metrics.push", "true")])).unwrap();
+        config.mark_read_keys_used();
+        assert_eq!(HashSet::from(["enable.metrics.push".to_string()]), config.unused());
+        assert_eq!(
+            "Unknown configuration 'enable.metrics.push'",
+            config.get_boolean("enable.metrics.push").unwrap_err().message()
+        );
     }
 
     /// Java's `equals` / `hashCode` compare the originals.

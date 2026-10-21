@@ -178,8 +178,6 @@ impl CommonClientConfigs {
     pub const DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
     /// The default `retry.backoff.max.ms`.
     pub const DEFAULT_RETRY_BACKOFF_MAX_MS: i64 = 1000;
-    /// Config key: `enable.metrics.push`
-    pub const ENABLE_METRICS_PUSH_CONFIG: &str = "enable.metrics.push";
     /// Config key: `metrics.sample.window.ms`
     pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &str = "metrics.sample.window.ms";
     /// Config key: `metrics.num.samples`

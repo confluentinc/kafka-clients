@@ -426,7 +426,10 @@ mod tests {
 
     #[test]
     fn scalar_getters_report_value_null_and_errors() {
-        let config = config_with(&[("request.timeout.ms", "1234"), ("enable.metrics.push", "true")]);
+        let config = config_with(&[
+            ("request.timeout.ms", "1234"),
+            ("metadata.cluster.check.enable", "false"),
+        ]);
         let mut error = std::ptr::null_mut();
         let key = |k: &str| CString::new(k).unwrap();
         // SAFETY: Test code: `config` is the live handle built above, destroyed once at the end;
@@ -457,13 +460,14 @@ mod tests {
             assert_eq!(
                 kafka_admin_AdminClientConfig_get_boolean(
                     config,
-                    key("enable.metrics.push").as_ptr(),
+                    key("metadata.cluster.check.enable").as_ptr(),
                     &mut boolean,
                     &mut error
                 ),
                 1
             );
-            assert_eq!(boolean, 1);
+            assert!(error.is_null());
+            assert_eq!(boolean, 0);
 
             // A type mismatch and an unknown key fail through `out_err`.
             let mut short = 7_i16;

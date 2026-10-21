@@ -48,7 +48,7 @@ breaking changes.
   `parseAcks` made of it (`-1` for `all`).
 - New `ProducerConfig` constants for keys Java's `ProducerConfig` names:
   `COMPRESSION_GZIP_LEVEL_CONFIG`, `COMPRESSION_LZ4_LEVEL_CONFIG`,
-  `COMPRESSION_ZSTD_LEVEL_CONFIG`, `ENABLE_METRICS_PUSH_CONFIG`,
+  `COMPRESSION_ZSTD_LEVEL_CONFIG`,
   `SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG` and
   `SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG`.
 - The producer logs its configuration values at INFO when it is built, as
@@ -168,6 +168,15 @@ breaking changes.
   `AdminClientConfig::new` used to fail with Java's
   `KafkaAdminClient.determineBootstrapType` message `You must set either
   bootstrap.servers or bootstrap.controllers`.
+- **Breaking (Rust, C API, Python):** `enable.metrics.push` is no longer
+  defined on `ProducerConfig`, `ConsumerConfig` or `AdminClientConfig`, and
+  `ConsumerConfig::ENABLE_METRICS_PUSH_CONFIG`, released since 0.1.0, is
+  removed (`ProducerConfig::ENABLE_METRICS_PUSH_CONFIG` was never released).
+  Client telemetry (KIP-714) is not implemented, so the key stays undefined
+  until it is: a value set for it is listed among the unused configurations
+  instead of being parsed and ignored, its typed getters answer `Unknown
+  configuration 'enable.metrics.push'`, and a value that is not a boolean no
+  longer fails the configuration.
 - `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
@@ -178,8 +187,8 @@ breaking changes.
   Java's `Admin.create` does, and then, in one INFO line, the supplied keys it
   did not use: `These configurations '[a, b]' were supplied but are not used
   yet.` It used to log neither. The line also lists keys Java reads and this
-  client does not yet (the `metrics.*` keys and `enable.metrics.push`), and the
-  `ssl.*` / `sasl.*` keys when `security.protocol` does not use them.
+  client does not yet (the `metrics.*` keys), and the `ssl.*` / `sasl.*` keys
+  when `security.protocol` does not use them.
 - **Behaviour change:** the admin client follows `metadata.recovery.strategy`,
   whose default is Java's `rebootstrap`, where it always ran as `none`. Once
   bootstrapped, it goes back to the `bootstrap.servers` addresses when no
