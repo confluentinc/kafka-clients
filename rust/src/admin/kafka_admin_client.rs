@@ -39,7 +39,7 @@
 use crate::admin::CreateTopicsResult;
 use crate::common::requests::DescribeClusterRequest;
 use crate::common::requests::MetadataResponse;
-use crate::{kafka_debug, kafka_error};
+use crate::{kafka_debug, kafka_error, kafka_warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -83,7 +83,6 @@ use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selectable;
 use crate::common::network::Selector;
-use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
@@ -374,8 +373,11 @@ impl KafkaAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the bootstrap addresses cannot be resolved or the
-    /// channel builder cannot be created.
+    /// Returns a Kafka error, `Failed to create new KafkaAdminClient`, whose
+    /// source is the failure: the bootstrap addresses cannot be resolved, the
+    /// channel builder cannot be created, or `default.api.timeout.ms` is set
+    /// explicitly below `request.timeout.ms`
+    /// ([`configure_default_api_timeout_ms`](Self::configure_default_api_timeout_ms)).
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
     pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
         // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
@@ -536,12 +538,12 @@ impl KafkaAdminClient {
             1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            USE_DEFAULT_BUFFER_SIZE,
-            USE_DEFAULT_BUFFER_SIZE,
+            config.send_buffer_bytes(),                      // `ClientUtils.java:294`
+            config.receive_buffer_bytes(),                   // `ClientUtils.java:295`
             3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
-            config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
-            true, // discover_broker_versions
+            config.socket_connection_setup_timeout_ms(), // `ClientUtils.java:297`
+            config.socket_connection_setup_timeout_max_ms(), // `ClientUtils.java:298`
+            true,      // discover_broker_versions
             api_versions,
             host_resolver,
             config.metadata_recovery_strategy(),
@@ -592,10 +594,53 @@ impl KafkaAdminClient {
         }
     }
 
+    /// If a `default.api.timeout.ms` has been explicitly specified, raise an
+    /// error if it conflicts with `request.timeout.ms`. If no
+    /// `default.api.timeout.ms` has been configured, then set its value as the
+    /// max of the default and `request.timeout.ms`. Also we should probably log
+    /// a warning. Otherwise, use the provided values for both configurations.
+    ///
+    /// Translated from `KafkaAdminClient.configureDefaultApiTimeoutMs`
+    /// (`KafkaAdminClient.java:715-731`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when `default.api.timeout.ms` is set explicitly below
+    /// `request.timeout.ms`, with Java's single-message `ConfigException` text.
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#configureDefaultApiTimeoutMs")]
+    fn configure_default_api_timeout_ms(config: &AdminClientConfig, log_context: &LogContext) -> Result<i32, Error> {
+        let request_timeout_ms = config.request_timeout_ms();
+        let default_api_timeout_ms = config.default_api_timeout_ms();
+
+        if default_api_timeout_ms < request_timeout_ms {
+            if config.user_configured(AdminClientConfig::DEFAULT_API_TIMEOUT_MS_CONFIG) {
+                return Err(Error::config_message(format!(
+                    "The specified value of {} must be no smaller than the value of {}.",
+                    AdminClientConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
+                    AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG
+                )));
+            }
+            kafka_warn!(
+                log_context,
+                "Overriding the default value for {} ({}) with the explicitly configured request timeout {}",
+                AdminClientConfig::DEFAULT_API_TIMEOUT_MS_CONFIG,
+                default_api_timeout_ms,
+                request_timeout_ms
+            );
+            return Ok(request_timeout_ms);
+        }
+        Ok(default_api_timeout_ms)
+    }
+
     /// Wires up the shared state and the (not-yet-running) background runnable.
     ///
     /// `client_id` is the resolved id from [`generate_client_id`](Self::generate_client_id),
     /// not `config.client_id()`, which may be empty.
+    ///
+    /// Shared by production ([`new`](Self::new)) and the test constructor, as
+    /// Java's private constructor is shared by both `createInternal` paths;
+    /// like it, this resolves the effective `default.api.timeout.ms`
+    /// ([`configure_default_api_timeout_ms`](Self::configure_default_api_timeout_ms)).
     fn build<C: KafkaClient + Send + 'static>(
         client: C,
         metadata_manager: AdminMetadataManager,
@@ -604,6 +649,9 @@ impl KafkaAdminClient {
         time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<(Self, AdminClientRunnable<C>), Error> {
+        // `this.defaultApiTimeoutMs = configureDefaultApiTimeoutMs(config)`
+        // (`KafkaAdminClient.java:680`).
+        let default_api_timeout_ms = Self::configure_default_api_timeout_ms(config, &log_context)?;
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
         let wakeup = client.wakeup_notify();
         let shutdown = Arc::new(ShutdownSignal::new());
@@ -637,7 +685,7 @@ impl KafkaAdminClient {
 
         let shared = Shared {
             client_id,
-            default_api_timeout_ms: config.default_api_timeout_ms(),
+            default_api_timeout_ms,
             request_timeout_ms: config.request_timeout_ms(),
             call_sender: CallSender {
                 tx: admin_tx,
@@ -5782,10 +5830,12 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         metadata_manager.update(cluster, time.milliseconds());
-        // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
-        // fixture, so panicking here is the right test behaviour.
+        // Test-only: the fixture's config is valid (`default.api.timeout.ms` no
+        // smaller than `request.timeout.ms` when set) and a bad
+        // `RETRY_BACKOFF_JITTER` constant is a build error, so panicking here is
+        // the right test behaviour.
         Self::build(client, metadata_manager, config, client_id, time, log_context)
-            .expect("the admin retry backoff constants are valid")
+            .expect("the test config is valid and the admin retry backoff constants are valid")
     }
 }
 
@@ -7617,6 +7667,197 @@ mod tests {
             .expect("the cause is a crate Error");
         assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
         assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
+    /// Java's `newConfMap`: `bootstrap.servers` and `request.timeout.ms=1000`
+    /// (`KafkaAdminClientTestBase.newStrMap`), plus `extra`.
+    fn new_conf_map(extra: &[(&str, &str)]) -> AdminClientConfig {
+        let mut props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:8121".to_string()),
+            ("request.timeout.ms".to_string(), "1000".to_string()),
+        ]);
+        props.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        AdminClientConfig::new(&props).unwrap()
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDefaultApiTimeoutAndRequestTimeoutConflicts`:
+    /// an explicit `default.api.timeout.ms` (500) below `request.timeout.ms`
+    /// (1000) fails creation with `configureDefaultApiTimeoutMs`'s
+    /// `ConfigException`, wrapped in the constructor's `KafkaException`
+    /// (`KafkaAdminClient.java:569-573`, `:715-731`).
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDefaultApiTimeoutAndRequestTimeoutConflicts"
+    )]
+    async fn test_default_api_timeout_and_request_timeout_conflicts() {
+        let config = new_conf_map(&[("default.api.timeout.ms", "500")]);
+        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        assert!(error.is_kafka_error(), "{error:?}");
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(
+            cause.message(),
+            "The specified value of default.api.timeout.ms must be no smaller than the value of request.timeout.ms."
+        );
+    }
+
+    /// `configureDefaultApiTimeoutMs`'s three branches: an explicit API timeout
+    /// below the request timeout is an error; an unset one below it is raised
+    /// to the request timeout (with a WARN); otherwise the API timeout is kept,
+    /// explicit or default. The raised value is what the client's calls use.
+    #[test]
+    fn test_configure_default_api_timeout_ms() {
+        let configure = |extra: &[(&str, &str)]| {
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+            props.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+            KafkaAdminClient::configure_default_api_timeout_ms(
+                &AdminClientConfig::new(&props).unwrap(),
+                &LogContext::empty(),
+            )
+        };
+        let err = configure(&[("default.api.timeout.ms", "10000"), ("request.timeout.ms", "30000")]).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "The specified value of default.api.timeout.ms must be no smaller than the value of request.timeout.ms."
+        );
+        assert_eq!(configure(&[("request.timeout.ms", "70000")]).unwrap(), 70_000);
+        assert_eq!(configure(&[("request.timeout.ms", "30000")]).unwrap(), 60_000);
+        assert_eq!(configure(&[]).unwrap(), 60_000);
+        assert_eq!(
+            configure(&[("default.api.timeout.ms", "30000"), ("request.timeout.ms", "30000")]).unwrap(),
+            30_000
+        );
+        assert_eq!(
+            configure(&[("default.api.timeout.ms", "90000"), ("request.timeout.ms", "30000")]).unwrap(),
+            90_000
+        );
+
+        let (admin, _runnable, _time, _nodes) = env_with_props(&[("request.timeout.ms", "70000")]);
+        assert_eq!(admin.shared.default_api_timeout_ms, 70_000);
+    }
+
+    /// Java's `testApiTimeout(requestTimeoutMs, defaultApiTimeoutMs,
+    /// overrideApiTimeoutMs)`: with an effective API timeout of twice the
+    /// request timeout, the first `listTopics` attempt times out after the
+    /// request timeout and is retried, and the call fails with a timeout after
+    /// the second.
+    async fn test_api_timeout(
+        request_timeout_ms: i64,
+        default_api_timeout_ms: i64,
+        override_api_timeout_ms: Option<i32>,
+    ) {
+        let retry_backoff_ms = 100;
+        let effective_timeout_ms = override_api_timeout_ms.map_or(default_api_timeout_ms, i64::from);
+        assert_eq!(
+            2 * request_timeout_ms,
+            effective_timeout_ms,
+            "This test expects the effective timeout to be twice the request timeout"
+        );
+        let (admin, mut runnable, time, _nodes) = env_nodes_with_props(
+            1,
+            &[
+                ("retry.backoff.ms", &retry_backoff_ms.to_string()),
+                ("request.timeout.ms", &request_timeout_ms.to_string()),
+                ("default.api.timeout.ms", &default_api_timeout_ms.to_string()),
+            ],
+        );
+        let options = ListTopicsOptions::new().set_timeout_ms(override_api_timeout_ms);
+        let future = admin.list_topics_with_options(options).names_to_listings();
+
+        // Wait until the first attempt has been sent, then advance the time
+        pump_until(&mut runnable, 40, |r| r.client_mut().has_in_flight_requests()).await;
+        assert!(
+            runnable.client_mut().has_in_flight_requests(),
+            "Timed out waiting for Metadata request to be sent"
+        );
+        time.sleep(request_timeout_ms + 1);
+
+        // Wait for the request to be timed out before backing off
+        pump_until(&mut runnable, 40, |r| !r.client_mut().has_in_flight_requests()).await;
+        assert!(
+            !runnable.client_mut().has_in_flight_requests(),
+            "Timed out waiting for inFlightRequests to be timed out"
+        );
+
+        // Since api timeout bound is not hit, AdminClient should retry
+        pump_until(&mut runnable, 40, |r| {
+            let has_inflight_requests = r.client_mut().has_in_flight_requests();
+            if !has_inflight_requests {
+                time.sleep(retry_backoff_ms);
+            }
+            has_inflight_requests
+        })
+        .await;
+        assert!(
+            runnable.client_mut().has_in_flight_requests(),
+            "Timed out waiting for Metadata request to be sent"
+        );
+        time.sleep(request_timeout_ms + 1);
+
+        pump_until(&mut runnable, 40, |_| future.is_done()).await;
+        let error = future.get().await.unwrap_err();
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDefaultApiTimeout`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDefaultApiTimeout")]
+    async fn test_default_api_timeout() {
+        test_api_timeout(1500, 3000, None).await;
+    }
+
+    /// Translated from `KafkaAdminClientTest.testDefaultApiTimeoutOverride`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDefaultApiTimeoutOverride")]
+    async fn test_default_api_timeout_override() {
+        test_api_timeout(1500, 10000, Some(3000)).await;
+    }
+
+    /// Translated from `KafkaAdminClientTest.testRequestTimeoutExceedingDefaultApiTimeout`:
+    /// with `request.timeout.ms=120000` and `default.api.timeout.ms` unset, the
+    /// API timeout is raised to 120000, so the `listTopics` metadata request is
+    /// still in flight after the default 60000 ms and the call fails with a
+    /// timeout once the request timeout passes. Java's thread runs
+    /// concurrently with the test; here the runnable is pumped after each
+    /// `sleep`, so the in-flight check sees the timeouts processed.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testRequestTimeoutExceedingDefaultApiTimeout")]
+    async fn test_request_timeout_exceeding_default_api_timeout() {
+        // This test assumes the default api timeout value of 60000. When the request timeout
+        // is set to something larger, we should adjust the api timeout accordingly for compatibility.
+        let retry_backoff_ms = 100;
+        let request_timeout_ms = 120_000;
+        let (admin, mut runnable, time, _nodes) = env_nodes_with_props(
+            1,
+            &[
+                ("retry.backoff.ms", &retry_backoff_ms.to_string()),
+                ("request.timeout.ms", &request_timeout_ms.to_string()),
+            ],
+        );
+        let future = admin.list_topics_with_options(ListTopicsOptions::new()).names_to_listings();
+
+        // Wait until the first attempt has been sent, then advance the time by the default api timeout
+        pump_until(&mut runnable, 40, |r| r.client_mut().has_in_flight_requests()).await;
+        assert!(
+            runnable.client_mut().has_in_flight_requests(),
+            "Timed out waiting for Metadata request to be sent"
+        );
+        time.sleep(60001);
+        pump(&mut runnable, 5).await;
+
+        // The in-flight request should not be cancelled
+        assert!(runnable.client_mut().has_in_flight_requests());
+        assert!(!future.is_done());
+
+        // Now sleep the remaining time for the request timeout to expire
+        time.sleep(60000);
+        pump_until(&mut runnable, 40, |_| future.is_done()).await;
+        let error = future.get().await.unwrap_err();
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
     }
 
     /// A [`Call`] whose failure hook records the error it was failed with.
@@ -14752,11 +14993,13 @@ mod tests {
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
         use crate::common::protocol::ApiKeys;
-        // request.timeout.ms (30000) > default.api.timeout.ms (20000) so the
-        // describe budget is observable uncapped; options.timeout (5000) is
-        // smaller still, so the buggy and fixed budgets are distinguishable.
+        // request.timeout.ms equals default.api.timeout.ms (20000), so the
+        // describe budget is observable uncapped (an explicit API timeout below
+        // the request timeout is a `ConfigException`, see
+        // `configure_default_api_timeout_ms`); options.timeout (5000) is
+        // smaller, so the buggy and fixed budgets are distinguishable.
         let (admin, mut runnable, _time, _nodes) = env_with_props(&[
-            ("request.timeout.ms", "30000"),
+            ("request.timeout.ms", "20000"),
             ("default.api.timeout.ms", "20000"),
             ("retries", "2147483647"),
             ("retry.backoff.ms", "10"),
@@ -14774,9 +15017,9 @@ mod tests {
         let describe_lookup = &requests[0];
         assert_eq!(describe_lookup.api_key(), &ApiKeys::FIND_COORDINATOR);
         // now == 1000, describe deadline == now + default.api.timeout.ms == 21000,
-        // budget == min(request.timeout.ms=30000, 21000-1000) == 20000. The buggy
+        // budget == min(request.timeout.ms=20000, 21000-1000) == 20000. The buggy
         // code (describe deadline tied to options.timeout=5000) would instead
-        // yield min(30000, 5000) == 5000.
+        // yield min(20000, 5000) == 5000.
         assert_eq!(
             describe_lookup.request_timeout_ms(),
             20000,
@@ -15835,6 +16078,100 @@ mod tests {
             i64::MAX,
             "update(..) was not called, so the manager stays UPDATE_PENDING until the rebootstrap"
         );
+    }
+
+    /// `ClientUtils.createNetworkClient` passes `send.buffer.bytes` and
+    /// `receive.buffer.bytes` to the `NetworkClient` (`ClientUtils.java:294-295`),
+    /// which hands them to every `Selectable::connect`. The admin client used
+    /// to pass `USE_DEFAULT_BUFFER_SIZE` for both.
+    #[test]
+    fn create_network_client_passes_the_socket_buffer_sizes() {
+        for (extra, expected) in [
+            (vec![], (128 * 1024, 64 * 1024)),
+            (
+                vec![("send.buffer.bytes", "262144"), ("receive.buffer.bytes", "32768")],
+                (262_144, 32_768),
+            ),
+        ] {
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+            props.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+            let config = AdminClientConfig::new(&props).unwrap();
+            let manager = AdminMetadataManager::new(100, 300_000, false, LogContext::empty());
+            let client = KafkaAdminClient::create_network_client(
+                &config,
+                crate::common::network::MockSelector::new(),
+                manager.updater(),
+                "admin",
+                Arc::new(ApiVersions::new()),
+                DefaultHostResolver::new(),
+                LogContext::empty(),
+            );
+            assert_eq!(client.socket_buffer_sizes(), expected, "{extra:?}");
+        }
+    }
+
+    /// `socket.connection.setup.timeout.max.ms` is the `NetworkClient`'s maximum
+    /// connection setup timeout (`ClientUtils.java:297-298`), so the timeout
+    /// grows from `socket.connection.setup.timeout.ms` with each consecutive
+    /// failed attempt, with 20% jitter (`ClusterConnectionStates.java`). Against
+    /// a listener that accepts the TCP connection and never answers SASL, with a
+    /// 1 s initial timeout, the first attempt is cut after 0.8-1.2 s and the
+    /// second after 1.6-2.4 s. The admin client used to pass the initial value
+    /// as the max too, which kept every attempt at 0.8-1.2 s.
+    #[tokio::test]
+    async fn the_connection_setup_timeout_grows_between_attempts() {
+        use std::time::{Duration, Instant};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel();
+        let acceptor = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let accepted = Instant::now();
+                let attempt_tx = attempt_tx.clone();
+                tokio::spawn(async move {
+                    // Reads whatever the client sends and never answers, until
+                    // the client gives up and closes the connection.
+                    let mut buf = [0u8; 512];
+                    while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                    let _ = attempt_tx.send(accepted.elapsed());
+                });
+            }
+        });
+
+        let props: HashMap<String, String> = [
+            ("bootstrap.servers", format!("127.0.0.1:{port}")),
+            ("security.protocol", "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism", "PLAIN".to_string()),
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"user\" password=\"secret\";"
+                    .to_string(),
+            ),
+            ("socket.connection.setup.timeout.ms", "1000".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).unwrap()).unwrap();
+        // A call keeps the client trying to connect.
+        let _result = admin.list_topics();
+
+        let mut attempts = Vec::new();
+        while attempts.len() < 2 {
+            let attempt = tokio::time::timeout(Duration::from_secs(10), attempt_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no connection attempt ended within 10 s; so far {attempts:?}"))
+                .expect("the acceptor is running");
+            attempts.push(attempt);
+        }
+        admin.close_with_timeout(Duration::ZERO).await;
+        acceptor.abort();
+
+        assert!(attempts[0] < Duration::from_millis(1400), "first attempt: {attempts:?}");
+        assert!(attempts[1] > Duration::from_millis(1400), "second attempt: {attempts:?}");
     }
 
     /// `ClientUtils.createNetworkClient` passes `metadata.recovery.strategy` and

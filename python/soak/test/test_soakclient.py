@@ -357,6 +357,23 @@ def test_route_shared_config_moves_other_clients_keys():
     validate_config(kept, PRODUCER_CONFIG_KEYS, "producer")
 
 
+def test_shared_connection_keys_stay_with_the_producer():
+    # The producer parses these keys too, so an unprefixed one must reach it
+    # rather than be routed to the consumer only, and a `producer.`-prefixed
+    # one must not be rejected at startup.
+    conf = {
+        "metadata.recovery.strategy": "none",
+        "metadata.recovery.rebootstrap.trigger.ms": "60000",
+        "socket.connection.setup.timeout.ms": "1000",
+        "socket.connection.setup.timeout.max.ms": "5000",
+    }
+    kept, routed = route_shared_config(conf, PRODUCER_CONFIG_KEYS,
+                                       CONSUMER_CONFIG_KEYS)
+    assert routed == []
+    assert kept == conf
+    validate_config(kept, PRODUCER_CONFIG_KEYS, "producer")
+
+
 def test_route_shared_config_keeps_keys_unknown_to_both():
     kept, routed = route_shared_config({"nonsense.key": "1"},
                                        PRODUCER_CONFIG_KEYS, CONSUMER_CONFIG_KEYS)

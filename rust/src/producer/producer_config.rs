@@ -31,7 +31,7 @@ use crate::MetadataRecoveryStrategy;
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
 use crate::common::config::types::Password;
-use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::config::{ConfigDef, SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::auth::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
@@ -170,7 +170,9 @@ pub struct ProducerConfig {
     pub(crate) reconnect_backoff_ms: i64,
 
     /// `reconnect.backoff.max.ms` - Maximum wait time before reconnection attempts.
-    /// Default: 1000 ms.
+    /// Default: 1000 ms. When the user set `reconnect.backoff.ms` and not this
+    /// key, it is the `reconnect.backoff.ms` value, as in Java
+    /// (`CommonClientConfigs.postProcessReconnectBackoffConfigs`).
     pub(crate) reconnect_backoff_max_ms: i64,
 
     /// `retry.backoff.ms` - Wait time before retrying a failed request.
@@ -623,6 +625,12 @@ impl ProducerConfig {
     pub const SEND_BUFFER_CONFIG: &'static str = "send.buffer.bytes";
     /// Config key: `receive.buffer.bytes`
     pub const RECEIVE_BUFFER_CONFIG: &'static str = "receive.buffer.bytes";
+    /// Config key: `socket.connection.setup.timeout.ms`
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG;
+    /// Config key: `socket.connection.setup.timeout.max.ms`
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG;
     /// Config key: `metadata.max.age.ms`
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// Config key: `metadata.max.idle.ms`
@@ -834,6 +842,14 @@ impl ProducerConfig {
                     // `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`, -1.
                     config.receive_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
                 },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
+                    // `Type.LONG` with no validator (`ProducerConfig.java:534-538`).
+                    config.socket_connection_setup_timeout_ms = Self::parse_i64(key, value)?;
+                },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG => {
+                    // `Type.LONG` with no validator (`ProducerConfig.java:539-543`).
+                    config.socket_connection_setup_timeout_max_ms = Self::parse_i64(key, value)?;
+                },
                 Self::METADATA_MAX_AGE_CONFIG => {
                     config.metadata_max_age_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
@@ -976,9 +992,21 @@ impl ProducerConfig {
             }
         }
 
-        // Order matters and matches Java's constructor: idempotence validation
-        // may override `enable.idempotence`, and the client id derivation reads
-        // `transactional.id`.
+        // Java's `postProcessParsedConfig` (`ProducerConfig.java:622-629`) runs
+        // these once every key is parsed. Order matters and matches Java:
+        // idempotence validation may override `enable.idempotence`, and the
+        // client id derivation reads `transactional.id`.
+        CommonClientConfigs::warn_disabling_exponential_backoff(
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+        );
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&config.originals, config.reconnect_backoff_ms)
+        {
+            config.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
         config.post_process_and_validate_idempotence_configs()?;
         config.maybe_override_client_id();
 
@@ -1220,14 +1248,18 @@ impl ProducerConfig {
         Ok(value)
     }
 
-    /// Parses a string value as `i32`.
+    /// Parses a `Type.INT` value as Java's `ConfigDef.parseType` does
+    /// ([`ConfigDef::parse_int`]): a value that is not a number is rejected
+    /// with `Not a number of type INT`.
     fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-        value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
+        ConfigDef::parse_int(key, value)
     }
 
-    /// Parses a string value as `i64`.
+    /// Parses a `Type.LONG` value as Java's `ConfigDef.parseType` does
+    /// ([`ConfigDef::parse_long`]): a value that is not a number is rejected
+    /// with `Not a number of type LONG`.
     fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-        value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
+        ConfigDef::parse_long(key, value)
     }
 
     /// Parses a string value as `bool`.
@@ -1573,6 +1605,58 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// `socket.connection.setup.timeout.ms` and `.max.ms` are `Type.LONG` keys
+    /// with Java's defaults of 10000 and 30000 and no validator
+    /// (`ProducerConfig.java:534-543`). The producer used to log them as
+    /// unknown keys and keep the defaults.
+    #[test]
+    fn test_socket_connection_setup_timeouts() {
+        let timeouts = |extra: &[(&str, &str)]| {
+            let config = ProducerConfig::new(&props_with(extra)).unwrap();
+            (
+                config.socket_connection_setup_timeout_ms,
+                config.socket_connection_setup_timeout_max_ms,
+            )
+        };
+        assert_eq!(timeouts(&[]), (10_000, 30_000));
+        assert_eq!(
+            timeouts(&[
+                ("socket.connection.setup.timeout.ms", "1000"),
+                ("socket.connection.setup.timeout.max.ms", "5000"),
+            ]),
+            (1000, 5000)
+        );
+        // No validator: Java accepts a negative value.
+        assert_eq!(timeouts(&[("socket.connection.setup.timeout.ms", "-1")]), (-1, 30_000));
+        for key in [
+            "socket.connection.setup.timeout.ms",
+            "socket.connection.setup.timeout.max.ms",
+        ] {
+            let err = ProducerConfig::new(&props_with(&[(key, "abc")])).unwrap_err();
+            assert_eq!(
+                err.message(),
+                format!("Invalid value abc for configuration {key}: Not a number of type LONG")
+            );
+        }
+    }
+
+    /// Java's `ConfigDef.parseType` rejects a value that is not a number with
+    /// `Not a number of type INT` / `LONG` after the key (`ConfigDef.java:752-760`,
+    /// `:788-789`), and trims the value before parsing it.
+    #[test]
+    fn test_unparsable_numbers_report_the_java_type() {
+        for (key, java_type) in [("batch.size", "INT"), ("linger.ms", "LONG")] {
+            let err = ProducerConfig::new(&props_with(&[(key, "abc")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value abc for configuration {key}: Not a number of type {java_type}")
+            );
+        }
+        let config = ProducerConfig::new(&props_with(&[("batch.size", " 7 "), ("linger.ms", " 8 ")])).unwrap();
+        assert_eq!((config.batch_size, config.linger_ms), (7, 8));
+    }
+
     #[test]
     fn test_new_unknown_key_ignored() {
         let mut props = base_props();
@@ -1732,6 +1816,28 @@ mod tests {
 
         assert_eq!(config.originals.get("client.id").map(String::as_str), Some("my-client"));
         assert_eq!(config.client_id, "my-client");
+    }
+
+    /// Java's `CommonClientConfigsTest.testExponentialBackoffDefaults`, run
+    /// against `ProducerConfig`, whose `postProcessParsedConfig` calls
+    /// `postProcessReconnectBackoffConfigs` (`ProducerConfig.java:625`): with
+    /// only `reconnect.backoff.ms` set, `reconnect.backoff.max.ms` takes its
+    /// value, above or below the default max of 1000. An explicit max is kept.
+    #[test]
+    fn test_reconnect_backoff_alone_sets_the_max() {
+        let backoffs = |extra: &[(&str, &str)]| {
+            let config = ProducerConfig::new(&props_with(extra)).unwrap();
+            (config.reconnect_backoff_ms, config.reconnect_backoff_max_ms)
+        };
+        assert_eq!(backoffs(&[]), (50, 1000));
+        assert_eq!(
+            backoffs(&[("reconnect.backoff.ms", "123"), ("reconnect.backoff.max.ms", "12345")]),
+            (123, 12345)
+        );
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "123")]), (123, 123));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "5000")]), (5000, 5000));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "10")]), (10, 10));
+        assert_eq!(backoffs(&[("reconnect.backoff.max.ms", "2000")]), (50, 2000));
     }
 
     #[test]
