@@ -137,7 +137,9 @@ pub struct ConsumerConfig {
     // --- Reconnect / Retry ---
     /// `reconnect.backoff.ms`
     pub(crate) reconnect_backoff_ms: i64,
-    /// `reconnect.backoff.max.ms`
+    /// `reconnect.backoff.max.ms`. When the user set `reconnect.backoff.ms` and
+    /// not this key, it is the `reconnect.backoff.ms` value, as in Java
+    /// (`CommonClientConfigs.postProcessReconnectBackoffConfigs`).
     pub(crate) reconnect_backoff_max_ms: i64,
     /// `retry.backoff.ms`
     pub(crate) retry_backoff_ms: i64,
@@ -956,8 +958,20 @@ impl ConsumerConfig {
             }
         }
 
-        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:753`),
-        // i.e. after every key has been parsed.
+        // Java runs these from `postProcessParsedConfig` (`ConsumerConfig.java:749-758`),
+        // i.e. after every key has been parsed, in this order. `props` is Java's
+        // `originals()`.
+        CommonClientConfigs::warn_disabling_exponential_backoff(
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+        );
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(props, config.reconnect_backoff_ms)
+        {
+            config.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
         config.maybe_override_client_id()?;
 
         config
@@ -1629,6 +1643,28 @@ mod tests {
             props.insert((*k).to_string(), (*v).to_string());
         }
         props
+    }
+
+    /// Java's `CommonClientConfigsTest.testExponentialBackoffDefaults`, run
+    /// against `ConsumerConfig`, whose `postProcessParsedConfig` calls
+    /// `postProcessReconnectBackoffConfigs` (`ConsumerConfig.java:752`): with
+    /// only `reconnect.backoff.ms` set, `reconnect.backoff.max.ms` takes its
+    /// value, above or below the default max of 1000. An explicit max is kept.
+    #[test]
+    fn test_reconnect_backoff_alone_sets_the_max() {
+        let backoffs = |extra: &[(&str, &str)]| {
+            let config = ConsumerConfig::new(&props_with(extra)).unwrap();
+            (config.reconnect_backoff_ms, config.reconnect_backoff_max_ms)
+        };
+        assert_eq!(backoffs(&[]), (50, 1000));
+        assert_eq!(
+            backoffs(&[("reconnect.backoff.ms", "123"), ("reconnect.backoff.max.ms", "12345")]),
+            (123, 12345)
+        );
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "123")]), (123, 123));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "5000")]), (5000, 5000));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "200")]), (200, 200));
+        assert_eq!(backoffs(&[("reconnect.backoff.max.ms", "2000")]), (50, 2000));
     }
 
     /// Parses the `<n>` suffix of a generated `consumer-<group>-<n>` id.

@@ -16,12 +16,12 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 
 use crate::common::Error;
-use crate::common::config::config_def::ValidList;
-use crate::common::config::types::Password;
-use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::config::config_def::{Range, ValidList};
+use crate::common::config::{ConfigDef, SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 
@@ -29,13 +29,10 @@ use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
-// `Debug` is derived: every secret this struct holds is a `Password` inside
-// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
-// ever gains a map of the raw user properties (Java's `originals()`), replace
-// the derive with a hand-written `Debug` that renders that map as its key set
-// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
-// does not parse, and Java never prints a raw `originals` value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality compares the parsed values and the user's map, as Java's
+/// `AbstractConfig.equals` compares `originals`.
+#[derive(Clone, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
@@ -52,6 +49,9 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    socket_connection_setup_timeout_max_ms: i64,
+    send_buffer_bytes: i32,
+    receive_buffer_bytes: i32,
     metadata_cluster_check_enable: bool,
     metadata_recovery_strategy: MetadataRecoveryStrategy,
     metadata_recovery_rebootstrap_trigger_ms: i64,
@@ -66,6 +66,93 @@ pub struct AdminClientConfig {
 
     /// SSL/TLS configuration.
     ssl_config: SslConfigs,
+
+    /// The user-supplied configuration map, verbatim: Java's
+    /// `AbstractConfig.originals()`, with no defaults mixed in. Read through
+    /// [`Self::user_configured`] where Java asks
+    /// `originals().containsKey(..)`: by
+    /// `CommonClientConfigs.postProcessReconnectBackoffConfigs` and by
+    /// `KafkaAdminClient.configureDefaultApiTimeoutMs`.
+    originals: HashMap<String, String>,
+}
+
+/// Renders every field in declaration order, as the derive it replaces did,
+/// but never a secret.
+///
+/// The typed secrets are `Password`s inside `sasl_config` / `ssl_config` and
+/// render as `Password::HIDDEN` on their own. `originals`, the raw user map,
+/// renders as its sorted key set, with no values at all, because Java never
+/// prints a raw `originals` value: `AbstractConfig.logAll()` prints only the
+/// values parsed for the keys the `ConfigDef` defines, with each
+/// `Type.PASSWORD` value rendered as `[hidden]`, and `logUnused()` prints key
+/// names only. The map also holds keys this client does not parse, such as
+/// Java's OAuth `Type.PASSWORD` keys, so hiding values by key could not match
+/// Java. This is the same rendering as `ProducerConfig`'s.
+impl fmt::Debug for AdminClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured exhaustively: a field added to the struct fails to
+        // compile until it is bound here, and a bound but unrendered field is
+        // an unused variable, which the lint rejects.
+        let Self {
+            bootstrap_servers,
+            client_dns_lookup,
+            client_id,
+            request_timeout_ms,
+            default_api_timeout_ms,
+            retries,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            bootstrap_resolve_timeout_ms,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            connections_max_idle_ms,
+            metadata_max_age_ms,
+            socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
+            metadata_cluster_check_enable,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
+            security_protocol,
+            sasl_config,
+            ssl_config,
+            originals,
+        } = self;
+        // The keys only, never a value (see above). Sorted so the rendering is
+        // deterministic, as Java's `logAll()` sorts; borrowed, so no key is
+        // copied.
+        let originals: BTreeSet<&str> = originals.keys().map(String::as_str).collect();
+        f.debug_struct("AdminClientConfig")
+            .field("bootstrap_servers", bootstrap_servers)
+            .field("client_dns_lookup", client_dns_lookup)
+            .field("client_id", client_id)
+            .field("request_timeout_ms", request_timeout_ms)
+            .field("default_api_timeout_ms", default_api_timeout_ms)
+            .field("retries", retries)
+            .field("retry_backoff_ms", retry_backoff_ms)
+            .field("retry_backoff_max_ms", retry_backoff_max_ms)
+            .field("bootstrap_resolve_timeout_ms", bootstrap_resolve_timeout_ms)
+            .field("reconnect_backoff_ms", reconnect_backoff_ms)
+            .field("reconnect_backoff_max_ms", reconnect_backoff_max_ms)
+            .field("connections_max_idle_ms", connections_max_idle_ms)
+            .field("metadata_max_age_ms", metadata_max_age_ms)
+            .field("socket_connection_setup_timeout_ms", socket_connection_setup_timeout_ms)
+            .field("socket_connection_setup_timeout_max_ms", socket_connection_setup_timeout_max_ms)
+            .field("send_buffer_bytes", send_buffer_bytes)
+            .field("receive_buffer_bytes", receive_buffer_bytes)
+            .field("metadata_cluster_check_enable", metadata_cluster_check_enable)
+            .field("metadata_recovery_strategy", metadata_recovery_strategy)
+            .field(
+                "metadata_recovery_rebootstrap_trigger_ms",
+                metadata_recovery_rebootstrap_trigger_ms,
+            )
+            .field("security_protocol", security_protocol)
+            .field("sasl_config", sasl_config)
+            .field("ssl_config", ssl_config)
+            .field("originals", &originals)
+            .finish()
+    }
 }
 
 impl AdminClientConfig {
@@ -87,23 +174,37 @@ impl AdminClientConfig {
     /// `retries`
     pub const RETRIES_CONFIG: &'static str = "retries";
     /// `retry.backoff.ms`
-    pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
+    pub const RETRY_BACKOFF_MS_CONFIG: &'static str = CommonClientConfigs::RETRY_BACKOFF_MS_CONFIG;
     /// `retry.backoff.max.ms`
-    pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = CommonClientConfigs::RETRY_BACKOFF_MAX_MS_CONFIG;
     /// `bootstrap.resolve.timeout.ms` (KIP-909). See
     /// [`Self::bootstrap_resolve_timeout_ms`].
     pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
         CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
-    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = "reconnect.backoff.ms";
-    /// `reconnect.backoff.max.ms`
-    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = "reconnect.backoff.max.ms";
+    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MS_CONFIG;
+    /// `reconnect.backoff.max.ms`. When only `reconnect.backoff.ms` is set, it
+    /// defaults to that value, which disables the exponential reconnect backoff
+    /// (see [`Self::reconnect_backoff_max_ms`]).
+    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MAX_MS_CONFIG;
     /// `connections.max.idle.ms`
     pub const CONNECTIONS_MAX_IDLE_MS_CONFIG: &'static str = "connections.max.idle.ms";
     /// `metadata.max.age.ms`
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
-    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG;
+    /// `socket.connection.setup.timeout.max.ms`. Java's `AdminClientConfig.java`
+    /// declares it as its own public alias of
+    /// `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG`.
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG;
+    /// `send.buffer.bytes`. Java's `AdminClientConfig.java` declares it as its own
+    /// public alias of `CommonClientConfigs.SEND_BUFFER_CONFIG`.
+    pub const SEND_BUFFER_CONFIG: &'static str = CommonClientConfigs::SEND_BUFFER_CONFIG;
+    /// `receive.buffer.bytes`. Java's `AdminClientConfig.java` declares it as its own
+    /// public alias of `CommonClientConfigs.RECEIVE_BUFFER_CONFIG`.
+    pub const RECEIVE_BUFFER_CONFIG: &'static str = CommonClientConfigs::RECEIVE_BUFFER_CONFIG;
     /// `metadata.cluster.check.enable` (KIP-1242).
     ///
     /// Whether the client should send cluster and node information when
@@ -120,6 +221,24 @@ impl AdminClientConfig {
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
+    /// `metrics.sample.window.ms`. Java's `AdminClientConfig.java` declares it as
+    /// its own public alias of `CommonClientConfigs.METRICS_SAMPLE_WINDOW_MS_CONFIG`.
+    /// This client's admin keeps no metrics, so the value is validated and has
+    /// no effect.
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &'static str = CommonClientConfigs::METRICS_SAMPLE_WINDOW_MS_CONFIG;
+    /// `metrics.num.samples`. Validated, with no effect (see
+    /// [`Self::METRICS_SAMPLE_WINDOW_MS_CONFIG`]).
+    pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = CommonClientConfigs::METRICS_NUM_SAMPLES_CONFIG;
+    /// `metrics.recording.level`. Validated, with no effect (see
+    /// [`Self::METRICS_SAMPLE_WINDOW_MS_CONFIG`]).
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = CommonClientConfigs::METRICS_RECORDING_LEVEL_CONFIG;
+    /// `enable.metrics.push` (KIP-714), default `false` for the admin client.
+    /// This client does not push metrics, so `true` is logged as ignored.
+    pub const ENABLE_METRICS_PUSH_CONFIG: &'static str = CommonClientConfigs::ENABLE_METRICS_PUSH_CONFIG;
+    /// `config.providers`: Java's `AbstractConfig.CONFIG_PROVIDERS_CONFIG`, which
+    /// `AdminClientConfig` inherits. Config providers are not implemented, so a
+    /// non-empty list makes [`Self::new`] fail (see there).
+    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
     /// `sasl.mechanism`
     pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// `sasl.jaas.config`
@@ -150,10 +269,14 @@ impl AdminClientConfig {
     /// ([`Error::unsupported_version`]): Java
     /// accepts it (KIP-919), but this client does not implement bootstrapping
     /// through controllers, and silently ignoring the key would leave the
-    /// client with no bootstrap address at all.
+    /// client with no bootstrap address at all. A non-empty `config.providers`
+    /// also returns an `UNSUPPORTED_VERSION` error: config providers are not
+    /// implemented, and the `${provider:..}` references they would resolve
+    /// must not be used as literal values.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let mut config = Self::default();
+        // Java's `AbstractConfig` keeps the user's map as `originals()`.
+        let mut config = Self { originals: props.clone(), ..Self::default() };
         let mut bootstrap_controllers: Vec<String> = Vec::new();
 
         for (key, value) in props {
@@ -169,37 +292,141 @@ impl AdminClientConfig {
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
-                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
-                Self::CLIENT_ID_CONFIG => config.client_id = value.trim().to_string(),
-                Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
-                Self::DEFAULT_API_TIMEOUT_MS_CONFIG => config.default_api_timeout_ms = parse_i32(key, value)?,
-                Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,
-                Self::RETRY_BACKOFF_MS_CONFIG => config.retry_backoff_ms = parse_i64(key, value)?,
-                Self::RETRY_BACKOFF_MAX_MS_CONFIG => config.retry_backoff_max_ms = parse_i64(key, value)?,
+                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:707-709`,
+                // `:731-733`), with Java's `String.trim`.
+                Self::CLIENT_ID_CONFIG => config.client_id = ConfigDef::trim(value).to_string(),
+                // Each numeric key is parsed by `ConfigDef.parseType`, then checked by
+                // the validator its `define(..)` gives (`AdminClientConfig.java:167-315`),
+                // if any.
+                Self::REQUEST_TIMEOUT_MS_CONFIG => {
+                    // `Type.INT`, `atLeast(0)` (`AdminClientConfig.java:218-223`).
+                    config.request_timeout_ms = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.request_timeout_ms)?;
+                },
+                Self::DEFAULT_API_TIMEOUT_MS_CONFIG => {
+                    // `Type.INT`, `atLeast(0)` (`AdminClientConfig.java:245-250`).
+                    config.default_api_timeout_ms = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.default_api_timeout_ms)?;
+                },
+                Self::RETRIES_CONFIG => {
+                    // `Type.INT`, `between(0, Integer.MAX_VALUE)` (`AdminClientConfig.java:239-244`).
+                    config.retries = ConfigDef::parse_int(key, value)?;
+                    Range::between(0, i32::MAX).ensure_valid(key, config.retries)?;
+                },
+                Self::RETRY_BACKOFF_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:195-200`).
+                    config.retry_backoff_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.retry_backoff_ms)?;
+                },
+                Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:201-206`).
+                    config.retry_backoff_max_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.retry_backoff_max_ms)?;
+                },
                 Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
                     // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:207-212`, KAFKA-20939).
-                    let v = parse_i64(key, value)?;
-                    if v < 0 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
-                    }
-                    config.bootstrap_resolve_timeout_ms = v;
+                    config.bootstrap_resolve_timeout_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.bootstrap_resolve_timeout_ms)?;
                 },
-                Self::RECONNECT_BACKOFF_MS_CONFIG => config.reconnect_backoff_ms = parse_i64(key, value)?,
-                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => config.reconnect_backoff_max_ms = parse_i64(key, value)?,
-                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => config.connections_max_idle_ms = parse_i64(key, value)?,
-                Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
+                Self::RECONNECT_BACKOFF_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:183-188`).
+                    config.reconnect_backoff_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.reconnect_backoff_ms)?;
+                },
+                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:189-194`).
+                    config.reconnect_backoff_max_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.reconnect_backoff_max_ms)?;
+                },
+                // `Type.LONG`, no validator (`AdminClientConfig.java:234-238`).
+                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => {
+                    config.connections_max_idle_ms = ConfigDef::parse_long(key, value)?
+                },
+                Self::METADATA_MAX_AGE_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0)` (`AdminClientConfig.java:180`).
+                    config.metadata_max_age_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.metadata_max_age_ms)?;
+                },
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
-                    config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
+                    // `Type.LONG`, no validator (`AdminClientConfig.java:224-228`).
+                    config.socket_connection_setup_timeout_ms = ConfigDef::parse_long(key, value)?;
+                },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG => {
+                    // `Type.LONG`, no validator (`AdminClientConfig.java:229-233`).
+                    config.socket_connection_setup_timeout_max_ms = ConfigDef::parse_long(key, value)?;
+                },
+                Self::SEND_BUFFER_CONFIG => {
+                    // `Type.INT`, `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`
+                    // (`AdminClientConfig.java:181`).
+                    config.send_buffer_bytes = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND)
+                        .ensure_valid(key, config.send_buffer_bytes)?;
+                },
+                Self::RECEIVE_BUFFER_CONFIG => {
+                    // `Type.INT`, `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`
+                    // (`AdminClientConfig.java:182`).
+                    config.receive_buffer_bytes = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND)
+                        .ensure_valid(key, config.receive_buffer_bytes)?;
                 },
                 Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
                     // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
-                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
+                    config.metadata_cluster_check_enable = ConfigDef::parse_boolean(key, value)?;
+                },
+                // The metrics keys (`AdminClientConfig.java:213-217`, `:251-269`):
+                // validated as Java validates them, then dropped, since this
+                // client's admin keeps no metrics.
+                Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0)`.
+                    Range::at_least(0).ensure_valid(key, ConfigDef::parse_long(key, value)?)?;
+                },
+                Self::METRICS_NUM_SAMPLES_CONFIG => {
+                    // `Type.INT`, `atLeast(1)`.
+                    Range::at_least(1).ensure_valid(key, ConfigDef::parse_int(key, value)?)?;
+                },
+                Self::METRICS_RECORDING_LEVEL_CONFIG => {
+                    // A trimmed `Type.STRING` checked by `ValidString.in("INFO", "DEBUG",
+                    // "TRACE")`, which is case-sensitive (`ConfigDef.java:1113-1118`).
+                    let trimmed = ConfigDef::trim(value);
+                    if !["INFO", "DEBUG", "TRACE"].contains(&trimmed) {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            trimmed,
+                            "String must be one of: INFO, DEBUG, TRACE",
+                        ));
+                    }
+                },
+                Self::ENABLE_METRICS_PUSH_CONFIG => {
+                    // `Type.BOOLEAN`, default `false` for the admin client. Java pushes
+                    // client metrics when the broker subscribes this client (KIP-714);
+                    // this client does not, so a `true` is logged as ignored.
+                    let enable_metrics_push = ConfigDef::parse_boolean(key, value)?;
+                    if enable_metrics_push {
+                        log::warn!(
+                            "{key} is not supported by this client and is ignored; client metrics are not pushed to the cluster"
+                        );
+                    }
+                },
+                Self::CONFIG_PROVIDERS_CONFIG => {
+                    // `Type.LIST`, `ValidList.anyNonDuplicateValues(true, false)`
+                    // (`AdminClientConfig.java:310-315`). Java resolves `${provider:..}`
+                    // references in the other values through these providers; this
+                    // client does not, so it fails rather than pass such a reference on
+                    // as a literal value (a password, for instance).
+                    let config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
+                    if !config_providers.is_empty() {
+                        return Err(Error::unsupported_version(format!("{key} is not supported by this client")));
+                    }
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
-                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
+                    // A trimmed `Type.STRING` (`ConfigDef.java:731-733`), checked by
+                    // `CaseInsensitiveValidString` (`AdminClientConfig.java:283-289`). The
+                    // validator sees the trimmed value, so its error prints that one.
+                    let trimmed = ConfigDef::trim(value);
+                    config.security_protocol = SecurityProtocol::for_name(trimmed).ok_or_else(|| {
                         Error::config_name_value_message(
                             key,
-                            value,
+                            trimmed,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
                         )
                     })?;
@@ -208,25 +435,39 @@ impl AdminClientConfig {
                     config.metadata_recovery_strategy = parse_metadata_recovery_strategy(key, value)?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    config.metadata_recovery_rebootstrap_trigger_ms = parse_rebootstrap_trigger_ms(key, value)?;
+                    // `Type.LONG`, `atLeast(0)` (`AdminClientConfig.java:299-304`).
+                    config.metadata_recovery_rebootstrap_trigger_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.metadata_recovery_rebootstrap_trigger_ms)?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
-                    config.sasl_config.mechanism = value.to_string();
-                },
-                Self::SASL_JAAS_CONFIG => {
-                    config.sasl_config.jaas_config = if value.is_empty() {
-                        None
-                    } else {
-                        Some(Password::new(value))
-                    };
+                key if key.starts_with("sasl.") => {
+                    // `sasl.mechanism`, `sasl.jaas.config` and the rest of
+                    // `SaslConfigs.addClientSaslSupport` (`SaslConfigs.java:387-431`).
+                    // The helper trims the value as each key's type requires.
+                    SaslConfigs::apply_sasl_config_key(&mut config.sasl_config, key, value)?;
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    // `parseType` trims a `String` value whatever the key's type
+                    // (`ConfigDef.java:707-709`), so every `ssl.*` key
+                    // `SslConfigs.addClientSslSupport` defines (`SslConfigs.java:128-148`)
+                    // is trimmed before its parser or validator sees it.
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, ConfigDef::trim(value))?;
                 },
-                // Unknown keys are accepted silently, as in Java.
+                // Unknown keys are accepted silently, as in Java. So are the keys
+                // Java's `AdminClientConfig` defines with a class, or a list of
+                // classes, as their value: `metric.reporters`, `security.providers`,
+                // `ssl.engine.factory.class`, `sasl.client.callback.handler.class`,
+                // `sasl.login.callback.handler.class`, `sasl.login.class`,
+                // `sasl.oauthbearer.jwt.retriever.class` and
+                // `sasl.oauthbearer.jwt.validator.class` (the `ssl.*` and `sasl.*`
+                // ones reach the helpers above, which treat them as unknown keys
+                // too). CLAUDE.md §2 does not allow a class as a configuration
+                // value: the Rust counterpart is a trait set through a setter, and
+                // those traits belong to features this client does not implement.
                 _ => {},
             }
         }
+
+        config.post_process_parsed_config()?;
 
         // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
         // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
@@ -250,6 +491,42 @@ impl AdminClientConfig {
         Ok(config)
     }
 
+    /// Java's `AbstractConfig.postProcessParsedConfig` hook as
+    /// `AdminClientConfig` overrides it (`AdminClientConfig.java:318-323`), run
+    /// once every key is parsed, before the bootstrap check:
+    /// `postValidateSaslMechanismConfig`, `warnDisablingExponentialBackoff`,
+    /// then `postProcessReconnectBackoffConfigs`, whose override replaces the
+    /// parsed `reconnect.backoff.max.ms`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when a SASL `security.protocol` has an empty
+    /// `sasl.mechanism`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#postProcessParsedConfig")]
+    fn post_process_parsed_config(&mut self) -> Result<(), Error> {
+        CommonClientConfigs::post_validate_sasl_mechanism_config(self.security_protocol, &self.sasl_config.mechanism)?;
+        CommonClientConfigs::warn_disabling_exponential_backoff(
+            self.retry_backoff_ms,
+            self.retry_backoff_max_ms,
+            self.socket_connection_setup_timeout_ms,
+            self.socket_connection_setup_timeout_max_ms,
+        );
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&self.originals, self.reconnect_backoff_ms)
+        {
+            self.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
+        Ok(())
+    }
+
+    /// Whether the user set `key` explicitly.
+    ///
+    /// Java's `originals().containsKey(key)`: a key is user configured iff it
+    /// is in the user's map, not merely because it has a value here.
+    pub(crate) fn user_configured(&self, key: &str) -> bool {
+        self.originals.contains_key(key)
+    }
+
     /// The `bootstrap.servers` list.
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
@@ -270,7 +547,11 @@ impl AdminClientConfig {
         self.request_timeout_ms
     }
 
-    /// `default.api.timeout.ms`.
+    /// `default.api.timeout.ms`, as configured. The client checks it against
+    /// `request.timeout.ms` when it is created, as Java's
+    /// `KafkaAdminClient.configureDefaultApiTimeoutMs` does: an explicit value
+    /// below the request timeout fails creation, and an unset one below it is
+    /// raised to the request timeout.
     pub fn default_api_timeout_ms(&self) -> i32 {
         self.default_api_timeout_ms
     }
@@ -309,7 +590,9 @@ impl AdminClientConfig {
         self.reconnect_backoff_ms
     }
 
-    /// `reconnect.backoff.max.ms`.
+    /// `reconnect.backoff.max.ms`. When the user set `reconnect.backoff.ms` and
+    /// not this key, this is the `reconnect.backoff.ms` value, as in Java
+    /// (`CommonClientConfigs.postProcessReconnectBackoffConfigs`).
     pub fn reconnect_backoff_max_ms(&self) -> i64 {
         self.reconnect_backoff_max_ms
     }
@@ -324,9 +607,30 @@ impl AdminClientConfig {
         self.metadata_max_age_ms
     }
 
-    /// `socket.connection.setup.timeout.ms`.
+    /// `socket.connection.setup.timeout.ms`: the initial connection setup
+    /// timeout, which grows exponentially for each consecutive failure up to
+    /// [`Self::socket_connection_setup_timeout_max_ms`].
     pub fn socket_connection_setup_timeout_ms(&self) -> i64 {
         self.socket_connection_setup_timeout_ms
+    }
+
+    /// `socket.connection.setup.timeout.max.ms`: the most the connection setup
+    /// timeout grows to. Default: 30 seconds.
+    pub fn socket_connection_setup_timeout_max_ms(&self) -> i64 {
+        self.socket_connection_setup_timeout_max_ms
+    }
+
+    /// `send.buffer.bytes`: the TCP send buffer (SO_SNDBUF) size, `-1` for the
+    /// OS default. Default: 128 KiB.
+    pub fn send_buffer_bytes(&self) -> i32 {
+        self.send_buffer_bytes
+    }
+
+    /// `receive.buffer.bytes`: the TCP receive buffer (SO_RCVBUF) size, `-1`
+    /// for the OS default. Default: 64 KiB for the admin client (the producer
+    /// and consumer default to 32 KiB and 64 KiB respectively).
+    pub fn receive_buffer_bytes(&self) -> i32 {
+        self.receive_buffer_bytes
     }
 
     /// `metadata.cluster.check.enable` (KIP-1242): whether the client sends the
@@ -385,44 +689,19 @@ impl Default for AdminClientConfig {
             reconnect_backoff_max_ms: 1_000,
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
-            socket_connection_setup_timeout_ms: 10_000,
+            socket_connection_setup_timeout_ms: CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
+            socket_connection_setup_timeout_max_ms: CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            // `128 * 1024` and `64 * 1024` (`AdminClientConfig.java:181-182`).
+            send_buffer_bytes: 128 * 1024,
+            receive_buffer_bytes: 64 * 1024,
             metadata_cluster_check_enable: true,
             metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
             metadata_recovery_rebootstrap_trigger_ms: Self::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
+            originals: HashMap::new(),
         }
-    }
-}
-
-fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
-}
-
-fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
-}
-
-/// Parses a string value as `bool`.
-///
-/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
-/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
-/// throws `ConfigException(name, value, "Expected value to be either true or
-/// false")`, where `value` is the **original, untrimmed** string. Same rule as
-/// the producer and consumer configs.
-fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if trimmed.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        Err(Error::config_name_value_message(
-            key,
-            value,
-            "Expected value to be either true or false",
-        ))
     }
 }
 
@@ -435,30 +714,18 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
 /// `HashSet`; the message lists them in that set's iteration order, which for
 /// these two names is `REBOOTSTRAP, NONE`.
 fn parse_metadata_recovery_strategy(key: &str, value: &str) -> Result<MetadataRecoveryStrategy, Error> {
-    let trimmed = value.trim();
+    // Java's `String.trim`, not `str::trim`: it strips control characters and
+    // keeps Unicode spaces such as U+00A0.
+    let trimmed = ConfigDef::trim(value);
     MetadataRecoveryStrategy::for_name(trimmed).map_err(|_| {
         Error::config_name_value_message(key, trimmed, "String must be one of (case insensitive): REBOOTSTRAP, NONE")
     })
 }
 
-/// `metadata.recovery.rebootstrap.trigger.ms`: a `Type.LONG` with `atLeast(0)`
-/// (`AdminClientConfig.java:298-303`). `ConfigDef.parseType` reports an
-/// unparsable value with "Not a number of type LONG", and `Range.atLeast` a
-/// negative one with "Value must be at least 0".
-fn parse_rebootstrap_trigger_ms(key: &str, value: &str) -> Result<i64, Error> {
-    let parsed = value
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| Error::config_name_value_message(key, value, "Not a number of type LONG"))?;
-    if parsed < 0 {
-        return Err(Error::config_name_value_message(key, parsed, "Value must be at least 0"));
-    }
-    Ok(parsed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::types::Password;
 
     #[test]
     fn defaults_and_required_bootstrap() {
@@ -608,12 +875,332 @@ mod tests {
         );
     }
 
+    /// A value `ConfigDef.parseType` cannot parse is reported with its
+    /// `NumberFormatException` message, naming the key's type and printing
+    /// the original, untrimmed value (`ConfigDef.java:788-789`). An `int` key
+    /// rejects a value beyond `Integer.MAX_VALUE` the same way.
     #[test]
     fn invalid_numeric_value_is_error() {
-        let mut props = HashMap::new();
-        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
-        props.insert("request.timeout.ms".to_string(), "not-a-number".to_string());
-        assert!(AdminClientConfig::new(&props).is_err());
+        for (key, type_name) in [
+            ("request.timeout.ms", "INT"),
+            ("default.api.timeout.ms", "INT"),
+            ("retries", "INT"),
+            ("retry.backoff.ms", "LONG"),
+            ("retry.backoff.max.ms", "LONG"),
+            ("bootstrap.resolve.timeout.ms", "LONG"),
+            ("reconnect.backoff.ms", "LONG"),
+            ("reconnect.backoff.max.ms", "LONG"),
+            ("connections.max.idle.ms", "LONG"),
+            ("metadata.max.age.ms", "LONG"),
+            ("socket.connection.setup.timeout.ms", "LONG"),
+            ("metadata.recovery.rebootstrap.trigger.ms", "LONG"),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, " not-a-number ")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value  not-a-number  for configuration {key}: Not a number of type {type_name}"),
+            );
+        }
+        let err = AdminClientConfig::new(&with_bootstrap(&[("retries", "2147483648")])).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "Invalid value 2147483648 for configuration retries: Not a number of type INT"
+        );
+    }
+
+    /// The `atLeast(0)` / `between(0, Integer.MAX_VALUE)` validators of
+    /// `AdminClientConfig`'s numeric keys (`AdminClientConfig.java:180-250`)
+    /// reject a negative value with `Range.ensureValid`'s message, and accept
+    /// the bounds themselves. `socket.connection.setup.timeout.ms` and
+    /// `connections.max.idle.ms` have no validator in Java, so `-1` stays
+    /// accepted for them.
+    #[test]
+    fn test_negative_values_are_rejected() {
+        for key in [
+            "retries",
+            "request.timeout.ms",
+            "default.api.timeout.ms",
+            "metadata.max.age.ms",
+            "retry.backoff.ms",
+            "retry.backoff.max.ms",
+            "reconnect.backoff.ms",
+            "reconnect.backoff.max.ms",
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "-1")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value -1 for configuration {key}: Value must be at least 0")
+            );
+            AdminClientConfig::new(&with_bootstrap(&[(key, "0")])).unwrap_or_else(|e| panic!("{key}=0: {e:?}"));
+        }
+        let config = AdminClientConfig::new(&with_bootstrap(&[("retries", "2147483647")])).unwrap();
+        assert_eq!(config.retries(), i32::MAX);
+        // The value in the message is the parsed number, not the raw string.
+        let err = AdminClientConfig::new(&with_bootstrap(&[("retry.backoff.ms", " -07 ")])).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "Invalid value -7 for configuration retry.backoff.ms: Value must be at least 0"
+        );
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("socket.connection.setup.timeout.ms", "-1"),
+            ("connections.max.idle.ms", "-1"),
+        ]))
+        .unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_ms(), -1);
+        assert_eq!(config.connections_max_idle_ms(), -1);
+    }
+
+    /// `send.buffer.bytes` / `receive.buffer.bytes` are `Type.INT` with
+    /// `atLeast(-1)`, defaulting to 128 KiB and 64 KiB
+    /// (`AdminClientConfig.java:181-182`); `-1` selects the OS default.
+    #[test]
+    fn test_socket_buffer_sizes() {
+        assert_eq!(AdminClientConfig::SEND_BUFFER_CONFIG, "send.buffer.bytes");
+        assert_eq!(AdminClientConfig::RECEIVE_BUFFER_CONFIG, "receive.buffer.bytes");
+        let config = AdminClientConfig::new(&with_bootstrap(&[])).unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (131_072, 65_536));
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("send.buffer.bytes", "262144"),
+            ("receive.buffer.bytes", "32768"),
+        ]))
+        .unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (262_144, 32_768));
+
+        let config =
+            AdminClientConfig::new(&with_bootstrap(&[("send.buffer.bytes", "-1"), ("receive.buffer.bytes", "-1")]))
+                .unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (-1, -1));
+
+        for key in ["send.buffer.bytes", "receive.buffer.bytes"] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "-2")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value -2 for configuration {key}: Value must be at least -1")
+            );
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "64k")])).unwrap_err();
+            assert_eq!(
+                err.message(),
+                format!("Invalid value 64k for configuration {key}: Not a number of type INT")
+            );
+        }
+    }
+
+    /// `socket.connection.setup.timeout.max.ms` is a `Type.LONG` without a
+    /// validator, defaulting to 30 seconds (`AdminClientConfig.java:229-233`).
+    #[test]
+    fn test_socket_connection_setup_timeout_max_ms() {
+        let key = "socket.connection.setup.timeout.max.ms";
+        assert_eq!(AdminClientConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, key);
+        let config = AdminClientConfig::new(&with_bootstrap(&[])).unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_ms(), 10_000);
+        assert_eq!(config.socket_connection_setup_timeout_max_ms(), 30_000);
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[(key, "45000")])).unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_max_ms(), 45_000);
+        assert_eq!(config.socket_connection_setup_timeout_ms(), 10_000);
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[(key, "abc")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration socket.connection.setup.timeout.max.ms: Not a number of type LONG"
+        );
+    }
+
+    /// Java checks the SASL mechanism in the config constructor
+    /// (`AdminClientConfig.postProcessParsedConfig`), before
+    /// `KafkaAdminClient.determineBootstrapType` runs, so with no bootstrap
+    /// servers either the mechanism error is the one reported.
+    #[test]
+    fn test_sasl_mechanism_is_checked_before_the_bootstrap_servers() {
+        let props = HashMap::from([
+            ("security.protocol".to_string(), "SASL_SSL".to_string()),
+            ("sasl.mechanism".to_string(), String::new()),
+        ]);
+        let err = AdminClientConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value null for configuration sasl.mechanism: When the security.protocol \
+             configuration enables SASL, mechanism must be non-null and non-empty string."
+        );
+    }
+
+    /// `reconnect.backoff.ms` alone sets the max to its value whether it is
+    /// above or below the default max of 1000, and an explicit max is kept.
+    #[test]
+    fn test_reconnect_backoff_alone_sets_the_max() {
+        let max = |extra: &[(&str, &str)]| {
+            AdminClientConfig::new(&with_bootstrap(extra))
+                .unwrap()
+                .reconnect_backoff_max_ms()
+        };
+        assert_eq!(max(&[("reconnect.backoff.ms", "5000")]), 5000);
+        assert_eq!(max(&[("reconnect.backoff.ms", "200")]), 200);
+        assert_eq!(
+            max(&[("reconnect.backoff.ms", "200"), ("reconnect.backoff.max.ms", "2000")]),
+            2000
+        );
+        assert_eq!(max(&[("reconnect.backoff.max.ms", "2000")]), 2000);
+    }
+
+    /// The metrics keys are validated with Java's type and validator
+    /// (`AdminClientConfig.java:213-217`, `:251-269`), then dropped:
+    /// `metrics.num.samples` is an `INT` with `atLeast(1)`,
+    /// `metrics.sample.window.ms` a `LONG` with `atLeast(0)`,
+    /// `metrics.recording.level` a trimmed `STRING` in `INFO`, `DEBUG`, `TRACE`
+    /// (case-sensitive) and `enable.metrics.push` a `BOOLEAN`.
+    #[test]
+    fn test_metrics_keys_are_validated() {
+        assert_eq!(AdminClientConfig::METRICS_NUM_SAMPLES_CONFIG, "metrics.num.samples");
+        assert_eq!(AdminClientConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG, "metrics.sample.window.ms");
+        assert_eq!(AdminClientConfig::METRICS_RECORDING_LEVEL_CONFIG, "metrics.recording.level");
+        assert_eq!(AdminClientConfig::ENABLE_METRICS_PUSH_CONFIG, "enable.metrics.push");
+        for (key, value) in [
+            ("metrics.num.samples", "1"),
+            ("metrics.sample.window.ms", "0"),
+            ("metrics.recording.level", " DEBUG "),
+            ("metrics.recording.level", "TRACE"),
+            ("enable.metrics.push", "true"),
+            ("enable.metrics.push", "FALSE"),
+        ] {
+            AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_or_else(|e| panic!("{key}={value}: {e:?}"));
+        }
+        for (key, value, message) in [
+            (
+                "metrics.num.samples",
+                "0",
+                "Invalid value 0 for configuration metrics.num.samples: Value must be at least 1",
+            ),
+            (
+                "metrics.num.samples",
+                "two",
+                "Invalid value two for configuration metrics.num.samples: Not a number of type INT",
+            ),
+            (
+                "metrics.sample.window.ms",
+                "-1",
+                "Invalid value -1 for configuration metrics.sample.window.ms: Value must be at least 0",
+            ),
+            (
+                "metrics.recording.level",
+                "FOO",
+                "Invalid value FOO for configuration metrics.recording.level: String must be one of: INFO, DEBUG, TRACE",
+            ),
+            (
+                "metrics.recording.level",
+                " debug ",
+                "Invalid value debug for configuration metrics.recording.level: String must be one of: INFO, DEBUG, TRACE",
+            ),
+            (
+                "enable.metrics.push",
+                "maybe",
+                "Invalid value maybe for configuration enable.metrics.push: Expected value to be either true or false",
+            ),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}={value}: got {err:?}");
+            assert_eq!(err.message(), message);
+        }
+    }
+
+    /// `config.providers` is a `LIST` validated by
+    /// `ValidList.anyNonDuplicateValues(true, false)`
+    /// (`AdminClientConfig.java:310-315`). Config providers are not
+    /// implemented, so a non-empty list fails with an unsupported error rather
+    /// than leave `${provider:..}` references unresolved; an empty one is
+    /// Java's default.
+    #[test]
+    fn test_config_providers() {
+        assert_eq!(AdminClientConfig::CONFIG_PROVIDERS_CONFIG, "config.providers");
+        let err = AdminClientConfig::new(&with_bootstrap(&[("config.providers", "file")])).unwrap_err();
+        assert_eq!(err.error(), crate::common::protocol::Errors::UnsupportedVersion, "{err:?}");
+        assert_eq!(err.message(), "config.providers is not supported by this client");
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[("config.providers", "a,,b")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(err.message(), "Configuration 'config.providers' values must not be empty.");
+
+        for value in ["", " "] {
+            AdminClientConfig::new(&with_bootstrap(&[("config.providers", value)])).unwrap();
+        }
+    }
+
+    /// The `sasl.*` keys of the mechanisms this client does not support are
+    /// validated as Java validates them (the full table is in
+    /// `SaslConfigs`' tests), here through the admin config.
+    #[test]
+    fn test_unsupported_sasl_keys_are_validated() {
+        for (key, value, message) in [
+            (
+                "sasl.login.refresh.window.factor",
+                "2.0",
+                "Invalid value 2.0 for configuration sasl.login.refresh.window.factor: Value must be no more than 1.0",
+            ),
+            (
+                "sasl.login.refresh.min.period.seconds",
+                "40000",
+                "Invalid value 40000 for configuration sasl.login.refresh.min.period.seconds: Not a number of type SHORT",
+            ),
+            (
+                "sasl.kerberos.min.time.before.relogin",
+                "x",
+                "Invalid value x for configuration sasl.kerberos.min.time.before.relogin: Not a number of type LONG",
+            ),
+            (
+                "sasl.oauthbearer.assertion.algorithm",
+                "HS256",
+                "Invalid value HS256 for configuration sasl.oauthbearer.assertion.algorithm: \
+                 String must be one of (case insensitive): ES256, RS256",
+            ),
+            (
+                "sasl.oauthbearer.expected.audience",
+                "a,,b",
+                "Configuration 'sasl.oauthbearer.expected.audience' values must not be empty.",
+            ),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}={value}: got {err:?}");
+            assert_eq!(err.message(), message);
+        }
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("sasl.kerberos.service.name", "kafka"),
+            ("sasl.login.connect.timeout.ms", "1000"),
+            ("sasl.oauthbearer.token.endpoint.url", "https://x"),
+            ("sasl.oauthbearer.client.credentials.client.secret", "oauth-S3cr3t"),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config(), &SaslConfigs::default());
+        assert!(!format!("{config:?}").contains("oauth-S3cr3t"));
+    }
+
+    /// Keys this client deliberately leaves as they are: the class-valued
+    /// keys stay unknown keys (accepted unvalidated, even where Java would
+    /// reject the value), because CLAUDE.md §2 does not allow a class as a
+    /// configuration value; and the SSL store types keep defaulting to PEM,
+    /// since this client's TLS provider reads PEM only.
+    #[test]
+    fn test_class_valued_keys_stay_unknown_keys() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("metric.reporters", "a,,b"),
+            ("security.providers", "com.example.Provider"),
+            ("ssl.engine.factory.class", "com.example.Factory"),
+            ("sasl.client.callback.handler.class", "com.example.Handler"),
+            ("sasl.login.callback.handler.class", "com.example.Handler"),
+            ("sasl.login.class", "com.example.Login"),
+            ("sasl.oauthbearer.jwt.retriever.class", "com.example.Retriever"),
+            ("sasl.oauthbearer.jwt.validator.class", "com.example.Validator"),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config(), &SaslConfigs::default());
+        assert_eq!(config.ssl_config(), &SslConfigs::default());
+        assert_eq!(config.ssl_config().keystore_type, "PEM");
+        assert_eq!(config.ssl_config().truststore_type, "PEM");
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted
@@ -748,8 +1335,9 @@ mod tests {
 
     /// `{:?}` of a config built from every `Type.PASSWORD` key the client
     /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
-    /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
-    /// and `SslConfigs` hold those values as `Password`s.
+    /// values: the hand-written `Debug` renders `originals` as its keys only,
+    /// and the embedded `SaslConfigs` and `SslConfigs` hold the values as
+    /// `Password`s.
     #[test]
     fn test_debug_redacts_password_configs() {
         let secrets = [
@@ -801,6 +1389,43 @@ mod tests {
         }
     }
 
+    /// `originals` is the user's map verbatim (Java's `originals()`), which
+    /// `user_configured` reads; `Debug` renders it as its sorted key set and
+    /// never a value, including the value of a key this client does not parse.
+    /// Equality compares it, as Java's `AbstractConfig.equals` compares
+    /// `originals`.
+    #[test]
+    fn test_originals() {
+        let props = with_bootstrap(&[
+            ("request.timeout.ms", "5000"),
+            ("sasl.oauthbearer.client.credentials.client.secret", "oauth-S3cr3t"),
+            ("some.unknown.key", "unknown-value"),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.originals, props);
+        assert!(config.user_configured("request.timeout.ms"));
+        assert!(config.user_configured("some.unknown.key"));
+        assert!(!config.user_configured("default.api.timeout.ms"));
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(!rendered.contains("oauth-S3cr3t"), "{rendered}");
+            assert!(!rendered.contains("unknown-value"), "{rendered}");
+        }
+        assert!(
+            format!("{config:?}").ends_with(
+                "originals: {\"bootstrap.servers\", \"request.timeout.ms\", \
+                 \"sasl.oauthbearer.client.credentials.client.secret\", \"some.unknown.key\"} }"
+            ),
+            "{config:?}"
+        );
+        assert!(format!("{:?}", AdminClientConfig::default()).ends_with("originals: {} }"));
+
+        let same_values = AdminClientConfig::new(&with_bootstrap(&[("request.timeout.ms", "5000")])).unwrap();
+        assert_eq!(same_values.request_timeout_ms(), config.request_timeout_ms());
+        assert_ne!(same_values, config);
+        assert_eq!(AdminClientConfig::new(&props).unwrap(), config);
+    }
+
     fn with_bootstrap(extra: &[(&str, &str)]) -> HashMap<String, String> {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
@@ -808,6 +1433,91 @@ mod tests {
             props.insert((*k).to_string(), (*v).to_string());
         }
         props
+    }
+
+    /// `ConfigDef.parseType` trims every `String` value before it parses or
+    /// validates it, whatever the key's type (`ConfigDef.java:707-709`). These
+    /// tests cover the `Type.STRING` key `security.protocol`.
+    #[test]
+    fn test_security_protocol_is_trimmed() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[("security.protocol", " SSL")])).unwrap();
+        assert_eq!(config.security_protocol(), SecurityProtocol::Ssl);
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("security.protocol", " sasl_ssl "),
+            ("sasl.mechanism", "PLAIN"),
+        ]))
+        .unwrap();
+        assert_eq!(config.security_protocol(), SecurityProtocol::SaslSsl);
+    }
+
+    /// The `Type.STRING` keys `sasl.mechanism` and `client.id` are trimmed
+    /// with Java's `String.trim`, which strips every character up to U+0020
+    /// and nothing else (so not U+00A0). `client.dns.lookup` was already
+    /// trimmed; it is checked here alongside them.
+    #[test]
+    fn test_string_keys_are_trimmed_with_java_trim() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("sasl.mechanism", " PLAIN "),
+            ("client.id", "\u{1}admin-1\t"),
+            ("client.dns.lookup", " resolve_canonical_bootstrap_servers_only "),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config().mechanism, "PLAIN");
+        assert_eq!(config.client_id(), "admin-1");
+        assert_eq!(
+            config.client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+        let config = AdminClientConfig::new(&with_bootstrap(&[("client.id", "\u{A0}admin-1 ")])).unwrap();
+        assert_eq!(config.client_id(), "\u{A0}admin-1");
+    }
+
+    /// The `Type.PASSWORD` key `sasl.jaas.config` is trimmed
+    /// (`ConfigDef.java:724-728`); a blank value trims to empty, which this
+    /// client reads as unset.
+    #[test]
+    fn test_sasl_jaas_config_is_trimmed() {
+        let jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                    username=\"alice\" password=\"secret\";";
+        let config = AdminClientConfig::new(&with_bootstrap(&[("sasl.jaas.config", &format!("  {jaas}\n"))])).unwrap();
+        assert_eq!(config.sasl_config().jaas_config.as_ref().map(Password::value), Some(jaas));
+        let config = AdminClientConfig::new(&with_bootstrap(&[("sasl.jaas.config", "  ")])).unwrap();
+        assert_eq!(config.sasl_config().jaas_config, None);
+    }
+
+    /// Every `ssl.*` value is trimmed before `SslConfigs` sees it, whatever
+    /// the key's type: `Type.STRING` locations and store types, `Type.PASSWORD`
+    /// passwords.
+    #[test]
+    fn test_ssl_values_are_trimmed() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("ssl.truststore.location", " /p.pem "),
+            ("ssl.keystore.type", "\tPKCS12 "),
+            ("ssl.key.password", " key-secret "),
+            ("ssl.endpoint.identification.algorithm", " "),
+        ]))
+        .unwrap();
+        assert_eq!(config.ssl_config().truststore_location.as_deref(), Some("/p.pem"));
+        assert_eq!(config.ssl_config().keystore_type, "PKCS12");
+        assert_eq!(
+            config.ssl_config().key_password.as_ref().map(Password::value),
+            Some("key-secret")
+        );
+        assert_eq!(config.ssl_config().endpoint_identification_algorithm, "");
+    }
+
+    /// `CaseInsensitiveValidString` validates the trimmed `security.protocol`,
+    /// so its error prints the value without the padding
+    /// (`ConfigDef.java:1141-1145`).
+    #[test]
+    fn test_invalid_security_protocol_error_prints_the_trimmed_value() {
+        let err = AdminClientConfig::new(&with_bootstrap(&[("security.protocol", " abc ")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration security.protocol: \
+             Valid values are: [\"PLAINTEXT\", \"SSL\", \"SASL_PLAINTEXT\", \"SASL_SSL\"]"
+        );
     }
 
     /// Translated from `AdminClientConfigTest.testDefaultMetadataRecoveryStrategy`
@@ -859,10 +1569,20 @@ mod tests {
             (" none ", MetadataRecoveryStrategy::None),
             ("REBOOTSTRAP", MetadataRecoveryStrategy::Rebootstrap),
             ("rebootstrap", MetadataRecoveryStrategy::Rebootstrap),
+            // Java's `String.trim` strips every character up to U+0020.
+            ("\u{1}none", MetadataRecoveryStrategy::None),
         ] {
             let config = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", value)])).unwrap();
             assert_eq!(config.metadata_recovery_strategy(), expected, "value {value:?}");
         }
+        // ... and nothing else: a no-break space stays, so the value is invalid.
+        let err = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", "none\u{A0}")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value none\u{A0} for configuration metadata.recovery.strategy: \
+             String must be one of (case insensitive): REBOOTSTRAP, NONE"
+        );
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is a `Type.LONG` with

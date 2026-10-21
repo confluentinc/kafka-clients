@@ -170,7 +170,9 @@ pub struct ProducerConfig {
     pub(crate) reconnect_backoff_ms: i64,
 
     /// `reconnect.backoff.max.ms` - Maximum wait time before reconnection attempts.
-    /// Default: 1000 ms.
+    /// Default: 1000 ms. When the user set `reconnect.backoff.ms` and not this
+    /// key, it is the `reconnect.backoff.ms` value, as in Java
+    /// (`CommonClientConfigs.postProcessReconnectBackoffConfigs`).
     pub(crate) reconnect_backoff_max_ms: i64,
 
     /// `retry.backoff.ms` - Wait time before retrying a failed request.
@@ -976,9 +978,21 @@ impl ProducerConfig {
             }
         }
 
-        // Order matters and matches Java's constructor: idempotence validation
-        // may override `enable.idempotence`, and the client id derivation reads
-        // `transactional.id`.
+        // Java's `postProcessParsedConfig` (`ProducerConfig.java:622-629`) runs
+        // these once every key is parsed. Order matters and matches Java:
+        // idempotence validation may override `enable.idempotence`, and the
+        // client id derivation reads `transactional.id`.
+        CommonClientConfigs::warn_disabling_exponential_backoff(
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+        );
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&config.originals, config.reconnect_backoff_ms)
+        {
+            config.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
         config.post_process_and_validate_idempotence_configs()?;
         config.maybe_override_client_id();
 
@@ -1732,6 +1746,28 @@ mod tests {
 
         assert_eq!(config.originals.get("client.id").map(String::as_str), Some("my-client"));
         assert_eq!(config.client_id, "my-client");
+    }
+
+    /// Java's `CommonClientConfigsTest.testExponentialBackoffDefaults`, run
+    /// against `ProducerConfig`, whose `postProcessParsedConfig` calls
+    /// `postProcessReconnectBackoffConfigs` (`ProducerConfig.java:625`): with
+    /// only `reconnect.backoff.ms` set, `reconnect.backoff.max.ms` takes its
+    /// value, above or below the default max of 1000. An explicit max is kept.
+    #[test]
+    fn test_reconnect_backoff_alone_sets_the_max() {
+        let backoffs = |extra: &[(&str, &str)]| {
+            let config = ProducerConfig::new(&props_with(extra)).unwrap();
+            (config.reconnect_backoff_ms, config.reconnect_backoff_max_ms)
+        };
+        assert_eq!(backoffs(&[]), (50, 1000));
+        assert_eq!(
+            backoffs(&[("reconnect.backoff.ms", "123"), ("reconnect.backoff.max.ms", "12345")]),
+            (123, 12345)
+        );
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "123")]), (123, 123));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "5000")]), (5000, 5000));
+        assert_eq!(backoffs(&[("reconnect.backoff.ms", "10")]), (10, 10));
+        assert_eq!(backoffs(&[("reconnect.backoff.max.ms", "2000")]), (50, 2000));
     }
 
     #[test]
