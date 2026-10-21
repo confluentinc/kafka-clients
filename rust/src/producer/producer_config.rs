@@ -597,9 +597,9 @@ impl ProducerConfig {
     /// Config key: `connections.max.idle.ms`
     pub const CONNECTIONS_MAX_IDLE_MS_CONFIG: &'static str = "connections.max.idle.ms";
     /// Config key: `reconnect.backoff.ms`
-    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = "reconnect.backoff.ms";
+    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MS_CONFIG;
     /// Config key: `reconnect.backoff.max.ms`
-    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = "reconnect.backoff.max.ms";
+    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MAX_MS_CONFIG;
     /// Config key: `retry.backoff.ms`
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`
@@ -976,9 +976,15 @@ impl ProducerConfig {
             }
         }
 
-        // Order matters and matches Java's constructor: idempotence validation
-        // may override `enable.idempotence`, and the client id derivation reads
+        // Order matters and matches Java's `postProcessParsedConfig`
+        // (`ProducerConfig.java:622-629`): idempotence validation may override
+        // `enable.idempotence`, and the client id derivation reads
         // `transactional.id`.
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&config.originals, config.reconnect_backoff_ms)
+        {
+            config.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
         config.post_process_and_validate_idempotence_configs()?;
         config.maybe_override_client_id();
 
@@ -1331,6 +1337,29 @@ mod tests {
         assert_eq!(config.metrics_recording_level, "INFO");
         // Java's `originals()` on a config built with no user map is empty.
         assert!(config.originals.is_empty());
+    }
+
+    /// Translated from `CommonClientConfigsTest.testExponentialBackoffDefaults`,
+    /// on the producer's config: setting only `reconnect.backoff.ms` sets
+    /// `reconnect.backoff.max.ms` to it, which disables the exponential backoff.
+    #[test]
+    fn test_exponential_backoff_defaults() {
+        let default_conf = ProducerConfig::new(&props_with(&[])).unwrap();
+        assert_eq!(50, default_conf.reconnect_backoff_ms);
+        assert_eq!(1000, default_conf.reconnect_backoff_max_ms);
+
+        let both_set_config = ProducerConfig::new(&props_with(&[
+            (ProducerConfig::RECONNECT_BACKOFF_MS_CONFIG, "123"),
+            (ProducerConfig::RECONNECT_BACKOFF_MAX_MS_CONFIG, "12345"),
+        ]))
+        .unwrap();
+        assert_eq!(123, both_set_config.reconnect_backoff_ms);
+        assert_eq!(12345, both_set_config.reconnect_backoff_max_ms);
+
+        let reconnect_backoff_set_conf =
+            ProducerConfig::new(&props_with(&[(ProducerConfig::RECONNECT_BACKOFF_MS_CONFIG, "123")])).unwrap();
+        assert_eq!(123, reconnect_backoff_set_conf.reconnect_backoff_ms);
+        assert_eq!(123, reconnect_backoff_set_conf.reconnect_backoff_max_ms);
     }
 
     /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
