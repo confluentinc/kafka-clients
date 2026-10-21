@@ -625,6 +625,12 @@ impl ProducerConfig {
     pub const SEND_BUFFER_CONFIG: &'static str = "send.buffer.bytes";
     /// Config key: `receive.buffer.bytes`
     pub const RECEIVE_BUFFER_CONFIG: &'static str = "receive.buffer.bytes";
+    /// Config key: `socket.connection.setup.timeout.ms`
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG;
+    /// Config key: `socket.connection.setup.timeout.max.ms`
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG;
     /// Config key: `metadata.max.age.ms`
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// Config key: `metadata.max.idle.ms`
@@ -835,6 +841,14 @@ impl ProducerConfig {
                 Self::RECEIVE_BUFFER_CONFIG => {
                     // `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`, -1.
                     config.receive_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
+                },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
+                    // `Type.LONG` with no validator (`ProducerConfig.java:534-538`).
+                    config.socket_connection_setup_timeout_ms = Self::parse_i64(key, value)?;
+                },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG => {
+                    // `Type.LONG` with no validator (`ProducerConfig.java:539-543`).
+                    config.socket_connection_setup_timeout_max_ms = Self::parse_i64(key, value)?;
                 },
                 Self::METADATA_MAX_AGE_CONFIG => {
                     config.metadata_max_age_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
@@ -1589,6 +1603,41 @@ mod tests {
         props.insert("batch.size".to_string(), "not-a-number".to_string());
         let result = ProducerConfig::new(&props);
         assert!(result.is_err());
+    }
+
+    /// `socket.connection.setup.timeout.ms` and `.max.ms` are `Type.LONG` keys
+    /// with Java's defaults of 10000 and 30000 and no validator
+    /// (`ProducerConfig.java:534-543`). The producer used to log them as
+    /// unknown keys and keep the defaults.
+    #[test]
+    fn test_socket_connection_setup_timeouts() {
+        let timeouts = |extra: &[(&str, &str)]| {
+            let config = ProducerConfig::new(&props_with(extra)).unwrap();
+            (
+                config.socket_connection_setup_timeout_ms,
+                config.socket_connection_setup_timeout_max_ms,
+            )
+        };
+        assert_eq!(timeouts(&[]), (10_000, 30_000));
+        assert_eq!(
+            timeouts(&[
+                ("socket.connection.setup.timeout.ms", "1000"),
+                ("socket.connection.setup.timeout.max.ms", "5000"),
+            ]),
+            (1000, 5000)
+        );
+        // No validator: Java accepts a negative value.
+        assert_eq!(timeouts(&[("socket.connection.setup.timeout.ms", "-1")]), (-1, 30_000));
+        for key in [
+            "socket.connection.setup.timeout.ms",
+            "socket.connection.setup.timeout.max.ms",
+        ] {
+            let err = ProducerConfig::new(&props_with(&[(key, "abc")])).unwrap_err();
+            assert_eq!(
+                err.message(),
+                format!("Invalid value abc for configuration {key}: Not a number of type LONG")
+            );
+        }
     }
 
     /// Java's `ConfigDef.parseType` rejects a value that is not a number with

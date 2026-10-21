@@ -8386,4 +8386,81 @@ mod tests {
             producer.close_with_timeout(Duration::ZERO).await.expect("close");
         }
     }
+
+    /// `socket.connection.setup.timeout.ms` and `socket.connection.setup.timeout.max.ms`
+    /// are read (`ProducerConfig.java:534-543`) and reach the producer's
+    /// `NetworkClient` (`ClientUtils.java:297-298`). The producer used to ignore
+    /// both keys and keep 10 s and 30 s.
+    ///
+    /// A local listener accepts TCP and never answers SASL, so each connection
+    /// attempt lasts until its setup timeout. With an initial and a max of 1000 ms
+    /// every attempt ends after about 1 s: the initial timeout of 10 s would make
+    /// the first attempt outlast the 1.4 s bound, and a max of 30 s would let the
+    /// second one double to 1.6-2.4 s.
+    #[tokio::test]
+    async fn the_connection_setup_timeouts_reach_the_network_client() {
+        use std::time::Instant;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let acceptor = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let accepted = Instant::now();
+                let attempt_tx = attempt_tx.clone();
+                tokio::spawn(async move {
+                    // Reads whatever the client sends and never answers, until
+                    // the client gives up and closes the connection.
+                    let mut buf = [0u8; 512];
+                    while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                    let _ = attempt_tx.send(accepted.elapsed());
+                });
+            }
+        });
+
+        let props: HashMap<String, String> = [
+            ("bootstrap.servers", format!("127.0.0.1:{port}")),
+            ("security.protocol", "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism", "PLAIN".to_string()),
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"user\" password=\"secret\";"
+                    .to_string(),
+            ),
+            ("socket.connection.setup.timeout.ms", "1000".to_string()),
+            ("socket.connection.setup.timeout.max.ms", "1000".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let producer = KafkaProducer::<String, String>::new(
+            ProducerConfig::new(&props).expect("valid config"),
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("constructs");
+
+        // A metadata wait keeps the producer trying to connect.
+        let attempts = tokio::select! {
+            attempts = async {
+                let mut attempts = Vec::new();
+                while attempts.len() < 2 {
+                    let attempt = tokio::time::timeout(Duration::from_secs(15), attempt_rx.recv())
+                        .await
+                        .unwrap_or_else(|_| panic!("no connection attempt ended within 15 s; so far {attempts:?}"))
+                        .expect("the acceptor is running");
+                    attempts.push(attempt);
+                }
+                attempts
+            } => attempts,
+            result = producer.partitions_for("topic") => panic!("partitions_for returned {result:?}"),
+        };
+        producer.close_with_timeout(Duration::ZERO).await.expect("close");
+        acceptor.abort();
+
+        assert!(attempts[0] < Duration::from_millis(1400), "first attempt: {attempts:?}");
+        assert!(attempts[1] < Duration::from_millis(1400), "second attempt: {attempts:?}");
+    }
 }
