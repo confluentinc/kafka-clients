@@ -130,12 +130,35 @@ impl AbstractConfig {
         pre_process: impl FnOnce(ConfigMap) -> ConfigMap,
         post_process: impl FnOnce(&AbstractConfig) -> Result<ConfigMap, Error>,
     ) -> Result<Self, Error> {
+        Self::with_hooks_and_log_warnings(definition, originals, do_log, true, class_name, pre_process, post_process)
+    }
+
+    /// [`Self::with_hooks`], whose parses log the duplicate-values warning
+    /// ([`ConfigDef::parse_with_log_warnings`]) only when `log_warnings` is
+    /// true; `do_log` is still Java's `doLog`, which decides only
+    /// [`Self::log_all`]. The configuration, the keys marked used and the
+    /// errors do not depend on `log_warnings`: a configuration copied for one
+    /// more client is built with it false, its original having logged the
+    /// warning once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_hooks`].
+    pub(crate) fn with_hooks_and_log_warnings(
+        definition: &'static ConfigDef,
+        originals: ConfigMap,
+        do_log: bool,
+        log_warnings: bool,
+        class_name: &str,
+        pre_process: impl FnOnce(ConfigMap) -> ConfigMap,
+        post_process: impl FnOnce(&AbstractConfig) -> Result<ConfigMap, Error>,
+    ) -> Result<Self, Error> {
         let originals = pre_process(originals);
-        let values = definition.parse(&originals)?;
+        let values = definition.parse_with_log_warnings(&originals, log_warnings)?;
         let mut config = Self { used: Mutex::new(HashSet::new()), originals, values, definition };
         let config_updates = post_process(&config)?;
         config.values.extend(config_updates);
-        definition.parse(&config.values)?;
+        definition.parse_with_log_warnings(&config.values, log_warnings)?;
         if do_log {
             config.log_all(class_name);
         }

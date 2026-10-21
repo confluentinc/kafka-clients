@@ -234,14 +234,16 @@ impl SslConfigs {
     /// `SslFactory` reads through `DefaultSslEngineFactory.configure`.
     ///
     /// `ssl.cipher.suites` is read but not modelled: the TLS provider picks
-    /// the suites, so a non-empty list is logged and ignored. An empty list is
-    /// Java's default (`List.of()`, the provider's defaults).
+    /// the suites, so a non-empty list is ignored, with a warning when
+    /// `log_warnings` is true (a configuration copied for one more client
+    /// reads the key without logging it again). An empty list is Java's
+    /// default (`List.of()`, the provider's defaults).
     ///
     /// # Errors
     ///
     /// [`Error::LocalIllegalState`] if a key's definition is missing or of
     /// another type, a defect of the definition rather than of the input.
-    pub(crate) fn from_values(values: &mut ValuesReader<'_>) -> Result<SslConfigs, Error> {
+    pub(crate) fn from_values(values: &mut ValuesReader<'_>, log_warnings: bool) -> Result<SslConfigs, Error> {
         let ssl = SslConfigs {
             truststore_location: values
                 .string_or_null(SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG)?
@@ -266,7 +268,10 @@ impl SslConfigs {
                 .to_string(),
             enabled_protocols: values.list(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG)?.to_vec(),
         };
-        if !values.list(SslConfigs::SSL_CIPHER_SUITES_CONFIG)?.is_empty() {
+        // Read whether or not the warning is logged, so a copy marks the same
+        // keys used.
+        let cipher_suites_set = !values.list(SslConfigs::SSL_CIPHER_SUITES_CONFIG)?.is_empty();
+        if log_warnings && cipher_suites_set {
             log::warn!(
                 "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
                 SslConfigs::SSL_CIPHER_SUITES_CONFIG
@@ -287,7 +292,7 @@ impl SslConfigs {
         static DEFINITION: LazyLock<ConfigDef> = LazyLock::new(|| ConfigDef::new().with_client_ssl_support());
         let props: HashMap<String, String> = props.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect();
         let config = AbstractConfig::new(&DEFINITION, string_originals(&props), false)?;
-        SslConfigs::from_values(&mut ValuesReader::new(&config))
+        SslConfigs::from_values(&mut ValuesReader::new(&config), true)
     }
 }
 

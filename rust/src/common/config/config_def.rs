@@ -630,27 +630,52 @@ impl ConfigDef {
     /// order, that is missing without a default, cannot be parsed or fails
     /// its validator.
     #[doc(alias = "org.apache.kafka.common.config.ConfigDef#parse")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "AbstractConfig parses through parse_with_log_warnings; ConfigDefTest uses it"
+        )
+    )]
     pub(crate) fn parse(
         &self,
         props: &HashMap<String, Option<ParsedValue>>,
+    ) -> Result<HashMap<String, Option<ParsedValue>>, Error> {
+        self.parse_with_log_warnings(props, true)
+    }
+
+    /// [`Self::parse`], logging the warning that a list's duplicate values are
+    /// removed only when `log_warnings` is true. The values, and the errors,
+    /// do not depend on it: a configuration copied for one more client
+    /// parses its originals again, and its original logged the warning once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::parse`].
+    pub(crate) fn parse_with_log_warnings(
+        &self,
+        props: &HashMap<String, Option<ParsedValue>>,
+        log_warnings: bool,
     ) -> Result<HashMap<String, Option<ParsedValue>>, Error> {
         // Java first checks that every dependent config is defined; dependents
         // are not translated, so there is nothing to check.
         let mut values = HashMap::with_capacity(self.config_keys.len());
         for key in &self.config_keys {
             let value = props.get(&key.name);
-            let parsed = self.parse_value(key, value.and_then(Option::as_ref), value.is_some())?;
+            let parsed = self.parse_value(key, value.and_then(Option::as_ref), value.is_some(), log_warnings)?;
             values.insert(key.name.clone(), parsed);
         }
         Ok(values)
     }
 
-    /// Java's `parseValue(key, value, isSet)`.
+    /// Java's `parseValue(key, value, isSet)`, which logs the duplicate-values
+    /// warning only when `log_warnings` is true.
     fn parse_value(
         &self,
         key: &ConfigKey,
         value: Option<&ParsedValue>,
         is_set: bool,
+        log_warnings: bool,
     ) -> Result<Option<ParsedValue>, Error> {
         let mut parsed_value = if is_set {
             Self::parse_type(&key.name, value, key.r#type)?
@@ -674,13 +699,15 @@ impl ConfigDef {
         {
             let deduped = distinct(original);
             if deduped.len() != original.len() {
-                log::warn!(
-                    "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. The original value \
+                if log_warnings {
+                    log::warn!(
+                        "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. The original value \
                      is: [{}], the updated value is: [{}]",
-                    key.name,
-                    original.join(", "),
-                    deduped.join(", ")
-                );
+                        key.name,
+                        original.join(", "),
+                        deduped.join(", ")
+                    );
+                }
                 parsed_value = Some(ParsedValue::List(deduped));
             }
         }
