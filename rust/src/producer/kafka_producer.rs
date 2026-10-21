@@ -992,12 +992,7 @@ impl<K, V> KafkaProducer<K, V> {
         // (CLAUDE.md §7).
 
         // 3. Derive compression from config
-        //    Translated from KafkaProducer.configureCompression().
-        // NOTE: Java also applies the per-codec level configs here
-        // (`compression.gzip.level` / `.lz4.level` / `.zstd.level`); those
-        // `ProducerConfig` keys are not translated yet, so every codec is built
-        // at its default level.
-        let compression = Compression::of(config.compression_type).build();
+        let compression = Self::configure_compression(&config)?;
 
         // 4. The system clock, Java's `Time.SYSTEM`
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -1497,6 +1492,23 @@ impl<K, V> KafkaProducer<K, V> {
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
         (metrics, producer_metrics)
+    }
+
+    /// Builds the compression of `compression.type`, at the level of its
+    /// `compression.<type>.level` config for gzip, lz4 and zstd.
+    ///
+    /// # Errors
+    ///
+    /// The level builder's error for a level out of range, which
+    /// [`ProducerConfig::new`] has already rejected.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#configureCompression")]
+    fn configure_compression(config: &ProducerConfig) -> Result<Compression, Error> {
+        Ok(match config.compression_type {
+            CompressionType::Gzip => Compression::gzip().level(config.compression_gzip_level)?.build(),
+            CompressionType::Lz4 => Compression::lz4().level(config.compression_lz4_level)?.build(),
+            CompressionType::Zstd => Compression::zstd().level(config.compression_zstd_level)?.build(),
+            compression_type => Compression::of(compression_type).build(),
+        })
     }
 
     /// Returns `linger.ms` as the `i32` the accumulator works with.
@@ -6259,7 +6271,7 @@ mod tests {
             ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
-                Compression::of(config.compression_type).build(),
+                KafkaProducer::<String, String>::configure_compression(&config).expect("valid compression"),
                 KafkaProducer::<String, String>::linger_ms(&config),
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
@@ -8114,7 +8126,7 @@ mod tests {
         ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
-            Compression::of(config.compression_type).build(),
+            KafkaProducer::<String, String>::configure_compression(&config).expect("valid compression"),
             KafkaProducer::<String, String>::linger_ms(&config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
@@ -8816,6 +8828,51 @@ mod tests {
         assert!(producer.chunked_accumulator.is_none());
     }
 
+    /// The producer builds its compression at the level its
+    /// `compression.<type>.level` config sets, as Java's `configureCompression`
+    /// (`KafkaProducer.java:601-622`) does, and at the type's default level when
+    /// that is not set. It used to build every codec at its default level. For
+    /// lz4 this shows only that the level reaches the accumulator: the lz4 writer
+    /// does not use it (`Compression::wrap_for_output`).
+    #[tokio::test]
+    async fn test_producer_compresses_at_the_configured_level() {
+        let cases = [
+            (
+                "gzip",
+                ProducerConfig::COMPRESSION_GZIP_LEVEL_CONFIG,
+                "1",
+                Compression::gzip().level(1).unwrap().build(),
+            ),
+            (
+                "lz4",
+                ProducerConfig::COMPRESSION_LZ4_LEVEL_CONFIG,
+                "17",
+                Compression::lz4().level(17).unwrap().build(),
+            ),
+            (
+                "zstd",
+                ProducerConfig::COMPRESSION_ZSTD_LEVEL_CONFIG,
+                "19",
+                Compression::zstd().level(19).unwrap().build(),
+            ),
+        ];
+        for (compression_type, key, level, expected) in cases {
+            let config =
+                ProducerConfig::new(&guard_props(&[("compression.type", compression_type), (key, level)])).unwrap();
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("constructs");
+            assert_eq!(expected, producer.accumulator.compression, "{key}={level}");
+
+            let config = ProducerConfig::new(&guard_props(&[("compression.type", compression_type)])).unwrap();
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("constructs");
+            let default = Compression::of(CompressionType::for_name(compression_type).unwrap()).build();
+            assert_eq!(default, producer.accumulator.compression, "{compression_type} without {key}");
+        }
+    }
+
     /// KAFKA-2121 for the KIP-1332 check: the compression `ConfigException` is raised inside
     /// `build_accumulator`, after a custom partitioner is configured, so the failed construction
     /// closes it (`KafkaProducer.java:519-523` -> `:1533`).
@@ -9338,5 +9395,66 @@ mod tests {
             .await
             .expect("the record must be delivered after the drop");
         assert_eq!(0, metadata.offset());
+    }
+
+    /// `buffer.memory=0` builds a producer, as Java's `atLeast(0)` validator
+    /// and `BufferPool` constructor allow, and each send fails in
+    /// `ensureValidRecordSize` (`KafkaProducer.java:1243-1253`) with Java's
+    /// message, under both allocation strategies. Construction used to panic
+    /// with "Buffer pool memory must be positive".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_producer_with_no_buffer_memory_fails_each_send_as_java_does() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "no-buffer-memory-topic";
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        for strategy in [
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+        ] {
+            let props = HashMap::from([
+                ("bootstrap.servers".to_string(), broker.bootstrap()),
+                (ProducerConfig::BUFFER_MEMORY_CONFIG.to_string(), "0".to_string()),
+                (
+                    ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+                    strategy.to_string(),
+                ),
+                // Non-idempotent, so the Sender does not first wait on an
+                // InitProducerId the fake never answers.
+                ("enable.idempotence".to_string(), "false".to_string()),
+            ]);
+            let config = ProducerConfig::new(&props).expect("buffer.memory=0 is a valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("a producer with no buffer memory constructs");
+            assert_eq!(
+                strategy == ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+                producer.chunked_accumulator.is_some(),
+                "{strategy}: the accumulator this strategy selects"
+            );
+            let future = producer
+                .send(ProducerRecord::new(TOPIC.to_string(), Some("value".to_string())))
+                .await
+                .expect("metadata arrives from the fake broker");
+            let err = future.get().await.expect_err("no record fits in no buffer memory");
+            assert!(matches!(err, Error::RecordTooLarge(_)), "{strategy}: {err:?}");
+            let size = AbstractRecords::estimate_size_in_bytes_upper_bound(
+                RecordBatch::CURRENT_MAGIC_VALUE,
+                CompressionType::None,
+                None,
+                Some(b"value"),
+                &[],
+            );
+            assert_eq!(
+                format!(
+                    "The message is {size} bytes when serialized which is larger than the total memory buffer you \
+                     have configured with the buffer.memory configuration."
+                ),
+                err.message(),
+                "{strategy}"
+            );
+            producer.close_with_timeout(Duration::ZERO).await.expect("close");
+        }
     }
 }

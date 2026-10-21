@@ -327,7 +327,9 @@ impl<R: BufRead> Read for DecompressingReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Error;
     use crate::common::record::internal::CompressionType;
+    use crate::common::record::internal::RecordBatch;
     use std::io::{Read, Write};
 
     /// Use record batch magic v2 for tests — this is the only version the
@@ -347,6 +349,61 @@ mod tests {
         reader.read_to_end(&mut decompressed).unwrap();
 
         decompressed
+    }
+
+    /// The loop of Java's `testCompressionDecompression` in `GzipCompressionTest`,
+    /// `Lz4CompressionTest` and `ZstdCompressionTest`: 256 copies of "data",
+    /// compressed and decompressed at the type's min, default and max level, for
+    /// record batch magic v0, v1 and v2. `wrap_for_output` and `wrap_for_input`
+    /// implement only the v2 framing, so v0 and v1 round-trip as v2 does.
+    fn assert_compression_decompression(
+        compression_type: CompressionType,
+        compression_at: impl Fn(i32) -> Compression,
+    ) {
+        let data = "data".repeat(256).into_bytes();
+        for magic in [
+            RecordBatch::MAGIC_VALUE_V0,
+            RecordBatch::MAGIC_VALUE_V1,
+            RecordBatch::MAGIC_VALUE_V2,
+        ] {
+            for level in [
+                compression_type.min_level().unwrap(),
+                compression_type.default_level().unwrap(),
+                compression_type.max_level().unwrap(),
+            ] {
+                let compression = compression_at(level);
+                let mut compressed = Vec::new();
+                let mut out = compression.wrap_for_output(&mut compressed, magic).unwrap();
+                out.write_all(&data).unwrap();
+                out.flush().unwrap();
+                out.finish().unwrap();
+
+                let mut result = Vec::new();
+                compression
+                    .wrap_for_input(compressed.as_slice(), magic)
+                    .unwrap()
+                    .read_to_end(&mut result)
+                    .unwrap();
+                assert_eq!(data, result, "level {level}, magic {magic}");
+            }
+        }
+    }
+
+    /// The body of Java's `testCompressionLevels` in the same three tests: the
+    /// builder rejects the type's min level - 1 and max level + 1, and accepts its
+    /// min and max levels. Asserts the `IllegalArgumentException` message too.
+    fn assert_compression_levels(compression_type: CompressionType, level: impl Fn(i32) -> Result<Compression, Error>) {
+        let (min, max) = (compression_type.min_level().unwrap(), compression_type.max_level().unwrap());
+        for invalid in [min - 1, max + 1] {
+            let err = level(invalid).unwrap_err();
+            assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
+            assert_eq!(
+                format!("{} doesn't support given compression level: {invalid}", compression_type.name()),
+                err.message()
+            );
+        }
+        level(min).unwrap();
+        level(max).unwrap();
     }
 
     #[test]
@@ -386,6 +443,83 @@ mod tests {
     #[test]
     fn test_gzip_default_level_valid() {
         assert!(Compression::gzip().level(-1).is_ok());
+    }
+
+    /// Translated from `GzipCompressionTest.testCompressionDecompression`.
+    #[test]
+    fn test_gzip_compression_decompression() {
+        assert_compression_decompression(CompressionType::Gzip, |level| {
+            Compression::gzip().level(level).unwrap().build()
+        });
+    }
+
+    /// Translated from `GzipCompressionTest.testCompressionLevels`.
+    #[test]
+    fn test_gzip_compression_levels() {
+        assert_compression_levels(CompressionType::Gzip, |level| Ok(Compression::gzip().level(level)?.build()));
+    }
+
+    /// Translated from `GzipCompressionTest.testLevelValidator`, asserting the
+    /// `ConfigException` message too.
+    #[test]
+    fn test_level_validator() {
+        let gzip = CompressionType::Gzip;
+        let (min, max, default) = (
+            gzip.min_level().unwrap(),
+            gzip.max_level().unwrap(),
+            gzip.default_level().unwrap(),
+        );
+        let validator = gzip.level_validator().unwrap();
+        for level in min..=max {
+            validator("", level).unwrap();
+        }
+        validator("", default).unwrap();
+        for level in [min - 1, max + 1] {
+            let err = validator("", level).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err:?}");
+            assert_eq!(
+                format!("Invalid value {level} for configuration : Value must be between 1 and 9 or equal to -1"),
+                err.message()
+            );
+        }
+    }
+
+    /// Java's lz4 and zstd `levelValidator()` is `ConfigDef.Range.between(minLevel,
+    /// maxLevel)`, which accepts both bounds and rejects a value past either with
+    /// `Range`'s messages; a type without levels throws
+    /// `UnsupportedOperationException` (`CompressionType.java:188-190`).
+    #[test]
+    fn test_lz4_and_zstd_level_validators_are_ranges() {
+        for (compression_type, min, max) in [(CompressionType::Lz4, 1, 17), (CompressionType::Zstd, -131072, 22)] {
+            let name = "compression.level";
+            let validator = compression_type.level_validator().unwrap();
+            validator(name, min).unwrap();
+            validator(name, max).unwrap();
+            for (level, message) in [
+                (min - 1, format!("Value must be at least {min}")),
+                (max + 1, format!("Value must be no more than {max}")),
+            ] {
+                let err = validator(name, level).unwrap_err();
+                assert!(matches!(err, Error::Config(_)), "{err:?}");
+                assert_eq!(
+                    format!("Invalid value {level} for configuration {name}: {message}"),
+                    err.message()
+                );
+            }
+        }
+        for compression_type in [CompressionType::None, CompressionType::Snappy] {
+            let Err(err) = compression_type.level_validator() else {
+                panic!("{} has no compression levels", compression_type.name());
+            };
+            assert!(matches!(err, Error::UnsupportedVersion(_)), "{err:?}");
+            assert_eq!(
+                format!(
+                    "Compression levels are not defined for this compression type: {}",
+                    compression_type.name()
+                ),
+                err.message()
+            );
+        }
     }
 
     #[test]
@@ -480,6 +614,21 @@ mod tests {
         assert!(Compression::lz4().level(0).is_err());
     }
 
+    /// Translated from `Lz4CompressionTest.testCompressionDecompression`. The lz4
+    /// writer does not use the level, so each level writes the same output.
+    #[test]
+    fn test_lz4_compression_decompression() {
+        assert_compression_decompression(CompressionType::Lz4, |level| {
+            Compression::lz4().level(level).unwrap().build()
+        });
+    }
+
+    /// Translated from `Lz4CompressionTest.testCompressionLevels`.
+    #[test]
+    fn test_lz4_compression_levels() {
+        assert_compression_levels(CompressionType::Lz4, |level| Ok(Compression::lz4().level(level)?.build()));
+    }
+
     #[test]
     fn test_zstd_round_trip() {
         let data = b"Hello, Kafka! This is a test of zstd compression.";
@@ -502,6 +651,20 @@ mod tests {
             err.to_string().contains("zstd doesn't support given compression level: 23"),
             "unexpected message: {err}"
         );
+    }
+
+    /// Translated from `ZstdCompressionTest.testCompressionDecompression`.
+    #[test]
+    fn test_zstd_compression_decompression() {
+        assert_compression_decompression(CompressionType::Zstd, |level| {
+            Compression::zstd().level(level).unwrap().build()
+        });
+    }
+
+    /// Translated from `ZstdCompressionTest.testCompressionLevels`.
+    #[test]
+    fn test_zstd_compression_levels() {
+        assert_compression_levels(CompressionType::Zstd, |level| Ok(Compression::zstd().level(level)?.build()));
     }
 
     #[test]

@@ -18,6 +18,8 @@
 //! Only the constants needed by the Metadata class are included here;
 //! full configuration support will be added as needed.
 
+use std::collections::HashMap;
+
 /// Configuration keys shared by producer, consumer and admin clients.
 ///
 /// Translates the Java static-utility class
@@ -111,4 +113,36 @@ impl CommonClientConfigs {
 
     /// The jitter factor for retry backoff.
     pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+    /// Config key: `reconnect.backoff.ms`
+    pub(crate) const RECONNECT_BACKOFF_MS_CONFIG: &str = "reconnect.backoff.ms";
+
+    /// Config key: `reconnect.backoff.max.ms`
+    pub(crate) const RECONNECT_BACKOFF_MAX_MS_CONFIG: &str = "reconnect.backoff.max.ms";
+
+    /// Postprocess the configuration so that exponential backoff is disabled when reconnect backoff
+    /// is explicitly configured but the maximum reconnect backoff is not explicitly configured.
+    ///
+    /// Returns the value `reconnect.backoff.max.ms` must take, the parsed
+    /// `reconnect_backoff_ms`, or `None` when it keeps its own. Java reads the
+    /// user's keys from `AbstractConfig.originals()` and returns the override
+    /// as a map of configs; this crate has no `AbstractConfig`, so the caller
+    /// passes its originals and applies the value itself.
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#postProcessReconnectBackoffConfigs")]
+    pub(crate) fn post_process_reconnect_backoff_configs(
+        originals: &HashMap<String, String>,
+        reconnect_backoff_ms: i64,
+    ) -> Option<i64> {
+        if !originals.contains_key(Self::RECONNECT_BACKOFF_MAX_MS_CONFIG)
+            && originals.contains_key(Self::RECONNECT_BACKOFF_MS_CONFIG)
+        {
+            log::warn!(
+                "Disabling exponential reconnect backoff because {} is set, but {} is not.",
+                Self::RECONNECT_BACKOFF_MS_CONFIG,
+                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG
+            );
+            return Some(reconnect_backoff_ms);
+        }
+        None
+    }
 }
