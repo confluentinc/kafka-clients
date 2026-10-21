@@ -313,7 +313,7 @@ def test_validate_config_accepts_known_keys():
 def test_validate_config_accepts_ssl_prefix():
     # Both Rust configs route every `ssl.*` key to apply_ssl_config_key().
     validate_config({"ssl.truststore.location": "/x"}, PRODUCER_CONFIG_KEYS, "producer")
-    validate_config({"ssl.keystore.password": "x"}, CONSUMER_CONFIG_KEYS, "consumer")
+    validate_config({"ssl.keystore.key": "x"}, CONSUMER_CONFIG_KEYS, "consumer")
 
 
 def test_validate_config_rejects_unknown_key_and_names_it():

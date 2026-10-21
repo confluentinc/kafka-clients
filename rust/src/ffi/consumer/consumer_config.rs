@@ -359,7 +359,7 @@ pub extern "C" fn kafka_consumer_ConsumerConfig_config_names() -> *mut kafka_Lis
 /// `getString(String key)`: the value of the `STRING` key `key`, borrowed
 /// from the handle and valid until it is destroyed, or `NULL` with `*out_err` still
 /// `NULL` when the key has no value (Java's `null`, which is also what an unset
-/// `PASSWORD` key such as `ssl.truststore.password` answers). `client.id` is the
+/// `PASSWORD` key such as `ssl.keystore.key` answers). `client.id` is the
 /// resolved id, generated when the property is unset, under which every
 /// consumer created from the handle runs. A key of another type
 /// (`max.poll.records`, a set `PASSWORD` key) fails as Java's cast does, with an
@@ -487,7 +487,7 @@ mod tests {
             let protocol = kafka_consumer_ConsumerConfig_get_string(config, c"security.protocol".as_ptr(), &mut err);
             assert!(err.is_null());
             assert_eq!(CStr::from_ptr(protocol).to_str().unwrap(), "sasl_ssl");
-            let password = kafka_consumer_ConsumerConfig_get_string(config, c"ssl.key.password".as_ptr(), &mut err);
+            let password = kafka_consumer_ConsumerConfig_get_string(config, c"ssl.keystore.key".as_ptr(), &mut err);
             assert!(password.is_null());
             assert!(err.is_null());
             let mechanism = kafka_consumer_ConsumerConfig_get_string(config, c"sasl.mechanism".as_ptr(), &mut err);

@@ -1294,7 +1294,7 @@ impl ConsumerConfig {
     /// # Errors
     ///
     /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type (`max.poll.records`, a set `ssl.truststore.password`). Java's
+    ///   another type (`max.poll.records`, a set `ssl.keystore.key`). Java's
     ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
     ///   and fails with a `ClassCastException`, which, like
     ///   `IllegalArgumentException`, is not a `KafkaException`.
@@ -1849,9 +1849,10 @@ mod tests {
     }
 
     /// `{:?}` of a config built from every `Type.PASSWORD` key the client
-    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// parses (`sasl.jaas.config` and the three SSL keys) renders none of their
     /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
-    /// and `SslConfigs` hold those values as `Password`s.
+    /// and `SslConfigs` hold those values as `Password`s. The three SSL
+    /// password keys this client does not define render as key names only.
     #[test]
     fn test_debug_redacts_password_configs() {
         let secrets = [
@@ -1860,15 +1861,19 @@ mod tests {
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
                  username=\"jaas-user\" password=\"jaas-S3cr3t\";",
             ),
-            ("ssl.truststore.password", "truststore-S3cr3t"),
             ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
-            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
             ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+        ];
+        // Not defined (`SslConfigs` module docs), so held only in the originals.
+        let undefined = [
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.key.password", "key-S3cr3t"),
         ];
         let mut props: HashMap<String, String> = secrets
             .iter()
+            .chain(&undefined)
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
@@ -1879,10 +1884,13 @@ mod tests {
 
         // The secrets did reach the config; they are only hidden from `Debug`.
         assert_eq!(c.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
-        assert_eq!(c.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
+        assert_eq!(
+            c.ssl_config.keystore_key.as_ref().map(Password::value),
+            Some("KEYSTORE-KEY-PEM")
+        );
 
         for rendered in [format!("{c:?}"), format!("{c:#?}")] {
-            for (key, value) in secrets {
+            for (key, value) in secrets.iter().chain(&undefined) {
                 assert!(!rendered.contains(value), "{key} leaked: {rendered}");
             }
             for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
@@ -2309,12 +2317,9 @@ mod tests {
         // `String`; only a set one fails the cast (below).
         for key in [
             SaslConfigs::SASL_JAAS_CONFIG,
-            SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG,
             SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG,
-            SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG,
             SslConfigs::SSL_KEYSTORE_KEY_CONFIG,
             SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG,
-            SslConfigs::SSL_KEY_PASSWORD_CONFIG,
         ] {
             assert_eq!(None, config.get_string(key).unwrap(), "for {key}");
         }
@@ -2362,11 +2367,11 @@ mod tests {
             (ConsumerConfig::METADATA_MAX_AGE_CONFIG, "LONG"),
             (ConsumerConfig::ENABLE_AUTO_COMMIT_CONFIG, "BOOLEAN"),
             (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "LIST"),
-            (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "PASSWORD"),
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "PASSWORD"),
             (SaslConfigs::SASL_JAAS_CONFIG, "PASSWORD"),
         ];
         let passwords = ConsumerConfig::new(&props_with(&[
-            (SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG, "secret"),
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "secret"),
             (SaslConfigs::SASL_JAAS_CONFIG, "x required;"),
         ]))
         .unwrap();
@@ -2915,6 +2920,9 @@ mod tests {
             "security.providers",
             "config.providers",
             "ssl.cipher.suites",
+            "ssl.keystore.password",
+            "ssl.key.password",
+            "ssl.truststore.password",
             "key.deserializer",
             "metric.reporters",
             "interceptor.classes",

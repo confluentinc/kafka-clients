@@ -71,11 +71,10 @@ impl SslFactory {
     ///
     /// Returns an error if:
     /// - The truststore or keystore format is not PEM (JKS/PKCS12 are unsupported)
-    /// - `ssl.keystore.password`, `ssl.truststore.password` or `ssl.key.password`
-    ///   is set (see [`validate_pem_passwords`])
     /// - PEM files cannot be read or parsed
     /// - No valid certificates are found in the truststore
-    /// - The private key cannot be loaded or is missing when a client cert is provided
+    /// - The private key cannot be loaded, is encrypted (see
+    ///   [`is_encrypted_pem_key`]), or is missing when a client cert is provided
     /// - TLS protocol configuration is invalid
     #[doc(alias = "org.apache.kafka.common.security.ssl.SslFactory#SslFactory")]
     pub fn new(ssl_config: &SslConfigs) -> io::Result<Self> {
@@ -86,7 +85,6 @@ impl SslFactory {
         // Validate store formats
         validate_store_format(&ssl_config.truststore_type, "truststore")?;
         validate_store_format(&ssl_config.keystore_type, "keystore")?;
-        validate_pem_passwords(ssl_config)?;
 
         // Build root cert store
         let root_store = build_root_cert_store(ssl_config)?;
@@ -156,51 +154,38 @@ impl SslFactory {
     }
 }
 
-/// Rejects the passwords this factory cannot use. Only PEM stores get past
-/// [`validate_store_format`], and:
-///
-/// - `ssl.keystore.password` cannot be set with PEM, translating
-///   `DefaultSslEngineFactory.createKeystore` (`DefaultSslEngineFactory.java:289`
-///   for an inline `ssl.keystore.key`, `:296` for a `ssl.keystore.location`,
-///   each with its own message);
-/// - `ssl.truststore.password` cannot be set with PEM, translating
-///   `DefaultSslEngineFactory.createTruststore` (`:316`, `:321`);
-/// - `ssl.key.password` is Rust-only: Java decrypts an encrypted PEM private key
-///   (an `EncryptedPrivateKeyInfo`) with it (`DefaultSslEngineFactory.java:505-520`),
-///   which this factory does not implement. Rejecting it here, rather than
-///   failing later with `No private key found in inline keystore key`, names
-///   the actual cause.
-///
-/// Deviation: Java runs the two store-password checks only inside
-/// `createKeystore` / `createTruststore`, i.e. when a store is configured;
-/// here they run whenever the password is set, because a set password that no
-/// code reads would be accepted and ignored.
-///
-/// # Errors
-///
-/// [`io::ErrorKind::InvalidInput`] with the messages above; the clients report
-/// it as a `ConfigError` (`Failed to create channel builder: ...`).
-fn validate_pem_passwords(ssl_config: &SslConfigs) -> io::Result<()> {
-    if ssl_config.keystore_password.is_some() {
-        let message = if ssl_config.keystore_key.is_some() {
-            "SSL key store password cannot be specified with PEM format, only key password may be specified."
-        } else {
-            "SSL key store password cannot be specified with PEM format, only key password may be specified"
-        };
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
-    }
-    if ssl_config.truststore_password.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "SSL trust store password cannot be specified for PEM format.",
-        ));
-    }
-    if ssl_config.key_password.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "ssl.key.password is not supported by this client: encrypted PEM private keys cannot be decrypted; \
-             provide an unencrypted PKCS#8 key",
-        ));
+/// The error for an encrypted PEM private key, a Rust-only message: Java
+/// decrypts an encrypted PKCS#8 key (an `EncryptedPrivateKeyInfo`) with
+/// `ssl.key.password` (`DefaultSslEngineFactory.java:505-520`), which this
+/// client does not implement, so the key password is not defined
+/// (`SslConfigs` module docs) and an encrypted key is reported as such rather
+/// than as a missing or unparseable key.
+const ENCRYPTED_PEM_KEY_MESSAGE: &str =
+    "Encrypted PEM private keys are not supported by this client; provide an unencrypted PKCS#8 key";
+
+/// Whether `pem` holds an encrypted private key: a PKCS#8
+/// `ENCRYPTED PRIVATE KEY` section (what Java decrypts at
+/// `DefaultSslEngineFactory.java:517`), or a legacy OpenSSL block whose
+/// `Proc-Type: 4,ENCRYPTED` header marks it encrypted (with its `DEK-Info`,
+/// e.g. in an `RSA PRIVATE KEY` section). A text check only: nothing is
+/// decrypted.
+fn is_encrypted_pem_key(pem: &[u8]) -> bool {
+    const ENCRYPTED_PKCS8_BEGIN: &[u8] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----";
+    pem.split(|&b| b == b'\n').map(<[u8]>::trim_ascii).any(|line| {
+        line.starts_with(ENCRYPTED_PKCS8_BEGIN)
+            || line
+                .strip_prefix(b"Proc-Type:")
+                .is_some_and(|value| value.trim_ascii().ends_with(b"ENCRYPTED"))
+    })
+}
+
+/// Fails with [`ENCRYPTED_PEM_KEY_MESSAGE`] when `pem` holds an encrypted
+/// private key ([`is_encrypted_pem_key`]). It runs before the key is parsed,
+/// since the PEM parser skips an `ENCRYPTED PRIVATE KEY` section (leaving
+/// `No private key found`) and fails to decode a legacy block's headers.
+fn reject_encrypted_pem_key(pem: &[u8]) -> io::Result<()> {
+    if is_encrypted_pem_key(pem) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, ENCRYPTED_PEM_KEY_MESSAGE));
     }
     Ok(())
 }
@@ -319,9 +304,13 @@ fn load_client_identity(
         }
         Some(certs)
     } else if let Some(ref path) = ssl_config.keystore_location {
-        let file = std::fs::File::open(path)
+        let pem = std::fs::read(path)
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file '{path}': {e}")))?;
-        let certs = CertificateDer::pem_reader_iter(file)
+        // The key is in the same file, and a legacy encrypted key's
+        // `Proc-Type` / `DEK-Info` headers would fail the certificate parse
+        // with a base64 error, so the encrypted-key check runs first.
+        reject_encrypted_pem_key(&pem)?;
+        let certs = CertificateDer::pem_slice_iter(&pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| {
                 io::Error::new(
@@ -345,6 +334,7 @@ fn load_client_identity(
         // the same shape the old `rustls_pemfile::private_key` returned — so a PEM
         // with no key section stays `Ok(None)` and produces the "No private key
         // found" message below rather than a parse error.
+        reject_encrypted_pem_key(key_pem.value().as_bytes())?;
         let key = PrivateKeyDer::pem_slice_iter(key_pem.value().as_bytes())
             .next()
             .transpose()
@@ -358,9 +348,10 @@ fn load_client_identity(
         Some(key)
     } else if let Some(ref path) = ssl_config.keystore_location {
         // When keystore_location is used, key is expected in the same file
-        let file = std::fs::File::open(path)
+        let pem = std::fs::read(path)
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file for key '{path}': {e}")))?;
-        let key = PrivateKeyDer::pem_reader_iter(file)
+        reject_encrypted_pem_key(&pem)?;
+        let key = PrivateKeyDer::pem_slice_iter(&pem)
             .next()
             .transpose()
             .map_err(|e| {
@@ -591,66 +582,6 @@ Dlqddi21TOtLHuQuxJqlASFSCzYesT3OIQz7zxb8jS6ESF3YmwZLzTX+GD7TxWcZ
 AW5Pv9kQ+0OdOQ+xjJfk9XN4iPkWupwYtLPM3LY1tleJVEf9ZNgXr9e6zkY+iMW+
 B2V9lhUZNk+pRjtJw9unpXsM
 -----END PRIVATE KEY-----";
-
-    /// `validate_pem_passwords`: each password is rejected with its message,
-    /// and the PEM stores still build with no password set.
-    #[test]
-    fn test_pem_passwords_rejected() {
-        let message = |config: &SslConfigs| SslFactory::new(config).unwrap_err().to_string();
-
-        // `DefaultSslEngineFactory.java:296`: a key store file.
-        let config = SslConfigs {
-            keystore_location: Some("/path/to/keystore.pem".to_string()),
-            keystore_password: Some(Password::new("secret")),
-            ..SslConfigs::default()
-        };
-        assert_eq!(
-            message(&config),
-            "SSL key store password cannot be specified with PEM format, only key password may be specified"
-        );
-        // `:289`: an inline key, with Java's trailing period.
-        let config = SslConfigs {
-            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
-            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
-            keystore_password: Some(Password::new("secret")),
-            ..SslConfigs::default()
-        };
-        assert_eq!(
-            message(&config),
-            "SSL key store password cannot be specified with PEM format, only key password may be specified."
-        );
-        // `:316` / `:321`, and also without a store configured (deviation).
-        for truststore_certificates in [Some(Password::new(TEST_CA_CERT)), None] {
-            let config = SslConfigs {
-                truststore_certificates,
-                truststore_password: Some(Password::new("changeit")),
-                ..SslConfigs::default()
-            };
-            assert_eq!(message(&config), "SSL trust store password cannot be specified for PEM format.");
-        }
-        let config = SslConfigs {
-            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
-            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
-            key_password: Some(Password::new("keypass")),
-            ..SslConfigs::default()
-        };
-        let err = SslFactory::new(&config).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(
-            err.to_string(),
-            "ssl.key.password is not supported by this client: encrypted PEM private keys cannot be decrypted; \
-             provide an unencrypted PKCS#8 key"
-        );
-
-        // The same PEM stores without a password build.
-        let config = SslConfigs {
-            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
-            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
-            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
-            ..SslConfigs::default()
-        };
-        SslFactory::new(&config).unwrap();
-    }
 
     #[test]
     fn test_build_with_system_roots() {
@@ -941,6 +872,95 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         };
         let err = load_client_identity(&config).unwrap_err();
         assert_eq!(err.to_string(), "No private key found in inline keystore key");
+    }
+
+    /// Encrypted PKCS#8 private key (`openssl pkcs8 -topk8 -v2 aes-256-cbc`
+    /// over a throwaway P-256 key, test-only), the form Java decrypts with
+    /// `ssl.key.password` (`DefaultSslEngineFactory.java:517`).
+    const TEST_ENCRYPTED_PKCS8_KEY: &str = "\
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIH0MF8GCSqGSIb3DQEFDTBSMDEGCSqGSIb3DQEFDDAkBBChEvfxzqdTnTzntfu+
+/JNkAgIIADAMBggqhkiG9w0CCQUAMB0GCWCGSAFlAwQBKgQQnLCb4V4KZtTCKIhZ
+9yXZ7wSBkCLHwAv0KMXYwGPsegoyjbzjMqy9/wkGNO/R4N6pN1b1eqQiBx+V9aaC
+zP4ok3TCR4yUhO6VeiPIx+Di6mWV74UaekldPQ6VWGQZC4HgG5/mMyFv+nPXF3/5
+9/Onw4P8LvTiGdSqlJedaHo3rIqkoPlTfpyr7TqYZv1vQe8KOVvx+kEwi2uGVxUw
+1nFxoNqAcg==
+-----END ENCRYPTED PRIVATE KEY-----";
+
+    /// Legacy OpenSSL encrypted key (`openssl genrsa -traditional -aes128`,
+    /// throwaway 512-bit, test-only): an `RSA PRIVATE KEY` section with
+    /// `Proc-Type: 4,ENCRYPTED` and `DEK-Info` headers.
+    const TEST_ENCRYPTED_LEGACY_KEY: &str = "\
+-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: AES-128-CBC,CF9AF4AB2F444E8C246411640F3CF3AD
+
+hpSwOZCb7kAJ8APc2ddKf/HujxTmR/RVcxz6zHiFVN4H1NyOX/EMTWUyCVhl4Ktd
+XXS+DvBFndAsFUvCYy57jF+x2LdlRDntmdMuWzt17VuOl10Azwe7UrgCXAJaqRto
+Kl6q8xZ6LkBVjPHCMzj9mVEFClpBSVihPA/IyiknTgH3WzRW0CY0iqccckpM8uZo
+VH0vfjR8QYm5Bh2O64nFBY/7eyJxsaLOFOvUuexNLXQY5Dd3EvmXGG2QAb+CmMdP
+RPzEy/xVAdxrIFRm1dvwbNVNSSWhRnjOnKgpSalAQbMtUavP9yhn6JL92udU3qwP
+8gtGUJLTV5nrN/fLQju85ndXGIPJ6tUtlBz2mpFlodJBN0bvkxtuyzdr5LLk32t4
+0LjkDh76Pb2/CFv8rmSdPW4DRinxozSNWbyzBv18/s4=
+-----END RSA PRIVATE KEY-----";
+
+    /// An encrypted inline `ssl.keystore.key`, in either form, fails with
+    /// the encrypted-key message rather than `No private key found` (PKCS#8)
+    /// or a base64 parse error (legacy).
+    #[test]
+    fn test_encrypted_inline_keystore_key_rejected() {
+        for key in [TEST_ENCRYPTED_PKCS8_KEY, TEST_ENCRYPTED_LEGACY_KEY] {
+            let config = SslConfigs {
+                keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+                keystore_key: Some(Password::new(key)),
+                ..SslConfigs::default()
+            };
+            let err = SslFactory::new(&config).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{key}");
+            assert_eq!(
+                err.to_string(),
+                "Encrypted PEM private keys are not supported by this client; provide an unencrypted PKCS#8 key",
+                "{key}"
+            );
+        }
+    }
+
+    /// An encrypted key in the `ssl.keystore.location` file, in either form,
+    /// fails with the same message.
+    #[test]
+    fn test_encrypted_keystore_file_key_rejected() {
+        let dir = std::env::temp_dir().join("kafka_ssl_test_encrypted_keystore_file");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, key) in [
+            ("pkcs8.pem", TEST_ENCRYPTED_PKCS8_KEY),
+            ("legacy.pem", TEST_ENCRYPTED_LEGACY_KEY),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("{TEST_CLIENT_CERT}\n{key}")).unwrap();
+            let config = SslConfigs {
+                keystore_location: Some(path.to_str().unwrap().to_string()),
+                ..SslConfigs::default()
+            };
+            let err = SslFactory::new(&config).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name}");
+            assert_eq!(
+                err.to_string(),
+                "Encrypted PEM private keys are not supported by this client; provide an unencrypted PKCS#8 key",
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The check looks at the PEM text only: an unencrypted key, a key file
+    /// with no key and a certificate are not encrypted keys.
+    #[test]
+    fn test_is_encrypted_pem_key() {
+        assert!(is_encrypted_pem_key(TEST_ENCRYPTED_PKCS8_KEY.as_bytes()));
+        assert!(is_encrypted_pem_key(TEST_ENCRYPTED_LEGACY_KEY.replace('\n', "\r\n").as_bytes()));
+        assert!(!is_encrypted_pem_key(TEST_CLIENT_KEY.as_bytes()));
+        assert!(!is_encrypted_pem_key(TEST_CLIENT_CERT.as_bytes()));
+        assert!(!is_encrypted_pem_key(b""));
     }
 
     #[test]

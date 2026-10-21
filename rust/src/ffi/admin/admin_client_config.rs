@@ -259,7 +259,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_boolean(
 /// `getString(String key)`: the `STRING` configuration `key`, borrowed from
 /// the handle and valid until it is destroyed, or `NULL` with `*out_err`
 /// still `NULL` when the key has no value (Java's `null`, which is also what
-/// an unset `PASSWORD` key such as `ssl.key.password` answers). Fails as
+/// an unset `PASSWORD` key such as `ssl.keystore.key` answers). Fails as
 /// [`kafka_admin_AdminClientConfig_get_int`] does.
 ///
 /// # Safety

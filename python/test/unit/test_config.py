@@ -27,6 +27,9 @@ themselves and are not.
 from __future__ import annotations
 
 import math
+import os
+import subprocess
+import sys
 from datetime import timedelta
 
 import pytest
@@ -243,6 +246,24 @@ def test_unsupported_sasl_mechanism_is_rejected_by_the_core() -> None:
                                "security.protocol": "SASL_SSL"})
     assert str(exc.value) == (
         "SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is")
+
+
+def test_an_undefined_ssl_password_is_reported_as_unused() -> None:
+    # The core leaves ssl.keystore.password undefined (PEM is its only store
+    # format, and Java rejects a store password with PEM), so a value set for
+    # it is listed in the client's unused-configurations INFO line. The core
+    # logs to stderr at the RUST_LOG level read when its first client is
+    # built, so a fresh interpreter builds the producer.
+    body = (
+        "from confluent_kafka.producer import KafkaProducer\n"
+        "KafkaProducer(configs={'bootstrap.servers': 'localhost:1',"
+        " 'security.protocol': 'PLAINTEXT', 'ssl.keystore.password': 'p'}).close()\n")
+    proc = subprocess.run(
+        [sys.executable, "-c", body], capture_output=True, text=True, timeout=120,
+        env={**os.environ, "RUST_LOG": "info", "PYTHONPATH": os.pathsep.join(sys.path)})
+    assert proc.returncode == 0, proc.stderr
+    assert ("These configurations '[ssl.keystore.password]' were supplied but are not used yet."
+            in proc.stderr), proc.stderr
 
 
 def test_prepare_uses_the_client_config_def() -> None:

@@ -327,7 +327,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 /// `getString(String key)`: the `STRING` configuration `key`, borrowed from
 /// the handle and valid until it is destroyed, or `NULL` with `*out_err`
 /// still `NULL` when the key has no value (Java's `null`, which is also what
-/// an unset `PASSWORD` key such as `ssl.key.password` answers). `client.id`
+/// an unset `PASSWORD` key such as `ssl.keystore.key` answers). `client.id`
 /// is the resolved id, generated when the property is unset, under which
 /// every producer created from the handle runs. Fails as
 /// [`kafka_producer_ProducerConfig_get_int`] does.

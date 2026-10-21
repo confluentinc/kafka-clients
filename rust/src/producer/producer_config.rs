@@ -1436,7 +1436,7 @@ impl ProducerConfig {
     /// # Errors
     ///
     /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type (`batch.size`, a set `ssl.truststore.password`). Java's
+    ///   another type (`batch.size`, a set `ssl.keystore.key`). Java's
     ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
     ///   and fails with a `ClassCastException`, which, like
     ///   `IllegalArgumentException`, is not a `KafkaException`.
@@ -3001,10 +3001,12 @@ mod tests {
     // -- Debug redaction -----------------------------------------------------
 
     /// `{:?}` renders no secret the user passed, and `originals` only as its
-    /// key set. The props hold the seven `Type.PASSWORD` keys this client
-    /// parses (`SslConfigs.java:133-137`, `:140`, `SaslConfigs.java:380`), the
-    /// two OAuth `Type.PASSWORD` keys it does not parse (`SaslConfigs.java:392`,
-    /// `:402`), and an unknown key carrying a serializer credential: Java
+    /// key set. The props hold the four `Type.PASSWORD` keys this client
+    /// parses (`SslConfigs.java:137-139`, `SaslConfigs.java:380`), the five
+    /// `Type.PASSWORD` keys it does not define (the SSL store and key
+    /// passwords, `SslConfigs.java:135-136`, `:142`, and two OAuth keys,
+    /// `SaslConfigs.java:392`, `:402`), and an unknown key carrying a
+    /// serializer credential: Java
     /// prints none of those values. The parsed secrets render as `[hidden]`
     /// through their typed fields, and the non-secret `bootstrap.servers` value
     /// stays visible through its typed field only.
@@ -3041,8 +3043,8 @@ mod tests {
         // from `Debug`.
         assert_eq!(config.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
         assert_eq!(
-            config.ssl_config.key_password.as_ref().map(Password::value),
-            Some("key-password-S3cr3t")
+            config.ssl_config.keystore_key.as_ref().map(Password::value),
+            Some("keystore-key-S3cr3t")
         );
         for (key, value) in secrets {
             assert_eq!(config.originals().get(key).map(String::as_str), Some(value), "{key}");
@@ -3058,8 +3060,8 @@ mod tests {
             for fragment in ["S3cr3t", "jaas-user", "PlainLoginModule", "registry-key"] {
                 assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
             }
-            // `[hidden]` comes from the seven typed `Password` fields only.
-            assert_eq!(rendered.matches(Password::HIDDEN).count(), 7, "{rendered}");
+            // `[hidden]` comes from the four typed `Password` fields only.
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), 4, "{rendered}");
             // The non-secret value renders once, through its typed field and
             // not through `originals`.
             assert_eq!(rendered.matches("visible-host:9092").count(), 1, "{rendered}");
@@ -3069,12 +3071,9 @@ mod tests {
         assert!(rendered.contains("bootstrap_servers: [\"visible-host:9092\"]"), "{rendered}");
         for field in [
             "jaas_config",
-            "truststore_password",
             "truststore_certificates",
-            "keystore_password",
             "keystore_key",
             "keystore_certificate_chain",
-            "key_password",
         ] {
             let hidden = format!("{field}: Some([hidden])");
             assert!(rendered.contains(&hidden), "{hidden} missing: {rendered}");
@@ -3187,6 +3186,9 @@ mod tests {
             "security.providers",
             "config.providers",
             "ssl.cipher.suites",
+            "ssl.keystore.password",
+            "ssl.key.password",
+            "ssl.truststore.password",
         ] {
             assert!(!names.contains(key), "{key}");
         }

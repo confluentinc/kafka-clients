@@ -1971,35 +1971,23 @@ mod tests {
         );
     }
 
+    /// Java's `testSslPasswords` uses `ssl.key.password`,
+    /// `ssl.keystore.password` and `ssl.truststore.password`, which this
+    /// client does not define (`SslConfigs` module docs); the same check runs
+    /// on the `Type.PASSWORD` keys `with_client_ssl_support` does define.
     #[test]
     fn test_ssl_passwords() {
+        use crate::common::config::SslConfigs;
+
         let def = ConfigDef::new().with_client_ssl_support();
-        let props = props(&[
-            (
-                crate::common::config::SslConfigs::SSL_KEY_PASSWORD_CONFIG,
-                "key_password".into(),
-            ),
-            (
-                crate::common::config::SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG,
-                "keystore_password".into(),
-            ),
-            (
-                crate::common::config::SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG,
-                "truststore_password".into(),
-            ),
-        ]);
+        let passwords = [
+            (SslConfigs::SSL_KEYSTORE_KEY_CONFIG, "keystore_key"),
+            (SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG, "keystore_certificate_chain"),
+            (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, "truststore_certificates"),
+        ];
+        let props = props(&passwords.map(|(key, password)| (key, password.into())));
         let vals = def.parse(&props).unwrap();
-        for (key, password) in [
-            (crate::common::config::SslConfigs::SSL_KEY_PASSWORD_CONFIG, "key_password"),
-            (
-                crate::common::config::SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG,
-                "keystore_password",
-            ),
-            (
-                crate::common::config::SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG,
-                "truststore_password",
-            ),
-        ] {
+        for (key, password) in passwords {
             assert_eq!(vals[key], Some(ParsedValue::Password(Password::new(password))));
             assert_eq!(vals[key].as_ref().unwrap().to_string(), Password::HIDDEN);
         }

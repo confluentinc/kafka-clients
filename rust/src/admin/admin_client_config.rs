@@ -634,7 +634,7 @@ impl AdminClientConfig {
     }
 
     /// The `STRING` configuration `key`, trimmed, `None` for Java's `null`
-    /// (also what an unset `PASSWORD` key such as `ssl.key.password` answers,
+    /// (also what an unset `PASSWORD` key such as `ssl.keystore.key` answers,
     /// as Java's cast of `null` succeeds). Reading a key marks it used
     /// ([`Self::unused`]).
     ///
@@ -1064,7 +1064,7 @@ mod tests {
     fn test_typed_getters() {
         let mut props = bootstrap_props();
         props.insert("client.id".to_string(), " admin-1 ".to_string());
-        props.insert("ssl.key.password".to_string(), "secret".to_string());
+        props.insert("ssl.keystore.key".to_string(), "secret".to_string());
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.get_int("request.timeout.ms").unwrap(), Some(30_000));
         assert_eq!(config.get_long("metadata.max.age.ms").unwrap(), Some(300_000));
@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(err.message(), "Configuration 'request.timeout.ms' is of type INT, not LONG");
         assert!(config.get_short("request.timeout.ms").is_err());
         assert!(config.get_double("request.timeout.ms").is_err());
-        assert!(config.get_string("ssl.key.password").is_err());
+        assert!(config.get_string("ssl.keystore.key").is_err());
     }
 
     #[test]
@@ -1104,6 +1104,9 @@ mod tests {
             "security.providers",
             "config.providers",
             "ssl.cipher.suites",
+            "ssl.keystore.password",
+            "ssl.key.password",
+            "ssl.truststore.password",
         ] {
             assert!(!names.contains(key), "{key}");
         }
@@ -1149,9 +1152,15 @@ mod tests {
         props.insert("ssl.keystore.type".to_string(), "JKS".to_string());
         let ssl = AdminClientConfig::new(&props).unwrap();
         ssl.mark_read_keys_used();
+        // `ssl.keystore.password` is not defined (`SslConfigs` module docs), so
+        // it stays unused under TLS too.
         assert_eq!(
             ssl.unused(),
-            HashSet::from(["send.buffer.bytes".to_string(), "some.unknown.key".to_string()])
+            HashSet::from([
+                "send.buffer.bytes".to_string(),
+                "some.unknown.key".to_string(),
+                "ssl.keystore.password".to_string(),
+            ])
         );
     }
 
@@ -1426,9 +1435,10 @@ mod tests {
     }
 
     /// `{:?}` of a config built from every `Type.PASSWORD` key the client
-    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// parses (`sasl.jaas.config` and the three SSL keys) renders none of their
     /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
-    /// and `SslConfigs` hold those values as `Password`s.
+    /// and `SslConfigs` hold those values as `Password`s. The three SSL
+    /// password keys this client does not define render as key names only.
     #[test]
     fn test_debug_redacts_password_configs() {
         let secrets = [
@@ -1437,15 +1447,19 @@ mod tests {
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
                  username=\"jaas-user\" password=\"jaas-S3cr3t\";",
             ),
-            ("ssl.truststore.password", "truststore-S3cr3t"),
             ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
-            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
             ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+        ];
+        // Not defined (`SslConfigs` module docs), so held only in the originals.
+        let undefined = [
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
             ("ssl.key.password", "key-S3cr3t"),
         ];
         let mut props: HashMap<String, String> = secrets
             .iter()
+            .chain(&undefined)
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
@@ -1457,12 +1471,12 @@ mod tests {
         // The secrets did reach the config; they are only hidden from `Debug`.
         assert_eq!(config.sasl_config().resolve_password(), Some("jaas-S3cr3t"));
         assert_eq!(
-            config.ssl_config().key_password.as_ref().map(Password::value),
-            Some("key-S3cr3t")
+            config.ssl_config().keystore_key.as_ref().map(Password::value),
+            Some("KEYSTORE-KEY-PEM")
         );
 
         for rendered in [format!("{config:?}"), format!("{config:#?}")] {
-            for (key, value) in secrets {
+            for (key, value) in secrets.iter().chain(&undefined) {
                 assert!(!rendered.contains(value), "{key} leaked: {rendered}");
             }
             for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {

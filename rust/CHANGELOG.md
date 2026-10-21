@@ -254,15 +254,21 @@ breaking changes.
   clear error, naming `GSSAPI`, instead of a misleading "requires a username"
   or a broker-side handshake failure: set `sasl.mechanism=PLAIN`. An empty
   mechanism keeps Java's `ConfigError`.
-- **Breaking (Rust, C API, Python):** with TLS on (`SSL`, `SASL_SSL`), the
-  clients' constructors now reject the passwords the SSL factory cannot use,
-  with a `ConfigError` `Failed to create channel builder: ...`, instead of
-  accepting and ignoring them: `ssl.keystore.password` and
-  `ssl.truststore.password`, which Java rejects with PEM stores (the only
-  ones this client supports), with Java's messages; and `ssl.key.password`,
-  because encrypted PEM private keys are not supported (an encrypted key used
-  to fail with `No private key found in inline keystore key`). Unlike Java,
-  the store passwords are rejected even when no store is configured.
+- **Breaking (Rust, C API, Python):** `ssl.keystore.password`,
+  `ssl.truststore.password` and `ssl.key.password` are no longer defined, and
+  `SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG`, `SSL_TRUSTSTORE_PASSWORD_CONFIG`
+  and `SSL_KEY_PASSWORD_CONFIG` are removed. None of them can work in this
+  client: PEM is the only store format, and Java rejects a store password with
+  PEM stores; and encrypted PEM private keys, which Java decrypts with the key
+  password, are not supported. A value set for one of them is now listed among
+  the unused configurations instead of being accepted and ignored, and reading
+  one through `get_string` fails with `Unknown configuration`. An encrypted
+  PEM private key (`ENCRYPTED PRIVATE KEY`, or a legacy block with
+  `Proc-Type: 4,ENCRYPTED`) now fails the clients' constructors with a
+  `ConfigError` `Failed to create channel builder: Encrypted PEM private keys
+  are not supported by this client; provide an unencrypted PKCS#8 key`, where
+  it used to fail with `No private key found in inline keystore key` or a PEM
+  parse error.
 - **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is no longer
   defined, and `SslConfigs::SSL_CIPHER_SUITES_CONFIG` is removed. The clients
   always use rustls's default cipher suites, so the key was read only to log a
