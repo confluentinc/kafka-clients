@@ -31,9 +31,11 @@ use crate::common::{Error, TopicPartition};
 /// # Invocation model
 ///
 /// Per `consumer-threading.md` §31, listener methods execute on the **caller's
-/// task** during `poll()`, `commit_*()`, `unsubscribe()`, or `close()` — never
-/// on the background task. This matches Java's contract that the callback
-/// "executes in the user thread as part of the poll() call".
+/// task** during `poll()` and `unsubscribe()`, and `close()` invokes
+/// `on_partitions_revoked` / `on_partitions_lost` for the partitions the group
+/// assigned — never on the background task, and never from other calls such
+/// as `commit_*()`. This matches Java's contract that the callback "executes
+/// in the user thread as part of the poll() call".
 ///
 /// Users may invoke other `Consumer` methods (notably `commit_sync()`) from
 /// inside the callback; rebalance state does not advance until the callback

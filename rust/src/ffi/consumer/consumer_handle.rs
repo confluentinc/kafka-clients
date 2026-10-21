@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! C bindings for the consumer's reentrancy handle
-//! ([`ConsumerHandle`], Rust-only; consumer-threading.md §31, §41).
+//! ([`ConsumerHandle`], Rust-only; consumer-threading.md §31; Phase 41, design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md).
 //!
 //! A Java listener calls the consumer back by capturing the `consumer`
 //! variable; the Rust listener trait takes only `&self`, so a listener
@@ -81,7 +81,7 @@ use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerHandle`].
-// Rust-only: a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer
+// Rust-only: a listener reenters the consumer through it (consumer-threading.md §31; Phase 41, design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md), as a Java listener captures the consumer
 #[doc(alias = "rust-only")]
 #[repr(C)]
 pub struct kafka_consumer_ConsumerHandle_t {

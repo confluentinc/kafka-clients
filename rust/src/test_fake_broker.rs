@@ -34,6 +34,11 @@
 //! short wait, as a broker does when `fetch.max.wait.ms` elapses with no data.
 //! Every other request is read and left unanswered.
 //!
+//! A test can also kill the broker ([`FakeBroker::kill`]), or have SASL/PLAIN
+//! authentication succeed on the first connections and fail
+//! (UNSUPPORTED_SASL_MECHANISM) on later ones
+//! ([`FakeBroker::accept_sasl_handshakes`]).
+//!
 //! Requests are recorded when they arrive, as Java's `MockClient` records them
 //! when the client sends them, even while an earlier request on the same
 //! connection is held: a reader task records each frame and hands it to the
@@ -57,6 +62,8 @@ use crate::FetchResponseData;
 use crate::ListOffsetsRequestData;
 use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
+use crate::SaslAuthenticateResponseData;
+use crate::SaslHandshakeResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
 use crate::common::compress::Compression;
@@ -122,6 +129,14 @@ struct Shared {
     fetch_requests: AtomicUsize,
     /// The answer for the next `Fetch`, taken by the one that uses it.
     fetch_answer: Mutex<Option<FetchAnswer>>,
+    /// `SaslHandshake`s answered so far. The first `sasl_handshakes_accepted`
+    /// succeed (PLAIN, and the `SaslAuthenticate` after them succeeds too);
+    /// later ones are answered UNSUPPORTED_SASL_MECHANISM.
+    sasl_handshakes: AtomicUsize,
+    sasl_handshakes_accepted: AtomicUsize,
+    /// The serving task of every accepted connection, so [`FakeBroker::kill`]
+    /// can close them.
+    connections: Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// A request read from a connection, waiting for its turn to be answered.
@@ -161,6 +176,9 @@ impl FakeBroker {
             list_offsets_answer: watch::Sender::new(None),
             fetch_requests: AtomicUsize::new(0),
             fetch_answer: Mutex::new(None),
+            sasl_handshakes: AtomicUsize::new(0),
+            sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
+            connections: Mutex::new(Vec::new()),
         });
         let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
@@ -168,7 +186,7 @@ impl FakeBroker {
         let topic_id = Uuid::random_uuid();
         let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(
+                let connection = tokio::spawn(serve(
                     stream,
                     addr,
                     Arc::clone(&seen),
@@ -176,6 +194,7 @@ impl FakeBroker {
                     topic.clone(),
                     topic_id,
                 ));
+                seen.connections.lock().expect("fake broker mutex poisoned").push(connection);
             }
         });
         Self { addr, shared, accept_task }
@@ -212,6 +231,24 @@ impl FakeBroker {
     /// empty again.
     pub(crate) fn answer_fetch(&self, answer: FetchAnswer) {
         *self.shared.fetch_answer.lock().expect("fake broker mutex poisoned") = Some(answer);
+    }
+
+    /// SASL/PLAIN: the first `accepted` `SaslHandshake`s (connections)
+    /// authenticate; every later one is answered UNSUPPORTED_SASL_MECHANISM
+    /// (offering only SCRAM-SHA-512), so that connection fails
+    /// authentication. With `accepted = 1` the bootstrap connection learns
+    /// the metadata and the connection to the partition leader fails.
+    pub(crate) fn accept_sasl_handshakes(&self, accepted: usize) {
+        self.shared.sasl_handshakes_accepted.store(accepted, Ordering::SeqCst);
+    }
+
+    /// Kills the broker: stops listening, so later connection attempts are
+    /// refused, and closes every open connection, as `docker kill` does.
+    pub(crate) fn kill(&self) {
+        self.accept_task.abort();
+        for connection in self.shared.connections.lock().expect("fake broker mutex poisoned").drain(..) {
+            connection.abort();
+        }
     }
 
     /// How many `Fetch` requests have arrived so far.
@@ -255,7 +292,15 @@ async fn serve(
 ) {
     let (reader, mut writer) = stream.into_split();
     let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
-    let reader_task = tokio::spawn(read_requests(
+    // Aborts the reader when this task ends or is aborted by `kill`, so the
+    // read half is dropped with the write half and the socket closes.
+    struct AbortOnDrop(JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _reader_task = AbortOnDrop(tokio::spawn(read_requests(
         reader,
         addr,
         Arc::clone(&seen),
@@ -263,7 +308,7 @@ async fn serve(
         topic,
         topic_id,
         pending_tx,
-    ));
+    )));
     while let Some(pending) = pending_rx.recv().await {
         let Some(response) = respond(&seen, pending).await else {
             break;
@@ -275,7 +320,6 @@ async fn serve(
             break;
         }
     }
-    reader_task.abort();
 }
 
 /// Reads, records and queues every request of a connection until it closes.
@@ -331,6 +375,33 @@ async fn read_requests(
                     .flat_map(|topic| topic.partitions().iter().map(|partition| partition.timestamp())),
             );
             Pending::ListOffsets { response_header, version, request }
+        } else if *header.api_key() == ApiKeys::SASL_HANDSHAKE {
+            let accept = seen.sasl_handshakes.fetch_add(1, Ordering::SeqCst)
+                < seen.sasl_handshakes_accepted.load(Ordering::SeqCst);
+            let mut body = SaslHandshakeResponseData::new();
+            if accept {
+                body.set_error_code(Errors::None.code());
+                body.set_mechanisms(vec!["PLAIN".to_string()]);
+            } else {
+                body.set_error_code(Errors::UnsupportedSaslMechanism.code());
+                body.set_mechanisms(vec!["SCRAM-SHA-512".to_string()]);
+            }
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::SASL_AUTHENTICATE {
+            let mut body = SaslAuthenticateResponseData::new();
+            body.set_error_code(Errors::None.code());
+            body.set_auth_bytes(Vec::new());
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else if *header.api_key() == ApiKeys::FETCH {
             let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
             seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
