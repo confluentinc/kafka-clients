@@ -10,9 +10,7 @@ name: create-release-tag
 #   - PYTHON_VERSION: the tag is python/<PYTHON_VERSION>, and "Release
 #     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
 #     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
-#     publishes it to PyPI. Until the Python release is signed off, its
-#     uploads are commented out in semaphore.yml and publish-pypi.yml: the tag
-#     build runs every check and publishes nothing.
+#     publishes it to PyPI.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
 #     like any other, and its tag build tests and packages the client without
 #     publishing it.

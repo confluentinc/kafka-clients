@@ -76,8 +76,7 @@ name: build-test-release
 #     through the manual "Publish to PyPI" promotion of the tag build, while a
 #     pre-release, with an aN, bN or rcN suffix, stops at Test PyPI. The PyPI
 #     project is shared with confluent-kafka-python, the librdkafka-based
-#     client. The uploads are commented out until the Python release is signed
-#     off (see the comment above "Release (Python): publish to Test PyPI").
+#     client.
 #   - A dev version (rust/0.2.0-dev.1, python/4.4.0a1.dev1) publishes nothing.
 #     Its tag build runs CI and the release blocks that build and test the
 #     package (the .crate, or the wheels, recorded in the workflow's
@@ -1164,11 +1163,6 @@ blocks:
           commands:
             - bash .semaphore/publish-wheels.sh package
 
-  # Uploading is commented out here and in publish-pypi.yml until the Python
-  # release is signed off: each publish block runs every check, then fails
-  # without uploading, so the blocks after it do not run. To enable an index,
-  # uncomment its `publish-wheels.sh upload` command and delete the command
-  # after it.
   - name: "Release (Python): publish to Test PyPI"
     # Publishes the wheels recorded by the packaging block. publish-wheels.sh
     # repeats the tag check and checks that the version is new on Test PyPI
@@ -1186,11 +1180,7 @@ blocks:
         - name: "twine upload (Test PyPI)"
           commands:
             - bash .semaphore/publish-wheels.sh prepare
-            # Commented out until the Python release is signed off (see above).
-            # - bash .semaphore/publish-wheels.sh upload
-            - |
-              echo "Not uploading to ${PYPI_INDEX}: the upload is commented out in .semaphore/semaphore.yml until the Python release is signed off. Every check passed; nothing was published." >&2
-              exit 1
+            - bash .semaphore/publish-wheels.sh upload
 
   - name: "Release (Python): post-publish checksum (Test PyPI)"
     # Checks that Test PyPI lists every uploaded wheel, not yanked, with the

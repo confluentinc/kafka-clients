@@ -14,11 +14,7 @@ name: publish-pypi
 # publish-wheels.sh refuses, before the token is loaded, unless the Test PyPI
 # checks recorded these wheels as verified in this workflow.
 #
-# Uploading is commented out until the Python release is signed off: the
-# publish block runs every check, then fails without uploading. To enable it,
-# uncomment its `publish-wheels.sh upload` command and delete the command after
-# it. To resume an interrupted publish, rerun the failed blocks of this
-# pipeline.
+# To resume an interrupted publish, rerun the failed blocks of this pipeline.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -50,11 +46,7 @@ blocks:
         - name: "twine upload (PyPI)"
           commands:
             - bash .semaphore/publish-wheels.sh prepare
-            # Commented out until the Python release is signed off (see above).
-            # - bash .semaphore/publish-wheels.sh upload
-            - |
-              echo "Not uploading to ${PYPI_INDEX}: the upload is commented out in .semaphore/publish-pypi.yml until the Python release is signed off. Every check passed; nothing was published." >&2
-              exit 1
+            - bash .semaphore/publish-wheels.sh upload
 
   - name: "Release (Python): post-publish checksum (PyPI)"
     # As for Test PyPI in semaphore.yml, on PyPI. A failure means the
