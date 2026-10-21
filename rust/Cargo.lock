@@ -4705,6 +4705,7 @@ version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "quote",
+ "serde_json",
  "syn 2.0.117",
 ]
 
