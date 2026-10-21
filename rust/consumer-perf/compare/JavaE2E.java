@@ -197,7 +197,7 @@ public class JavaE2E {
                     rssSum += rss; if (rss < rssMin) rssMin = rss; if (rss > rssMax) rssMax = rss; rssN++;
                     double cpu = sampleCpuPct();
                     cpuSum += cpu; if (cpu < cpuMin) cpuMin = cpu; if (cpu > cpuMax) cpuMax = cpu; cpuN++;
-                    System.out.printf("[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms cpu=%5.1f%% rss=%.1fMB%n",
+                    System.out.printf(java.util.Locale.ROOT, "[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms cpu=%5.1f%% rss=%.1fMB%n",
                         ivIdx, (now - measureStart) / 1000.0, icnt, thr, icnt == 0 ? 0.0 : (double) isum / icnt,
                         pct(iB, icnt, 50), pct(iB, icnt, 99), pct(iB, icnt, 99.9), imax == Long.MIN_VALUE ? 0 : imax, cpu, rss);
                     resetIv(); ivStart = System.currentTimeMillis(); ivIdx++;
