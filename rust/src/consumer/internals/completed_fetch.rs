@@ -1778,6 +1778,15 @@ impl CompletedFetch {
                         self.partition, batch_meta.producer_id, batch_meta.base_offset, batch_meta.last_offset
                     );
                     self.next_fetch_offset = batch_meta.next_offset;
+                    // Java's `currentBatch` is every batch `batches.next()` returns
+                    // (`CompletedFetch.java:204`), skipped ones included, so when the
+                    // fetch ends on this batch `nextFetchedRecord` ends at its
+                    // `nextOffset()` (`:198-199`), not the last installed batch's. Nothing else reads it before the next batch is
+                    // installed: the previous batch is exhausted and its records
+                    // released.
+                    if let Some(cursor) = self.cursor.as_mut() {
+                        cursor.current_batch = Some(batch_meta);
+                    }
                     // `source` is dropped here still pending — an aborted batch's
                     // records are never decoded, nor inflated.
                     continue;
@@ -2843,6 +2852,45 @@ mod tests {
         );
         assert_eq!(Some(&"value-0".to_string()), collected[0].value());
         assert_eq!(Some(&"value-5".to_string()), collected[3].value());
+    }
+
+    /// A fetch ending on an aborted batch ends at that batch's next offset, as
+    /// Java's `nextFetchedRecord` sets `nextFetchOffset = currentBatch.nextOffset()`
+    /// from the last batch it read, skipped or not (`CompletedFetch.java:198-204`).
+    /// Layout `[pid 1 data 0-1][COMMIT 2][pid 2 aborted 3-4]`; Java 4.4 reports
+    /// `size@nextFetchOffset` per `fetchRecords` call as `[2@5, 0@5]` with
+    /// `maxRecords = 10` and `[1@1, 1@2, 0@5]` with `maxRecords = 1`. Ending at 3
+    /// instead would make the next fetch read the aborted batch again.
+    #[test]
+    fn test_aborted_transaction_batch_at_fetch_tail_advances_next_fetch_offset() {
+        const COMMITTED_PID: i64 = 1;
+        const ABORTED_PID: i64 = 2;
+        for (max_records, expected) in [(10, vec!["2@5", "0@5"]), (1, vec!["1@1", "1@2", "0@5"])] {
+            let mut buf = batch_full(0, 2, COMMITTED_PID, true, false);
+            buf.extend_from_slice(&marker_batch(2, 1, COMMITTED_PID, ControlRecordType::Commit));
+            buf.extend_from_slice(&batch_full(3, 2, ABORTED_PID, true, false));
+            let mut cf = CompletedFetch::with_full(
+                make_subscriptions(),
+                Arc::new(BufferSupplier::create()),
+                tp("test", 0),
+                partition_data_with_aborted_txn(buf, ABORTED_PID, 3),
+                test_aggregator(),
+                0,
+            );
+            let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+
+            let mut per_call = Vec::new();
+            loop {
+                let records = cf
+                    .fetch_records_now::<String, String>(&config, &StringDeserializer, &StringDeserializer, max_records)
+                    .expect("the batches are valid");
+                per_call.push(format!("{}@{}", records.len(), cf.next_fetch_offset()));
+                if records.is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(expected, per_call, "max_records = {max_records}");
+        }
     }
 
     /// Translated from `CompletedFetchTest.testNegativeFetchCount`.
