@@ -1110,45 +1110,89 @@ impl ProducerConfig {
     /// `transaction.two.phase.commit.enable=true`.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = AbstractConfig::with_hooks(
-            &CONFIG,
-            string_originals(props),
-            false,
-            "ProducerConfig",
-            |originals| originals,
-            Self::post_process_parsed_config,
-        )?;
-        let config = Self::from_abstract(config)?;
+        let config = Self::build(string_originals(props), None)?;
         config
             .client_dns_lookup
             .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
 
+    /// The configuration of one more client given this one: the same
+    /// properties and this configuration's resolved `client.id`, with its
+    /// own record of the keys used and no partitioner, as [`Self::new`]
+    /// leaves it.
+    ///
+    /// Java hands each client the `ProducerConfig` it is given, which took
+    /// its one number from the `client.id` sequence when it was built
+    /// (`KafkaProducer.java:366` reads it), so clients given one
+    /// configuration share its id. Building the configuration again would
+    /// take a second number; this copy does not. It is not `Clone`
+    /// (CLAUDE.md §3), and it does not repeat `new`'s warnings.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::new`] does; this configuration's properties already
+    /// passed it, so it does not in practice.
+    #[cfg_attr(
+        not(any(feature = "ffi", test)),
+        expect(dead_code, reason = "only the C config handle copies a configuration")
+    )]
+    pub(crate) fn copy_for_client(&self) -> Result<Self, Error> {
+        Self::build(self.config.originals_map().clone(), Some(&self.client_id))
+    }
+
+    /// Java's `ProducerConfig(Map)` without its logging: parses `originals`
+    /// and post-processes them, `resolved_client_id` standing in for the
+    /// sequence number `client.id` would take.
+    fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
+        let config = AbstractConfig::with_hooks(
+            &CONFIG,
+            originals,
+            false,
+            "ProducerConfig",
+            |originals| originals,
+            |config| Self::post_process_parsed_config(config, resolved_client_id),
+        )?;
+        Self::from_abstract(config)
+    }
+
     /// Java's `ProducerConfig.postProcessParsedConfig`: the values that
-    /// replace the parsed ones.
-    fn post_process_parsed_config(config: &AbstractConfig) -> Result<ConfigMap, Error> {
+    /// replace the parsed ones. A `resolved_client_id` is the id a derived
+    /// `client.id` takes, in place of a new one.
+    fn post_process_parsed_config(
+        config: &AbstractConfig,
+        resolved_client_id: Option<&str>,
+    ) -> Result<ConfigMap, Error> {
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
         CommonClientConfigs::warn_disabling_exponential_backoff(config)?;
         let mut refined_configs =
             CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values());
         Self::post_process_and_validate_idempotence_configs(config, &mut refined_configs)?;
-        Self::maybe_override_client_id(config, &mut refined_configs)?;
+        Self::maybe_override_client_id(config, &mut refined_configs, resolved_client_id)?;
         Ok(refined_configs)
     }
 
     /// Java's private `maybeOverrideClientId`: a `client.id` the user did not
     /// set becomes `producer-<transactional.id>` when a transactional id is
     /// set, otherwise `producer-<n>` from the process-wide sequence.
+    ///
+    /// A `resolved_client_id` (the id of the configuration this one copies)
+    /// is put in `configs` instead of a derived one, after the same reads.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#maybeOverrideClientId")]
-    fn maybe_override_client_id(config: &AbstractConfig, configs: &mut ConfigMap) -> Result<(), Error> {
+    fn maybe_override_client_id(
+        config: &AbstractConfig,
+        configs: &mut ConfigMap,
+        resolved_client_id: Option<&str>,
+    ) -> Result<(), Error> {
         let user_configured_client_id = config.originals_map().contains_key(Self::CLIENT_ID_CONFIG);
         let refined_client_id = if user_configured_client_id {
             config.get_string(Self::CLIENT_ID_CONFIG)?.unwrap_or_default().to_string()
         } else {
-            match config.get_string(Self::TRANSACTIONAL_ID_CONFIG)? {
-                Some(transactional_id) => format!("producer-{transactional_id}"),
-                None => format!(
+            let transactional_id = config.get_string(Self::TRANSACTIONAL_ID_CONFIG)?;
+            match (resolved_client_id, transactional_id) {
+                (Some(resolved_client_id), _) => resolved_client_id.to_string(),
+                (None, Some(transactional_id)) => format!("producer-{transactional_id}"),
+                (None, None) => format!(
                     "producer-{}",
                     PRODUCER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
                 ),
@@ -2724,6 +2768,39 @@ mod tests {
         assert_ne!(first.client_id, second.client_id);
         let n: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
         assert!(n >= 1, "Java's sequence starts at 1");
+    }
+
+    /// A copy keeps the configuration's resolved `client.id` and takes no
+    /// sequence number, while the next configuration built takes the next
+    /// one, as Java's next `new ProducerConfig(props)` does. The generated id
+    /// stays out of the copy's originals, and its used set is its own, as
+    /// `new` leaves it.
+    #[test]
+    fn test_copy_for_client_keeps_the_resolved_client_id() {
+        let first = ProducerConfig::new(&base_properties()).expect("valid");
+        let copy = first.copy_for_client().expect("copied");
+        let second_copy = first.copy_for_client().expect("copied");
+        let next = ProducerConfig::new(&base_properties()).expect("valid");
+        assert_eq!(copy.client_id, first.client_id);
+        assert_eq!(second_copy.client_id, first.client_id);
+        assert_eq!(
+            copy.get_string(ProducerConfig::CLIENT_ID_CONFIG).unwrap(),
+            Some(first.client_id.as_str())
+        );
+        assert!(!copy.user_configured(ProducerConfig::CLIENT_ID_CONFIG));
+        let n1: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
+        let n2: i32 = next.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
+        // Other tests take numbers concurrently, so the next one is only later.
+        assert!(n2 > n1, "{} then {}", first.client_id, next.client_id);
+        let unused = first.unused();
+        assert_eq!(second_copy.unused(), unused);
+        first.ignore(ProducerConfig::BOOTSTRAP_SERVERS_CONFIG);
+        assert_eq!(second_copy.unused(), unused, "the copy's used set is its own");
+
+        let config = ProducerConfig::new(&props_with(&[("client.id", "mine")])).expect("valid");
+        assert_eq!(config.copy_for_client().expect("copied").client_id, "mine");
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", "t")])).expect("valid");
+        assert_eq!(config.copy_for_client().expect("copied").client_id, "producer-t");
     }
 
     /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the

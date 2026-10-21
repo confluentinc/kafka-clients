@@ -24,12 +24,14 @@
 //!
 //! A `ProducerConfig` is not `Clone` and `KafkaProducer::new` takes it by
 //! value, while the C constructor borrows the handle; the handle therefore
-//! keeps the validated properties and rebuilds the Rust value for every
-//! producer created from it, so one configuration can build several
-//! producers (Java's `Properties` can be reused the same way), each with its
-//! own record of the keys it used. The handle also keeps the configuration
-//! validated in [`kafka_producer_ProducerConfig_new`], which answers
-//! `AbstractConfig`'s getters (`kafka_producer_ProducerConfig_get_int`, ...).
+//! keeps the configuration validated in [`kafka_producer_ProducerConfig_new`],
+//! which answers `AbstractConfig`'s getters
+//! (`kafka_producer_ProducerConfig_get_int`, ...), and each producer created
+//! from it gets a copy of that configuration, so one configuration can build
+//! several producers. Like Java's producers given one `ProducerConfig`, they
+//! share its resolved `client.id`, the one
+//! `kafka_producer_ProducerConfig_get_string` answers, and each keeps its own
+//! record of the keys it used.
 
 use std::collections::HashMap;
 use std::ffi::c_char;
@@ -53,12 +55,17 @@ pub struct kafka_producer_ProducerConfig_t {
 }
 
 pub(crate) struct ProducerConfigInner {
-    props: HashMap<String, String>,
-    /// The configuration the getters read.
+    /// The configuration the getters read, copied for each producer
+    /// ([`Self::build`]).
     config: ProducerConfig,
     partitioner: Option<Arc<SharedPartitioner>>,
     /// The values [`kafka_producer_ProducerConfig_get_string`] lent out.
     strings: LentStrings,
+    /// Test-only: properties that [`Self::build`] parses with
+    /// `ProducerConfig::new` in place of the copy, so that it can fail
+    /// ([`Self::unvalidated_for_test`]).
+    #[cfg(test)]
+    unvalidated_props: Option<HashMap<String, String>>,
 }
 
 impl ProducerConfigInner {
@@ -70,16 +77,27 @@ impl ProducerConfigInner {
         let valid = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         let config = ProducerConfig::new(&valid).expect("a valid configuration");
         Box::into_raw(Box::new(Self {
-            props,
             config,
             partitioner: None,
             strings: LentStrings::default(),
+            unvalidated_props: Some(props),
         })) as *mut kafka_producer_ProducerConfig_t
     }
 
-    /// The Rust configuration this handle stands for.
+    /// The configuration of a producer created from the handle: a copy of the
+    /// handle's ([`ProducerConfig::copy_for_client`]), with its `client.id`,
+    /// its own record of the keys used and the handle's partitioner.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`ProducerConfig::copy_for_client`] does, which it does not in
+    /// practice.
     pub(crate) fn build(&self) -> Result<ProducerConfig, Error> {
-        let config = ProducerConfig::new(&self.props)?;
+        #[cfg(test)]
+        if let Some(props) = &self.unvalidated_props {
+            ProducerConfig::new(props)?;
+        }
+        let config = self.config.copy_for_client()?;
         Ok(match &self.partitioner {
             Some(partitioner) => config.set_partitioner(Box::new(SharedPartitionerAdapter(Arc::clone(partitioner)))),
             None => config,
@@ -126,7 +144,13 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
     };
-    let inner = ProducerConfigInner { props, config, partitioner: None, strings: LentStrings::default() };
+    let inner = ProducerConfigInner {
+        config,
+        partitioner: None,
+        strings: LentStrings::default(),
+        #[cfg(test)]
+        unvalidated_props: None,
+    };
     Box::into_raw(Box::new(inner)) as *mut kafka_producer_ProducerConfig_t
 }
 
@@ -298,7 +322,9 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 /// `getString(String key)`: the `STRING` configuration `key`, borrowed from
 /// the handle and valid until it is destroyed, or `NULL` with `*out_err`
 /// still `NULL` when the key has no value (Java's `null`, which is also what
-/// an unset `PASSWORD` key such as `ssl.key.password` answers). Fails as
+/// an unset `PASSWORD` key such as `ssl.key.password` answers). `client.id`
+/// is the resolved id, generated when the property is unset, under which
+/// every producer created from the handle runs. Fails as
 /// [`kafka_producer_ProducerConfig_get_int`] does.
 ///
 /// # Safety
@@ -591,8 +617,8 @@ mod tests {
             assert_eq!(take_list(kafka_producer_ProducerConfig_unused(config)), ["bootstrap.servers"]);
             kafka_producer_ProducerConfig_log_unused(config);
 
-            // A configuration rebuilt for a client starts with nothing used.
-            let built = producer_config_ref(config).build().expect("rebuilt");
+            // A configuration copied for a client starts with nothing used.
+            let built = producer_config_ref(config).build().expect("copied");
             assert_eq!(built.unused().len(), 3);
 
             kafka_producer_ProducerConfig_destroy(config);

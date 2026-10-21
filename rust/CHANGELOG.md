@@ -284,7 +284,11 @@ breaking changes.
   `kafka_producer_ProducerConfig_get_short`, `_get_int`, `_get_long`,
   `_get_double`, `_get_boolean`, `_get_string`, `_get_list`, `_unused`,
   `_ignore`, `_log_unused` and `_config_names`. A producer created from the
-  handle keeps its own record of the keys it used.
+  handle keeps its own record of the keys it used, and runs under the
+  handle's `client.id`, the one `_get_string` answers: the producers of one
+  handle share it, as Java's producers given one `ProducerConfig` do. A
+  generated id used to take a second number from the `producer-<n>`
+  sequence, so the handle's `producer-1` built a `producer-2`.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

@@ -203,8 +203,11 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 }
 
 /// `new KafkaProducer(ProducerConfig, Serializer<K>, Serializer<V>)`: the
-/// configuration stays the caller's; the producer is delivered owned, freed
-/// with [`kafka_producer_KafkaProducer_destroy`]. A constructor that fails
+/// producer gets its own copy of the handle's configuration, with the handle's
+/// `client.id` (the producers of one handle share it, as Java's producers
+/// given one `ProducerConfig` do), so the configuration stays the caller's and
+/// can build further producers; the producer is delivered owned, freed with
+/// [`kafka_producer_KafkaProducer_destroy`]. A constructor that fails
 /// after taking the serializers closes them, as Java's does
 /// (`KafkaProducer.java:519-523`), and returns without waiting for a C
 /// serializer's `close` to report: that report may arrive after this
@@ -735,6 +738,66 @@ mod tests {
             }
             kafka_common_serialization_StringSerializer_destroy(string);
             kafka_producer_ProducerConfig_destroy(config);
+        }
+    }
+
+    /// A producer created from a handle runs under the handle's resolved
+    /// `client.id`, the one `_get_string` answers, so the producers of one
+    /// handle share it, as Java's producers given one `ProducerConfig` do;
+    /// the next handle takes the next number from the sequence, as Java's
+    /// next `ProducerConfig` does (`producer-1`, then `producer-2`).
+    #[test]
+    fn producers_run_under_the_client_id_of_their_handle() {
+        use crate::ffi::producer::producer_config::kafka_producer_ProducerConfig_get_string;
+        // SAFETY: Test code: `producer` is a live class handle; the view is used only within this
+        // call, while the handle lives.
+        let client_ids = |producer: *mut kafka_producer_KafkaProducer_t| unsafe {
+            client_ref(kafka_producer_KafkaProducer__as_Producer(producer))
+                .producer()
+                .expect("not destroyed")
+                .metrics()
+                .keys()
+                .filter_map(|name| name.tags().get("client-id").cloned())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1")]);
+        // SAFETY: Test code: the map, both configs and every producer handle are live until they
+        // are destroyed once below; the strings `_get_string` lends are copied before their
+        // handle is destroyed; `err` is a valid slot pointing at null before each call.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let mut handle_ids = Vec::new();
+            let mut producers = Vec::new();
+            for _ in 0..2 {
+                let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+                assert!(err.is_null());
+                let id = kafka_producer_ProducerConfig_get_string(config, c"client.id".as_ptr(), &raw mut err);
+                assert!(err.is_null());
+                let id = c_str_to_string(id);
+                for _ in 0..2 {
+                    let producer = kafka_producer_KafkaProducer_new(
+                        config,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &raw mut err,
+                    );
+                    assert!(err.is_null());
+                    assert_eq!(client_ids(producer), std::collections::HashSet::from([id.clone()]));
+                    producers.push(producer);
+                }
+                kafka_producer_ProducerConfig_destroy(config);
+                handle_ids.push(id);
+            }
+            kafka_Map_destroy(props);
+            let numbers: Vec<i32> = handle_ids
+                .iter()
+                .map(|id| id.strip_prefix("producer-").unwrap().parse().unwrap())
+                .collect();
+            // Other tests take numbers concurrently, so the next one is only later.
+            assert!(numbers[1] > numbers[0], "{handle_ids:?}");
+            for producer in producers {
+                kafka_producer_KafkaProducer_destroy(producer);
+            }
         }
     }
 
