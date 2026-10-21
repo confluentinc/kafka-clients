@@ -3037,7 +3037,7 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {}", e)))?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -8399,6 +8399,37 @@ mod tests {
         assert!(
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
+        );
+    }
+
+    /// R2-01: a SASL mechanism the client cannot run is a configuration error,
+    /// as on the producer and the admin client: `ChannelBuilders` refuses it and
+    /// the constructor reports it as the cause of "Failed to construct kafka
+    /// consumer" with `is_config_error()` true, not as an illegal argument.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_unsupported_sasl_mechanism_is_a_config_error() {
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism".to_string(), "SCRAM-SHA-256".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            config,
+            Box::new(TestBytesDeserializer),
+            Box::new(TestBytesDeserializer),
+        )
+        .err()
+        .expect("an unsupported SASL mechanism must fail construction");
+
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err.source().expect("the channel builder failure is the cause");
+        assert!(cause.is_config_error(), "must be a ConfigError: {cause:?}");
+        assert!(
+            cause.message().contains("SASL mechanism 'SCRAM-SHA-256' is not supported"),
+            "got: {}",
+            cause.message()
         );
     }
 
