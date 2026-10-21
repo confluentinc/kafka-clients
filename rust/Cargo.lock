@@ -674,6 +674,7 @@ dependencies = [
  "crc32c",
  "crc32fast",
  "dashmap 6.1.0",
+ "dns-lookup",
  "env_logger",
  "ffi-macros",
  "flate2",
@@ -959,6 +960,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dns-lookup"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263c0ccfc6b3b6a93e959edad4f985779e76c0b36dbb2e13e3d27c690974adf1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "socket2 0.6.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

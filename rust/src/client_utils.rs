@@ -132,31 +132,9 @@ impl ClientUtils {
     ///   error (Java's `UnknownHostException` → `ConfigException`); a canonical
     ///   name that does not resolve is logged and skipped.
     ///
-    /// # Deviation: canonical host name
-    ///
-    /// Java's `getCanonicalHostName()` performs a reverse-DNS (PTR) lookup and,
-    /// when that fails, returns the address's textual IP. The Rust standard
-    /// library (and tokio) expose no reverse-DNS API, and this crate has no DNS
-    /// dependency, so the canonical name is always the textual IP — i.e. the
-    /// result Java produces when the reverse lookup fails. The per-address
-    /// expansion and the resolvability checks are otherwise identical.
-    ///
-    /// The consequence is that in this mode **the bootstrap `Node`'s host is
-    /// always the textual IP**, and that host is the TLS peer host:
-    ///
-    /// - **TLS (`SSL` / `SASL_SSL`)**: the SNI value and the server name that
-    ///   hostname verification checks (on by default,
-    ///   `ssl.endpoint.identification.algorithm=https`) are the IP address.
-    ///   Brokers whose certificates carry only DNS-name SANs (no IP SAN) are
-    ///   therefore rejected during the handshake, and every bootstrap
-    ///   connection fails. Java, given working PTR records, connects to the
-    ///   FQDN and verification passes. Before `client.dns.lookup` was honoured,
-    ///   this crate ignored the setting and connected by host name, so such a
-    ///   configuration used to work. The producer, consumer and admin configs
-    ///   log a warning for this combination when they are built. Use
-    ///   `use_all_dns_ips`, or add IP SANs to the broker certificates.
-    /// - **SASL/GSSAPI (Kerberos)**: its service principal is built from the
-    ///   host name. That mechanism is not implemented in this crate.
+    /// The canonical name is Java's `getCanonicalHostName()`
+    /// ([`Self::canonical_host_name`]): a reverse lookup confirmed by a forward
+    /// lookup, the textual IP when either fails or they disagree.
     ///
     /// # Errors
     ///
@@ -180,9 +158,12 @@ impl ClientUtils {
         urls: &[String],
         client_dns_lookup: ClientDnsLookup,
     ) -> Result<Vec<(String, SocketAddr)>, Error> {
-        Self::parse_and_validate_addresses_with_lookup(urls, client_dns_lookup, Self::system_resolve_all, |address| {
-            address.to_string()
-        })
+        Self::parse_and_validate_addresses_with_lookup(
+            urls,
+            client_dns_lookup,
+            Self::system_resolve_all,
+            Self::canonical_host_name,
+        )
     }
 
     /// The system name service: Java's `InetAddress.getAllByName` /
@@ -203,6 +184,55 @@ impl ClientUtils {
             return Ok(vec![SocketAddr::new(DefaultHostResolver::EMPTY_HOST_ADDRESS, port)]);
         }
         (host, port).to_socket_addrs().map(Iterator::collect)
+    }
+
+    /// The canonical host name of `address`: Java's
+    /// `InetAddress.getCanonicalHostName()`, which `ClientUtils.resolveAddress`
+    /// calls for each address in `resolve_canonical_bootstrap_servers_only`
+    /// mode (`ClientUtils.java:77`).
+    ///
+    /// Translated from the JDK's `InetAddress.getHostFromNameService`
+    /// (JDK 21, `java.base/java/net/InetAddress.java:835-880`; the
+    /// security-manager check does not apply): the reverse lookup goes through
+    /// the system resolver's `getnameinfo` with `NI_NAMEREQD`
+    /// ([`dns_lookup::lookup_addr`]), the primitive the JDK's
+    /// `Inet4AddressImpl` / `Inet6AddressImpl.getHostByAddr` use, so an address
+    /// without a PTR record is an error rather than its textual form; the
+    /// forward confirmation is [`Self::system_resolve_all`], Java's
+    /// `getAllByName0`. See [`Self::canonical_host_name_with`] for the rules.
+    #[doc(alias = "java.net.InetAddress#getCanonicalHostName")]
+    fn canonical_host_name(address: IpAddr) -> String {
+        Self::canonical_host_name_with(
+            address,
+            |address| dns_lookup::lookup_addr(address).map_err(io::Error::from),
+            Self::system_resolve_all,
+        )
+    }
+
+    /// Body of [`Self::canonical_host_name`] with its two name-service calls
+    /// injected, so the spoof and failure branches are testable without DNS.
+    ///
+    /// As in `getHostFromNameService`:
+    /// 1. `reverse_lookup` maps `address` to a host name;
+    /// 2. `resolve_all` forward-resolves that name, and the result must contain
+    ///    `address` (Java's anti-spoofing check, `addr.equals(arr[i])`), else
+    ///    the result is the textual IP (Java's `getHostAddress()`);
+    /// 3. an error in either step is the textual IP too (Java catches
+    ///    `UnknownHostException` and `RuntimeException`).
+    ///
+    /// Addresses compare as [`IpAddr`]s, so an IPv4-mapped IPv6 address is not
+    /// the IPv4 address it maps, as Java's `Inet4Address.equals` is false for
+    /// any `Inet6Address`; a scope id is not compared, as Java's
+    /// `Inet6Address.equals` compares the address bytes only.
+    fn canonical_host_name_with<L, R>(address: IpAddr, reverse_lookup: L, resolve_all: R) -> String
+    where
+        L: FnOnce(&IpAddr) -> io::Result<String>,
+        R: FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>>,
+    {
+        let confirmed = reverse_lookup(&address).ok().filter(|host| {
+            resolve_all(host, 0).is_ok_and(|resolved| resolved.iter().any(|candidate| candidate.ip() == address))
+        });
+        confirmed.unwrap_or_else(|| address.to_string())
     }
 
     /// Host-name suffix whose lookup takes [`Self::SLOW_TEST_HOST_DELAY`] and
@@ -247,7 +277,7 @@ impl ClientUtils {
             client_dns_lookup,
             is_interrupted,
             Self::system_resolve_all,
-            |address| address.to_string(),
+            Self::canonical_host_name,
         )
     }
 
@@ -722,12 +752,6 @@ mod tests {
         ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::UseAllDnsIps)
     }
 
-    /// `ClientUtilsTest.checkWithLookup`.
-    fn check_with_lookup(urls: &[&str]) -> Result<Vec<(String, SocketAddr)>, Error> {
-        let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
-        ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
-    }
-
     /// Java's `assertThrows(ConfigException.class, ...)`, plus the exact
     /// message, which Java builds with the single-message `ConfigException`
     /// constructor (no `Invalid value ... for configuration ...` prefix).
@@ -784,14 +808,16 @@ mod tests {
     /// Mockito; here the same two calls are injected as closures.
     #[test]
     fn test_parse_and_validate_addresses_with_reverse_lookup() {
-        // The literal-address checks Java repeats before mocking; with a real
-        // resolver an IP literal's canonical name is its textual form.
-        let addrs = check_with_lookup(&["127.0.0.1:8000"]).unwrap();
+        // The literal-address checks Java runs before mocking, through
+        // `checkWithoutLookup` as Java does: canonical mode would reverse-resolve
+        // through the real name service, whose answer depends on the host (see
+        // `test_canonical_host_name_system_resolver` for that path).
+        let addrs = check_without_lookup(&["127.0.0.1:8000"]).unwrap();
         assert_eq!(addrs, vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]);
-        let addrs = check_with_lookup(&["[::1]:8000"]).unwrap();
+        let addrs = check_without_lookup(&["[::1]:8000"]).unwrap();
         assert_eq!(addrs, vec![("::1".to_string(), "[::1]:8000".parse().unwrap())]);
-        assert!(!check_with_lookup(&["localhost:8080"]).unwrap().is_empty());
-        let addrs = check_with_lookup(&["[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234", "localhost:10000"]).unwrap();
+        assert!(!check_without_lookup(&["localhost:8080"]).unwrap().is_empty());
+        let addrs = check_without_lookup(&["[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234", "localhost:10000"]).unwrap();
         assert_eq!(addrs[0].0, "2001:db8:85a3:8d3:1319:8a2e:370:7348");
         assert!(addrs[1..].iter().all(|(_, a)| a.port() == 10000));
 
@@ -993,9 +1019,10 @@ mod tests {
     /// name-service lookup. In `use_all_dns_ips` mode the node host is
     /// `localhost`: Java's `getHostString()` of the resolved
     /// `InetSocketAddress("", port)` is the loopback address's name. In
-    /// canonical mode the one address is keyed by its canonical name, the
-    /// textual IP (see the canonical-name deviation; Java gets `localhost`
-    /// from the PTR lookup). Either way the bootstrap node is not empty, so
+    /// canonical mode the one address is keyed by its canonical name: the
+    /// name the system resolver's PTR lookup gives `127.0.0.1` (usually
+    /// `localhost`, from `/etc/hosts`) when it forward-resolves back to it,
+    /// else the textual IP. Either way the bootstrap node is not empty, so
     /// `NetworkClient::ready` (which rejects an empty node) can connect to it.
     #[test]
     fn test_empty_host_resolves_to_loopback() {
@@ -1012,8 +1039,144 @@ mod tests {
             let addrs =
                 ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
                     .unwrap();
-            assert_eq!(addrs, vec![("127.0.0.1".to_string(), loopback)], "url {url}");
+            assert_eq!(addrs.len(), 1, "url {url}: {addrs:?}");
+            assert_eq!(addrs[0].1, loopback, "url {url}");
+            assert_canonical_name_of(&addrs[0].0, loopback.ip());
             assert!(!crate::common::Cluster::bootstrap(&addrs).nodes()[0].is_empty());
+        }
+    }
+
+    /// What a real-resolver canonical name of `address` may be: the textual IP
+    /// (no PTR record, or one that does not forward-resolve back), or a name
+    /// that the system resolver maps back to `address` (Java's forward
+    /// confirmation). The name itself depends on the host's resolver, so no
+    /// exact string is asserted.
+    fn assert_canonical_name_of(host: &str, address: IpAddr) {
+        if host == address.to_string() {
+            return;
+        }
+        let resolved = ClientUtils::system_resolve_all(host, 0).unwrap_or_else(|e| panic!("{host}: {e}"));
+        assert!(
+            resolved.iter().any(|a| a.ip() == address),
+            "canonical name {host} of {address} resolves to {resolved:?}"
+        );
+    }
+
+    fn sockets(ips: &[&str]) -> io::Result<Vec<SocketAddr>> {
+        Ok(ips.iter().map(|ip| SocketAddr::new(ip.parse().unwrap(), 0)).collect())
+    }
+
+    /// `getHostFromNameService`: a reverse name whose forward lookup contains
+    /// the address is the canonical name.
+    #[test]
+    fn test_canonical_host_name_confirmed() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            address,
+            |a| {
+                assert_eq!(*a, address);
+                Ok("broker1.example".to_string())
+            },
+            |host, port| {
+                assert_eq!((host, port), ("broker1.example", 0));
+                sockets(&["192.0.2.9", "192.0.2.1"])
+            },
+        );
+        assert_eq!(name, "broker1.example");
+    }
+
+    /// A reverse name whose forward lookup does not contain the address looks
+    /// like a spoof: the textual IP.
+    #[test]
+    fn test_canonical_host_name_spoofed() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            address,
+            |_| Ok("evil.example".to_string()),
+            |_, _| sockets(&["203.0.113.7"]),
+        );
+        assert_eq!(name, "192.0.2.1");
+    }
+
+    /// A failed reverse lookup (Java's `UnknownHostException` from
+    /// `lookupByAddress`) is the textual IP, with no forward lookup.
+    #[test]
+    fn test_canonical_host_name_reverse_lookup_error() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            address,
+            |_| Err(io::Error::new(io::ErrorKind::NotFound, "no PTR record")),
+            |host, _| panic!("no forward lookup expected, got {host}"),
+        );
+        assert_eq!(name, "192.0.2.1");
+    }
+
+    /// A failed forward lookup (Java's `UnknownHostException` from
+    /// `getAllByName0`) is the textual IP.
+    #[test]
+    fn test_canonical_host_name_forward_lookup_error() {
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            address,
+            |_| Ok("broker1.example".to_string()),
+            |host, _| Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+        );
+        assert_eq!(name, "192.0.2.1");
+    }
+
+    /// IPv6: confirmed and spoofed, the fallback being the compressed textual
+    /// form (Java's `Inet6Address.getHostAddress()` is the full form, but
+    /// [`IpAddr`]'s `Display` is what the rest of this module uses for an IPv6
+    /// host, as the literal-address checks above show).
+    #[test]
+    fn test_canonical_host_name_ipv6() {
+        let address: IpAddr = "2001:db8::1".parse().unwrap();
+        let confirmed = ClientUtils::canonical_host_name_with(
+            address,
+            |_| Ok("broker6.example".to_string()),
+            |_, _| sockets(&["192.0.2.1", "2001:db8::1"]),
+        );
+        assert_eq!(confirmed, "broker6.example");
+        let spoofed = ClientUtils::canonical_host_name_with(
+            address,
+            |_| Ok("evil.example".to_string()),
+            |_, _| sockets(&["2001:db8::2"]),
+        );
+        assert_eq!(spoofed, "2001:db8::1");
+    }
+
+    /// An IPv4-mapped IPv6 address is not the IPv4 address it maps (Java's
+    /// `Inet4Address.equals(Inet6Address)` is false), in either direction.
+    #[test]
+    fn test_canonical_host_name_ipv4_mapped_is_a_mismatch() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            v4,
+            |_| Ok("broker1.example".to_string()),
+            |_, _| sockets(&["::ffff:192.0.2.1"]),
+        );
+        assert_eq!(name, "192.0.2.1");
+        let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
+        let name = ClientUtils::canonical_host_name_with(
+            mapped,
+            |_| Ok("broker1.example".to_string()),
+            |_, _| sockets(&["192.0.2.1"]),
+        );
+        assert_eq!(name, mapped.to_string());
+    }
+
+    /// The real name service on the loopback addresses: the textual IP or a
+    /// name that forward-resolves back to the address, whichever this host's
+    /// resolver gives.
+    #[test]
+    fn test_canonical_host_name_system_resolver() {
+        for address in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ] {
+            let name = ClientUtils::canonical_host_name(address);
+            assert!(!name.is_empty(), "{address}");
+            assert_canonical_name_of(&name, address);
         }
     }
 
@@ -1200,10 +1363,16 @@ mod tests {
             ClientDnsLookup::UseAllDnsIps,
             ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
         ] {
-            assert_eq!(
-                ClientUtils::parse_addresses(&urls(&["127.0.0.1:8000"]), mode, || false),
-                vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]
-            );
+            let addrs = ClientUtils::parse_addresses(&urls(&["127.0.0.1:8000"]), mode, || false);
+            let expected: SocketAddr = "127.0.0.1:8000".parse().unwrap();
+            assert_eq!(addrs.len(), 1, "{mode}: {addrs:?}");
+            assert_eq!(addrs[0].1, expected, "{mode}");
+            if mode == ClientDnsLookup::UseAllDnsIps {
+                assert_eq!(addrs[0].0, "127.0.0.1");
+            } else {
+                // The real name service's canonical name of the loopback.
+                assert_canonical_name_of(&addrs[0].0, expected.ip());
+            }
             assert!(ClientUtils::parse_addresses(&[], mode, || false).is_empty());
         }
 

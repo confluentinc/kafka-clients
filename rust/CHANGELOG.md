@@ -277,6 +277,14 @@ breaking changes.
   warning and then ignored; it stays undefined until the cipher suites are
   honoured, and a value set for it is now listed among the unused
   configurations instead of being accepted and ignored.
+- `client.dns.lookup=resolve_canonical_bootstrap_servers_only` now resolves
+  each bootstrap address to its canonical host name as Java's
+  `InetAddress.getCanonicalHostName()` does: a reverse (PTR) lookup through the
+  system resolver, confirmed by a forward lookup that must return the address,
+  with the textual IP as the fallback (new dependency `dns-lookup`). Where PTR
+  records exist the bootstrap node's host is the FQDN, so TLS hostname
+  verification checks it as in Java, where it used to be the textual IP. The
+  warning these configurations logged for this mode with TLS is removed.
 
 ### C API
 

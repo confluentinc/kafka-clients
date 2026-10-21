@@ -997,11 +997,7 @@ impl ConsumerConfig {
     ///   authentication.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = Self::build(string_originals(props), None)?;
-        config
-            .client_dns_lookup
-            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
-        Ok(config)
+        Self::build(string_originals(props), None)
     }
 
     /// The configuration of one more client given this one: the same
@@ -1021,8 +1017,8 @@ impl ConsumerConfig {
     /// same way, but logs neither the parse's warning that a list's duplicate
     /// values are removed, nor the post-processing's warnings (the reconnect
     /// and retry backoff, the connection setup timeout,
-    /// `connections.max.idle.ms` below `max.poll.interval.ms`), nor `new`'s
-    /// TLS hostname-verification warning. The client given the copy logs its one unused-keys line
+    /// `connections.max.idle.ms` below `max.poll.interval.ms`). The client given the copy logs its
+    /// one unused-keys line
     /// ([`Self::log_unused`]), as Java's client constructor does.
     ///
     /// # Errors

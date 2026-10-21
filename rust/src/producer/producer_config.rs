@@ -1112,11 +1112,7 @@ impl ProducerConfig {
     /// with another mechanism would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = Self::build(string_originals(props), None)?;
-        config
-            .client_dns_lookup
-            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
-        Ok(config)
+        Self::build(string_originals(props), None)
     }
 
     /// The configuration of one more client given this one: the same
@@ -1137,8 +1133,7 @@ impl ProducerConfig {
     /// way, but logs neither the parse's warning that a list's duplicate
     /// values are removed, nor the post-processing's lines (the reconnect and
     /// retry backoff and connection setup timeout warnings, the INFO lines
-    /// saying idempotence will be disabled), nor `new`'s TLS
-    /// hostname-verification warning. The client given the copy logs its one
+    /// saying idempotence will be disabled). The client given the copy logs its one
     /// unused-keys line ([`Self::log_unused`]), as Java's client constructor
     /// does.
     ///

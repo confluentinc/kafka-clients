@@ -431,11 +431,7 @@ impl AdminClientConfig {
     /// with another mechanism would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = Self::build(string_originals(props), true)?;
-        config
-            .client_dns_lookup
-            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
-        Ok(config)
+        Self::build(string_originals(props), true)
     }
 
     /// The configuration of one more client given this one: the same
@@ -448,8 +444,7 @@ impl AdminClientConfig {
     /// same reads, marking the same keys used and failing the same way, but
     /// logs neither the parse's warning that a list's duplicate values are
     /// removed, nor the post-processing's warnings (the reconnect and retry
-    /// backoff, the connection setup timeout), nor `new`'s TLS
-    /// hostname-verification warning.
+    /// backoff, the connection setup timeout).
     ///
     /// Unlike the consumer's and producer's, an admin configuration derives
     /// no `client.id`: `KafkaAdminClient.createInternal` does, taking one
@@ -468,8 +463,7 @@ impl AdminClientConfig {
         Self::build(self.config.originals_map().clone(), false)
     }
 
-    /// Java's `AdminClientConfig(Map)` without the TLS hostname-verification
-    /// warning [`Self::new`] adds: parses `originals` and post-processes them,
+    /// Java's `AdminClientConfig(Map)`: parses `originals` and post-processes them,
     /// logging the parse's and the post-processing's warnings only when
     /// `log_warnings` is true.
     fn build(originals: ConfigMap, log_warnings: bool) -> Result<Self, Error> {
@@ -1172,8 +1166,7 @@ mod tests {
     }
 
     /// `new` logs each configuration warning once (the parse's duplicate
-    /// values, the post-processing's, the TLS
-    /// hostname verification); a copy for one more client logs none of them,
+    /// values and the post-processing's); a copy for one more client logs none of them,
     /// as Java's client logs nothing about the config it is given, but makes
     /// the same reads, so it equals `new`'s and its used set is `new`'s.
     #[test]
@@ -1184,11 +1177,6 @@ mod tests {
 
         let props: HashMap<String, String> = [
             (AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
-            (AdminClientConfig::SECURITY_PROTOCOL_CONFIG, "SSL"),
-            (
-                AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG,
-                "resolve_canonical_bootstrap_servers_only",
-            ),
             (AdminClientConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
             (AdminClientConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "1000"),
             (AdminClientConfig::RECONNECT_BACKOFF_MS_CONFIG, "100"),
@@ -1214,7 +1202,6 @@ mod tests {
                 "Configuration 'retry.backoff.ms' with",
                 "Configuration 'socket.connection.setup.timeout.ms' with",
                 "Disabling exponential reconnect",
-                "client.dns.lookup=resolve_canonical_bootstrap_servers_only with security.protocol=SSL:",
             ],
             "{new_lines:?}"
         );
