@@ -1127,7 +1127,15 @@ impl ProducerConfig {
     /// (`KafkaProducer.java:366` reads it), so clients given one
     /// configuration share its id. Building the configuration again would
     /// take a second number; this copy does not. It is not `Clone`
-    /// (CLAUDE.md §3), and it does not repeat `new`'s warnings.
+    /// (CLAUDE.md §3).
+    ///
+    /// Java's client logs nothing about the configuration it is given, so the
+    /// copy logs nothing either: it makes the post-processing's reads, marking
+    /// the same keys used, but none of its log lines (the reconnect and retry
+    /// backoff and connection setup timeout warnings, the INFO lines saying
+    /// idempotence will be disabled), and not `new`'s TLS hostname-verification
+    /// warning. The client given the copy logs its one unused-keys line
+    /// ([`Self::log_unused`]), as Java's client constructor does.
     ///
     /// # Errors
     ///
@@ -1143,7 +1151,8 @@ impl ProducerConfig {
 
     /// Java's `ProducerConfig(Map)` without its logging: parses `originals`
     /// and post-processes them, `resolved_client_id` standing in for the
-    /// sequence number `client.id` would take.
+    /// sequence number `client.id` would take. With a `resolved_client_id`
+    /// (a copy) the post-processing logs nothing.
     fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
         let config = AbstractConfig::with_hooks(
             &CONFIG,
@@ -1158,16 +1167,19 @@ impl ProducerConfig {
 
     /// Java's `ProducerConfig.postProcessParsedConfig`: the values that
     /// replace the parsed ones. A `resolved_client_id` is the id a derived
-    /// `client.id` takes, in place of a new one.
+    /// `client.id` takes, in place of a new one; it marks a copy for one more
+    /// client ([`Self::copy_for_client`]), whose reads are the same but which
+    /// logs none of the lines: its original logged them once.
     fn post_process_parsed_config(
         config: &AbstractConfig,
         resolved_client_id: Option<&str>,
     ) -> Result<ConfigMap, Error> {
+        let log_lines = resolved_client_id.is_none();
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
-        CommonClientConfigs::warn_disabling_exponential_backoff(config)?;
+        CommonClientConfigs::warn_disabling_exponential_backoff(config, log_lines)?;
         let mut refined_configs =
-            CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values());
-        Self::post_process_and_validate_idempotence_configs(config, &mut refined_configs)?;
+            CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values(), log_lines);
+        Self::post_process_and_validate_idempotence_configs(config, &mut refined_configs, log_lines)?;
         Self::maybe_override_client_id(config, &mut refined_configs, resolved_client_id)?;
         Ok(refined_configs)
     }
@@ -1211,10 +1223,14 @@ impl ProducerConfig {
     /// `max.in.flight.requests.per.connection` it is **always** an error. The
     /// silent-disable path is what keeps existing non-idempotent configurations
     /// working, so removing it would be a breaking change.
+    ///
+    /// With `log_lines` false it decides and fails the same way but logs
+    /// neither INFO line.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#postProcessAndValidateIdempotenceConfigs")]
     fn post_process_and_validate_idempotence_configs(
         config: &AbstractConfig,
         configs: &mut ConfigMap,
+        log_lines: bool,
     ) -> Result<(), Error> {
         let original_configs = config.originals_map();
         let acks_str = Self::parse_acks(config.get_string(Self::ACKS_CONFIG)?.unwrap_or_default())?;
@@ -1233,7 +1249,9 @@ impl ProducerConfig {
                         Self::RETRIES_CONFIG
                     )));
                 }
-                info!("Idempotence will be disabled because {} is set to 0.", Self::RETRIES_CONFIG);
+                if log_lines {
+                    info!("Idempotence will be disabled because {} is set to 0.", Self::RETRIES_CONFIG);
+                }
                 should_disable_idempotence = true;
             }
 
@@ -1250,11 +1268,13 @@ impl ProducerConfig {
                         Self::ACKS_CONFIG
                     )));
                 }
-                info!(
-                    "Idempotence will be disabled because {} is set to {}, not set to 'all'.",
-                    Self::ACKS_CONFIG,
-                    acks
-                );
+                if log_lines {
+                    info!(
+                        "Idempotence will be disabled because {} is set to {}, not set to 'all'.",
+                        Self::ACKS_CONFIG,
+                        acks
+                    );
+                }
                 should_disable_idempotence = true;
             }
 
@@ -1594,6 +1614,8 @@ impl ProducerConfig {
 mod tests {
     use super::*;
     use crate::common::config::types::Password;
+    use crate::test_log_capture::capture_logs;
+    use log::Level;
 
     /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
     /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
@@ -2801,6 +2823,46 @@ mod tests {
         assert_eq!(config.copy_for_client().expect("copied").client_id, "mine");
         let config = ProducerConfig::new(&props_with(&[("transactional.id", "t")])).expect("valid");
         assert_eq!(config.copy_for_client().expect("copied").client_id, "producer-t");
+    }
+
+    /// `new` logs each post-processing line once; a copy for one more client
+    /// logs none of them, as Java's client logs nothing about the config it
+    /// is given, but makes the same reads, so its used set is `new`'s.
+    #[test]
+    fn test_copy_for_client_logs_no_post_process_line() {
+        let props = props_with(&[
+            (ProducerConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
+            (ProducerConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "1000"),
+            (ProducerConfig::RECONNECT_BACKOFF_MS_CONFIG, "100"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, "40000"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, "30000"),
+            (ProducerConfig::RETRIES_CONFIG, "0"),
+            (ProducerConfig::ACKS_CONFIG, "1"),
+        ]);
+        let (config, new_lines) = capture_logs(|| ProducerConfig::new(&props).expect("valid"));
+        let lines = |lines: &[(Level, String)]| {
+            lines
+                .iter()
+                .map(|(level, line)| (*level, line.split(' ').take(3).collect::<Vec<_>>().join(" ")))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&new_lines),
+            [
+                (Level::Warn, "Configuration 'retry.backoff.ms' with".to_string()),
+                (
+                    Level::Warn,
+                    "Configuration 'socket.connection.setup.timeout.ms' with".to_string()
+                ),
+                (Level::Warn, "Disabling exponential reconnect".to_string()),
+                (Level::Info, "Idempotence will be".to_string()),
+                (Level::Info, "Idempotence will be".to_string()),
+            ],
+            "{new_lines:?}"
+        );
+        let (copy, copy_lines) = capture_logs(|| config.copy_for_client().expect("copied"));
+        assert!(copy_lines.is_empty(), "{copy_lines:?}");
+        assert_eq!(copy.unused(), ProducerConfig::new(&props).expect("valid").unused());
     }
 
     /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the

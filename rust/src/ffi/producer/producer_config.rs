@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use crate::common::Error;
 use crate::ffi::common::config::config_getters::{self, LentStrings};
-use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::{fail_with, init_default_logger};
 use crate::ffi::ffi_guard;
 use crate::ffi::producer::partitioner::{
     SharedPartitioner, SharedPartitionerAdapter, kafka_producer_Partitioner_t, take_partitioner,
@@ -126,6 +126,10 @@ pub(crate) unsafe fn producer_config_ref<'a>(
 /// properties (the map stays the caller's) and delivers the configuration,
 /// owned by the caller ([`kafka_producer_ProducerConfig_destroy`]).
 ///
+/// It first sets up the default stderr logger, as creating a client does, so
+/// the warnings the configuration logs while it is built are not lost when it
+/// is created before any client; its clients do not log them again.
+///
 /// # Safety
 ///
 /// `props` must be a live map of C strings and `out_err` a valid slot pointing
@@ -136,6 +140,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     props: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_producer_ProducerConfig_t {
+    init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, as `map_strings`
     // requires; its entries are copied into owned `String`s.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
