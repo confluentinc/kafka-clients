@@ -575,7 +575,6 @@ mod tests {
 
         let props = box_string_map([
             ("bootstrap.servers", "localhost:9092,localhost:9092"),
-            ("ssl.cipher.suites", "TLS_AES_128_GCM_SHA256"),
             ("retry.backoff.ms", "2000"),
             ("retry.backoff.max.ms", "1000"),
         ]);
@@ -599,7 +598,6 @@ mod tests {
                 [
                     "Configuration key \"bootstrap.servers\"",
                     "Configuration 'retry.backoff.ms' with",
-                    "ssl.cipher.suites is not",
                 ],
                 "{new_lines:?}"
             );

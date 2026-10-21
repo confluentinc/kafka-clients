@@ -635,15 +635,14 @@ impl ConsumerConfig {
         let props = HashMap::from([(Self::BOOTSTRAP_SERVERS_CONFIG.to_string(), "localhost:9092".to_string())]);
         let config =
             AbstractConfig::new(&CONFIG, string_originals(&props), false).expect("the ConfigDef defaults are valid");
-        let mut defaults = Self::from_abstract(config, false).expect("the ConfigDef defaults are valid");
+        let mut defaults = Self::from_abstract(config).expect("the ConfigDef defaults are valid");
         defaults.bootstrap_servers = Vec::new();
         defaults
     }
 
     /// Reads the typed fields from the parsed values, recording the keys read
-    /// in `read_keys`. With `log_warnings` false (a copy) it makes the same
-    /// reads but does not log that `ssl.cipher.suites` is ignored.
-    fn from_abstract(config: AbstractConfig, log_warnings: bool) -> Result<Self, Error> {
+    /// in `read_keys`.
+    fn from_abstract(config: AbstractConfig) -> Result<Self, Error> {
         let mut values = ValuesReader::new(&config);
         let bootstrap_servers = values.list(Self::BOOTSTRAP_SERVERS_CONFIG)?.to_vec();
         let client_dns_lookup = ClientDnsLookup::parse_config_value(values.string(Self::CLIENT_DNS_LOOKUP_CONFIG)?)?;
@@ -709,7 +708,7 @@ impl ConsumerConfig {
         // for a protocol that uses them (`ChannelBuilders.clientChannelBuilder`),
         // so only then are they marked used.
         let mut ssl_values = ValuesReader::new(&config);
-        let ssl_config = SslConfigs::from_values(&mut ssl_values, log_warnings)?;
+        let ssl_config = SslConfigs::from_values(&mut ssl_values)?;
         if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
             values.append(ssl_values);
         }
@@ -1015,9 +1014,8 @@ impl ConsumerConfig {
     /// same way, but logs neither the parse's warning that a list's duplicate
     /// values are removed, nor the post-processing's warnings (the reconnect
     /// and retry backoff, the connection setup timeout,
-    /// `connections.max.idle.ms` below `max.poll.interval.ms`), nor that
-    /// `ssl.cipher.suites` is ignored, nor `new`'s TLS hostname-verification
-    /// warning. The client given the copy logs its one unused-keys line
+    /// `connections.max.idle.ms` below `max.poll.interval.ms`), nor `new`'s
+    /// TLS hostname-verification warning. The client given the copy logs its one unused-keys line
     /// ([`Self::log_unused`]), as Java's client constructor does.
     ///
     /// # Errors
@@ -1036,7 +1034,7 @@ impl ConsumerConfig {
     /// and post-processes them, `resolved_client_id` standing in for the
     /// sequence number `client.id` would take. With a `resolved_client_id`
     /// (a copy) nothing is logged: not the parse's duplicate-values warning,
-    /// not the post-processing's lines, not the `ssl.cipher.suites` warning.
+    /// not the post-processing's lines.
     fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
         let log_warnings = resolved_client_id.is_none();
         let config = AbstractConfig::with_hooks_and_log_warnings(
@@ -1048,7 +1046,7 @@ impl ConsumerConfig {
             |originals| originals,
             |config| Self::post_process_parsed_config(config, resolved_client_id),
         )?;
-        Self::from_abstract(config, log_warnings)
+        Self::from_abstract(config)
     }
 
     /// Java's `ConsumerConfig.postProcessParsedConfig`: the values that
@@ -2152,7 +2150,7 @@ mod tests {
     }
 
     /// `new` logs each configuration warning once (the parse's duplicate
-    /// values, the post-processing's, the ignored `ssl.cipher.suites`); a copy
+    /// values and the post-processing's); a copy
     /// for one more client logs none of them, as Java's client logs nothing
     /// about the config it is given, but makes the same reads, so its used set
     /// is `new`'s.
@@ -2160,7 +2158,6 @@ mod tests {
     fn test_copy_for_client_logs_no_configuration_warning() {
         let props = props_with(&[
             (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
-            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
             (ConsumerConfig::GROUP_ID_CONFIG, "copy-log-group"),
             (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "classic"),
             (ConsumerConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
@@ -2187,7 +2184,6 @@ mod tests {
                 "Configuration 'socket.connection.setup.timeout.ms' with",
                 "Disabling exponential reconnect",
                 "Configuration 'connections.max.idle.ms' with",
-                "ssl.cipher.suites is not",
             ],
             "{new_lines:?}"
         );
@@ -2918,6 +2914,7 @@ mod tests {
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
             "security.providers",
             "config.providers",
+            "ssl.cipher.suites",
             "key.deserializer",
             "metric.reporters",
             "interceptor.classes",

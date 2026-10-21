@@ -441,8 +441,8 @@ impl AdminClientConfig {
     /// same reads, marking the same keys used and failing the same way, but
     /// logs neither the parse's warning that a list's duplicate values are
     /// removed, nor the post-processing's warnings (the reconnect and retry
-    /// backoff, the connection setup timeout), nor that `ssl.cipher.suites` is
-    /// ignored, nor `new`'s TLS hostname-verification warning.
+    /// backoff, the connection setup timeout), nor `new`'s TLS
+    /// hostname-verification warning.
     ///
     /// Unlike the consumer's and producer's, an admin configuration derives
     /// no `client.id`: `KafkaAdminClient.createInternal` does, taking one
@@ -463,8 +463,8 @@ impl AdminClientConfig {
 
     /// Java's `AdminClientConfig(Map)` without the TLS hostname-verification
     /// warning [`Self::new`] adds: parses `originals` and post-processes them,
-    /// logging the parse's, the post-processing's and the
-    /// `ssl.cipher.suites` warnings only when `log_warnings` is true.
+    /// logging the parse's and the post-processing's warnings only when
+    /// `log_warnings` is true.
     fn build(originals: ConfigMap, log_warnings: bool) -> Result<Self, Error> {
         let config = AbstractConfig::with_hooks_and_log_warnings(
             &CONFIG,
@@ -528,7 +528,7 @@ impl AdminClientConfig {
         // for a protocol that uses them (`ChannelBuilders.clientChannelBuilder`),
         // so only then are they marked used.
         let mut ssl_values = ValuesReader::new(&config);
-        let ssl_config = SslConfigs::from_values(&mut ssl_values, log_warnings)?;
+        let ssl_config = SslConfigs::from_values(&mut ssl_values)?;
         if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
             values.append(ssl_values);
         }
@@ -1099,7 +1099,12 @@ mod tests {
         ] {
             assert!(names.contains(key), "{key}");
         }
-        for key in ["metric.reporters", "security.providers", "config.providers"] {
+        for key in [
+            "metric.reporters",
+            "security.providers",
+            "config.providers",
+            "ssl.cipher.suites",
+        ] {
             assert!(!names.contains(key), "{key}");
         }
     }
@@ -1151,7 +1156,7 @@ mod tests {
     }
 
     /// `new` logs each configuration warning once (the parse's duplicate
-    /// values, the post-processing's, the ignored `ssl.cipher.suites`, the TLS
+    /// values, the post-processing's, the TLS
     /// hostname verification); a copy for one more client logs none of them,
     /// as Java's client logs nothing about the config it is given, but makes
     /// the same reads, so it equals `new`'s and its used set is `new`'s.
@@ -1163,7 +1168,6 @@ mod tests {
 
         let props: HashMap<String, String> = [
             (AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG, "localhost:9092,localhost:9092"),
-            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
             (AdminClientConfig::SECURITY_PROTOCOL_CONFIG, "SSL"),
             (
                 AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG,
@@ -1194,7 +1198,6 @@ mod tests {
                 "Configuration 'retry.backoff.ms' with",
                 "Configuration 'socket.connection.setup.timeout.ms' with",
                 "Disabling exponential reconnect",
-                "ssl.cipher.suites is not",
                 "client.dns.lookup=resolve_canonical_bootstrap_servers_only with security.protocol=SSL:",
             ],
             "{new_lines:?}"

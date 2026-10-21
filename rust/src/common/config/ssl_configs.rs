@@ -27,12 +27,14 @@
 //! - `ssl.secure.random.implementation` — Java SecureRandom PRNG
 //! - `ssl.keymanager.algorithm` — Java JSSE key manager
 //! - `ssl.trustmanager.algorithm` — Java JSSE trust manager
-//! - `ssl.cipher.suites` — rustls's default cipher suites are used; a
-//!   non-empty value logs a warning
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
 //!
-//! Only `ssl.engine.factory.class`, the Java SSLEngine factory, is not
-//! defined: a configuration never takes a class (CLAUDE.md §2).
+//! Two of Java's keys are not defined:
+//! - `ssl.engine.factory.class`, the Java SSLEngine factory: a configuration
+//!   never takes a class (CLAUDE.md §2).
+//! - `ssl.cipher.suites`: rustls's default cipher suites are always used, so
+//!   the key stays undefined until the cipher suites are honoured, and a value
+//!   set for it is reported as unused rather than accepted and ignored.
 
 use crate::common::Error;
 use crate::common::config::abstract_config::ValuesReader;
@@ -52,9 +54,6 @@ impl SslConfigs {
 
     /// Config key: `ssl.provider`.
     pub const SSL_PROVIDER_CONFIG: &str = "ssl.provider";
-
-    /// Config key: `ssl.cipher.suites`.
-    pub const SSL_CIPHER_SUITES_CONFIG: &str = "ssl.cipher.suites";
 
     /// Config key: `ssl.enabled.protocols`.
     pub const SSL_ENABLED_PROTOCOLS_CONFIG: &str = "ssl.enabled.protocols";
@@ -236,18 +235,12 @@ impl SslConfigs {
     /// [`Self::add_client_ssl_support`]'s definitions, the keys Java's
     /// `SslFactory` reads through `DefaultSslEngineFactory.configure`.
     ///
-    /// `ssl.cipher.suites` is read but not modelled: the TLS provider picks
-    /// the suites, so a non-empty list is ignored, with a warning when
-    /// `log_warnings` is true (a configuration copied for one more client
-    /// reads the key without logging it again). An empty list is Java's
-    /// default (`List.of()`, the provider's defaults).
-    ///
     /// # Errors
     ///
     /// [`Error::LocalIllegalState`] if a key's definition is missing or of
     /// another type, a defect of the definition rather than of the input.
-    pub(crate) fn from_values(values: &mut ValuesReader<'_>, log_warnings: bool) -> Result<SslConfigs, Error> {
-        let ssl = SslConfigs {
+    pub(crate) fn from_values(values: &mut ValuesReader<'_>) -> Result<SslConfigs, Error> {
+        Ok(SslConfigs {
             truststore_location: values
                 .string_or_null(SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG)?
                 .map(str::to_string),
@@ -270,17 +263,7 @@ impl SslConfigs {
                 .string(SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG)?
                 .to_string(),
             enabled_protocols: values.list(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG)?.to_vec(),
-        };
-        // Read whether or not the warning is logged, so a copy marks the same
-        // keys used.
-        let cipher_suites_set = !values.list(SslConfigs::SSL_CIPHER_SUITES_CONFIG)?.is_empty();
-        if log_warnings && cipher_suites_set {
-            log::warn!(
-                "{} is not supported by this client and is ignored; the TLS provider's default cipher suites are used",
-                SslConfigs::SSL_CIPHER_SUITES_CONFIG
-            );
-        }
-        Ok(ssl)
+        })
     }
 
     /// The `ssl.*` settings parsed from `props` with
@@ -295,7 +278,7 @@ impl SslConfigs {
         static DEFINITION: LazyLock<ConfigDef> = LazyLock::new(|| ConfigDef::new().with_client_ssl_support());
         let props: HashMap<String, String> = props.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect();
         let config = AbstractConfig::new(&DEFINITION, string_originals(&props), false)?;
-        SslConfigs::from_values(&mut ValuesReader::new(&config), true)
+        SslConfigs::from_values(&mut ValuesReader::new(&config))
     }
 }
 
@@ -312,7 +295,8 @@ impl SslConfigs {
 
     /// Defines the client `ssl.*` keys on `config`: Java's
     /// `SslConfigs.addClientSslSupport(ConfigDef)`, in Java's order, except
-    /// `ssl.engine.factory.class`, a class-valued key (CLAUDE.md §2).
+    /// `ssl.engine.factory.class`, a class-valued key (CLAUDE.md §2), and
+    /// `ssl.cipher.suites`, which is not honoured (module docs).
     pub(crate) fn add_client_ssl_support(config: ConfigDef) -> ConfigDef {
         config
             .define(
@@ -327,13 +311,9 @@ impl SslConfigs {
                 DefaultValue::Null,
                 Importance::Medium,
             )
-            .define_with_validator(
-                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
-                Type::List,
-                Vec::<String>::new(),
-                ValidList::any_non_duplicate_values(true, false),
-                Importance::Low,
-            )
+            // Java defines `ssl.cipher.suites` here (`SslConfigs.java:131`); it
+            // stays undefined until the cipher suites are honoured, so a value
+            // set for it is reported as unused.
             .define_with_validator(
                 SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
                 Type::List,
@@ -526,7 +506,6 @@ mod tests {
         assert_eq!(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "ssl.enabled.protocols");
         assert_eq!(SslConfigs::SSL_PROTOCOL_CONFIG, "ssl.protocol");
         assert_eq!(SslConfigs::SSL_PROVIDER_CONFIG, "ssl.provider");
-        assert_eq!(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "ssl.cipher.suites");
         assert_eq!(
             SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
             "ssl.secure.random.implementation"
@@ -631,23 +610,6 @@ mod tests {
         let ssl =
             SslConfigs::parse_for_test(&[(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")]).unwrap();
         assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2".to_string()]);
-    }
-
-    /// `ssl.cipher.suites` is not modelled, but is validated like Java
-    /// (`SslConfigs.java:129`) before being ignored.
-    #[test]
-    fn test_cipher_suites_valid_list() {
-        for (value, expected) in [
-            ("A,,B", "Configuration 'ssl.cipher.suites' values must not be empty."),
-            (",,", "Configuration 'ssl.cipher.suites' values must not be empty."),
-        ] {
-            match SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, value)]) {
-                Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{value:?}"),
-                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
-            }
-        }
-        SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B")]).unwrap();
-        SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A")]).unwrap();
     }
 
     /// `{:?}` hides the six `Type.PASSWORD` fields and keeps the others.

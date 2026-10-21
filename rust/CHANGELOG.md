@@ -263,6 +263,12 @@ breaking changes.
   because encrypted PEM private keys are not supported (an encrypted key used
   to fail with `No private key found in inline keystore key`). Unlike Java,
   the store passwords are rejected even when no store is configured.
+- **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is no longer
+  defined, and `SslConfigs::SSL_CIPHER_SUITES_CONFIG` is removed. The clients
+  always use rustls's default cipher suites, so the key was read only to log a
+  warning and then ignored; it stays undefined until the cipher suites are
+  honoured, and a value set for it is now listed among the unused
+  configurations instead of being accepted and ignored.
 
 ### C API
 
