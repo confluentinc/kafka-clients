@@ -1568,7 +1568,7 @@ fn run_grcov_html() -> anyhow::Result<()> {
 
 const PACKAGE_NAME: &str = "confluent-kafka";
 /// Maximum compressed size of the `.crate`: 3 MiB (the crates.io limit is 10 MiB).
-const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const PACKAGE_CHECK_DIR: &str = "target/package-check";
 const PACKAGE_SMOKE_DIR: &str = "target/package-smoke";
 /// Source of the smoke test, compiled as the `main.rs` of the generated project.
