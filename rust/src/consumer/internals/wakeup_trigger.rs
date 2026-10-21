@@ -183,7 +183,11 @@ impl WakeupTrigger {
             return Ok(());
         }
         if self.current_token().is_cancelled() {
-            return Err(Error::wakeup("WakeupTrigger fired"));
+            // Java's `WakeupException` carries no message (`getMessage()` is null): the
+            // empty message is its rendering, so a binding's `str(e)` is "" as the rules
+            // give for a null Java message. (The error's code is `UnknownServerError`,
+            // so leaving the message unset would show that code's text instead.)
+            return Err(Error::wakeup(""));
         }
         Ok(())
     }

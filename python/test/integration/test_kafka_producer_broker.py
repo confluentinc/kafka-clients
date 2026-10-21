@@ -38,7 +38,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
-from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
+from confluent_kafka.common import Header, KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import KafkaConsumer
@@ -95,7 +95,7 @@ _Call = tuple[str, int, int, Exception | None]
 
 def _recorder(calls: list[_Call], label: str) -> Any:
     """A callback appending ``(label, partition, offset, exception)``."""
-    def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+    def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
         calls.append((label, metadata.partition(), metadata.offset(), exception))
     return callback
 
@@ -277,8 +277,8 @@ def test_an_oversized_record_fails_with_record_too_large(
                                       **limit})
     try:
         future = producer.send(record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
-                               callback=lambda metadata, exception: calls.append(
-                                   (metadata, exception)))
+                               callback=lambda *, metadata, exception, **_:
+                                            calls.append((metadata, exception)))
         error = failure(future, 30)
     finally:
         producer.close()
@@ -298,7 +298,7 @@ def test_an_oversized_async_record_fails_with_record_too_large(
         try:
             future = await producer.send(
                 record=ProducerRecord(topic=topic, value=bytes(VALUE_SIZE)),
-                callback=lambda metadata, exception: calls.append((metadata, exception)))
+                callback=lambda *, metadata, exception, **_: calls.append((metadata, exception)))
             return await async_failure(future, 30)
         finally:
             await producer.close()
@@ -392,8 +392,8 @@ def _consumed_headers(broker: Any, topic: str) -> list[tuple[str, bytes | None]]
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             for record in consumer.poll(timeout=0.5):
-                return [(key, None if value is None else bytes(value))
-                        for key, value in record.headers()]
+                return [(h.key(), None if (value := h.value()) is None else bytes(value))
+                        for h in record.headers()]
         raise AssertionError("the record was not consumed")
     finally:
         consumer.close()
@@ -412,6 +412,27 @@ def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
     finally:
         producer.close()
     assert _consumed_headers(kafka_broker, topic) == HEADERS
+
+
+def test_send_delivers_header_objects_and_headers_added_before_the_send(
+        kafka_broker: Any) -> None:
+    # A Header given to the record and one added to record.headers() before
+    # the send both reach the broker (KafkaProducerTest.doTestHeaders: "ensure
+    # headers can be mutated pre send"); after the send they are read-only.
+    topic = _topic(kafka_broker)
+    producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
+    try:
+        record = ProducerRecord(topic=topic, partition=0, key=b"k", value=b"v",
+                                headers=[Header(key="given", value=b"1")])
+        record.headers().add(key="added", value=None)
+        future = producer.send(record=record)
+        assert future.get(timeout=30).offset() == 0
+        with pytest.raises(IllegalStateError) as closed:
+            record.headers().add(key="late", value=b"x")
+        assert str(closed.value) == "RecordHeaders has been closed."
+    finally:
+        producer.close()
+    assert _consumed_headers(kafka_broker, topic) == [("given", b"1"), ("added", None)]
 
 
 def test_async_send_delivers_the_record_headers(kafka_broker: Any) -> None:
@@ -444,7 +465,7 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
         started = asyncio.Event()
         finished: list[bool] = []
 
-        async def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+        async def callback(*, metadata: RecordMetadata, exception: Exception | None, **kwargs: Any) -> None:
             assert exception is None
             started.set()
             await release.wait()

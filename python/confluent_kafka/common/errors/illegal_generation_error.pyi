@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.IllegalGenerationError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.application_recoverable_error import ApplicationRecoverableError
 
@@ -22,4 +22,11 @@ __all__ = ["IllegalGenerationError"]
 
 class IllegalGenerationError(ApplicationRecoverableError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, cause: BaseException | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
+    @overload
+    def __init__(self, *, cause: BaseException | None) -> None: ...

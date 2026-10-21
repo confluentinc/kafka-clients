@@ -17,21 +17,26 @@
 //! [`crate::common::multilanguage_producer::MultilanguageProducer`].
 //!
 //! Scope: only the surface the C FFI / Python binding support is bridged
-//! (poll, subscribe(topics), assign, commit_sync, committed, position, seek,
-//! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
-//! the non-blocking state reads, wakeup, close).
+//! (poll, subscribe(topics), subscribe(SubscriptionPattern), assign,
+//! commit_sync, committed, position, seek, pause/resume, *_offsets,
+//! offsets_for_times, partitions_for, list_topics, current_lag, the
+//! non-blocking state reads, wakeup, close and close(CloseOptions)). The timed
+//! overloads of commit_sync, committed, position, beginning_offsets,
+//! end_offsets and offsets_for_times forward their timeout; those of
+//! partitions_for and list_topics still drop it.
 //!
 //! The callback-taking trait methods (`subscribe_with_topics_listener`,
-//! `commit_async_*_with_callback`) return an `illegal_state` error, and
-//! deliberately keep doing so even though the bindings *do* bridge those
-//! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
-//! cannot be handed to a server in another one. Callback coverage for the gRPC
-//! backends goes through [`crate::common::callback_log::ConsumerCallbackLog`]
-//! instead, which asks the server to register a listener built by its own
-//! binding and reads back what it observed. Client-side regex subscription has
-//! nothing to bridge: Java's `subscribe(Pattern ...)` overloads are not
-//! implemented in Rust at all (see `Consumer`), so the only pattern form that
-//! crosses this bridge is `subscribe_with_pattern`.
+//! `subscribe_with_pattern_listener`, `commit_async_*_with_callback`) return an
+//! `illegal_state` error, and deliberately keep doing so even though the
+//! bindings *do* bridge those callbacks now: a `dyn ConsumerRebalanceListener`
+//! living in this process cannot be handed to a server in another one. Callback
+//! coverage for the gRPC backends goes through
+//! [`crate::common::callback_log::ConsumerCallbackLog`] instead, which asks the
+//! server to register a listener built by its own binding and reads back what
+//! it observed. Client-side regex subscription has nothing to bridge: Java's
+//! `subscribe(Pattern ...)` overloads are not implemented in Rust at all (see
+//! `Consumer`), so the only pattern form that crosses this bridge is
+//! `subscribe_with_pattern`.
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
@@ -59,8 +64,8 @@ use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecordOptionsBuilder, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
-    SubscriptionPattern,
+    ConsumerRecordOptionsBuilder, ConsumerRecords, GroupMembershipOperation, OffsetAndMetadata, OffsetAndTimestamp,
+    OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -240,7 +245,7 @@ impl MultilanguageConsumer {
 
     fn unsupported(&self, method: &str) -> Error {
         Error::local_illegal_state(format!(
-            "{} is not supported on the {} gRPC multilanguage backend (an in-process callback cannot cross the wire — use ConsumerCallbackLog; pattern subscription is unbridged)",
+            "{} is not supported on the {} gRPC multilanguage backend (an in-process callback cannot cross the wire — use ConsumerCallbackLog)",
             method, self.backend
         ))
     }
@@ -258,12 +263,19 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn subscribe_rpc(&self, topics: Vec<String>) -> Result<(), Error> {
+    /// The plain `subscribe(topics)` or, with `pattern`, the plain
+    /// `subscribe(SubscriptionPattern)`.
+    async fn subscribe_rpc(&self, topics: Vec<String>, pattern: Option<&SubscriptionPattern>) -> Result<(), Error> {
         let mut client = self.client.clone();
-        // with_listener stays false here: this is the plain subscribe(topics).
-        // The listener-registering variant lives on ConsumerCallbackLog, since
-        // the listener must be created by the server's own binding.
-        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: false };
+        // with_listener stays false here: this is the listener-less form. The
+        // listener-registering variant lives on ConsumerCallbackLog, since the
+        // listener must be created by the server's own binding.
+        let req = proto::SubscribeRequest {
+            consumer_id: self.consumer_id,
+            topics,
+            with_listener: false,
+            pattern: pattern.map(|p| p.pattern().to_string()),
+        };
         self.status_rpc(client.subscribe(req)).await
     }
 
@@ -275,8 +287,11 @@ impl MultilanguageConsumer {
 
     async fn tp_list_rpc(&self, partitions: &[TopicPartition], which: TpListOp) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req =
-            proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
+        let req = proto::TopicPartitionListRequest {
+            consumer_id: self.consumer_id,
+            partitions: tps_to_proto(partitions),
+            timeout_ms: None,
+        };
         match which {
             TpListOp::SeekToBeginning => self.status_rpc(client.seek_to_beginning(req)).await,
             TpListOp::SeekToEnd => self.status_rpc(client.seek_to_end(req)).await,
@@ -300,18 +315,23 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>) -> Result<(), Error> {
+    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>, timeout: Option<Duration>) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets };
+        let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets, timeout_ms: timeout_ms(timeout) };
         self.status_rpc(client.commit_sync(req)).await
     }
 
     async fn committed_rpc(
         &self,
         partitions: &[TopicPartition],
+        timeout: Option<Duration>,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         let mut client = self.client.clone();
-        let req = proto::CommittedRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
+        let req = proto::CommittedRequest {
+            consumer_id: self.consumer_id,
+            partitions: tps_to_proto(partitions),
+            timeout_ms: timeout_ms(timeout),
+        };
         let response = client
             .committed(req)
             .await
@@ -324,9 +344,13 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn position_rpc(&self, partition: &TopicPartition) -> Result<i64, Error> {
+    async fn position_rpc(&self, partition: &TopicPartition, timeout: Option<Duration>) -> Result<i64, Error> {
         let mut client = self.client.clone();
-        let req = proto::PositionRequest { consumer_id: self.consumer_id, partition: Some(tp_to_proto(partition)) };
+        let req = proto::PositionRequest {
+            consumer_id: self.consumer_id,
+            partition: Some(tp_to_proto(partition)),
+            timeout_ms: timeout_ms(timeout),
+        };
         let response = client
             .position(req)
             .await
@@ -343,10 +367,14 @@ impl MultilanguageConsumer {
         &self,
         partitions: &[TopicPartition],
         end: bool,
+        timeout: Option<Duration>,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
         let mut client = self.client.clone();
-        let req =
-            proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
+        let req = proto::TopicPartitionListRequest {
+            consumer_id: self.consumer_id,
+            partitions: tps_to_proto(partitions),
+            timeout_ms: timeout_ms(timeout),
+        };
         let response = if end {
             client.end_offsets(req).await
         } else {
@@ -359,6 +387,46 @@ impl MultilanguageConsumer {
             Some(proto::long_offsets_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
             None => Ok(HashMap::new()),
         }
+    }
+
+    async fn offsets_for_times_rpc(
+        &self,
+        timestamps_to_search: &HashMap<TopicPartition, i64>,
+        timeout: Option<Duration>,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+        let mut client = self.client.clone();
+        let timestamps = timestamps_to_search
+            .iter()
+            .map(|(tp, ts)| proto::TimestampSpecEntry { partition: Some(tp_to_proto(tp)), timestamp: *ts })
+            .collect();
+        let req = proto::OffsetsForTimesRequest {
+            consumer_id: self.consumer_id,
+            timestamps,
+            timeout_ms: timeout_ms(timeout),
+        };
+        let response = client
+            .offsets_for_times(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, self.backend))?
+            .into_inner();
+        match response.result {
+            Some(proto::offset_and_timestamp_response::Result::Offsets(map)) => {
+                Ok(offset_and_timestamp_map_from_proto(map))
+            },
+            Some(proto::offset_and_timestamp_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
+            None => Ok(HashMap::new()),
+        }
+    }
+
+    async fn close_rpc(&self, options: Option<&CloseOptions>) -> Result<(), Error> {
+        let mut client = self.client.clone();
+        let req = proto::ConsumerCloseRequest {
+            consumer_id: self.consumer_id,
+            group_membership_operation: options
+                .map(|o| group_membership_operation_name(o.group_membership_operation()).to_string()),
+            close_timeout_ms: timeout_ms(options.and_then(CloseOptions::timeout)),
+        };
+        self.status_rpc(client.close(req)).await
     }
 
     async fn partitions_for_rpc(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
@@ -473,8 +541,26 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         MultilanguageGroupMetadata::register(response, self.client.clone(), backend)
     }
 
-    async fn current_lag(&mut self, _topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
-        Err(self.unsupported("current_lag"))
+    async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
+        // Java's currentLag does not wait for a remote call (though it may send a
+        // LIST_OFFSETS for an unknown end offset), but the consumer lives in the
+        // server, so it is one CurrentLag round trip. Java can fail here:
+        // IllegalStateException for an unassigned partition or a closed consumer,
+        // TimeoutException past default.api.timeout.ms, ConcurrentModificationException;
+        // the trait carries them as the `Result`'s error.
+        let mut client = self.client.clone();
+        let req =
+            proto::CurrentLagRequest { consumer_id: self.consumer_id, partition: Some(tp_to_proto(topic_partition)) };
+        let backend = self.backend;
+        let resp = client
+            .current_lag(req)
+            .await
+            .map_err(|s| status_to_kafka_error(&s, backend))?
+            .into_inner();
+        if let Some(err) = resp.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        Ok(resp.lag)
     }
 
     fn wakeup(&self) {
@@ -532,7 +618,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── subscription / assignment ──
     async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
-        self.subscribe_rpc(topics).await
+        self.subscribe_rpc(topics, None).await
     }
 
     async fn subscribe_with_topics_listener(
@@ -543,8 +629,8 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         Err(self.unsupported("subscribe_with_topics_listener"))
     }
 
-    async fn subscribe_with_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_with_pattern"))
+    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
+        self.subscribe_rpc(Vec::new(), Some(&pattern)).await
     }
 
     async fn subscribe_with_pattern_listener(
@@ -572,33 +658,33 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── commit ──
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        self.commit_rpc(Vec::new()).await
+        self.commit_rpc(Vec::new(), None).await
     }
 
-    async fn commit_sync_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
-        self.commit_rpc(Vec::new()).await
+    async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.commit_rpc(Vec::new(), Some(timeout)).await
     }
 
     async fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets)).await
+        self.commit_rpc(offset_map_to_proto(&offsets), None).await
     }
 
     async fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets)).await
+        self.commit_rpc(offset_map_to_proto(&offsets), Some(timeout)).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
         // Mapped to a synchronous commit server-side; the offset ends up
         // committed. Tests that depend on async-not-yet-committed timing are
         // native-Rust-only and never reach this backend.
-        self.commit_rpc(Vec::new()).await
+        self.commit_rpc(Vec::new(), None).await
     }
 
     async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
@@ -652,26 +738,26 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── position / committed ──
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
-        self.position_rpc(partition).await
+        self.position_rpc(partition, None).await
     }
 
-    async fn position_with_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
-        self.position_rpc(partition).await
+    async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
+        self.position_rpc(partition, Some(timeout)).await
     }
 
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        self.committed_rpc(partitions).await
+        self.committed_rpc(partitions, None).await
     }
 
     async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        self.committed_rpc(partitions).await
+        self.committed_rpc(partitions, Some(timeout)).await
     }
 
     // ── metadata ──
@@ -713,59 +799,42 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        let mut client = self.client.clone();
-        let timestamps = timestamps_to_search
-            .iter()
-            .map(|(tp, ts)| proto::TimestampSpecEntry { partition: Some(tp_to_proto(tp)), timestamp: *ts })
-            .collect();
-        let req = proto::OffsetsForTimesRequest { consumer_id: self.consumer_id, timestamps };
-        let response = client
-            .offsets_for_times(req)
-            .await
-            .map_err(|s| status_to_kafka_error(&s, self.backend))?
-            .into_inner();
-        match response.result {
-            Some(proto::offset_and_timestamp_response::Result::Offsets(map)) => {
-                Ok(offset_and_timestamp_map_from_proto(map))
-            },
-            Some(proto::offset_and_timestamp_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
-            None => Ok(HashMap::new()),
-        }
+        self.offsets_for_times_rpc(&timestamps_to_search, None).await
     }
 
     async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        self.offsets_for_times(timestamps_to_search).await
+        self.offsets_for_times_rpc(&timestamps_to_search, Some(timeout)).await
     }
 
     async fn beginning_offsets(
         &mut self,
         partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        self.long_offsets_rpc(partitions, false).await
+        self.long_offsets_rpc(partitions, false, None).await
     }
 
     async fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        self.long_offsets_rpc(partitions, false).await
+        self.long_offsets_rpc(partitions, false, Some(timeout)).await
     }
 
     async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
-        self.long_offsets_rpc(partitions, true).await
+        self.long_offsets_rpc(partitions, true, None).await
     }
 
     async fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        self.long_offsets_rpc(partitions, true).await
+        self.long_offsets_rpc(partitions, true, Some(timeout)).await
     }
 
     // ── flow control ──
@@ -787,23 +856,36 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── lifecycle ──
     async fn close(&mut self) -> Result<(), Error> {
-        let mut client = self.client.clone();
-        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id }))
-            .await
+        self.close_rpc(None).await
     }
 
-    async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // The server-side close ignores per-call timeouts, so `CloseOptions::timeout`
-        // is deliberately not forwarded and this maps to a plain close.
-        let mut client = self.client.clone();
-        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id }))
-            .await
+    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error> {
+        // Java's close(CloseOptions): the server builds the binding's own
+        // CloseOptions from the operation name and the timeout.
+        self.close_rpc(Some(&options)).await
     }
 }
 
 // ---------------------------------------------------------------------------
 // Wire <-> domain conversions
 // ---------------------------------------------------------------------------
+
+/// A timed overload's `Duration` as the wire's optional milliseconds; `None`
+/// selects the overload without a timeout.
+fn timeout_ms(timeout: Option<Duration>) -> Option<i64> {
+    timeout.map(|t| i64::try_from(t.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Java's `CloseOptions.GroupMembershipOperation` constant name, which is what
+/// crosses the wire (the enum has no numeric id).
+fn group_membership_operation_name(operation: GroupMembershipOperation) -> &'static str {
+    match operation {
+        GroupMembershipOperation::LeaveGroup => "LEAVE_GROUP",
+        GroupMembershipOperation::RemainInGroup => "REMAIN_IN_GROUP",
+        GroupMembershipOperation::Default => "DEFAULT",
+        other => panic!("GroupMembershipOperation {other:?} has no name on the wire yet"),
+    }
+}
 
 fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
     proto::TopicPartition { topic: tp.topic().to_string(), partition: tp.partition() }
@@ -822,7 +904,7 @@ fn offset_and_metadata_from_proto(o: proto::OffsetAndMetadata) -> OffsetAndMetad
         .expect("invalid OffsetAndMetadata from backend")
 }
 
-fn offset_map_to_proto(offsets: &HashMap<TopicPartition, OffsetAndMetadata>) -> Vec<proto::OffsetMapEntry> {
+pub(crate) fn offset_map_to_proto(offsets: &HashMap<TopicPartition, OffsetAndMetadata>) -> Vec<proto::OffsetMapEntry> {
     offsets
         .iter()
         .map(|(tp, oam)| proto::OffsetMapEntry {

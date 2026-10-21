@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["CreateAclsOptions"]
@@ -39,17 +39,17 @@ class CreateAclsOptions(AbstractOptions):
 
     __slots__ = ()
 
-    def __init__(self, *, timeout_ms: int | None = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING) -> None:
         super().__init__()
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object. Without: the timeout in milliseconds, or ``None``."""
         # This method is retained to keep binary compatibility with 0.11
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)

@@ -21,6 +21,8 @@ The text is parsed as ``java.util.UUID.fromString`` parses it.
 
 from __future__ import annotations
 
+from typing import Any
+
 import uuid
 
 from confluent_kafka._java import uuid_from_string
@@ -50,8 +52,14 @@ class UUIDDeserializer:
         if isinstance(encoding_value, str):
             self._encoding = encoding_value
 
-    def __call__(self, topic: str, data: memoryview | None,
-                 headers: Headers | None = None) -> uuid.UUID | None:
+    def __call__(self, *, topic: str, data: memoryview | None,
+                 headers: Headers | None = None, **kwargs: Any) -> uuid.UUID | None:
+        return self._fast(topic, data, headers)
+
+    def _fast(self, topic: str, data: memoryview | None,
+              headers: Headers | None = None) -> uuid.UUID | None:
+        """The positional entry the clients call, without the keyword
+        binding and ``**kwargs`` dict of ``__call__`` (private)."""
         if data is None:
             return None
         try:

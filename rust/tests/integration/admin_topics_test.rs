@@ -34,13 +34,15 @@
 //! legacy Python admin binding, which is removed; the Python arm
 //! now runs on `confluent_kafka.admin`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions, NewTopic,
+    CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec, ListTopicsOptions, NewTopic,
 };
-use confluent_kafka::common::Error;
+use confluent_kafka::common::acl::AclOperation;
+use confluent_kafka::common::{Error, Uuid};
 
 use crate::common::admin_backend::{
     AdminBackend, admin_config_for, admin_for, all_of, create_topic, wait_for_all_partitions_metadata,
@@ -55,6 +57,15 @@ use crate::multilanguage_admin_test;
 /// real creation needs (the other scenarios in this file see propagation inside a
 /// second), short enough not to dominate the suite.
 const VALIDATE_ONLY_NON_CREATION_WINDOW: Duration = Duration::from_secs(3);
+
+/// An explicit `timeoutMs` the option-driving scenarios set, so the request
+/// field crosses every backend with a non-default value. Generous: the
+/// scenarios assert results, not the deadline.
+const EXPLICIT_TIMEOUT_MS: i32 = 30_000;
+
+/// Java's `Topic.GROUP_METADATA_TOPIC_NAME`, the internal topic every group
+/// coordinator lookup creates on first use.
+const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
 
 /// The topics the scenario created, removed so the next scenario on a pooled
 /// cluster starts clean. Deletion is asserted, as it was in the originals: it is
@@ -655,6 +666,235 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
     ctx.cleanup().await;
 }
 
+/// `deleteTopics` keyed by name *and* by id reports a missing key in that key's
+/// own slot, not as a failure of the batch.
+///
+/// The second scenario for both `delete_topics` and `delete_topics_by_ids`:
+/// [`delete_topics_removes_them`] and [`describe_and_delete_topics_by_ids`] only
+/// take the success arm. Java answers a missing name with
+/// `UnknownTopicOrPartitionException` and a missing id with
+/// `UnknownTopicIdException` (`DeleteTopicsResponse` carries
+/// `UNKNOWN_TOPIC_OR_PARTITION` / `UNKNOWN_TOPIC_ID` per topic, and
+/// `KafkaAdminClient.handleDeleteTopicsUsingNames` / `...UsingIds` complete only
+/// that key's future with it), while the topic deleted beside the missing name
+/// still succeeds. Both requests also carry an explicit `timeoutMs` and
+/// `retryOnQuotaViolation = false`, the two `DeleteTopicsOptions` fields.
+async fn delete_topics_reports_unknown_names_and_ids_per_key<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let topic = ctx.topic("admin_delete_mixed");
+    let missing = ctx.topic("admin_delete_missing");
+    create_topic(&admin, &topic, 1, 1).await;
+    wait_until_listed(&admin, &topic, true).await;
+
+    let options = || {
+        DeleteTopicsOptions::new()
+            .set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS))
+            .set_retry_on_quota_violation(false)
+    };
+    let deleted = admin
+        .delete_topics(&[topic.clone(), missing.clone()], options())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: delete topics: {e}"));
+    assert_eq!(
+        deleted.len(),
+        2,
+        "{backend} backend: one entry per requested name, got {:?}",
+        deleted.keys().collect::<Vec<_>>()
+    );
+    deleted[&topic]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: deleting {topic} beside a missing name should succeed: {e}"));
+    let err = deleted[&missing]
+        .as_ref()
+        .expect_err(&format!("{backend} backend: deleting a missing topic name must fail"));
+    assert!(
+        matches!(err, Error::UnknownTopicOrPartition(_)),
+        "{backend} backend: a missing *name* is UNKNOWN_TOPIC_OR_PARTITION, got {err:?}"
+    );
+    wait_until_listed(&admin, &topic, false).await;
+
+    let unknown_id = Uuid::random_uuid();
+    let deleted = admin
+        .delete_topics_by_ids(&[unknown_id], options())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: delete topics by ids: {e}"));
+    let err = deleted
+        .get(&unknown_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "{backend} backend: deleteTopics(ofTopicIds) must report the requested id, got {:?}",
+                deleted.keys().collect::<Vec<_>>()
+            )
+        })
+        .as_ref()
+        .expect_err(&format!("{backend} backend: deleting a random topic id must fail"));
+    assert!(
+        matches!(err, Error::UnknownTopicId(_)),
+        "{backend} backend: a missing *id* is UNKNOWN_TOPIC_ID, got {err:?}"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// `describeTopics(ofTopicIds)` with `includeAuthorizedOperations`.
+///
+/// The second scenario for `describe_topics_by_ids`, which
+/// [`describe_and_delete_topics_by_ids`] drives with default options only. The
+/// by-id path is a Metadata request (`KafkaAdminClient.handleDescribeTopicsByIds`),
+/// whose `IncludeTopicAuthorizedOperations` flag is set from the option: with no
+/// authorizer the broker answers the full supported set for a TOPIC
+/// (`AuthHelper.authorizedOperations`, as the `describeCluster` scenario
+/// explains), and without the flag it leaves `Integer.MIN_VALUE`, which decodes
+/// to Java's null. Both arms are asserted, so a backend that drops the request
+/// field, or the nullable wrapper on the way back, fails here.
+async fn describe_topics_by_ids_reports_authorized_operations<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let topic = ctx.topic("admin_by_ids_ops");
+    create_topic(&admin, &topic, 1, 1).await;
+    wait_until_listed(&admin, &topic, true).await;
+    let topic_id = admin
+        .list_topics(ListTopicsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: list topics: {e}"))
+        .get(&topic)
+        .unwrap_or_else(|| panic!("{backend} backend: {topic} should be listed"))
+        .topic_id();
+
+    let with_operations = admin
+        .describe_topics_by_ids(
+            &[topic_id],
+            DescribeTopicsOptions::new()
+                .set_include_authorized_operations(true)
+                .set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe topics by ids: {e}"));
+    let desc = with_operations[&topic_id]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: describe {topic} by id: {e}"));
+    assert_eq!(desc.name(), topic, "{backend} backend");
+    let operations = desc
+        .authorized_operations()
+        .unwrap_or_else(|| panic!("{backend} backend: the broker reports the operations when they are requested"));
+    assert!(
+        operations.contains(&AclOperation::Read)
+            && operations.contains(&AclOperation::Write)
+            && operations.contains(&AclOperation::Describe),
+        "{backend} backend: with no authorizer every TOPIC operation is authorized, got {operations:?}"
+    );
+    assert!(
+        !operations.contains(&AclOperation::Unknown) && !operations.contains(&AclOperation::Any),
+        "{backend} backend: every reported operation code must decode, got {operations:?}"
+    );
+
+    let without = admin
+        .describe_topics_by_ids(&[topic_id], DescribeTopicsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe topics by ids: {e}"));
+    let desc = without[&topic_id]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: describe {topic} by id: {e}"));
+    assert_eq!(
+        desc.authorized_operations(),
+        None,
+        "{backend} backend: operations must be absent when they were not requested"
+    );
+
+    delete_and_close(&admin, &[topic]).await;
+    ctx.cleanup().await;
+}
+
+/// `listTopics(listInternal = true)` lists the internal topics the default
+/// listing hides.
+///
+/// The second scenario for `list_topics`, whose other callers all use default
+/// options. `__consumer_offsets` is the internal topic every cluster grows: a
+/// group-coordinator lookup creates it on first use, which is why the scenario
+/// first lists a (non-existent) group's offsets — that is a `FindCoordinator`
+/// for the group, and `KafkaApis.getCoordinator` creates the topic when it is
+/// missing. Java's `ListTopicsOptions.listInternal` is then the only difference
+/// between the two listings, and the internal topic must carry
+/// `isInternal() == true`.
+async fn list_topics_list_internal_includes_internal_topics<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    // A coordinator lookup creates `__consumer_offsets` if no earlier scenario
+    // on this pooled cluster did. The group has no offsets; only the lookup
+    // matters.
+    let group = ctx.group_id("g_list_internal");
+    let specs = HashMap::from([(group, ListConsumerGroupOffsetsSpec::new())]);
+    let _ = admin
+        .list_consumer_group_offsets_with_group_specs(&specs, ListConsumerGroupOffsetsOptions::new())
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let internal = loop {
+        let listings = admin
+            .list_topics(
+                ListTopicsOptions::new()
+                    .set_list_internal(true)
+                    .set_timeout_ms(Some(EXPLICIT_TIMEOUT_MS)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: list topics (internal): {e}"));
+        if let Some(listing) = listings.get(GROUP_METADATA_TOPIC_NAME) {
+            break listing.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{backend} backend: listInternal must list {GROUP_METADATA_TOPIC_NAME}, got {:?}",
+            listings.keys().collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(
+        internal.is_internal(),
+        "{backend} backend: {GROUP_METADATA_TOPIC_NAME} must be reported as internal"
+    );
+    assert_ne!(
+        internal.topic_id(),
+        Uuid::ZERO_UUID,
+        "{backend} backend: the internal listing must carry a real topic id"
+    );
+
+    let default_listing = admin
+        .list_topics(ListTopicsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: list topics: {e}"));
+    assert!(
+        !default_listing.contains_key(GROUP_METADATA_TOPIC_NAME),
+        "{backend} backend: the default listing must hide internal topics"
+    );
+    assert!(
+        default_listing.values().all(|listing| !listing.is_internal()),
+        "{backend} backend: the default listing must contain no internal topic"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 multilanguage_admin_test!(test_create_then_list_and_describe_topics, create_then_list_and_describe_topics);
 multilanguage_admin_test!(
     test_describe_topics_by_name_reports_elr_and_pages,
@@ -685,4 +925,16 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_create_topics_against_unreachable_broker_fails,
     create_topics_against_unreachable_broker_fails
+);
+multilanguage_admin_test!(
+    test_delete_topics_reports_unknown_names_and_ids_per_key,
+    delete_topics_reports_unknown_names_and_ids_per_key
+);
+multilanguage_admin_test!(
+    test_describe_topics_by_ids_reports_authorized_operations,
+    describe_topics_by_ids_reports_authorized_operations
+);
+multilanguage_admin_test!(
+    test_list_topics_list_internal_includes_internal_topics,
+    list_topics_list_internal_includes_internal_topics
 );

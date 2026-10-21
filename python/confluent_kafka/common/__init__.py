@@ -16,7 +16,7 @@
 
 The common value types, plus the types of ``common.*`` subpackages that are not
 a module of their own (CLAUDE.md, Python Binding Conventions, Modules):
-``TimestampType`` (``common.record``), ``Headers`` (``common.header``),
+``TimestampType`` (``common.record``), ``Header`` and ``Headers`` (``common.header``),
 ``KafkaMetric``, ``MetricConfig`` and ``Measurable`` (``common.metrics``),
 the ACL types of ``common.acl`` (``AclBinding``, ``AclOperation``, ...), the
 resource types of ``common.resource`` (``ResourcePattern``, ``ResourceType``,
@@ -47,6 +47,7 @@ from .delegation_token import DelegationToken as DelegationToken
 from .election_type import ElectionType as ElectionType
 from .group_state import GroupState as GroupState
 from .group_type import GroupType as GroupType
+from .header import Header as Header
 from .headers import Headers as Headers
 from .isolation_level import IsolationLevel as IsolationLevel
 from .kafka_future import AsyncKafkaFuture as AsyncKafkaFuture
@@ -90,6 +91,7 @@ __all__ = [
     "ElectionType",
     "GroupState",
     "GroupType",
+    "Header",
     "Headers",
     "IsolationLevel",
     "KafkaFuture",

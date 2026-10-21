@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.InvalidFetchSessionEpochError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
@@ -22,4 +22,7 @@ __all__ = ["InvalidFetchSessionEpochError"]
 
 class InvalidFetchSessionEpochError(RetriableError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...

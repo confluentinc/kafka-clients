@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 
 __all__ = ["ExecutionError"]
 
@@ -36,10 +37,10 @@ class ExecutionError(Exception):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = MISSING,
         cause: BaseException | None,
     ) -> None:
-        if message is not None:
+        if message is not MISSING:
             _throwable.init(self, message, cause)
         else:
             _throwable.init(self, _throwable.cause_message(cause), cause)

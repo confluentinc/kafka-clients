@@ -151,7 +151,11 @@ class LoopBinding:
     callback. An async client drains on its loop, so it is bound to one: the
     loop running when it is constructed, or else the loop of its first async
     call. A call from another loop raises ``RuntimeError``, as asyncio's own
-    primitives do once bound to a loop."""
+    primitives do once bound to a loop. ``close()`` alone may move the
+    binding to the running loop once the bound loop is closed
+    (:meth:`bind_for_close`): a closed loop never drains again, so the single
+    drainer holds, and a client whose loop ended can still be closed, as
+    Java's ``close()`` always can be."""
 
     __slots__ = ("_owner", "_loop", "_lock")
 
@@ -179,6 +183,17 @@ class LoopBinding:
             elif self._loop is not loop:
                 raise RuntimeError(f"{self._owner} is bound to a different event loop")
         return loop
+
+    def bind_for_close(self) -> asyncio.AbstractEventLoop:
+        """:meth:`bind` for ``close()``: when the bound loop is already closed,
+        the running loop becomes the bound one instead of raising. A close
+        from another loop while the bound loop is still open is refused as
+        any other call is."""
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self._loop is not None and self._loop is not loop and self._loop.is_closed():
+                self._loop = loop
+        return self.bind()
 
 
 class OffLoopPump:

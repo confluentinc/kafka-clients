@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["DescribeClassicGroupsOptions"]
@@ -41,24 +41,26 @@ class DescribeClassicGroupsOptions(AbstractOptions):
 
     __slots__ = ("_include_authorized_operations",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 include_authorized_operations: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 include_authorized_operations: bool = MISSING) -> None:
         super().__init__()
         self._include_authorized_operations = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if include_authorized_operations is not UNSET:
+        if include_authorized_operations is not MISSING:
             self.include_authorized_operations(
                 include_authorized_operations=include_authorized_operations)
 
     def include_authorized_operations(self, *,
-                                      include_authorized_operations: bool | None = None) -> Any:
+                                      include_authorized_operations: bool = MISSING) -> Any:
         """With ``include_authorized_operations``: set it and return this object.
 
         Without: the current value.
         """
-        if include_authorized_operations is None:
+        if include_authorized_operations is MISSING:
             return self._include_authorized_operations
+        if include_authorized_operations is None:  # a boolean: Java cannot pass null
+            raise TypeError("include_authorized_operations must not be None")
         self._include_authorized_operations = include_authorized_operations
         self._record("include_authorized_operations", self._include_authorized_operations)
         return self

@@ -20,7 +20,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from .scram_mechanism import ScramMechanism
@@ -43,7 +42,7 @@ class ScramCredentialInfo:
         """``mechanism``: the required mechanism; ``iterations``: the number of
         iterations used when creating the credential."""
         if mechanism is None:
-            raise NullPointerError()
+            raise TypeError("mechanism must not be None")
         self._mechanism = mechanism
         self._iterations = iterations
 

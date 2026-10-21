@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
 
+from confluent_kafka._args import MISSING
+
 from .async_producer import AsyncProducer
 
 if TYPE_CHECKING:
@@ -53,9 +55,12 @@ class AsyncKafkaProducer(AsyncProducer[K, V]):
     def __init__(self, *, configs: dict[str, Any], key_serializer: Serializer[K],
                  value_serializer: Serializer[V]) -> None: ...
 
-    def __init__(self, *, configs: dict[str, Any], key_serializer: Serializer[Any] | None = None,
-                 value_serializer: Serializer[Any] | None = None) -> None:
+    def __init__(self, *, configs: dict[str, Any], key_serializer: Serializer[Any] | None = MISSING,
+                 value_serializer: Serializer[Any] | None = MISSING) -> None:
         """See ``KafkaProducer``. The constructor does not wait, so it may run
         outside an event loop; every other waiting method is awaited on one."""
         AsyncProducer.__init__(self)
-        self._start(configs, key_serializer, value_serializer)
+        # Left out or None (Java's null, which KafkaProducer reads as "use the
+        # config key"): the config route (Signatures, the serde exception).
+        self._start(configs, None if key_serializer is MISSING else key_serializer,
+                    None if value_serializer is MISSING else value_serializer)

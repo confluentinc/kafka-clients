@@ -290,8 +290,11 @@ rebalance or commit.
 **Do NOT use `#[async_trait]` for:**
 
   - `Consumer<K, V>` itself (see above).
-  - `Deserializer<T>` / `Serializer<T>` — per-record, sync trait
-    (`fn deserialize(bytes: &[u8]) -> Result<T, Error>`).
+  - `Deserializer<T>` / `Serializer<T>` — per-record; their methods are
+    `async fn` in the trait, returning `impl Future` without a box
+    (`fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8]) -> impl
+    Future<Output = Result<T, Error>> + Send + 'a`), and their dyn-compatible
+    companions `DynDeserializer` / `DynSerializer` return an `InlineFuture`.
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing
     inside; keep generic dispatch (`<I: ConsumerInterceptor<K, V>>`) where
     feasible.
@@ -562,19 +565,23 @@ send path. The symmetric rule on the receive path:
 **`Deserializer<T>` trait shape:**
 
     pub trait Deserializer<T>: Send + Sync + 'static {
-        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
-        fn deserialize_headers(
-            &self,
-            topic: &str,
-            headers: &Headers,
-            data: &[u8],
-        ) -> Result<T, Error> {
+        fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8])
+            -> impl Future<Output = Result<T, Error>> + Send + 'a;
+        fn deserialize_with_headers<'a>(
+            &'a self,
+            topic: &'a str,
+            headers: &'a RecordHeaders,
+            data: &'a [u8],
+        ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+            let _ = headers;
             self.deserialize(topic, data)
         }
     }
 
-Sync `fn`. No `#[async_trait]`. `data: &[u8]` borrowed from the fetch
-buffer.
+An `async fn` in the trait (`impl Future`, no box). No `#[async_trait]`.
+`data: &[u8]` borrowed from the fetch buffer. Code holding a deserializer of
+any type uses the dyn-compatible `DynDeserializer`, whose futures are
+`InlineFuture`s, so a call through `dyn` allocates nothing per record for a future that fits `InlineFuture`'s buffer.
 
 **Compression handling:**
 
@@ -605,7 +612,8 @@ in a batch) only if profiling shows header allocation is hot.
 
   - `Deserializer::deserialize(&self, topic: &str, data: Vec<u8>)` —
     forces a per-record copy.
-  - `#[async_trait]` on `Deserializer`.
+  - `#[async_trait]` on `Deserializer` — it boxes a future per record; the
+    trait's own `async fn` / `impl Future` (and `InlineFuture` for `dyn`) does not.
   - `Bytes::copy_from_slice(...)` where `Bytes::slice(...)` would do.
   - `CompletedFetch { records: Vec<ConsumerRecord<K, V>> }` — pre-decoded
     records in a vec require a second pass that copies all bytes. Hold the
