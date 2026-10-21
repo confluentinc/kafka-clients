@@ -221,7 +221,9 @@ class Metrics:
                     self.total_external_metrics += 1
                     self.total_cpu += float(self.last_metrics["cpu"]["average"])
                     self.total_rss += float(self.last_metrics["rss"]["average"])
-                print(json.dumps(self.last_metrics), file=self._fd)
+                # Flushed, so the window is on disk while the run goes on:
+                # `cargo xtask perf-cloud` reports from it as it runs.
+                print(json.dumps(self.last_metrics), file=self._fd, flush=True)
 
         # Daemon so a crash on the main thread (e.g. a failed recreate_topic at
         # startup) lets the process exit instead of hanging on this sampler.

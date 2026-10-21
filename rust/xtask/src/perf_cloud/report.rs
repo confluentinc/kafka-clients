@@ -35,10 +35,33 @@
 //! cluster's limit, which then capped it rather than the client. The notes
 //! under a table name the clients that failed or did not run, and those that
 //! missed a fixed rate.
+//!
+//! While a test runs, the report so far ([`Live`], written by
+//! [`super::live`]) opens with when it was written. Its running client shows
+//! the numbers it has measured so far that need no percentiles (throughput,
+//! average and maximum latency, CPU, RSS, records), its other rows `–`; the
+//! clients yet to start are noted, and a Δ either of whose clients has not
+//! finished is `pending` (`n/a` at once when the other failed).
 
 use std::fmt::Write as _;
 
+use super::live::{SoFar, INTERVAL};
 use super::{Arm, ArmResult, Group, Metrics, Outcome, PerfTest, RunInfo, TestResult, Workload};
+
+/// A report written while the last of its tests runs.
+pub(crate) struct Live {
+    /// When, as [`crate::chaos_matrix::now_utc`] gives it.
+    pub(crate) updated: String,
+    /// The test's client running now, if any.
+    pub(crate) running: Option<Running>,
+}
+
+/// A client running now, with what it measured so far (`None` before its
+/// measurement started).
+pub(crate) struct Running {
+    pub(crate) arm: Arm,
+    pub(crate) so_far: Option<SoFar>,
+}
 
 /// Above this share of the cluster's ingress limit a result may be capped by
 /// the cluster rather than by the client.
@@ -103,6 +126,16 @@ struct Row {
     transactional: bool,
     /// A rate the cluster's ingress limit can cap.
     throughput: bool,
+    /// How to read it from a running client's numbers so far; `None` for the
+    /// rows only a finished client has.
+    so_far: Option<fn(&SoFar) -> Option<f64>>,
+}
+
+impl Row {
+    /// The row, shown for a running client too.
+    const fn so_far(self, value: fn(&SoFar) -> Option<f64>) -> Row {
+        Row { so_far: Some(value), ..self }
+    }
 }
 
 const fn row(
@@ -112,7 +145,7 @@ const fn row(
     better: Option<Better>,
     transactional: bool,
 ) -> Row {
-    Row { label, value, decimals, better, transactional, throughput: false }
+    Row { label, value, decimals, better, transactional, throughput: false, so_far: None }
 }
 
 const fn rate_row(
@@ -128,20 +161,21 @@ const fn rate_row(
         better: Some(Better::Higher),
         transactional,
         throughput: true,
+        so_far: None,
     }
 }
 
 const ROWS: &[Row] = &[
-    rate_row("Throughput (msg/s)", |m| Some(m.msg_s), 0, false),
-    rate_row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, false),
+    rate_row("Throughput (msg/s)", |m| Some(m.msg_s), 0, false).so_far(SoFar::msg_s),
+    rate_row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, false).so_far(SoFar::mib_s),
     rate_row("Transactions/s", |m| m.txn.as_ref().map(|t| t.per_s), 2, true),
-    row("Latency avg (ms)", |m| Some(m.avg), 2, Some(Better::Lower), false),
+    row("Latency avg (ms)", |m| Some(m.avg), 2, Some(Better::Lower), false).so_far(|s| s.latency_avg),
     row("Latency p50 (ms)", |m| Some(m.p50), 2, Some(Better::Lower), false),
     row("Latency p90 (ms)", |m| Some(m.p90), 2, Some(Better::Lower), false),
     row("Latency p95 (ms)", |m| Some(m.p95), 2, Some(Better::Lower), false),
     row("Latency p99 (ms)", |m| Some(m.p99), 2, Some(Better::Lower), false),
     row("Latency p99.9 (ms)", |m| Some(m.p999), 2, Some(Better::Lower), false),
-    row("Latency max (ms)", |m| Some(m.max), 2, Some(Better::Lower), false),
+    row("Latency max (ms)", |m| Some(m.max), 2, Some(Better::Lower), false).so_far(|s| s.latency_max),
     row(
         "Commit latency p50 (ms)",
         |m| m.txn.as_ref().map(|t| t.commit_p50),
@@ -156,9 +190,9 @@ const ROWS: &[Row] = &[
         Some(Better::Lower),
         true,
     ),
-    row("CPU (%)", |m| Some(m.cpu_pct), 1, Some(Better::Lower), false),
-    row("RSS (MiB)", |m| Some(m.rss_mib), 1, Some(Better::Lower), false),
-    row("Messages measured", |m| Some(m.messages), 0, None, false),
+    row("CPU (%)", |m| Some(m.cpu_pct), 1, Some(Better::Lower), false).so_far(|s| s.cpu_pct),
+    row("RSS (MiB)", |m| Some(m.rss_mib), 1, Some(Better::Lower), false).so_far(|s| s.rss_mib),
+    row("Messages measured", |m| Some(m.messages), 0, None, false).so_far(|s| Some(s.messages)),
     row("Committed transactions", |m| m.txn.as_ref().map(|t| t.committed), 0, None, true),
     row("Aborted transactions", |m| m.txn.as_ref().map(|t| t.aborted), 0, None, true),
 ];
@@ -378,9 +412,21 @@ fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
     }
 }
 
-pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
+/// The report of `results`; with `live`, the report so far, whose last test
+/// is still running.
+pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Live>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# {}", title(info.group));
+    if let Some(live) = live {
+        let _ = writeln!(
+            out,
+            "\n> In progress, updated {} and every {} while a test runs. A running client shows its throughput, \
+             average and maximum latency, CPU, RSS and messages so far; the full report replaces this one when the \
+             test finishes.",
+            start_time(&live.updated),
+            hours_minutes(INTERVAL.as_secs() / 60)
+        );
+    }
     // A run of one test (as CI runs) lists the test's settings with the
     // run's; a run of several lists each test's under its results.
     let single = match info.tests.as_slice() {
@@ -391,15 +437,16 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     if results.is_empty() {
         let _ = writeln!(out, "\nNo test has finished yet.");
     }
-    for result in results {
+    for (i, result) in results.iter().enumerate() {
+        let live = live.filter(|_| i + 1 == results.len());
         match single {
             Some(_) => {
                 let _ = writeln!(out, "\n## Results\n");
-                results_table(&mut out, info, &columns, result);
+                results_table(&mut out, info, &columns, result, live);
             },
             None => {
                 let _ = writeln!(out, "\n## {}\n", inline(&result.test.id));
-                results_table(&mut out, info, &columns, result);
+                results_table(&mut out, info, &columns, result, live);
                 let _ = writeln!(out, "\n### Parameters\n");
                 parameter_list(&mut out, &parameters(&result.test));
             },
@@ -434,8 +481,10 @@ fn inline(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
 }
 
-/// A test's results table and the notes on it.
-fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult) {
+/// A test's results table and the notes on it; with `live`, the test is
+/// still running.
+fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult, live: Option<&Live>) {
+    let running = live.and_then(|l| l.running.as_ref());
     let test = &result.test;
     let headers: Vec<&str> = columns
         .iter()
@@ -458,15 +507,34 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
         let cells: Vec<String> = columns
             .iter()
             .map(|c| match c {
-                Column::Client(arm) => match metrics_of(&result.arms, *arm).and_then(row.value) {
-                    Some(v) => number(v, row.decimals),
-                    None => "–".to_string(),
+                Column::Client(arm) => {
+                    let value = match running.filter(|r| r.arm == *arm) {
+                        Some(r) => row.so_far.zip(r.so_far.as_ref()).and_then(|(value, s)| value(s)),
+                        None => metrics_of(&result.arms, *arm).and_then(row.value),
+                    };
+                    match value {
+                        Some(v) => number(v, row.decimals),
+                        None => "–".to_string(),
+                    }
                 },
                 Column::Delta(comparison) => {
                     let Some(better) = row.better else {
                         return String::new();
                     };
                     let (candidate, baseline) = (comparison.candidate, comparison.baseline);
+                    // Until both clients finish, unless one that did cannot be
+                    // compared.
+                    let unfinished = |arm: Arm| find(&result.arms, arm).is_none();
+                    let comparable = |arm: Arm| {
+                        find(&result.arms, arm).is_none_or(|a| a.outcome == Outcome::Passed && a.metrics.is_some())
+                    };
+                    if live.is_some()
+                        && (unfinished(candidate) || unfinished(baseline))
+                        && comparable(candidate)
+                        && comparable(baseline)
+                    {
+                        return "pending".to_string();
+                    }
                     let pair = (
                         passed_metrics_of(&result.arms, candidate).and_then(row.value),
                         passed_metrics_of(&result.arms, baseline).and_then(row.value),
@@ -496,7 +564,22 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
     for &arm in &info.arms {
         let label = arm.label();
         let Some(a) = find(&result.arms, arm) else {
-            notes.push(format!("{label} did not run."));
+            notes.push(match running.filter(|r| r.arm == arm) {
+                Some(Running { so_far: Some(s), .. }) => {
+                    let measured = match (s.seconds / 60.0) as u64 {
+                        0 => "under 1 min".to_string(),
+                        minutes => hours_minutes(minutes),
+                    };
+                    format!(
+                        "{label} is running: {measured} of its {} measurement so far. Its other numbers come when \
+                         it finishes.",
+                        hours_minutes(info.duration_min)
+                    )
+                },
+                Some(Running { so_far: None, .. }) => format!("{label} is running and has not started measuring yet."),
+                None if live.is_some() => format!("{label} has not started yet."),
+                None => format!("{label} did not run."),
+            });
             continue;
         };
         if let Outcome::Failed(reason) = &a.outcome {
@@ -690,6 +773,17 @@ mod tests {
 
     /// The report of a run of `results`' tests.
     fn render(group: Group, arms: &[Arm], ingress: Option<f64>, results: &[TestResult]) -> String {
+        render_live(group, arms, ingress, results, None)
+    }
+
+    /// The report of a run of `results`' tests; with `live`, the report so far.
+    fn render_live(
+        group: Group,
+        arms: &[Arm],
+        ingress: Option<f64>,
+        results: &[TestResult],
+        live: Option<&Live>,
+    ) -> String {
         let info = RunInfo {
             group,
             arms: arms.to_vec(),
@@ -700,7 +794,7 @@ mod tests {
             facts: vec![("Cluster size".to_string(), "2 CKU".to_string())],
             ingress_mb_s: ingress,
         };
-        markdown(&info, results)
+        markdown(&info, results, live)
     }
 
     fn test(line: &str) -> PerfTest {
@@ -1184,6 +1278,217 @@ mod tests {
         assert!(!md.contains("The load producer for librdkafka"), "{md}");
         // How a consumer test measures is the documentation's, not the report's.
         assert!(!md.contains("kafka-producer-perf-test.sh"), "{md}");
+    }
+
+    fn so_far(msg_s: f64, minutes: f64) -> SoFar {
+        let seconds = minutes * 60.0;
+        SoFar {
+            seconds,
+            messages: msg_s * seconds,
+            bytes: msg_s * seconds * 1024.0,
+            latency_avg: Some(3.25),
+            latency_max: Some(40.0),
+            cpu_pct: Some(55.5),
+            rss_mib: Some(120.3),
+        }
+    }
+
+    #[test]
+    fn live_markdown_shows_the_running_client_so_far() {
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1_000.0, 9.0)))],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let live = Live {
+            updated: "2026-10-21T10:05:00Z".to_string(),
+            running: Some(Running { arm: Arm::Librdkafka, so_far: Some(so_far(2_000.0, 12.5)) }),
+        };
+        let md = render_live(Group::Rust, &all, None, &results, Some(&live));
+        assert!(
+            md.starts_with(
+                "# Rust client performance results\n\n> In progress, updated 2026-10-21 10:05:00 UTC and every 5 \
+                 min while a test runs. A running client shows its throughput, average and maximum latency, CPU, \
+                 RSS and messages so far; the full report replaces this one when the test finishes.\n\n## \
+                 Results\n"
+            ),
+            "{md}"
+        );
+        // The finished client's numbers, the running one's so far, and no Δ
+        // until both of its clients finish.
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 2,000 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (MiB/s) |"),
+            "| Throughput (MiB/s) | 0.98 | 1.95 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency avg (ms) |"),
+            "| Latency avg (ms) | 2.50 | 3.25 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency p99 (ms) |"),
+            "| Latency p99 (ms) | 9.00 | – | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency max (ms) |"),
+            "| Latency max (ms) | 20.00 | 40.00 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| CPU (%) |"),
+            "| CPU (%) | 50.0 | 55.5 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| RSS (MiB) |"),
+            "| RSS (MiB) | 100.0 | 120.3 | – | pending | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Messages measured |"),
+            "| Messages measured | 60,000 | 1,500,000 | – |  |  |"
+        );
+        assert!(
+            md.contains(
+                "\n**Notes**\n\n\
+                 - librdkafka is running: 12 min of its 30 min measurement so far. Its other numbers come when it \
+                 finishes.\n\
+                 - Java has not started yet.\n\
+                 \n## Parameters\n"
+            ),
+            "{md}"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn live_markdown_compares_the_clients_that_finished() {
+        let results = vec![TestResult {
+            test: test("txn rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(txn_metrics("rust-txn", 1_000.0, 40.0))),
+                arm(
+                    Arm::Librdkafka,
+                    Outcome::Passed,
+                    Some(txn_metrics("librdkafka-txn", 1_000.0, 50.0)),
+                ),
+            ],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let live = Live {
+            updated: "2026-10-21T10:05:00Z".to_string(),
+            running: Some(Running { arm: Arm::Java, so_far: None }),
+        };
+        let md = render_live(Group::Rust, &all, None, &results, Some(&live));
+        assert_eq!(
+            line_starting(&md, "| Commit latency p99 (ms) |"),
+            "| Commit latency p99 (ms) | 40.00 | 50.00 | – | 🟢 -20.0% | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 1,000 | – | 🟢 +0.0% | pending |"
+        );
+        assert!(
+            md.contains("\n**Notes**\n\n- Java is running and has not started measuring yet.\n\n## Parameters\n"),
+            "{md}"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn live_markdown_runs_only_its_last_test() {
+        let results = vec![
+            TestResult {
+                test: test("a rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+                arms: vec![arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1_000.0, 9.0)))],
+            },
+            TestResult { test: test("b rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"), arms: vec![] },
+        ];
+        let live = Live { updated: "2026-10-21T10:05:00Z".to_string(), running: None };
+        let md = render_live(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results, Some(&live));
+        let (a, b) = md.split_once("\n## b\n").unwrap();
+        // The finished test's missing client did not run; the running test's
+        // have not started.
+        assert!(a.contains("- librdkafka did not run.\n") && !a.contains("pending"), "{md}");
+        assert_eq!(
+            line_starting(b, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | – | – | pending |"
+        );
+        assert!(
+            b.contains("- Rust has not started yet.\n- librdkafka has not started yet.\n"),
+            "{md}"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn live_markdown_notes_a_failure_beside_the_running_client() {
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            arms: vec![arm(
+                Arm::Rust,
+                Outcome::Failed("harness exited with 1".to_string()),
+                Some(metrics("rust", 1_000.0, 9.0)),
+            )],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let live = Live {
+            updated: "2026-10-21T10:05:00Z".to_string(),
+            running: Some(Running { arm: Arm::Librdkafka, so_far: Some(so_far(2_000.0, 0.5)) }),
+        };
+        let md = render_live(Group::Rust, &all, None, &results, Some(&live));
+        // A failed client is never compared, so its Δ is not pending.
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 2,000 | – | n/a | pending |"
+        );
+        // A running client below the rate gets no note until it finishes.
+        assert!(
+            md.contains(
+                "\n**Notes**\n\n\
+                 - Rust failed: harness exited with 1. Its results are from a partial run and are not compared.\n\
+                 - librdkafka is running: under 1 min of its 30 min measurement so far. Its other numbers come when \
+                 it finishes.\n\
+                 - Java has not started yet.\n\
+                 \n## Parameters\n"
+            ),
+            "{md}"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn live_markdown_compares_a_python_pair_that_finished() {
+        let results = vec![TestResult {
+            test: test("t python PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::PythonSyncRust, Outcome::Passed, Some(metrics("a", 1_000.0, 9.0))),
+                arm(Arm::PythonSyncLibrdkafka, Outcome::Passed, Some(metrics("b", 1_000.0, 10.0))),
+            ],
+        }];
+        // No CPU or RSS sample yet.
+        let so_far = SoFar { cpu_pct: None, rss_mib: None, ..so_far(500.0, 2.0) };
+        let live = Live {
+            updated: "2026-10-21T10:05:00Z".to_string(),
+            running: Some(Running { arm: Arm::PythonAsyncRust, so_far: Some(so_far) }),
+        };
+        let md = render_live(Group::Python, Group::Python.arms(), None, &results, Some(&live));
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 1,000 | 500 | – | 🟢 +0.0% | pending |"
+        );
+        assert_eq!(
+            line_starting(&md, "| CPU (%) |"),
+            "| CPU (%) | 50.0 | 50.0 | – | – | 🟢 +0.0% | pending |"
+        );
+        assert!(
+            md.contains(
+                "- Python async (Rust) is running: 2 min of its 30 min measurement so far. Its other numbers come \
+                 when it finishes.\n- Python async (librdkafka) has not started yet.\n"
+            ),
+            "{md}"
+        );
+        assert_rectangular(&md);
     }
 
     #[test]
