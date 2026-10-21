@@ -9438,4 +9438,60 @@ mod tests {
             .expect("the record must be delivered after the drop");
         assert_eq!(0, metadata.offset());
     }
+
+    /// `buffer.memory=0` builds a producer, as Java's `atLeast(0)` validator
+    /// and `BufferPool` constructor allow, and each send fails in
+    /// `ensureValidRecordSize` (`KafkaProducer.java:1243-1251`) with Java's
+    /// message, under both allocation strategies. Construction used to panic
+    /// with "Buffer pool memory must be positive".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_producer_with_no_buffer_memory_fails_each_send_as_java_does() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "no-buffer-memory-topic";
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        for strategy in [
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+        ] {
+            let props = HashMap::from([
+                ("bootstrap.servers".to_string(), broker.bootstrap()),
+                (ProducerConfig::BUFFER_MEMORY_CONFIG.to_string(), "0".to_string()),
+                (
+                    ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+                    strategy.to_string(),
+                ),
+                // Non-idempotent, so the Sender does not first wait on an
+                // InitProducerId the fake never answers.
+                ("enable.idempotence".to_string(), "false".to_string()),
+            ]);
+            let config = ProducerConfig::new(&props).expect("buffer.memory=0 is a valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("a producer with no buffer memory constructs");
+            let future = producer
+                .send(ProducerRecord::new(TOPIC.to_string(), Some("value".to_string())))
+                .await
+                .expect("metadata arrives from the fake broker");
+            let err = future.get().await.expect_err("no record fits in no buffer memory");
+            assert!(matches!(err, Error::RecordTooLarge(_)), "{strategy}: {err:?}");
+            let size = AbstractRecords::estimate_size_in_bytes_upper_bound(
+                RecordBatch::CURRENT_MAGIC_VALUE,
+                CompressionType::None,
+                None,
+                Some(b"value"),
+                &[],
+            );
+            assert_eq!(
+                format!(
+                    "The message is {size} bytes when serialized which is larger than the total memory buffer you \
+                     have configured with the buffer.memory configuration."
+                ),
+                err.message(),
+                "{strategy}"
+            );
+            producer.close_with_timeout(Duration::ZERO).await.expect("close");
+        }
+    }
 }
