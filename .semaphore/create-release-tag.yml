@@ -1,0 +1,301 @@
+version: v1.0
+name: create-release-tag
+# Target of the manual "Create release tag" promotion in semaphore.yml. Tags
+# the commit of this master build for the release of each client whose
+# version is entered, and pushes the tags, which start those releases:
+# semaphore.yml runs on each tag and, once every CI job passes, that client's
+# release blocks publish it.
+#   - RUST_VERSION: the tag is rust/<RUST_VERSION>, and "Release (Rust):"
+#     publishes ${CRATE} to crates.io.
+#   - PYTHON_VERSION: the tag is python/<PYTHON_VERSION>, and "Release
+#     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
+#     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
+#     publishes it to PyPI.
+#   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
+#     like any other, and its tag build tests and packages the client without
+#     publishing it.
+# A client whose version is left empty is not released; at least one version
+# must be entered. The tags are created only if all of the following hold, for
+# every client entered:
+#   - the build is of the master branch;
+#   - the version is a valid release version for the client and equals its
+#     version at this commit: [package] version in rust/Cargo.toml
+#     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N
+#     or -dev.N), or [project] version in python/pyproject.toml
+#     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
+#     optionally by .devN);
+#   - the tag does not yet exist, and, unless it is a dev version, the version
+#     is new: for rust, higher than every version on crates.io; for python, not
+#     yet on any index it is published to (Test PyPI, and PyPI for a final
+#     version);
+#   - every job in REQUIRED_CI_JOBS passed on this commit.
+# If any check fails, no tag is created, so releasing two clients is all or
+# nothing. The publish blocks repeat the tag, version and registry checks on
+# each tag build, and run only after every CI block of that build has passed,
+# so they also apply to a tag pushed by other means. The checks here avoid
+# creating a tag that could never be published.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+global_job_config:
+  env_vars:
+    - name: CRATE
+      value: confluent-kafka
+    - name: PYPI_PACKAGE
+      value: confluent-kafka
+    # The jobs of semaphore.yml that must pass before a commit is tagged, by
+    # their exact names, separated by ';'. The list must stay in sync with
+    # semaphore.yml: a job that reports a result but is not listed, or is
+    # listed but reports no result, blocks the release until the list is
+    # updated. The release blocks never run on a master build, so they are not
+    # listed.
+    - name: REQUIRED_CI_JOBS
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64)"
+
+blocks:
+  - name: "Create release tag"
+    dependencies: []
+    execution_time_limit:
+      minutes: 10
+    task:
+      jobs:
+        - name: "Tag and push"
+          commands:
+            - checkout
+            # refuse: fails the job with a message stating why no tag was
+            # created. use_client <client>: sets the variables that the checks
+            # below read for that client (rust or python).
+            #
+            # The version patterns are those of the `run` conditions of each
+            # client's release blocks in semaphore.yml, without the tag prefix.
+            - |
+              refuse() {
+                echo "Refusing to create the release tags: $*" >&2
+                exit 1
+              }
+              use_client() {
+                client=$1
+                case "${client}" in
+                  rust)
+                    version_param=RUST_VERSION
+                    version=${RUST_VERSION:-}
+                    version_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc|dev)\.[0-9]+)?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N or -dev.N'
+                    dev_pattern='-dev\.[0-9]+$'
+                    manifest=rust/Cargo.toml
+                    manifest_key=package
+                    ;;
+                  python)
+                    version_param=PYTHON_VERSION
+                    version=${PYTHON_VERSION:-}
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then optionally by .devN'
+                    dev_pattern='\.dev[0-9]+$'
+                    manifest=python/pyproject.toml
+                    manifest_key=project
+                    ;;
+                esac
+                tag="${client}/${version}"
+                # A dev version is tested and packaged, never published.
+                dev=""
+                [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
+                return 0
+              }
+            # A pull request build reports the target branch in
+            # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. A build
+            # whose jobs were redirected to another branch
+            # (SEMAPHORE_GIT_BRANCH_CHECKOUT, see semaphore.yml) did not test
+            # the commit checked out here.
+            - |
+              if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
+                refuse "only a master branch build can be tagged for release (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')"
+              fi
+              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
+                refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test master"
+              fi
+            # The clients to release are those whose version was entered. Each
+            # version must be valid and equal the client's version at this
+            # commit. /usr/bin/python3 is the image's system Python (3.12 on
+            # Ubuntu 24.04), which provides tomllib.
+            - |
+              clients=()
+              [ -z "${RUST_VERSION:-}" ] || clients+=(rust)
+              [ -z "${PYTHON_VERSION:-}" ] || clients+=(python)
+              if [ "${#clients[@]}" -eq 0 ]; then
+                refuse "RUST_VERSION and PYTHON_VERSION are both empty; enter the version of each client to release"
+              fi
+              head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
+              for client in "${clients[@]}"; do
+                use_client "${client}"
+                if ! [[ "${version}" =~ ${version_pattern} ]]; then
+                  refuse "${version_param} '${version}' is not a ${client} release version (${version_form})"
+                fi
+                manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))[sys.argv[2]].get("version"); print(v) if isinstance(v, str) else sys.exit(f"[{sys.argv[2]}] version must be a literal string")' "${manifest}" "${manifest_key}") \
+                  || refuse "could not read [${manifest_key}] version from ${manifest}"
+                if [ "${version}" != "${manifest_version}" ]; then
+                  refuse "${version_param} is '${version}', but ${manifest} at this commit has '${manifest_version}'; merge the version bump to master first, then promote its build"
+                fi
+              done
+            # Tags are never moved or reused, because a published version
+            # cannot be replaced. A tag whose release was not published may be
+            # deleted manually before a retry.
+            - |
+              for client in "${clients[@]}"; do
+                use_client "${client}"
+                existing=$(git ls-remote --tags origin "refs/tags/${tag}") \
+                  || refuse "could not read tags from origin"
+                if [ -n "${existing}" ]; then
+                  refuse "tag ${tag} already exists on origin (${existing%%[[:space:]]*}); bump [${manifest_key}] version in ${manifest} for a new release"
+                fi
+              done
+            # Applies the same version policy as each client's publish block in
+            # semaphore.yml. A version already published, whether yanked or
+            # not, cannot be published again. A crate version must also be
+            # higher than every published version, by Semantic Versioning
+            # precedence (0.2.0-alpha.1 < 0.2.0 < 0.10.0). A Python version
+            # need only be new on each index it is published to, Test PyPI and,
+            # for a final version, PyPI: as with Apache Kafka, a patch of an
+            # older minor version can follow a newer minor version (4.4.101
+            # after 4.5.0). A dev version is never published, so it is not
+            # compared with the registries. `fetch` writes the body of a URL to a file, or
+            # empties the file if the URL does not exist; it fails on any other
+            # status, and on an empty body, which no existing page has.
+            - |
+              fetch() {
+                local status
+                status=$(curl -sS --retry 3 --retry-delay 5 -o "$2" -w '%{http_code}' "${@:3}" "$1") || return 1
+                case "${status}" in
+                  200) [ -s "$2" ] || { echo "$1 returned an empty body" >&2; return 1; } ;;
+                  404) : > "$2" ;;
+                  *) echo "$1 returned HTTP ${status}" >&2; return 1 ;;
+                esac
+              }
+              published_file=$(mktemp) && body=$(mktemp) || refuse "could not create a temporary file"
+              for client in "${clients[@]}"; do
+                use_client "${client}"
+                if [ -n "${dev}" ]; then
+                  echo "${tag} is a dev version, which is never published; not checking the registries"
+                  continue
+                fi
+                case "${client}" in
+                  rust)
+                    fetch "https://index.crates.io/${CRATE:0:2}/${CRATE:2:2}/${CRATE}" "${body}" \
+                      || refuse "could not read the crates.io index to confirm that ${CRATE} ${version} is new"
+                    /usr/bin/python3 -c 'import json, sys; [print(json.loads(line)["vers"]) for line in open(sys.argv[1]) if line.strip()]' "${body}" > "${published_file}" \
+                      || refuse "could not read the versions of ${CRATE} on crates.io"
+                    not_lower=$(/usr/bin/python3 - "${version}" "${published_file}" <<'PYTHON'
+              import sys
+
+              def semver(version):
+                  # Semantic Versioning 2.0.0 precedence. Build metadata is ignored.
+                  core, _, pre = version.split("+", 1)[0].partition("-")
+                  release = tuple(int(part) for part in core.split("."))
+                  if not pre:
+                      return (release, 1, ())
+                  identifiers = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+                  return (release, 0, identifiers)
+
+              candidate = semver(sys.argv[1])
+              published = [line.strip() for line in open(sys.argv[2]) if line.strip()]
+              not_lower = [v for v in published if semver(v) >= candidate]
+              if not_lower:
+                  print(max(not_lower, key=semver))
+              PYTHON
+                    ) || refuse "could not compare ${version} with the versions on crates.io"
+                    if [ -n "${not_lower}" ]; then
+                      refuse "${version} is not higher than ${not_lower}, which is already on crates.io"
+                    fi
+                    ;;
+                  python)
+                    indexes=(https://test.pypi.org)
+                    [[ "${version}" =~ (a|b|rc)[0-9]+$ ]] || indexes+=(https://pypi.org)
+                    for index in "${indexes[@]}"; do
+                      fetch "${index}/simple/${PYPI_PACKAGE}/" "${body}" -H 'Accept: application/vnd.pypi.simple.v1+json' \
+                        || refuse "could not read ${index} to confirm that ${PYPI_PACKAGE} ${version} is new"
+                      /usr/bin/python3 -c 'import json, os, sys; [print(v) for v in (json.load(open(sys.argv[1]))["versions"] if os.path.getsize(sys.argv[1]) else [])]' "${body}" > "${published_file}" \
+                        || refuse "could not read the versions of ${PYPI_PACKAGE} on ${index}"
+                      if grep -qxF -- "${version}" "${published_file}"; then
+                        refuse "${PYPI_PACKAGE} ${version} is already on ${index}; bump [project] version in python/pyproject.toml for a new release"
+                      fi
+                    done
+                    ;;
+                esac
+              done
+            # Each job in REQUIRED_CI_JOBS must have reported `passed` for
+            # exactly this commit, and every job that reported a result must be
+            # in the list, so a job added to semaphore.yml cannot be omitted
+            # unintentionally. The job-name mapping matches the global epilogue
+            # in semaphore.yml. A tag on a failing commit would rerun CI and
+            # never be published.
+            - |
+              results_dir=$(mktemp -d) || refuse "could not create a temporary directory"
+              artifact pull workflow ci-result --destination "${results_dir}/ci-result" --force >/dev/null \
+                || refuse "this build has no recorded CI results; wait for build-test-release to finish, then promote again"
+              declare -A required=() reported=()
+              while IFS= read -r job; do
+                [ -n "${job}" ] || continue
+                marker=$(printf '%s' "${job}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+                [ -z "${required[${marker}]+set}" ] \
+                  || refuse "two jobs in REQUIRED_CI_JOBS map to the same result name '${marker}'; rename one of them in semaphore.yml"
+                required[${marker}]=${job}
+              done <<< "$(printf '%s' "${REQUIRED_CI_JOBS}" | tr ';' '\n')"
+              while IFS= read -r file; do
+                reported[$(basename "${file}")]=${file}
+              done < <(find "${results_dir}" -type f)
+              problems=""
+              for marker in "${!required[@]}"; do
+                job=${required[${marker}]}
+                if [ -z "${reported[${marker}]+set}" ]; then
+                  problems+="  - ${job}: no result (still running, stopped, or the result upload failed)\n"
+                  continue
+                fi
+                read -r result sha _ < "${reported[${marker}]}"
+                if [ "${result}" = "running" ]; then
+                  problems+="  - ${job}: started but recorded no result (still running, stopped, or its result upload failed)\n"
+                elif [ "${result}" != "passed" ]; then
+                  problems+="  - ${job}: ${result:-empty result}\n"
+                elif [ "${sha}" != "${head_sha}" ]; then
+                  problems+="  - ${job}: passed on ${sha}, not on ${head_sha}\n"
+                fi
+              done
+              for marker in "${!reported[@]}"; do
+                [ -n "${required[${marker}]+set}" ] \
+                  || problems+="  - ${marker}: reported a result but is not in REQUIRED_CI_JOBS; add it to REQUIRED_CI_JOBS in create-release-tag.yml\n"
+              done
+              if [ -n "${problems}" ]; then
+                printf 'Refusing to create the release tags: the CI build of this commit is not fully green:\n%bRerun the failed or missing jobs, then promote again.\n' "${problems}" >&2
+                exit 1
+              fi
+              echo "All ${#required[@]} required CI jobs passed on ${head_sha}"
+            # Creates a lightweight tag per client, as the other Confluent
+            # clients do, and pushes them in one atomic push: either every tag
+            # reaches origin or none does. Each pushed tag starts its own tag
+            # build. GitHub sends no push event for a push of more than three
+            # tags, so with more clients the tags must be pushed in groups of
+            # at most three. Semaphore's pre-job setup configures
+            # `pushInsteadOf` so that `git push` to this repository uses the
+            # job's GitHub write token; a branch job receives one for its own
+            # repository without any change to service.yml (see "GitHub Token
+            # Authentication Guide for CI Jobs" in the TOOLS space of the
+            # Confluent wiki).
+            - |
+              refs=()
+              for client in "${clients[@]}"; do
+                use_client "${client}"
+                git tag "${tag}" "${head_sha}" || refuse "could not create tag ${tag}"
+                refs+=("refs/tags/${tag}")
+              done
+              git push --atomic origin "${refs[@]}" || refuse "could not push ${refs[*]} to origin; no tag was pushed"
+            - |
+              for client in "${clients[@]}"; do
+                use_client "${client}"
+                if [ -n "${dev}" ]; then
+                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${client} ${version}; a dev version publishes nothing."
+                  continue
+                fi
+                case "${client}" in
+                  rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
+                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI. For a final version, then run its \"Publish to PyPI\" promotion to publish to PyPI." ;;
+                esac
+              done
