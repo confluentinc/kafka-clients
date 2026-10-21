@@ -988,6 +988,13 @@ impl ConsumerConfig {
     ///   without a `group.id`.
     /// - The error of `JoinGroupRequest.validateGroupInstanceId` for an invalid
     ///   `group.instance.id` when `client.id` is derived from it.
+    /// - A
+    ///   [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
+    ///   ([`Error::local_unsupported_operation`]) when a SASL
+    ///   `security.protocol` has a `sasl.mechanism` other than `PLAIN`: Java
+    ///   accepts any mechanism name, but this client implements only PLAIN,
+    ///   and a client built with another mechanism would fail only later, at
+    ///   authentication.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let config = Self::build(string_originals(props), None)?;

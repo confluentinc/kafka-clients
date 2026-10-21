@@ -422,6 +422,13 @@ impl AdminClientConfig {
     /// accepts it (KIP-919), but this client does not implement bootstrapping
     /// through controllers, and silently ignoring the key would leave the
     /// client with no bootstrap address at all.
+    ///
+    /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
+    /// returns a
+    /// [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
+    /// ([`Error::local_unsupported_operation`]): Java accepts any mechanism
+    /// name, but this client implements only PLAIN, and a client built
+    /// with another mechanism would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let config = Self::build(string_originals(props), true)?;

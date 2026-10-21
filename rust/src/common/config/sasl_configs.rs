@@ -100,7 +100,7 @@ pub struct SaslConfigs {
     /// via [`SaslConfigs::resolve_username`] and [`SaslConfigs::resolve_password`].
     ///
     /// A [`Password`] because Java defines `sasl.jaas.config` as
-    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:380`): the string embeds
+    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:398`): the string embeds
     /// the credentials, so every rendering of it is `[hidden]`.
     pub(crate) jaas_config: Option<Password>,
 

@@ -558,7 +558,7 @@ mod tests {
     }
 
     /// `ssl.enabled.protocols` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:130`):
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:132`):
     /// an empty protocol is rejected with `ConfigDef`'s exact message,
     /// duplicates are removed, and an empty list is allowed.
     #[test]

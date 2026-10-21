@@ -1103,6 +1103,13 @@ impl ProducerConfig {
     /// above 5 with idempotence enabled); when `transactional.id` is set
     /// without idempotence; and when `transaction.timeout.ms` is set with
     /// `transaction.two.phase.commit.enable=true`.
+    ///
+    /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
+    /// returns a
+    /// [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
+    /// ([`Error::local_unsupported_operation`]): Java accepts any mechanism
+    /// name, but this client implements only PLAIN, and a client built
+    /// with another mechanism would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let config = Self::build(string_originals(props), None)?;
@@ -3002,11 +3009,11 @@ mod tests {
 
     /// `{:?}` renders no secret the user passed, and `originals` only as its
     /// key set. The props hold the four `Type.PASSWORD` keys this client
-    /// parses (`SslConfigs.java:137-139`, `SaslConfigs.java:380`), the five
-    /// `Type.PASSWORD` keys it does not define (the SSL store and key
-    /// passwords, `SslConfigs.java:135-136`, `:142`, and two OAuth keys,
-    /// `SaslConfigs.java:392`, `:402`), and an unknown key carrying a
-    /// serializer credential: Java
+    /// parses (`SslConfigs.java:137-139`, `SaslConfigs.java:398`), the three
+    /// SSL store and key password keys it does not define
+    /// (`SslConfigs.java:135-136`, `:142`), the two OAuth `Type.PASSWORD` keys
+    /// it defines but does not parse (`SaslConfigs.java:410`, `:420`), and an
+    /// unknown key carrying a serializer credential: Java
     /// prints none of those values. The parsed secrets render as `[hidden]`
     /// through their typed fields, and the non-secret `bootstrap.servers` value
     /// stays visible through its typed field only.

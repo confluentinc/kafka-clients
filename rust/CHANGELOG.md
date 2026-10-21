@@ -265,10 +265,12 @@ breaking changes.
   one through `get_string` fails with `Unknown configuration`. An encrypted
   PEM private key (`ENCRYPTED PRIVATE KEY`, or a legacy block with
   `Proc-Type: 4,ENCRYPTED`) now fails the clients' constructors with a
-  `ConfigError` `Failed to create channel builder: Encrypted PEM private keys
-  are not supported by this client; provide an unencrypted PKCS#8 key`, where
-  it used to fail with `No private key found in inline keystore key` or a PEM
-  parse error.
+  `ConfigError` cause, `Failed to create channel builder: Encrypted PEM private
+  keys are not supported by this client; provide an unencrypted PKCS#8 key`,
+  where it used to fail with `No private key found in inline keystore key`,
+  `No private key found in keystore file '<path>'` or a PEM parse error; the
+  outer error ("Failed to construct kafka producer", "Failed to construct kafka
+  consumer", "Failed to create new KafkaAdminClient") is unchanged.
 - **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is no longer
   defined, and `SslConfigs::SSL_CIPHER_SUITES_CONFIG` is removed. The clients
   always use rustls's default cipher suites, so the key was read only to log a
