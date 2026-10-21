@@ -327,6 +327,7 @@ impl<R: BufRead> Read for DecompressingReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Error;
     use crate::common::record::internal::CompressionType;
     use std::io::{Read, Write};
 
@@ -386,6 +387,68 @@ mod tests {
     #[test]
     fn test_gzip_default_level_valid() {
         assert!(Compression::gzip().level(-1).is_ok());
+    }
+
+    /// Translated from `GzipCompressionTest.testLevelValidator`, asserting the
+    /// `ConfigException` message too.
+    #[test]
+    fn test_level_validator() {
+        let gzip = CompressionType::Gzip;
+        let (min, max, default) = (
+            gzip.min_level().unwrap(),
+            gzip.max_level().unwrap(),
+            gzip.default_level().unwrap(),
+        );
+        let validator = gzip.level_validator().unwrap();
+        for level in min..=max {
+            validator("", level).unwrap();
+        }
+        validator("", default).unwrap();
+        for level in [min - 1, max + 1] {
+            let err = validator("", level).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{err:?}");
+            assert_eq!(
+                format!("Invalid value {level} for configuration : Value must be between 1 and 9 or equal to -1"),
+                err.message()
+            );
+        }
+    }
+
+    /// Java's lz4 and zstd `levelValidator()` is `ConfigDef.Range.between(minLevel,
+    /// maxLevel)`, which accepts both bounds and rejects a value past either with
+    /// `Range`'s messages; a type without levels throws
+    /// `UnsupportedOperationException` (`CompressionType.java:187-189`).
+    #[test]
+    fn test_lz4_and_zstd_level_validators_are_ranges() {
+        for (compression_type, min, max) in [(CompressionType::Lz4, 1, 17), (CompressionType::Zstd, -131072, 22)] {
+            let name = "compression.level";
+            let validator = compression_type.level_validator().unwrap();
+            validator(name, min).unwrap();
+            validator(name, max).unwrap();
+            for (level, message) in [
+                (min - 1, format!("Value must be at least {min}")),
+                (max + 1, format!("Value must be no more than {max}")),
+            ] {
+                let err = validator(name, level).unwrap_err();
+                assert!(matches!(err, Error::Config(_)), "{err:?}");
+                assert_eq!(
+                    format!("Invalid value {level} for configuration {name}: {message}"),
+                    err.message()
+                );
+            }
+        }
+        for compression_type in [CompressionType::None, CompressionType::Snappy] {
+            let Err(err) = compression_type.level_validator() else {
+                panic!("{} has no compression levels", compression_type.name());
+            };
+            assert_eq!(
+                format!(
+                    "Compression levels are not defined for this compression type: {}",
+                    compression_type.name()
+                ),
+                err.message()
+            );
+        }
     }
 
     #[test]

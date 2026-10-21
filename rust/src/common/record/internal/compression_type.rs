@@ -168,6 +168,48 @@ impl CompressionType {
         }
     }
 
+    /// The validator of this type's `compression.<type>.level` config: called
+    /// with the config name and a level, it fails as Java's validator's
+    /// `ensureValid(name, value)` does. Gzip accepts `[1,...,9]` or -1
+    /// (`Deflater.DEFAULT_COMPRESSION`); lz4 and zstd are
+    /// `ConfigDef.Range.between(minLevel, maxLevel)`.
+    ///
+    /// Java returns a `ConfigDef.Validator`; this crate has none, so the
+    /// validator is the function it calls.
+    ///
+    /// # Errors
+    ///
+    /// For a type without compression levels, the error for Java's
+    /// `UnsupportedOperationException`. The validator fails with
+    /// [`Error::Config`] and the message of the `ConfigException` Java's
+    /// throws.
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#levelValidator")]
+    pub(crate) fn level_validator(self) -> Result<impl Fn(&str, i32) -> Result<(), Error>, Error> {
+        let (Some(min), Some(max), Some(default)) = (self.min_level(), self.max_level(), self.default_level()) else {
+            return Err(Error::unsupported_version(format!(
+                "Compression levels are not defined for this compression type: {}",
+                self.name()
+            )));
+        };
+        let gzip = matches!(self, Self::Gzip);
+        Ok(move |name: &str, level: i32| {
+            let message = if gzip {
+                (level > max || (level < min && level != default))
+                    .then(|| format!("Value must be between {min} and {max} or equal to {default}"))
+            } else if level < min {
+                Some(format!("Value must be at least {min}"))
+            } else if level > max {
+                Some(format!("Value must be no more than {max}"))
+            } else {
+                Option::None
+            };
+            match message {
+                Some(message) => Err(Error::config_name_value_message(name, level, message)),
+                Option::None => Ok(()),
+            }
+        })
+    }
+
     /// Returns all compression type values.
     pub fn values() -> &'static [CompressionType] {
         &[Self::None, Self::Gzip, Self::Snappy, Self::Lz4, Self::Zstd]
