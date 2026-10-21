@@ -1020,6 +1020,12 @@ impl CommitRequestManager {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             guard.pending.unsent_offset_commits.push_back(request);
         }
+        // Java queues this request on the network thread before the managers
+        // are polled in the same `runOnce`, so it goes out at once. Rust
+        // reaches here from the spawned AsyncPoll task (reconcile), i.e. while
+        // the bg loop is parked in its network poll: wake it so the commit is
+        // sent now rather than after the poll timeout or an unrelated wake.
+        wake_background_task(&self.inner);
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         // A `Weak`: see "Retry drivers" below.
         let inner = Arc::downgrade(&self.inner);
@@ -1271,6 +1277,14 @@ impl CommitRequestManager {
             guard.pending.unsent_offset_fetches.push(request);
             chained
         };
+        // Java queues this request on the network thread before the managers
+        // are polled in the same `runOnce`, so it goes out at once. Rust
+        // reaches here from the spawned AsyncPoll task
+        // (`OffsetsRequestManager::init_with_committed_offsets_if_needed`),
+        // while the bg loop is parked in its network poll: wake it so the
+        // fetch is sent now rather than after the poll timeout or an
+        // unrelated wake. The guard above is already dropped.
+        wake_background_task(&self.inner);
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         // A `Weak`: see "Retry drivers" below.
         let inner = Arc::downgrade(&self.inner);
@@ -2630,6 +2644,15 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     let mut guard = result_tx.lock().expect("auto-commit-sync tx poisoned");
     if let Some(tx) = guard.take() {
         let _ = tx.send(outcome);
+    }
+    drop(guard);
+    // The bg loop parks the reconciliation on this result
+    // (`ConsumerMembershipManager::drive_pending_reconcile` `try_recv`s it).
+    // Java resumes it from the commit future's `whenComplete`, inside
+    // `client.poll` on the network thread; this driver runs on a spawned task,
+    // so wake the loop to resume the reconciliation now.
+    if let Some(inner) = manager.upgrade() {
+        wake_background_task(&inner);
     }
 }
 
@@ -5638,6 +5661,12 @@ mod tests {
         let tp = topic_partition("t1", 0);
         // Far deadline: the driver has time to retry, so it re-enqueues.
         let _public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), 60_000, 0);
+        // The initial enqueue wakes the bg task too (it may be reached from
+        // the spawned AsyncPoll task); consume that permit so only the retry's
+        // own wake can satisfy the wait below.
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+            .await
+            .expect("queuing the OffsetFetch must wake the bg task");
 
         let unsent = poll_one_unsent(&manager, &coordinator, 0);
         let woken = notify.notified();
@@ -5704,6 +5733,12 @@ mod tests {
             s.seek(&tp, 100).expect("seek");
         }
         let _public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+        // The initial enqueue wakes the bg task too (it is reached from the
+        // spawned AsyncPoll task's reconcile); consume that permit so only the
+        // retry's own wake can satisfy the wait below.
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+            .await
+            .expect("queuing the pre-rebalance auto-commit must wake the bg task");
 
         let coordinator = coordinator_with_node();
         let unsent = poll_one_unsent(&manager, &coordinator, 0);

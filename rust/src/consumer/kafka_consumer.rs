@@ -742,6 +742,82 @@ mod tests {
         consumer.close().await.expect("close");
     }
 
+    /// A manually assigned consumer with a group: the first `poll()` fetches
+    /// the committed offset and then the records.
+    async fn time_to_first_records_after_assign(retry_backoff_ms: Option<&str>) -> Duration {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        broker.set_committed_offset(50);
+        broker.answer_fetch(FetchAnswer { log_first_offset: 1, log_last_offset: 99, offset: 50, count: 5 });
+        let mut props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("group.id".to_string(), "first-poll-group".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+            // The fake does not answer OffsetCommit; keep auto-commit out of
+            // the timing and out of close().
+            ("enable.auto.commit".to_string(), "false".to_string()),
+        ]);
+        if let Some(backoff) = retry_backoff_ms {
+            props.insert("retry.backoff.ms".to_string(), backoff.to_string());
+            props.insert("retry.backoff.max.ms".to_string(), backoff.to_string());
+        }
+        let mut consumer = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("constructs against the fake broker");
+        consumer.assign(vec![tp0()]).await.expect("assign");
+        // Let the metadata and the coordinator lookup complete, so what is
+        // timed below is the committed-offset fetch and the FETCH.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let start = std::time::Instant::now();
+        let records = consumer.poll(Duration::from_secs(15)).await.expect("poll");
+        let took = start.elapsed();
+        assert_eq!(1, broker.offset_fetch_requests(), "one OffsetFetch for the committed offset");
+        assert_eq!(
+            5,
+            records.count(),
+            "the first poll() returns the records at the committed offset ({took:?})"
+        );
+        assert_eq!(55, consumer.position(&tp0()).await.expect("position"));
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+        took
+    }
+
+    /// After a manual `assign`, the first `poll()` returns records within a few round
+    /// trips, as Java's does: Java's network thread sends the OffsetFetch that
+    /// `updateFetchPositions` queues while processing the `AsyncPollEvent` in
+    /// the same `runOnce`, and the FETCH as soon as the offset is applied
+    /// (`ApplicationEventProcessor.process(AsyncPollEvent)`,
+    /// `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`,
+    /// `FetchRequestManager.createFetchRequests`). Rust queues the OffsetFetch
+    /// from the spawned AsyncPoll task, so `CommitRequestManager::fetch_offsets`
+    /// must wake the background loop: without that wake the request waited for
+    /// the next unrelated wake, here the application's own wake at the start
+    /// of each `retry.backoff.ms`-bounded wait for the fetch buffer
+    /// (`AsyncKafkaConsumer::poll_for_fetches` → `send_prefetches`), so the
+    /// first `poll()` took one `retry.backoff.ms`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_poll_after_assign_does_not_wait_for_unrelated_wakes() {
+        let with_default = time_to_first_records_after_assign(None).await;
+        let with_slow_backoff = time_to_first_records_after_assign(Some("2000")).await;
+        eprintln!(
+            "time to first records: default retry.backoff.ms {with_default:?}, retry.backoff.ms=2000 {with_slow_backoff:?}"
+        );
+        assert!(
+            with_slow_backoff < Duration::from_secs(1),
+            "with retry.backoff.ms=2000 the first poll() after assign took {with_slow_backoff:?} to return records \
+             (default retry.backoff.ms: {with_default:?}): the OffsetFetch and the FETCH queued by the AsyncPoll \
+             task waited for unrelated wakes of the background loop. Java sends each in the ConsumerNetworkThread \
+             runOnce that queues it, so the time is a few round trips whatever retry.backoff.ms is"
+        );
+    }
+
     /// A closed and dropped consumer frees its state. The offsets manager's
     /// cluster listener, boxed into the consumer's `Metadata`, once held the
     /// manager's shared state, which owns that `Metadata`: an `Arc` cycle that
@@ -775,6 +851,177 @@ mod tests {
                 "ConsumerMetadata / SubscriptionState still referenced (query_offsets = {query_offsets})"
             );
         }
+    }
+
+    /// A real `KafkaConsumer` against `broker` with the given extra
+    /// properties, assigned to `tp0` at offset 0.
+    async fn new_assigned_consumer(broker: &FakeBroker, extra: &[(&str, &str)]) -> KafkaConsumer<String, String> {
+        let mut props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+        ]);
+        props.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        let mut consumer: KafkaConsumer<String, String> = KafkaConsumer::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("constructs against the fake broker");
+        consumer.assign(vec![tp0()]).await.expect("assign");
+        consumer.seek_with_offset(tp0(), 0).await.expect("seek");
+        consumer
+    }
+
+    /// Polls `consumer` with `poll(100 ms)` for `window`, returning every
+    /// error `poll` returned.
+    async fn poll_for(consumer: &mut KafkaConsumer<String, String>, window: Duration) -> Vec<Error> {
+        let mut errors = Vec::new();
+        let until = tokio::time::Instant::now() + window;
+        while tokio::time::Instant::now() < until {
+            if let Err(e) = consumer.poll(Duration::from_millis(100)).await {
+                errors.push(e);
+            }
+        }
+        errors
+    }
+
+    /// Kills the leader once a FETCH has reached it, and waits until the
+    /// consumer has seen the disconnect (no more fetches are being built).
+    async fn kill_leader_after_first_fetch(consumer: &mut KafkaConsumer<String, String>, broker: &FakeBroker) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while broker.fetch_requests() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "No FETCH request sent");
+            let _ = consumer.poll(Duration::from_millis(10)).await;
+        }
+        broker.kill();
+        poll_for(consumer, Duration::from_millis(300)).await;
+    }
+
+    /// Once the partition leader has gone away and its node is inside its
+    /// reconnect backoff, the consumer must not build fetches for it.
+    ///
+    /// Java's `AbstractFetch.prepareFetchRequests` skips a node for which
+    /// `NetworkClientDelegate.isUnavailable(node)` (`connectionFailed(node) &&
+    /// connectionDelay(node, now) > 0`) holds, so with a 10 s backoff it builds
+    /// none in the second measured here. The Rust consumer used to wire
+    /// `is_unavailable = |_| false`: it built a fetch to the dead node on every
+    /// background-loop iteration (~400 in this second), each failed at once by
+    /// the delegate's disconnect check, which woke the loop again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_skips_dead_leader_in_reconnect_backoff() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let mut consumer = new_assigned_consumer(
+            &broker,
+            &[("reconnect.backoff.ms", "10000"), ("reconnect.backoff.max.ms", "10000")],
+        )
+        .await;
+        kill_leader_after_first_fetch(&mut consumer, &broker).await;
+
+        let before = consumer
+            .delegate
+            .fetch_requests_built_for_test(crate::test_fake_broker::FAKE_BROKER_NODE_ID);
+        poll_for(&mut consumer, Duration::from_millis(1000)).await;
+        let built = consumer
+            .delegate
+            .fetch_requests_built_for_test(crate::test_fake_broker::FAKE_BROKER_NODE_ID)
+            - before;
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+        assert!(
+            built <= 1,
+            "{built} FETCH requests were built in 1 s for node 0, which is disconnected and inside its 10 s \
+             reconnect backoff; Java's AbstractFetch.prepareFetchRequests skips it because \
+             NetworkClientDelegate.isUnavailable(node) = connectionFailed(node) && connectionDelay(node, now) > 0"
+        );
+    }
+
+    /// The other side of [`fetch_skips_dead_leader_in_reconnect_backoff`]:
+    /// with a short reconnect backoff the consumer keeps trying the dead
+    /// leader, about once per backoff (each fetch it builds starts a
+    /// reconnect, which is refused and starts the next backoff), rather than
+    /// giving up on the node or building one per loop iteration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_retries_dead_leader_once_reconnect_backoff_elapses() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        let mut consumer =
+            new_assigned_consumer(&broker, &[("reconnect.backoff.ms", "200"), ("reconnect.backoff.max.ms", "200")])
+                .await;
+        kill_leader_after_first_fetch(&mut consumer, &broker).await;
+
+        let before = consumer
+            .delegate
+            .fetch_requests_built_for_test(crate::test_fake_broker::FAKE_BROKER_NODE_ID);
+        poll_for(&mut consumer, Duration::from_millis(2000)).await;
+        let built = consumer
+            .delegate
+            .fetch_requests_built_for_test(crate::test_fake_broker::FAKE_BROKER_NODE_ID)
+            - before;
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+        assert!(
+            (2..=40).contains(&built),
+            "{built} FETCH requests were built in 2 s for node 0 with a 200 ms reconnect backoff; Java builds about \
+             one per elapsed backoff (isUnavailable(node) is false once connectionDelay(node, now) is 0)"
+        );
+    }
+
+    /// The connection to the partition leader fails SASL authentication
+    /// (metadata came from a bootstrap connection that authenticated), so
+    /// `poll()` must keep reporting the authentication failure.
+    ///
+    /// Java's `AbstractFetch.prepareFetchRequests` calls
+    /// `maybeThrowAuthFailure(node)` for an unavailable node, which rethrows
+    /// `NetworkClient.authenticationException(node)`; `createFetchRequests`
+    /// fails, `ApplicationEventProcessor.process(AsyncPollEvent)` completes the
+    /// poll event with it and `AsyncKafkaConsumer.poll` throws it. Against this
+    /// fake broker the 4.3.1 jar threw `UnsupportedSaslMechanismException` from
+    /// 26 of 55 `poll(100 ms)` calls in 3 s. The Rust consumer used to wire
+    /// `maybe_auth = |_| Ok(())` and reported it once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poll_reports_cached_auth_failure_of_leader() {
+        let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+        broker.accept_sasl_handshakes(1);
+        let mut consumer = new_assigned_consumer(
+            &broker,
+            &[
+                ("security.protocol", "SASL_PLAINTEXT"),
+                ("sasl.mechanism", "PLAIN"),
+                (
+                    "sasl.jaas.config",
+                    "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password=\"p\";",
+                ),
+                ("reconnect.backoff.ms", "10000"),
+                ("reconnect.backoff.max.ms", "10000"),
+            ],
+        )
+        .await;
+
+        let errors = poll_for(&mut consumer, Duration::from_millis(3000)).await;
+        consumer
+            .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+        println!("poll errors: {} (first: {:?})", errors.len(), errors.first());
+        assert_eq!(
+            0,
+            broker.fetch_requests(),
+            "the leader never authenticated, so no FETCH reached it"
+        );
+        assert!(
+            errors.iter().all(|e| e.is_authentication_error()),
+            "every poll error is the leader's authentication failure: {errors:?}"
+        );
+        assert!(
+            errors.len() >= 10,
+            "poll() reported the leader's cached authentication failure {} times in 3 s of poll(100 ms); Java's \
+             AbstractFetch.prepareFetchRequests rethrows NetworkClient.authenticationException(node) on every \
+             fetch round, so 4.3.1 threw it from about every other poll (26 of 55)",
+            errors.len()
+        );
     }
 
     /// `KafkaConsumer` can move to another task but not be shared between

@@ -485,8 +485,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             if let (Some(coord_arc), Some(commit_arc)) = (coord_handle.as_ref(), commit_handle.as_ref()) {
                 collected_before.push(commit_arc.poll_with_coordinator(coord_arc.as_ref(), current_time_ms));
             }
-            // `entries()` ordering with the three Arc-shared slots skipped
-            // is `heartbeat → offsets → topic_metadata → fetch → dyn`.
+            // `entries()` ordering with the three Arc-shared slots and the
+            // fetch slot skipped is `heartbeat → offsets → topic_metadata →
+            // dyn`; fetch is polled right after (`dyn` is test-only and never
+            // populated together with fetch).
             // `membership_boundary()` returns the heartbeat count (0 or 1):
             // the leading `boundary` results join the before-batch (they are
             // processed before `membership.reconcile`); the rest join the
@@ -501,6 +503,15 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 } else {
                     collected_after.push(result);
                 }
+            }
+            // Java: `FetchRequestManager.poll(currentTimeMs)`, whose
+            // `prepareFetchRequests` asks the delegate `isUnavailable(node)` /
+            // `maybeThrowAuthFailure(node)`. The delegate is the one this
+            // iteration already holds (`delegate_guard`), so it is lent to the
+            // fetch manager rather than locked again. Fetch follows the
+            // membership boundary, so it joins the after-batch.
+            if let Some(fetch) = rm_guard.fetch.as_mut() {
+                collected_after.push(fetch.poll(&*delegate_guard, current_time_ms));
             }
         }
         for mut poll_result in collected_before.drain(..) {
@@ -563,7 +574,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
-        // topic_metadata, fetch, dyn) ────
+        // topic_metadata, dyn, fetch) ────
         for mut poll_result in collected_after.drain(..) {
             let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
             for node in try_connect_nodes {
@@ -646,6 +657,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             for rm in rm_guard.entries() {
                 let wait_ms = rm.maximum_time_to_wait(current_time_ms);
                 max_time_to_wait_ms = max_time_to_wait_ms.min(wait_ms);
+            }
+            // The fetch manager is outside `entries()` (Phase 2 polls it with
+            // the delegate), so it is consulted here explicitly.
+            if let Some(fetch) = rm_guard.fetch.as_ref() {
+                max_time_to_wait_ms = max_time_to_wait_ms.min(fetch.maximum_time_to_wait(current_time_ms));
             }
         }
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
@@ -956,6 +972,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 .expect("delegate not contended on bg task");
             for rm in rm_guard.entries() {
                 let result = rm.poll_on_close(current_time_ms);
+                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+            }
+            // Java: `FetchRequestManager.pollOnClose(currentTimeMs)`, which
+            // skips close-session requests to unavailable nodes; it reads the
+            // delegate held here (`entries()` skips the fetch slot).
+            if let Some(fetch) = rm_guard.fetch.as_mut() {
+                let result = fetch.poll_on_close(&*delegate_guard, current_time_ms);
                 let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
             }
             // Commit's close-side drain (Java
@@ -2918,8 +2941,6 @@ mod tests {
             ),
             Arc::new(crate::consumer::internals::FetchBuffer::new()),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            crate::consumer::internals::FetchRequestManager::always_available(),
-            crate::consumer::internals::FetchRequestManager::no_auth_failure(),
             Arc::new(ApiVersions::new()),
             crate::consumer::internals::FetchMetricsManager::for_test(),
             retry_backoff_ms,
@@ -2978,6 +2999,169 @@ mod tests {
             );
             time.sleep(50);
         }
+    }
+
+    /// `run_once` lends the fetch manager the delegate it holds, so a fetch
+    /// is not built for a leader inside its reconnect backoff window and is
+    /// built again once the window has elapsed.
+    ///
+    /// Java's `AbstractFetch.prepareFetchRequests` skips a node for which
+    /// `NetworkClientDelegate.isUnavailable(node)` (`connectionFailed(node) &&
+    /// connectionDelay(node, now) > 0`) holds — the same shape as
+    /// `FetchRequestManagerTest.testFetchSkipsBlackedOutNodes`, which drives
+    /// `client.backoff(node, 500)` on a `MockClient`. Before the delegate was
+    /// lent to the fetch manager, the production predicate was `|_| false`, so
+    /// the fetch was built on every iteration and failed at once by the
+    /// delegate's disconnect check (a busy loop while the leader was down).
+    /// The second half pins that the fix does not stop fetching for good.
+    #[tokio::test]
+    async fn run_once_skips_fetch_to_node_in_reconnect_backoff_until_it_elapses() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+
+        // One broker (node 0) leading `test-0`, assigned with a validated
+        // position so the partition is fetchable.
+        let tp = crate::common::TopicPartition::new("test".to_string(), 0);
+        metadata.add_transient_topics(HashSet::from(["test".to_string()]));
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "dummy",
+            1,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([("test".to_string(), 1)]),
+            &|_tp| Some(0),
+            &std::collections::HashMap::from([("test".to_string(), crate::common::Uuid::random_uuid())]),
+        );
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, time.milliseconds());
+        let leader = metadata
+            .metadata_arc()
+            .fetch()
+            .leader_for(&tp)
+            .cloned()
+            .expect("node 0 leads test-0");
+        {
+            let mut guard = subs.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            guard
+                .seek_validated(
+                    &tp,
+                    crate::consumer::internals::FetchPosition::with_leader(
+                        0,
+                        Some(0),
+                        crate::metadata::LeaderAndEpoch::new(Some(leader.clone()), Some(0)),
+                    ),
+                )
+                .unwrap();
+        }
+
+        let fetch = crate::consumer::internals::FetchRequestManager::new(
+            metadata.clone(),
+            subs.clone(),
+            crate::consumer::internals::FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(crate::consumer::internals::FetchBuffer::new()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            config.retry_backoff_ms(),
+        );
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+
+        // Java's `client.backoff(node, 500)`: the leader's connection failed
+        // and is inside a 500 ms reconnect backoff, on the consumer's clock.
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        client.backoff(&leader, 500);
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let delegate = Arc::new(AsyncMutex::new(NetworkClientDelegate::new(
+            &config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        )));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            Arc::clone(&delegate),
+            request_managers.clone(),
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+        let create_fetch_requests = || {
+            let mut guard = request_managers.lock().unwrap();
+            guard.fetch.as_mut().expect("fetch manager").create_fetch_requests()
+        };
+        let fetch_in_flight_to_leader = || {
+            let guard = request_managers.lock().unwrap();
+            let fetch = guard.fetch.as_ref().expect("fetch manager");
+            fetch.abstract_fetch().nodes_with_pending_fetch_requests.contains(&leader.id())
+        };
+
+        // Inside the backoff window: no fetch is built, and the request for
+        // fetch requests still completes (Java completes the future and
+        // returns an empty poll result).
+        for step in 0..5 {
+            let mut ack = create_fetch_requests();
+            thread.run_once().await;
+            assert!(
+                delegate.lock().await.is_unavailable(&leader, time.milliseconds()),
+                "step {step}: the delegate reports node 0 as unavailable"
+            );
+            assert!(
+                !fetch_in_flight_to_leader(),
+                "step {step}: Java's AbstractFetch.prepareFetchRequests skips a node that \
+                 NetworkClientDelegate.isUnavailable reports in reconnect backoff, but a fetch was built for it"
+            );
+            assert!(
+                matches!(ack.try_recv(), Ok(Ok(()))),
+                "step {step}: the createFetchRequests future completes successfully"
+            );
+            time.sleep(50);
+        }
+
+        // The backoff has elapsed: the node is connectable again, so the next
+        // poll builds the fetch (Java: `isUnavailable` is false once
+        // `connectionDelay` is 0).
+        time.sleep(500);
+        assert!(!delegate.lock().await.is_unavailable(&leader, time.milliseconds()));
+        let mut ack = create_fetch_requests();
+        thread.run_once().await;
+        assert!(
+            fetch_in_flight_to_leader(),
+            "once node 0's reconnect backoff has elapsed, the fetch to it must be built again"
+        );
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
     }
 
     /// COMMENTS.93 Issue 2: `run_once` Phase 5 consults the commit manager
@@ -3058,5 +3242,344 @@ mod tests {
         time.sleep(500);
         thread.run_once().await;
         assert_eq!(retry_backoff_ms, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+    }
+
+    /// Shared setup for the fetch-manager `run_once` / `cleanup` tests:
+    /// `num_nodes` brokers with node 0 leading `test-0`, which is assigned
+    /// with a validated position so it is fetchable, and a
+    /// `FetchRequestManager` over that state. Returns the partition, its
+    /// leader, the topic id and the manager.
+    fn fetchable_partition_on_node_0(
+        config: &ConsumerConfig,
+        subs: &Arc<Mutex<SubscriptionState>>,
+        metadata: &Arc<ConsumerMetadata>,
+        now_ms: i64,
+        num_nodes: i32,
+    ) -> (
+        crate::common::TopicPartition,
+        Node,
+        crate::common::Uuid,
+        crate::consumer::internals::FetchRequestManager,
+    ) {
+        let tp = crate::common::TopicPartition::new("test".to_string(), 0);
+        let topic_id = crate::common::Uuid::random_uuid();
+        metadata.add_transient_topics(HashSet::from(["test".to_string()]));
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "dummy",
+            num_nodes,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([("test".to_string(), 1)]),
+            &|_tp| Some(0),
+            &std::collections::HashMap::from([("test".to_string(), topic_id)]),
+        );
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, now_ms);
+        let leader = metadata
+            .metadata_arc()
+            .fetch()
+            .leader_for(&tp)
+            .cloned()
+            .expect("node 0 leads test-0");
+        assert_eq!(0, leader.id());
+        {
+            let mut guard = subs.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            guard
+                .seek_validated(
+                    &tp,
+                    crate::consumer::internals::FetchPosition::with_leader(
+                        0,
+                        Some(0),
+                        crate::metadata::LeaderAndEpoch::new(Some(leader.clone()), Some(0)),
+                    ),
+                )
+                .unwrap();
+        }
+        let fetch = crate::consumer::internals::FetchRequestManager::new(
+            metadata.clone(),
+            subs.clone(),
+            crate::consumer::internals::FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(crate::consumer::internals::FetchBuffer::new()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            config.retry_backoff_ms(),
+        );
+        (tp, leader, topic_id, fetch)
+    }
+
+    /// A `ConsumerNetworkThread` over a real `NetworkClientDelegate` wrapping
+    /// `client`, without membership. Returns the thread, its delegate and the
+    /// cached `maximumTimeToWait` it publishes.
+    fn mock_client_thread(
+        config: &ConsumerConfig,
+        subs: &Arc<Mutex<SubscriptionState>>,
+        metadata: &Arc<ConsumerMetadata>,
+        time: &Arc<MockTime>,
+        request_managers: &Arc<Mutex<RequestManagers>>,
+        client: MockClient,
+    ) -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<AsyncMutex<NetworkClientDelegate<MockClient>>>,
+        Arc<AtomicI64>,
+    ) {
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let delegate = Arc::new(AsyncMutex::new(NetworkClientDelegate::new(
+            config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        )));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            Arc::clone(&delegate),
+            request_managers.clone(),
+            None,
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+        (thread, delegate, cached_max_time_to_wait_ms)
+    }
+
+    /// COMMENTS c3-05 Issue 1: `run_once` Phase 5 consults the fetch manager
+    /// (Java's `entries()` includes it, `ConsumerNetworkThread.java:232-235`;
+    /// `RequestManagers::entries()` skips the fetch slot). Here it is the
+    /// binding minimum: no coordinator, commit, heartbeat or topic-metadata
+    /// manager, and the offsets manager reports `i64::MAX`. With no fetch in
+    /// flight, Java's `FetchRequestManager.maximumTimeToWait` returns
+    /// `retryBackoffMs` so the application thread re-evaluates subscription
+    /// state promptly (KAFKA-20854); with a fetch in flight, `Long.MAX_VALUE`.
+    /// Without the consult the published bound would be `i64::MAX` throughout.
+    #[tokio::test]
+    async fn run_once_maximum_time_to_wait_includes_the_fetch_manager() {
+        let config = make_config();
+        let retry_backoff_ms = config.retry_backoff_ms();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (_tp, leader, _topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            Some(fetch),
+        )));
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let (mut thread, _delegate, cached_max_time_to_wait_ms) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // No fetch in flight: the fetch manager's retry backoff is the bound.
+        thread.run_once().await;
+        assert_eq!(
+            retry_backoff_ms,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "Java's FetchRequestManager.maximumTimeToWait returns retryBackoffMs with no fetch in flight"
+        );
+
+        // A fetch is sent to node 0 and its response does not arrive: the
+        // fetch manager no longer bounds the wait.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        thread.run_once().await;
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .nodes_with_pending_fetch_requests
+                .contains(&leader.id()),
+            "the fetch to node 0 is in flight"
+        );
+        assert_eq!(
+            i64::MAX,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "Java's FetchRequestManager.maximumTimeToWait returns Long.MAX_VALUE with a fetch in flight"
+        );
+    }
+
+    /// Java `FetchRequestManagerTest.testFetcherCloseClosesFetchSessionsInBroker`,
+    /// driven through `ConsumerNetworkThread::cleanup` (Java's `runAtClose`
+    /// over `requestManagers.entries()`, `ConsumerNetworkThread.java:311-319`,
+    /// `:420`). A normal fetch establishes a session with node 0; closing then
+    /// sends node 0 a request carrying that session id, `FINAL_EPOCH` and no
+    /// partition data.
+    ///
+    /// Rust addition: node 1 also holds a session but is in reconnect backoff,
+    /// so its close request is skipped (`FetchRequestManager.pollOnClose` →
+    /// `AbstractFetch.prepareCloseFetchSessionRequests` skips a node for which
+    /// `isUnavailable(node)` holds, `AbstractFetch.java:403`).
+    #[tokio::test]
+    async fn test_fetcher_close_closes_fetch_sessions_in_broker() {
+        use crate::common::requests::{AbstractRequest, ConcreteResponse, FetchMetadata, FetchResponse};
+        use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, leader, topic_id, mut fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 2);
+        let backed_off = metadata
+            .metadata_arc()
+            .fetch()
+            .node_by_id(1)
+            .cloned()
+            .expect("node 1 is in the cluster");
+        let _ = fetch.abstract_fetch_mut().session_handler_or_create(backed_off.id());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        client.backoff(&backed_off, 500);
+        let session_id = 123;
+        let mut partition = RespPartitionData::new();
+        partition.set_partition_index(tp.partition());
+        partition.set_error_code(crate::common::protocol::Errors::None.code());
+        partition.set_high_watermark(100);
+        partition.set_last_stable_offset(100);
+        partition.set_log_start_offset(0);
+        partition.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+        let mut topic = FetchableTopicResponse::new();
+        topic.set_topic(tp.topic().to_string());
+        topic.set_topic_id(topic_id);
+        topic.set_partitions(vec![partition]);
+        let mut data = crate::FetchResponseData::new();
+        data.set_error_code(crate::common::protocol::Errors::None.code());
+        data.set_throttle_time_ms(0);
+        data.set_session_id(session_id);
+        data.set_responses(vec![topic]);
+        client.prepare_response(ConcreteResponse::Fetch(FetchResponse::new(data)));
+        let (mut thread, delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // Normal fetch: sent, answered, and its completion drained by the
+        // next `poll`, which establishes the session with node 0.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        let session_established = || {
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .session_handler(leader.id())
+                .is_some_and(|handler| handler.session_id() == session_id)
+        };
+        for _ in 0..50 {
+            thread.run_once().await;
+            if session_established() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(
+            session_established(),
+            "the fetch response establishes session {session_id} with node 0"
+        );
+        assert!(!delegate.lock().await.has_any_pending_requests());
+
+        // Java's `runAtClose(...)` followed by `networkClientDelegate.poll(...)`:
+        // `cleanup` builds the close requests and polls once (zero close
+        // timeout), sending them.
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        // A request built for a node marks it pending (Java's
+        // `createFetchRequest`). The delegate does not hand a request for a
+        // node in backoff to the client, so the pending set is where a
+        // wrongly built close request for node 1 shows.
+        {
+            let rm_guard = request_managers.lock().unwrap();
+            let pending = &rm_guard
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .nodes_with_pending_fetch_requests;
+            assert!(pending.contains(&leader.id()), "a close-session request is built for node 0");
+            assert!(
+                !pending.contains(&backed_off.id()),
+                "Java's AbstractFetch.prepareCloseFetchSessionRequests skips node 1, which isUnavailable \
+                 (reconnect backoff), but a close-session request was built for it"
+            );
+        }
+        let mut guard = delegate.lock().await;
+        let fetches: Vec<_> = guard
+            .client_for_test_mut()
+            .requests_mut()
+            .iter_mut()
+            .filter(|r| *r.api_key() == crate::common::protocol::ApiKeys::FETCH)
+            .collect();
+        assert_eq!(
+            1,
+            fetches.len(),
+            "exactly one close-session request is sent, to node 0; node 1 is in reconnect backoff"
+        );
+        let close = fetches.into_iter().next().unwrap();
+        assert_eq!(leader.id_string(), close.destination());
+        let AbstractRequest::Fetch(request) = close.request_builder_mut().build().expect("build the fetch request")
+        else {
+            panic!("a fetch request was sent");
+        };
+        // session Id is the same
+        assert_eq!(session_id, request.metadata().session_id());
+        // contains final epoch: it indicates we want to close the session
+        assert_eq!(FetchMetadata::FINAL_EPOCH, request.metadata().epoch());
+        // partition data should be empty
+        assert!(
+            request.data().topics().is_empty(),
+            "the close request carries no partition data"
+        );
     }
 }
