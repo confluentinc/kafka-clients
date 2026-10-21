@@ -281,12 +281,25 @@ breaking changes.
   `No private key found in keystore file '<path>'` or a PEM parse error; the
   outer error ("Failed to construct kafka producer", "Failed to construct kafka
   consumer", "Failed to create new KafkaAdminClient") is unchanged.
-- **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is no longer
-  defined, and `SslConfigs::SSL_CIPHER_SUITES_CONFIG` is removed. The clients
-  always use rustls's default cipher suites, so the key was read only to log a
-  warning and then ignored; it stays undefined until the cipher suites are
-  honoured, and a value set for it is now listed among the unused
-  configurations instead of being accepted and ignored.
+- **Breaking (Rust, C API, Python):** `ssl.cipher.suites` is honoured. The
+  clients offer the configured suites, named as in Java and IANA
+  (`TLS_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`), in the
+  configured order; an empty list keeps the TLS provider's defaults. Every
+  suite of the aws-lc-rs provider is accepted. The key used to be read only to
+  log a warning and then ignored. An unknown name fails the clients'
+  constructors with a `ConfigError` cause, `Failed to create channel builder:
+  Unsupported CipherSuite: <name>`, where Java fails the first connection with
+  the same message; suites none of which can be used with an enabled protocol
+  fail the same way with the TLS provider's `no usable cipher suites
+  configured`.
+- **Breaking (Rust, C API, Python):** `ssl.protocol` is honoured as Java's
+  ceiling on `ssl.enabled.protocols`: with `TLSv1.2` the clients do not use
+  TLS 1.3 even when it is enabled; `TLSv1.3` (the default) and `TLS` put no
+  ceiling. It used to be defined and ignored. Another value fails the clients'
+  constructors (`Unsupported TLS protocol: '<value>'. Supported protocols:
+  TLSv1.3, TLSv1.2, TLS`), and so does a ceiling that leaves no enabled
+  protocol (`No TLS protocol of ssl.enabled.protocols = [TLSv1.3] is allowed by
+  ssl.protocol = TLSv1.2`), which Java reports at the handshake instead.
 - `client.dns.lookup=resolve_canonical_bootstrap_servers_only` now resolves
   each bootstrap address to its canonical host name as Java's
   `InetAddress.getCanonicalHostName()` does: a reverse (PTR) lookup through the

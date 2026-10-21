@@ -1044,6 +1044,7 @@ mod tests {
             "metadata.cluster.check.enable",
             "ssl.truststore.type",
             "sasl.mechanism",
+            "ssl.cipher.suites",
         ] {
             assert!(names.contains(key), "{key}");
         }
@@ -1052,7 +1053,6 @@ mod tests {
             "security.providers",
             "config.providers",
             "bootstrap.controllers",
-            "ssl.cipher.suites",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",

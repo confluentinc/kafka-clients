@@ -27,14 +27,16 @@
 //! - `ssl.secure.random.implementation` — Java SecureRandom PRNG
 //! - `ssl.keymanager.algorithm` — Java JSSE key manager
 //! - `ssl.trustmanager.algorithm` — Java JSSE trust manager
-//! - `ssl.protocol` — rustls handles protocol negotiation automatically
 //!
-//! Five of Java's keys are not defined:
+//! `ssl.protocol` and `ssl.cipher.suites` are honoured by the
+//! [`SslFactory`](crate::common::security::ssl::SslFactory): `ssl.protocol` is
+//! the ceiling Java's `SSLContext.getInstance(protocol)` puts on
+//! `ssl.enabled.protocols`, and `ssl.cipher.suites` restricts and orders the
+//! TLS provider's cipher suites.
+//!
+//! Four of Java's keys are not defined:
 //! - `ssl.engine.factory.class`, the Java SSLEngine factory: a configuration
 //!   never takes a class (CLAUDE.md §2).
-//! - `ssl.cipher.suites`: rustls's default cipher suites are always used, so
-//!   the key stays undefined until the cipher suites are honoured, and a value
-//!   set for it is reported as unused rather than accepted and ignored.
 //! - `ssl.keystore.password` and `ssl.truststore.password`: PEM is the only
 //!   store format here, and Java rejects a store password with PEM stores
 //!   (`DefaultSslEngineFactory.java:289,296,316,321`), so the keys stay
@@ -63,6 +65,9 @@ impl SslConfigs {
 
     /// Config key: `ssl.provider`.
     pub const SSL_PROVIDER_CONFIG: &str = "ssl.provider";
+
+    /// Config key: `ssl.cipher.suites`.
+    pub const SSL_CIPHER_SUITES_CONFIG: &str = "ssl.cipher.suites";
 
     /// Config key: `ssl.enabled.protocols`.
     pub const SSL_ENABLED_PROTOCOLS_CONFIG: &str = "ssl.enabled.protocols";
@@ -185,13 +190,22 @@ pub struct SslConfigs {
     /// Enabled TLS protocol versions.
     /// Corresponds to `ssl.enabled.protocols`. Default: `["TLSv1.2", "TLSv1.3"]`.
     pub(crate) enabled_protocols: Vec<String>,
+
+    /// The protocol of Java's `SSLContext`, the highest version a connection
+    /// may use. Corresponds to `ssl.protocol`. Default: `"TLSv1.3"`.
+    pub(crate) protocol: String,
+
+    /// The enabled cipher suites, in preference order; empty for the TLS
+    /// provider's defaults. Corresponds to `ssl.cipher.suites`. Default: empty.
+    pub(crate) cipher_suites: Vec<String>,
 }
 
 impl Default for SslConfigs {
     /// Returns an `SslConfigs` with sensible defaults for Rust/rustls:
     ///
     /// - PEM format for both truststore and keystore
-    /// - TLSv1.2 and TLSv1.3 enabled
+    /// - TLSv1.2 and TLSv1.3 enabled, `TLSv1.3` as the protocol
+    /// - the TLS provider's default cipher suites
     /// - `"https"` endpoint identification (hostname verification enabled)
     /// - All optional locations and PEM values are `None`
     fn default() -> Self {
@@ -205,6 +219,8 @@ impl Default for SslConfigs {
             keystore_type: SslConfigs::DEFAULT_SSL_KEYSTORE_TYPE.to_owned(),
             endpoint_identification_algorithm: SslConfigs::DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM.to_owned(),
             enabled_protocols: vec!["TLSv1.2".to_owned(), "TLSv1.3".to_owned()],
+            protocol: SslConfigs::DEFAULT_SSL_PROTOCOL.to_owned(),
+            cipher_suites: Vec::new(),
         }
     }
 }
@@ -239,6 +255,8 @@ impl SslConfigs {
                 .string(SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG)?
                 .to_string(),
             enabled_protocols: values.list(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG)?.to_vec(),
+            protocol: values.string(SslConfigs::SSL_PROTOCOL_CONFIG)?.to_string(),
+            cipher_suites: values.list(SslConfigs::SSL_CIPHER_SUITES_CONFIG)?.to_vec(),
         })
     }
 
@@ -272,7 +290,7 @@ impl SslConfigs {
     /// Defines the client `ssl.*` keys on `config`: Java's
     /// `SslConfigs.addClientSslSupport(ConfigDef)`, in Java's order, except
     /// `ssl.engine.factory.class`, a class-valued key (CLAUDE.md §2), and
-    /// `ssl.cipher.suites`, `ssl.keystore.password`, `ssl.key.password` and
+    /// `ssl.keystore.password`, `ssl.key.password` and
     /// `ssl.truststore.password`, which cannot be honoured (module docs).
     pub(crate) fn add_client_ssl_support(config: ConfigDef) -> ConfigDef {
         config
@@ -288,9 +306,13 @@ impl SslConfigs {
                 DefaultValue::Null,
                 Importance::Medium,
             )
-            // Java defines `ssl.cipher.suites` here (`SslConfigs.java:131`); it
-            // stays undefined until the cipher suites are honoured, so a value
-            // set for it is reported as unused.
+            .define_with_validator(
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
+                Type::List,
+                Vec::<String>::new(),
+                ValidList::any_non_duplicate_values(true, false),
+                Importance::Low,
+            )
             .define_with_validator(
                 SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
                 Type::List,
@@ -471,6 +493,7 @@ mod tests {
         assert_eq!(SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "ssl.enabled.protocols");
         assert_eq!(SslConfigs::SSL_PROTOCOL_CONFIG, "ssl.protocol");
         assert_eq!(SslConfigs::SSL_PROVIDER_CONFIG, "ssl.provider");
+        assert_eq!(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "ssl.cipher.suites");
         assert_eq!(
             SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
             "ssl.secure.random.implementation"
@@ -512,6 +535,11 @@ mod tests {
             (SslConfigs::SSL_KEYSTORE_TYPE_CONFIG, "JKS"),
             (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
             (SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.3"),
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (
+                SslConfigs::SSL_CIPHER_SUITES_CONFIG,
+                "TLS_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            ),
         ])
         .unwrap();
 
@@ -533,6 +561,43 @@ mod tests {
         assert_eq!(ssl.keystore_type, "JKS");
         assert_eq!(ssl.endpoint_identification_algorithm, "");
         assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"]);
+        assert_eq!(ssl.protocol, "TLSv1.2");
+        assert_eq!(
+            ssl.cipher_suites,
+            vec!["TLS_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"]
+        );
+    }
+
+    #[test]
+    fn test_default_protocol_and_cipher_suites() {
+        let ssl = SslConfigs::parse_for_test(&[]).unwrap();
+        assert_eq!(ssl.protocol, "TLSv1.3");
+        assert!(ssl.cipher_suites.is_empty());
+        assert_eq!(ssl, SslConfigs::default());
+    }
+
+    /// `ssl.cipher.suites` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:131`):
+    /// an empty suite is rejected with `ConfigDef`'s exact message, duplicates
+    /// are removed, and an empty list is allowed.
+    #[test]
+    fn test_cipher_suites_valid_list() {
+        for value in ["A,,B", ",,"] {
+            match SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, value)]) {
+                Err(Error::Config(e)) => assert_eq!(
+                    e.message(),
+                    "Configuration 'ssl.cipher.suites' values must not be empty.",
+                    "{value:?}"
+                ),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        }
+        let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B")]).unwrap();
+        assert_eq!(ssl.cipher_suites, vec!["A", "B"]);
+        let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A")]).unwrap();
+        assert_eq!(ssl.cipher_suites, vec!["A"]);
+        let ssl = SslConfigs::parse_for_test(&[(SslConfigs::SSL_CIPHER_SUITES_CONFIG, "")]).unwrap();
+        assert!(ssl.cipher_suites.is_empty());
     }
 
     #[test]

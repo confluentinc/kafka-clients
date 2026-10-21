@@ -3176,6 +3176,7 @@ mod tests {
             ProducerConfig::ENABLE_METRICS_PUSH_CONFIG,
             SaslConfigs::SASL_MECHANISM,
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
+            "ssl.cipher.suites",
         ] {
             assert!(names.contains(key), "{key}");
         }
@@ -3187,7 +3188,6 @@ mod tests {
             "interceptor.classes",
             "security.providers",
             "config.providers",
-            "ssl.cipher.suites",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",

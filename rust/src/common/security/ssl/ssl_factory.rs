@@ -27,6 +27,12 @@
 //! - Hostname verification is controlled by `endpoint_identification_algorithm`:
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
+//! - `ssl.protocol` is the highest TLS version used, as Java's
+//!   `SSLContext.getInstance(protocol)` is; `ssl.enabled.protocols` and
+//!   `ssl.cipher.suites` pick the versions and suites as Java's
+//!   `setEnabledProtocols` / `setEnabledCipherSuites` do. Their errors are
+//!   reported when the factory is built, where Java reports some of them at the
+//!   first connection or handshake (see [`SslFactory::new`]).
 
 use crate::common::config::SslConfigs;
 
@@ -75,7 +81,16 @@ impl SslFactory {
     /// - No valid certificates are found in the truststore
     /// - The private key cannot be loaded, is encrypted (see
     ///   [`is_encrypted_pem_key`]), or is missing when a client cert is provided
-    /// - TLS protocol configuration is invalid
+    /// - `ssl.protocol` is not `TLSv1.3`, `TLSv1.2` or `TLS`, an entry of
+    ///   `ssl.enabled.protocols` is not `TLSv1.3` or `TLSv1.2`, or the
+    ///   `ssl.protocol` ceiling leaves no enabled protocol
+    /// - an entry of `ssl.cipher.suites` is not a cipher suite of the TLS
+    ///   provider (`Unsupported CipherSuite: <name>`), or none of the
+    ///   configured suites can be used with an enabled protocol
+    ///
+    /// Java reports an unsupported cipher suite when it creates the first
+    /// `SSLEngine`, and an empty protocol intersection at the handshake; here
+    /// both are reported when the factory is built.
     #[doc(alias = "org.apache.kafka.common.security.ssl.SslFactory#SslFactory")]
     pub fn new(ssl_config: &SslConfigs) -> io::Result<Self> {
         // Install the aws-lc-rs crypto provider if not already installed.
@@ -92,39 +107,39 @@ impl SslFactory {
         // Determine hostname verification
         let hostname_verification = !ssl_config.endpoint_identification_algorithm.is_empty();
 
-        // Determine TLS versions
-        let versions = resolve_tls_versions(&ssl_config.enabled_protocols)?;
+        // Determine TLS versions: `ssl.enabled.protocols` under the
+        // `ssl.protocol` ceiling.
+        let versions = resolve_tls_versions(&ssl_config.protocol, &ssl_config.enabled_protocols)?;
 
-        // Build client config
-        let config = if let Some(certs_and_key) = load_client_identity(ssl_config)? {
-            let (certs, key) = certs_and_key;
-            if hostname_verification {
-                ClientConfig::builder_with_protocol_versions(&versions)
-                    .with_root_certificates(root_store)
-                    .with_client_auth_cert(certs, key)
-                    .map_err(|e| {
-                        io::Error::new(io::ErrorKind::InvalidInput, format!("Failed to set client auth: {e}"))
-                    })?
-            } else {
-                let verifier = NoHostnameVerifier::new(root_store);
-                ClientConfig::builder_with_protocol_versions(&versions)
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(verifier))
-                    .with_client_auth_cert(certs, key)
-                    .map_err(|e| {
-                        io::Error::new(io::ErrorKind::InvalidInput, format!("Failed to set client auth: {e}"))
-                    })?
-            }
-        } else if hostname_verification {
+        // An empty `ssl.cipher.suites` keeps the installed provider's suites;
+        // otherwise the configured ones, in the configured order.
+        let builder = if ssl_config.cipher_suites.is_empty() {
             ClientConfig::builder_with_protocol_versions(&versions)
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
         } else {
-            let verifier = NoHostnameVerifier::new(root_store);
-            ClientConfig::builder_with_protocol_versions(&versions)
+            let provider = rustls::crypto::CryptoProvider {
+                cipher_suites: resolve_cipher_suites(&ssl_config.cipher_suites)?,
+                ..rustls::crypto::aws_lc_rs::default_provider()
+            };
+            ClientConfig::builder_with_provider(Arc::new(provider))
+                .with_protocol_versions(&versions)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
+        };
+
+        // Server certificate verification
+        let builder = if hostname_verification {
+            builder.with_root_certificates(root_store)
+        } else {
+            builder
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(verifier))
-                .with_no_client_auth()
+                .with_custom_certificate_verifier(Arc::new(NoHostnameVerifier::new(root_store)))
+        };
+
+        // Client authentication
+        let config = match load_client_identity(ssl_config)? {
+            Some((certs, key)) => builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Failed to set client auth: {e}")))?,
+            None => builder.with_no_client_auth(),
         };
 
         Ok(Self { client_config: Arc::new(config), hostname_verification })
@@ -385,34 +400,112 @@ fn load_client_identity(
     }
 }
 
-/// Resolves TLS protocol version strings to rustls `SupportedProtocolVersion` references.
+/// Resolves `ssl.enabled.protocols` under the `ssl.protocol` ceiling to rustls
+/// `SupportedProtocolVersion` references.
 ///
-/// An empty list means the provider's defaults, as in Java:
+/// An empty `enabled_protocols` means the provider's defaults, as in Java:
 /// `DefaultSslEngineFactory.configure` leaves `enabledProtocols` `null` for an
 /// empty `ssl.enabled.protocols`, and `createSslEngine` then skips
 /// `setEnabledProtocols`, so the JSSE provider's default protocols apply. The
 /// rustls counterpart is [`rustls::DEFAULT_VERSIONS`].
-fn resolve_tls_versions(enabled_protocols: &[String]) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
-    if enabled_protocols.is_empty() {
-        return Ok(rustls::DEFAULT_VERSIONS.to_vec());
-    }
+///
+/// `protocol` is Java's `SSLContext.getInstance(protocol)`
+/// (`DefaultSslEngineFactory.java:243-245`), the highest version a connection
+/// may use (`SslConfigs.java:35-40`: "If this config is set to 'TLSv1.2',
+/// clients will not use 'TLSv1.3' even if it is one of the values in
+/// ssl.enabled.protocols"). `TLSv1.3` and the JDK's generic `TLS` keep the
+/// enabled versions, `TLSv1.2` drops TLS 1.3 from them. The name is matched
+/// ignoring case, as JCA algorithm names are. Any other name is an error:
+/// rustls has no TLS 1.1 or lower, and Java fails `SSLContext.getInstance` for
+/// an unknown one. When the ceiling leaves no enabled version, the error names
+/// both keys; Java would fail at the handshake instead.
+fn resolve_tls_versions(
+    protocol: &str,
+    enabled_protocols: &[String],
+) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
+    let allow_tls13 = if protocol.eq_ignore_ascii_case("TLSv1.3") || protocol.eq_ignore_ascii_case("TLS") {
+        true
+    } else if protocol.eq_ignore_ascii_case("TLSv1.2") {
+        false
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported TLS protocol: '{protocol}'. Supported protocols: TLSv1.3, TLSv1.2, TLS"),
+        ));
+    };
     let mut versions = Vec::new();
-    for proto in enabled_protocols {
-        match proto.as_str() {
-            "TLSv1.3" => versions.push(&rustls::version::TLS13),
-            "TLSv1.2" => versions.push(&rustls::version::TLS12),
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Unsupported TLS protocol version: '{other}'. \
-                         Supported versions: TLSv1.2, TLSv1.3"
-                    ),
-                ));
-            },
+    if enabled_protocols.is_empty() {
+        versions.extend_from_slice(rustls::DEFAULT_VERSIONS);
+    } else {
+        for proto in enabled_protocols {
+            match proto.as_str() {
+                "TLSv1.3" => versions.push(&rustls::version::TLS13),
+                "TLSv1.2" => versions.push(&rustls::version::TLS12),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Unsupported TLS protocol version: '{other}'. \
+                             Supported versions: TLSv1.2, TLSv1.3"
+                        ),
+                    ));
+                },
+            }
         }
     }
+    if !allow_tls13 {
+        versions.retain(|v| v.version != rustls::ProtocolVersion::TLSv1_3);
+    }
+    if versions.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "No TLS protocol of {} = [{}] is allowed by {} = {protocol}",
+                SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG,
+                enabled_protocols.join(", "),
+                SslConfigs::SSL_PROTOCOL_CONFIG,
+            ),
+        ));
+    }
     Ok(versions)
+}
+
+/// Resolves `ssl.cipher.suites` to the TLS provider's cipher suites, in the
+/// configured order (Java's `SSLEngine.setEnabledCipherSuites` order is the
+/// preference order, `DefaultSslEngineFactory.java:191`).
+///
+/// A name is the Java / IANA one. Every suite of the aws-lc-rs provider
+/// ([`rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES`]) is accepted, as Java's
+/// `ssl.cipher.suites` accepts every suite the JSSE provider supports. rustls
+/// names the TLS 1.3 suites `TLS13_*` where Java and IANA say `TLS_*`
+/// (`TLS_AES_128_GCM_SHA256`), so those names are matched with that prefix.
+/// An unknown name fails with `Unsupported CipherSuite: <name>`, the message of
+/// Java's `IllegalArgumentException` from `setEnabledCipherSuites`.
+fn resolve_cipher_suites(names: &[String]) -> io::Result<Vec<rustls::SupportedCipherSuite>> {
+    names
+        .iter()
+        .map(|name| {
+            rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES
+                .iter()
+                .find(|suite| {
+                    suite
+                        .suite()
+                        .as_str()
+                        .is_some_and(|rustls_name| is_java_cipher_suite_name(rustls_name, name))
+                })
+                .copied()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("Unsupported CipherSuite: {name}")))
+        })
+        .collect()
+}
+
+/// Whether `java_name` is the Java / IANA name of the rustls suite named
+/// `rustls_name`: rustls's `TLS13_` prefix is IANA's `TLS_`.
+fn is_java_cipher_suite_name(rustls_name: &str, java_name: &str) -> bool {
+    match rustls_name.strip_prefix("TLS13_") {
+        Some(rest) => java_name.strip_prefix("TLS_") == Some(rest),
+        None => rustls_name == java_name,
+    }
 }
 
 /// A custom `ServerCertVerifier` that validates the certificate chain but
@@ -708,11 +801,177 @@ B2V9lhUZNk+pRjtJw9unpXsM
     /// does, rather than failing every TLS connection.
     #[test]
     fn test_empty_enabled_protocols_uses_provider_defaults() {
-        assert_eq!(resolve_tls_versions(&[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
+        assert_eq!(resolve_tls_versions("TLSv1.3", &[]).unwrap(), rustls::DEFAULT_VERSIONS.to_vec());
 
         let config = SslConfigs::parse_for_test(&[("ssl.enabled.protocols", "")]).unwrap();
         assert!(config.enabled_protocols.is_empty());
         assert!(SslFactory::new(&config).is_ok());
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    /// `ssl.protocol=TLSv1.2` is a ceiling: TLS 1.3 is dropped from
+    /// `ssl.enabled.protocols` (`SslConfigs.java:35-40`), from the provider's
+    /// defaults too.
+    #[test]
+    fn test_tls12_protocol_drops_tls13() {
+        let both = strings(&["TLSv1.2", "TLSv1.3"]);
+        assert_eq!(resolve_tls_versions("TLSv1.2", &both).unwrap(), vec![&rustls::version::TLS12]);
+        assert_eq!(resolve_tls_versions("TLSv1.2", &[]).unwrap(), vec![&rustls::version::TLS12]);
+        // JCA algorithm names ignore case.
+        assert_eq!(resolve_tls_versions("tlsv1.2", &both).unwrap(), vec![&rustls::version::TLS12]);
+
+        let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.2")]).unwrap();
+        assert!(SslFactory::new(&config).is_ok());
+    }
+
+    /// `TLSv1.3` and the JDK's generic `TLS` context put no ceiling on the
+    /// enabled protocols.
+    #[test]
+    fn test_tls13_and_tls_protocol_keep_enabled_versions() {
+        let both = strings(&["TLSv1.2", "TLSv1.3"]);
+        for protocol in ["TLSv1.3", "TLS"] {
+            assert_eq!(
+                resolve_tls_versions(protocol, &both).unwrap(),
+                vec![&rustls::version::TLS12, &rustls::version::TLS13],
+                "{protocol}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unsupported_protocol_fails() {
+        for protocol in ["TLSv1.1", "SSLv3", ""] {
+            let err = resolve_tls_versions(protocol, &strings(&["TLSv1.2"])).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                err.to_string(),
+                format!("Unsupported TLS protocol: '{protocol}'. Supported protocols: TLSv1.3, TLSv1.2, TLS")
+            );
+        }
+        let config = SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.1")]).unwrap();
+        assert_eq!(
+            SslFactory::new(&config).unwrap_err().to_string(),
+            "Unsupported TLS protocol: 'TLSv1.1'. Supported protocols: TLSv1.3, TLSv1.2, TLS"
+        );
+    }
+
+    /// A ceiling that leaves no enabled protocol fails when the factory is
+    /// built, naming both keys (Java fails at the handshake).
+    #[test]
+    fn test_protocol_ceiling_leaving_no_version_fails() {
+        let config =
+            SslConfigs::parse_for_test(&[("ssl.protocol", "TLSv1.2"), ("ssl.enabled.protocols", "TLSv1.3")]).unwrap();
+        let err = SslFactory::new(&config).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "No TLS protocol of ssl.enabled.protocols = [TLSv1.3] is allowed by ssl.protocol = TLSv1.2"
+        );
+    }
+
+    /// Every suite of the aws-lc-rs provider resolves by its Java / IANA name.
+    #[test]
+    fn test_every_provider_cipher_suite_resolves_by_java_name() {
+        let names = [
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        ];
+        assert_eq!(names.len(), rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES.len());
+        for name in names {
+            let suites = resolve_cipher_suites(&strings(&[name])).unwrap();
+            assert_eq!(suites.len(), 1, "{name}");
+            assert!(rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES.contains(&suites[0]), "{name}");
+        }
+        let all = resolve_cipher_suites(&strings(&names)).unwrap();
+        let mut provider_suites = rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES.to_vec();
+        provider_suites.sort_by_key(|s| u16::from(s.suite()));
+        let mut resolved = all.clone();
+        resolved.sort_by_key(|s| u16::from(s.suite()));
+        assert_eq!(resolved, provider_suites);
+    }
+
+    #[test]
+    fn test_cipher_suites_keep_configured_order() {
+        let names = [
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_CHACHA20_POLY1305_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+        ];
+        let suites = resolve_cipher_suites(&strings(&names)).unwrap();
+        let expected = [
+            rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+            rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
+        ];
+        assert_eq!(suites.iter().map(|s| s.suite()).collect::<Vec<_>>(), expected);
+
+        let config = SslConfigs { cipher_suites: strings(&names), ..SslConfigs::default() };
+        let factory = SslFactory::new(&config).unwrap();
+        assert_eq!(
+            factory
+                .client_config()
+                .crypto_provider()
+                .cipher_suites
+                .iter()
+                .map(|s| s.suite())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    /// An unknown name fails with the message of Java's
+    /// `setEnabledCipherSuites`; rustls's own `TLS13_` spelling is not a
+    /// Java name.
+    #[test]
+    fn test_unknown_cipher_suite_fails() {
+        for name in [
+            "TLS_RSA_WITH_AES_128_CBC_SHA",
+            "TLS13_AES_128_GCM_SHA256",
+            "tls_aes_128_gcm_sha256",
+        ] {
+            let config = SslConfigs {
+                cipher_suites: strings(&["TLS_AES_128_GCM_SHA256", name]),
+                ..SslConfigs::default()
+            };
+            let err = SslFactory::new(&config).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), format!("Unsupported CipherSuite: {name}"));
+        }
+    }
+
+    /// TLS 1.2-only suites with only TLS 1.3 enabled leave no usable suite:
+    /// rustls's error is reported.
+    #[test]
+    fn test_cipher_suites_unusable_with_enabled_protocols_fail() {
+        let config = SslConfigs::parse_for_test(&[
+            ("ssl.enabled.protocols", "TLSv1.3"),
+            ("ssl.cipher.suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+        ])
+        .unwrap();
+        let err = SslFactory::new(&config).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            rustls::Error::General("no usable cipher suites configured".into()).to_string()
+        );
+    }
+
+    /// An empty `ssl.cipher.suites` keeps the installed provider.
+    #[test]
+    fn test_empty_cipher_suites_keep_provider_defaults() {
+        let factory = SslFactory::new(&SslConfigs::default()).unwrap();
+        let installed = rustls::crypto::CryptoProvider::get_default().unwrap();
+        assert!(Arc::ptr_eq(factory.client_config().crypto_provider(), installed));
     }
 
     #[test]

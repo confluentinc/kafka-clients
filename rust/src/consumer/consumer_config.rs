@@ -2915,6 +2915,7 @@ mod tests {
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
             SaslConfigs::SASL_MECHANISM,
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG,
+            "ssl.cipher.suites",
         ] {
             assert!(names.contains(key), "{key}");
         }
@@ -2922,7 +2923,6 @@ mod tests {
             ConsumerConfig::PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
             "security.providers",
             "config.providers",
-            "ssl.cipher.suites",
             "ssl.keystore.password",
             "ssl.key.password",
             "ssl.truststore.password",

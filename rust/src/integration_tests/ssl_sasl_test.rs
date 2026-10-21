@@ -76,12 +76,17 @@ fn client_config(props: &[(&str, &str)]) -> AdminClientConfig {
 /// Helper: SSL config trusting `ca_cert_pem`, hostname verification disabled
 /// (tests connect via 127.0.0.1).
 fn ssl_configs(ca_cert_pem: &str) -> SslConfigs {
-    client_config(&[
+    ssl_configs_with(ca_cert_pem, &[])
+}
+
+/// Helper: [`ssl_configs`] plus the `extra` properties.
+fn ssl_configs_with(ca_cert_pem: &str, extra: &[(&str, &str)]) -> SslConfigs {
+    let mut props = vec![
         (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, ca_cert_pem),
         (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
-    ])
-    .ssl_config()
-    .clone()
+    ];
+    props.extend_from_slice(extra);
+    client_config(&props).ssl_config().clone()
 }
 
 /// Helper: SASL config for `mechanism` with credentials in `sasl.jaas.config`.
@@ -99,7 +104,12 @@ const PLAIN_LOGIN_MODULE: &str = "org.apache.kafka.common.security.plain.PlainLo
 
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
-    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
+    create_ssl_selector_with(ca_cert_pem, &[])
+}
+
+/// Helper: [`create_ssl_selector`] with the `extra` `ssl.*` properties.
+fn create_ssl_selector_with(ca_cert_pem: &str, extra: &[(&str, &str)]) -> Selector {
+    let ssl_factory = SslFactory::new(&ssl_configs_with(ca_cert_pem, extra)).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
     Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
@@ -241,6 +251,59 @@ async fn test_ssl_connection() {
     assert_eq!(avr.data().error_code(), Errors::None.code());
     assert!(avr.api_version(ApiKeys::METADATA.id()).is_some(), "Should contain METADATA API");
 
+    selector.close().await;
+}
+
+/// Test: `ssl.protocol=TLSv1.2` and `ssl.cipher.suites` reach the handshake.
+///
+/// The broker certificate is ECDSA (`rcgen`'s default key), so a TLS 1.2
+/// `ECDHE_ECDSA` suite under the `TLSv1.2` ceiling completes the handshake and
+/// serves a request, while a list holding only an `ECDHE_RSA` suite has no suite
+/// the broker can use with that certificate and the handshake fails.
+#[tokio::test]
+async fn test_ssl_connection_with_protocol_and_cipher_suites() {
+    let ctx = TestContext::new(ClusterConfig::default()).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
+    let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
+        ],
+    );
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_ready(&mut selector, NODE_ID).await;
+    let mut builder = api_versions_request::Builder::new();
+    let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
+    selector.send(send).expect("Failed to queue send");
+    poll_until_receive(&mut selector).await;
+    let receives = selector.completed_receives();
+    assert_eq!(1, receives.len());
+    let response = parse_response(receives[0].payload().unwrap(), &header);
+    let ConcreteResponse::ApiVersions(ref avr) = response else {
+        panic!("Expected ApiVersions response, got: {response}");
+    };
+    assert_eq!(avr.data().error_code(), Errors::None.code());
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+        ],
+    );
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_disconnected(&mut selector).await;
+    assert!(!selector.is_channel_ready(NODE_ID));
     selector.close().await;
 }
 
