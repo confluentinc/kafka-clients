@@ -220,22 +220,27 @@ impl CommonClientConfigs {
     /// when reconnect backoff is explicitly configured but the maximum
     /// reconnect backoff is not explicitly configured.
     ///
-    /// Returns the updates to apply to the configuration.
+    /// Returns the updates to apply to the configuration. With `log_warnings`
+    /// false it logs nothing (a configuration copied for one more client,
+    /// whose original logged it once, as Java builds the config once).
     #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#postProcessReconnectBackoffConfigs")]
     pub(crate) fn post_process_reconnect_backoff_configs(
         config: &AbstractConfig,
         parsed_values: &ConfigMap,
+        log_warnings: bool,
     ) -> ConfigMap {
         let mut rval = HashMap::new();
         let original_config = config.originals_map();
         if !original_config.contains_key(Self::RECONNECT_BACKOFF_MAX_MS_CONFIG)
             && original_config.contains_key(Self::RECONNECT_BACKOFF_MS_CONFIG)
         {
-            log::warn!(
-                "Disabling exponential reconnect backoff because {} is set, but {} is not.",
-                Self::RECONNECT_BACKOFF_MS_CONFIG,
-                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG
-            );
+            if log_warnings {
+                log::warn!(
+                    "Disabling exponential reconnect backoff because {} is set, but {} is not.",
+                    Self::RECONNECT_BACKOFF_MS_CONFIG,
+                    Self::RECONNECT_BACKOFF_MAX_MS_CONFIG
+                );
+            }
             rval.insert(
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG.to_string(),
                 parsed_values.get(Self::RECONNECT_BACKOFF_MS_CONFIG).cloned().flatten(),
@@ -247,14 +252,18 @@ impl CommonClientConfigs {
     /// Log warning if the exponential backoff is disabled due to initial
     /// backoff value is greater than max backoff value.
     ///
+    /// With `log_warnings` false it makes the same reads, so marks the same
+    /// keys used, but logs nothing (a configuration copied for one more
+    /// client, whose original logged it once, as Java builds the config once).
+    ///
     /// # Errors
     ///
     /// The error of a getter: a key is not defined, not a `LONG`, or `null`.
     #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#warnDisablingExponentialBackoff")]
-    pub(crate) fn warn_disabling_exponential_backoff(config: &AbstractConfig) -> Result<(), Error> {
+    pub(crate) fn warn_disabling_exponential_backoff(config: &AbstractConfig, log_warnings: bool) -> Result<(), Error> {
         let retry_backoff_ms = required_long(config, Self::RETRY_BACKOFF_MS_CONFIG)?;
         let retry_backoff_max_ms = required_long(config, Self::RETRY_BACKOFF_MAX_MS_CONFIG)?;
-        if retry_backoff_ms > retry_backoff_max_ms {
+        if log_warnings && retry_backoff_ms > retry_backoff_max_ms {
             log::warn!(
                 "Configuration '{}' with value '{}' is greater than configuration '{}' with value '{}'. A static \
                  backoff with value '{}' will be applied.",
@@ -269,7 +278,7 @@ impl CommonClientConfigs {
         let connection_setup_timeout_ms = required_long(config, Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG)?;
         let connection_setup_timeout_max_ms =
             required_long(config, Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?;
-        if connection_setup_timeout_ms > connection_setup_timeout_max_ms {
+        if log_warnings && connection_setup_timeout_ms > connection_setup_timeout_max_ms {
             log::warn!(
                 "Configuration '{}' with value '{}' is greater than configuration '{}' with value '{}'. A static \
                  connection setup timeout with value '{}' will be applied.",
@@ -382,6 +391,7 @@ mod tests {
                 Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
                     config,
                     config.parsed_values(),
+                    true,
                 ))
             },
         )
@@ -504,7 +514,7 @@ mod tests {
             false,
         )
         .unwrap();
-        CommonClientConfigs::warn_disabling_exponential_backoff(&config).unwrap();
+        CommonClientConfigs::warn_disabling_exponential_backoff(&config, true).unwrap();
         assert!(config.unused().is_empty(), "{:?}", config.unused());
     }
 }

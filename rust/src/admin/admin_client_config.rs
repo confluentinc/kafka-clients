@@ -438,10 +438,11 @@ impl AdminClientConfig {
             // Java's `postProcessParsedConfig`.
             |config| {
                 CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
-                CommonClientConfigs::warn_disabling_exponential_backoff(config)?;
+                CommonClientConfigs::warn_disabling_exponential_backoff(config, true)?;
                 Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
                     config,
                     config.parsed_values(),
+                    true,
                 ))
             },
         )?;

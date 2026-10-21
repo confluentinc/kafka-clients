@@ -1013,7 +1013,15 @@ impl ConsumerConfig {
     /// (`AsyncKafkaConsumer.java:476` reads it), so clients given one
     /// configuration share its id. Building the configuration again would
     /// take a second number; this copy does not. It is not `Clone`
-    /// (CLAUDE.md §3), and it does not repeat `new`'s warnings.
+    /// (CLAUDE.md §3).
+    ///
+    /// Java's client logs nothing about the configuration it is given, so the
+    /// copy logs nothing either: it makes the post-processing's reads, marking
+    /// the same keys used, but none of its warnings (the reconnect and retry
+    /// backoff, the connection setup timeout, `connections.max.idle.ms` below
+    /// `max.poll.interval.ms`), and not `new`'s TLS hostname-verification
+    /// warning. The client given the copy logs its one unused-keys line
+    /// ([`Self::log_unused`]), as Java's client constructor does.
     ///
     /// # Errors
     ///
@@ -1029,7 +1037,8 @@ impl ConsumerConfig {
 
     /// Java's `ConsumerConfig(Map)` without its logging: parses `originals`
     /// and post-processes them, `resolved_client_id` standing in for the
-    /// sequence number `client.id` would take.
+    /// sequence number `client.id` would take. With a `resolved_client_id`
+    /// (a copy) the post-processing logs nothing.
     fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
         let config = AbstractConfig::with_hooks(
             &CONFIG,
@@ -1044,31 +1053,38 @@ impl ConsumerConfig {
 
     /// Java's `ConsumerConfig.postProcessParsedConfig`: the values that
     /// replace the parsed ones. A `resolved_client_id` is the id a derived
-    /// `client.id` takes, in place of a new one.
+    /// `client.id` takes, in place of a new one; it marks a copy for one more
+    /// client ([`Self::copy_for_client`]), whose reads are the same but which
+    /// logs none of the warnings: its original logged them once.
     fn post_process_parsed_config(
         config: &AbstractConfig,
         resolved_client_id: Option<&str>,
     ) -> Result<ConfigMap, Error> {
+        let log_warnings = resolved_client_id.is_none();
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
-        CommonClientConfigs::warn_disabling_exponential_backoff(config)?;
+        CommonClientConfigs::warn_disabling_exponential_backoff(config, log_warnings)?;
         let mut refined_configs =
-            CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values());
+            CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values(), log_warnings);
         Self::maybe_override_client_id_with_configs(config, &mut refined_configs, resolved_client_id)?;
         Self::maybe_override_enable_auto_commit(config, &mut refined_configs)?;
         Self::check_unsupported_configs_post_process(config)?;
-        Self::warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config)?;
+        Self::warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config, log_warnings)?;
         Ok(refined_configs)
     }
 
-    /// Java's `warnIfConnectionsMaxIdleMsLowerThanMaxPollIntervalMs`.
-    fn warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config: &AbstractConfig) -> Result<(), Error> {
+    /// Java's `warnIfConnectionsMaxIdleMsLowerThanMaxPollIntervalMs`. With
+    /// `log_warnings` false it makes the same reads but logs nothing.
+    fn warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(
+        config: &AbstractConfig,
+        log_warnings: bool,
+    ) -> Result<(), Error> {
         let group_protocol = config.get_string(Self::GROUP_PROTOCOL_CONFIG)?;
         if !group_protocol.is_some_and(|protocol| protocol.eq_ignore_ascii_case("CLASSIC")) {
             return Ok(());
         }
         let connections_max_idle_ms = config.get_long(Self::CONNECTIONS_MAX_IDLE_MS_CONFIG)?.unwrap_or_default();
         let max_poll_interval_ms = config.get_int(Self::MAX_POLL_INTERVAL_MS_CONFIG)?.unwrap_or_default();
-        if connections_max_idle_ms >= 0 && connections_max_idle_ms < i64::from(max_poll_interval_ms) {
+        if log_warnings && connections_max_idle_ms >= 0 && connections_max_idle_ms < i64::from(max_poll_interval_ms) {
             warn!(
                 "Configuration '{}' with value '{}' is lower than configuration '{}' with value '{}'. This may cause \
                  the connection to the group coordinator to be closed during an ongoing rebalance, which can \
@@ -1433,6 +1449,8 @@ impl ConsumerConfig {
 mod tests {
     use super::*;
     use crate::common::config::types::Password;
+    use crate::test_log_capture::capture_logs;
+    use log::Level;
 
     /// Props holding only `bootstrap.servers`, which the `ConfigDef` defines
     /// with `NO_DEFAULT_VALUE` and so every valid config must carry.
@@ -2097,6 +2115,46 @@ mod tests {
         ]);
         let config = ConsumerConfig::new(&explicit).unwrap();
         assert_eq!(config.copy_for_client().unwrap().client_id(), "mine");
+    }
+
+    /// `new` logs each post-processing warning once; a copy for one more
+    /// client logs none of them, as Java's client logs nothing about the
+    /// config it is given, but makes the same reads, so its used set is
+    /// `new`'s.
+    #[test]
+    fn test_copy_for_client_logs_no_post_process_warning() {
+        let props = props_with(&[
+            (ConsumerConfig::GROUP_ID_CONFIG, "copy-log-group"),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG, "classic"),
+            (ConsumerConfig::RETRY_BACKOFF_MS_CONFIG, "2000"),
+            (ConsumerConfig::RETRY_BACKOFF_MAX_MS_CONFIG, "1000"),
+            (ConsumerConfig::RECONNECT_BACKOFF_MS_CONFIG, "100"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, "40000"),
+            (CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, "30000"),
+            (ConsumerConfig::CONNECTIONS_MAX_IDLE_MS_CONFIG, "1000"),
+            (ConsumerConfig::MAX_POLL_INTERVAL_MS_CONFIG, "300000"),
+        ]);
+        let (config, new_lines) = capture_logs(|| ConsumerConfig::new(&props).unwrap());
+        let warnings = |lines: &[(Level, String)]| {
+            lines
+                .iter()
+                .filter(|(level, _)| *level == Level::Warn)
+                .map(|(_, line)| line.split(' ').take(3).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            warnings(&new_lines),
+            [
+                "Configuration 'retry.backoff.ms' with",
+                "Configuration 'socket.connection.setup.timeout.ms' with",
+                "Disabling exponential reconnect",
+                "Configuration 'connections.max.idle.ms' with",
+            ],
+            "{new_lines:?}"
+        );
+        let (copy, copy_lines) = capture_logs(|| config.copy_for_client().unwrap());
+        assert!(copy_lines.is_empty(), "{copy_lines:?}");
+        assert_eq!(copy.unused(), ConsumerConfig::new(&props).unwrap().unused());
     }
 
     /// A static member uses its `group.instance.id` instead of the sequence.

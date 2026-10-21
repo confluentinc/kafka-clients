@@ -40,8 +40,8 @@ use std::os::raw::c_char;
 use crate::common::Error;
 use crate::consumer::ConsumerConfig;
 use crate::ffi::common::config::config_getters::{self, LentStrings};
-use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::{fail_with, init_default_logger};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_t, kafka_Map_t, map_strings, sorted_string_list};
 
@@ -111,6 +111,10 @@ pub(crate) unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_Consu
 /// owned by the caller ([`kafka_consumer_ConsumerConfig_destroy`]), or
 /// returns the `ConfigException` translation.
 ///
+/// It first sets up the default stderr logger, as creating a client does, so
+/// the warnings the configuration logs while it is built are not lost when it
+/// is created before any client; its clients do not log them again.
+///
 /// # Safety
 ///
 /// `props` must be null or a valid map of `char *` keys and values; `out_err` a
@@ -121,6 +125,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     props: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_ConsumerConfig_t {
+    init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();

@@ -93,11 +93,17 @@ use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
 use kafka_common_Error_e::*;
 
 /// Initializes the default stderr log backend, honouring `RUST_LOG`, the first
-/// time a client is created from C. Idempotent: `try_init` succeeds once and
-/// is a silent no-op afterwards, so a logger a binding installed beforehand
-/// stays in place.
+/// time a client, or a consumer or producer configuration, is created from C.
+/// Idempotent: `try_init` succeeds once and is a silent no-op afterwards, so a
+/// logger a binding installed beforehand stays in place.
+///
+/// In the unit tests it installs the test log capture instead, which forwards
+/// to the same `env_logger` (`crate::test_log_capture`).
 pub(crate) fn init_default_logger() {
+    #[cfg(not(test))]
     let _ = env_logger::try_init();
+    #[cfg(test)]
+    crate::test_log_capture::install();
 }
 
 // ---------------------------------------------------------------------------
