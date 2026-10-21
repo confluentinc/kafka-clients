@@ -250,7 +250,18 @@ const SETTING_NAMES: &[(&str, &str, &str, &str)] = &[
         " B",
     ),
     ("MAX_POLL_RECORDS", "max.poll.records", "max.poll.records", ""),
+    ("LIBRDKAFKA_BATCH", "librdkafka", "librdkafka reads", ""),
 ];
+
+/// A setting's value as a scenario or a parameter table shows it, `number`
+/// formatting a whole number.
+fn setting_value(key: &str, value: &str, unit: &str, number: fn(&str) -> String) -> String {
+    match (key, value) {
+        ("LIBRDKAFKA_BATCH", "0") => "poll(), one record at a time".to_string(),
+        ("LIBRDKAFKA_BATCH", n) => format!("consume_batch, {} records", number(n)),
+        _ => format!("{}{unit}", number(value)),
+    }
+}
 
 /// A one-line description of a test's settings.
 pub(crate) fn scenario(test: &PerfTest) -> String {
@@ -270,7 +281,7 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
     }
     for &(key, label, _, unit) in SETTING_NAMES {
         if let Some(v) = test.setting(key) {
-            parts.push(format!("{label} {v}{unit}"));
+            parts.push(format!("{label} {}", setting_value(key, v, unit, str::to_string)));
         }
     }
     parts.join(", ")
@@ -302,7 +313,7 @@ fn parameters(test: &PerfTest) -> Vec<(String, String)> {
         }),
     );
     for &(key, _, name, unit) in SETTING_NAMES {
-        add(name, test.setting(key).map(|v| format!("{}{unit}", grouped(v))));
+        add(name, test.setting(key).map(|v| setting_value(key, v, unit, grouped)));
     }
     rows
 }
@@ -733,6 +744,30 @@ mod tests {
         for key in named {
             assert!(SETTINGS.iter().any(|s| s.key == key), "{key} is not a setting");
         }
+    }
+
+    #[test]
+    fn says_how_the_librdkafka_clients_read() {
+        let tests = parse_tests(
+            "poll python WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000 LIBRDKAFKA_BATCH=0\n\
+             batch python WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000 MAX_POLL_RECORDS=4500 \
+             LIBRDKAFKA_BATCH=4000\n",
+        )
+        .unwrap();
+        assert_eq!(
+            scenario(&tests[0]),
+            "consumer, 200 partitions, 1024 B values, 300000 msg/s, librdkafka poll(), one record at a time"
+        );
+        assert!(scenario(&tests[1]).ends_with("max.poll.records 4500, librdkafka consume_batch, 4000 records"));
+        let rows = parameters(&tests[1]);
+        assert!(
+            rows.contains(&("max.poll.records".to_string(), "4,500".to_string())),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&("librdkafka reads".to_string(), "consume_batch, 4,000 records".to_string())),
+            "{rows:?}"
+        );
     }
 
     fn metrics(client: &str, msg_s: f64, p99: f64) -> Metrics {
