@@ -3382,54 +3382,12 @@ where
         // TopicMetadataRequestManager — always built.
         let topic_metadata = Some(TopicMetadataRequestManager::new(&config));
 
-        // FetchRequestManager — always built. The `is_unavailable` and
-        // `maybe_throw_auth_failure` closures bridge to the delegate
-        // (the delegate is not visible from the fetch manager directly
-        // — Phase-7 design uses Arc<Fn> indirection).
+        // FetchRequestManager — always built. Java hands it the
+        // `NetworkClientDelegate` for `isUnavailable` / `maybeThrowAuthFailure`;
+        // here the bg task lends it the delegate on every `poll` /
+        // `poll_on_close` instead (see `NodeStatus`).
         let fetch = {
-            use crate::common::Node;
             use crate::common::utils::internals::BufferSupplier;
-
-            // Phase-12-deferred wiring: the delegate-backed
-            // `is_unavailable` / `maybe_throw_auth_failure` closures
-            // require an `Arc<AsyncMutex<NetworkClientDelegate<...>>>`
-            // crossing into a sync `Fn` boundary. Synchronously
-            // acquiring an async mutex inside a sync `Fn` is not
-            // possible without blocking. Phase 12 ships with no-op
-            // closures (always-available, never-auth-fail).
-            //
-            // Behavior gap (Critic Issue 4):
-            //   * `is_unavailable` no-op: the fetch manager treats
-            //     every node as available, so it may schedule fetches
-            //     to nodes the delegate has disconnected. The delegate
-            //     filters those at send-time, so the practical impact
-            //     is one extra round-trip per disconnected-node fetch
-            //     attempt — not a correctness bug.
-            //   * `maybe_throw_auth_failure` no-op IS a correctness
-            //     gap. Java's `AbstractFetch.java:452-457` calls
-            //     `isUnavailable(node)` THEN `maybeThrowAuthFailure(node)`
-            //     to surface cached auth errors observable on the
-            //     consumer side BEFORE the broker connection has been
-            //     established. With the no-op `|_| Ok(())`, an auth
-            //     error stays invisible until the broker actually RSTs
-            //     the next reconnect attempt, then surfaces via the
-            //     background event queue with delayed semantics.
-            //
-            // Phase 12 is PLAINTEXT-only (PLAN.md §"Out of scope"); the
-            // auth path is not exercised here. The closures MUST be
-            // replaced with delegate-backed snapshots before any
-            // SSL/SASL wiring lands.
-            //
-            // FIXME(phase-9-sasl): wire a sync snapshot of the
-            // delegate's node-availability + auth-failure maps. The
-            // delegate writes on `add_all_from_poll_result` /
-            // `handle_disconnections`; the closures read. Without this,
-            // an `AbstractFetch.maybeThrowAuthFailure`-equivalent path
-            // cannot surface `SASL_AUTHENTICATION_FAILED` from the
-            // delegate's cached state — auth errors will only appear
-            // after a subsequent broker round-trip.
-            let is_unavailable: crate::consumer::internals::IsUnavailableFn = Arc::new(|_n: &Node| false);
-            let maybe_auth: crate::consumer::internals::MaybeAuthFailureFn = Arc::new(|_n: &Node| Ok::<(), Error>(()));
 
             let mut frm = FetchRequestManager::new(
                 Arc::clone(&metadata),
@@ -3437,8 +3395,6 @@ where
                 fetch_config.clone(),
                 Arc::clone(&fetch_buffer),
                 Arc::new(BufferSupplier::create()),
-                is_unavailable,
-                maybe_auth,
                 Arc::clone(&api_versions),
                 Arc::clone(&fetch_metrics_manager),
                 config.retry_backoff_ms(),
@@ -3974,6 +3930,17 @@ where
     #[cfg(test)]
     pub(crate) fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Test seam: how many fetch requests the production fetch manager has
+    /// built for `node_id` (each one a FETCH handed to the network client).
+    #[cfg(test)]
+    pub(crate) fn fetch_requests_built_for_test(&self, node_id: i32) -> u64 {
+        let guard = self.request_managers.lock().expect("request managers mutex poisoned");
+        guard
+            .fetch
+            .as_ref()
+            .map_or(0, |fetch| fetch.fetch_requests_built_for_test(node_id))
     }
 
     /// Test seam: weak references to the metadata and subscription state, so a

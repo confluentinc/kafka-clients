@@ -1406,7 +1406,12 @@ impl ApplicationEventProcessor {
                     ));
                     return;
                 };
-                fetch_mgr.create_fetch_requests()
+                let rx = fetch_mgr.create_fetch_requests();
+                // Java runs this on the network thread, so the same `runOnce`
+                // polls the fetch manager; this continuation runs on a spawned
+                // task, so wake the bg task to get the same prompt completion.
+                fetch_mgr.wake_background_task();
+                rx
             };
             match fetch_rx.await {
                 Ok(Ok(())) => {
@@ -1608,7 +1613,6 @@ mod tests {
     use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
     use crate::consumer::internals::CoordinatorRequestManager;
     use crate::consumer::internals::OffsetsRequestManager;
-    use crate::consumer::internals::RequestManager;
     use crate::consumer::internals::SubscriptionState;
     use crate::consumer::internals::TopicMetadataRequestManager;
     use crate::consumer::internals::events::ApplicationEvent;
@@ -1716,8 +1720,6 @@ mod tests {
                 fetch_config,
                 Arc::new(FetchBuffer::new()),
                 Arc::new(BufferSupplier::create()),
-                FetchRequestManager::always_available(),
-                FetchRequestManager::no_auth_failure(),
                 Arc::new(ApiVersions::new()),
                 crate::consumer::internals::FetchMetricsManager::for_test(),
                 100,
@@ -2904,7 +2906,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 12_345);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 12_345);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3425,7 +3427,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3472,7 +3474,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3533,7 +3535,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3620,7 +3622,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
