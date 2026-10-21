@@ -6824,6 +6824,105 @@ mod tests {
         assert_eq!(result.topic_id("myTopic").get().await.unwrap(), Uuid::new(0, 7));
     }
 
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServer`
+    /// (`KafkaAdminClientTest.java:399`).
+    #[tokio::test]
+    async fn test_unreachable_bootstrap_server() {
+        verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::Rebootstrap).await;
+    }
+
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServerNoRebootstrap`
+    /// (`KafkaAdminClientTest.java:404`).
+    #[tokio::test]
+    async fn test_unreachable_bootstrap_server_no_rebootstrap() {
+        verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::None).await;
+    }
+
+    /// Java `verifyUnreachableBootstrapServer` (`KafkaAdminClientTest.java:1546-1574`).
+    ///
+    /// Java runs it over `Time.SYSTEM`, where the 200 ms of unreachability pass
+    /// in real time while `future.get()` waits; here the runnable is driven by
+    /// hand over a `MockTime` advanced 50 ms per iteration, so the same 200 ms
+    /// pass between iterations. The client config is Java's
+    /// `AdminClientUnitTestEnv.clientConfigs(METADATA_RECOVERY_STRATEGY_CONFIG, name)`.
+    async fn verify_unreachable_bootstrap_server(metadata_recovery_strategy: crate::MetadataRecoveryStrategy) {
+        use crate::{CommonClientConfigs, MetadataRecoveryStrategy};
+        // This tests the scenario in which the bootstrap server is unreachable for a short while,
+        // which prevents AdminClient from being able to send the initial metadata request
+
+        let address = "127.0.0.1:8121".parse().expect("a socket address");
+        let cluster = Cluster::bootstrap(&[("localhost".to_string(), address)]);
+        let bootstrap_node = cluster.nodes()[0].clone();
+        let time = mock_time(1000);
+        let client = MockClient::with_static_nodes(cluster.nodes().to_vec(), Arc::clone(&time) as Arc<dyn Time>);
+        let props = HashMap::from([
+            (
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:8121".to_string(),
+            ),
+            (AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG.to_string(), "1000".to_string()),
+            (
+                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(),
+                metadata_recovery_strategy.name().to_string(),
+            ),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        // `unreachableNodes.forEach(mockClient::setUnreachable)` in `AdminClientUnitTestEnv`.
+        runnable.client_mut().set_unreachable(&bootstrap_node, 200);
+
+        let (_discovered_cluster, discovered_nodes) = mock_cluster(3, 0);
+        // Bind responses to specific destinations so MockClient delivery does not depend on
+        // the iteration order of AdminClient's callsToSend map (which is keyed by Node).
+        let is_metadata = || -> crate::RequestMatcher {
+            Box::new(|body: &AbstractRequest| matches!(body, AbstractRequest::Metadata(_)))
+        };
+        let discovered_metadata = || {
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &discovered_nodes,
+                Some("mock-cluster"),
+                1,
+                Vec::new(),
+            ))
+        };
+        runnable
+            .client_mut()
+            .prepare_response_from_matcher(is_metadata(), discovered_metadata(), &bootstrap_node);
+        if metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap {
+            runnable
+                .client_mut()
+                .prepare_response_from_matcher(is_metadata(), discovered_metadata(), &bootstrap_node);
+        }
+        runnable.client_mut().prepare_response_from_matcher(
+            Box::new(|body: &AbstractRequest| matches!(body, AbstractRequest::CreateTopics(_))),
+            create_response(vec![create_result("myTopic", Errors::None, None)]),
+            &discovered_nodes[1],
+        );
+
+        let future = admin
+            .create_topics_with_options(
+                &[NewTopic::with_replicas_assignments(
+                    "myTopic",
+                    std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+                )],
+                CreateTopicsOptions::new().set_timeout_ms(Some(10000)),
+            )
+            .all();
+
+        // `future.get()`: drive the runnable until the future completes, well
+        // within the request's 10 s timeout.
+        for _ in 0..200 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(50);
+        }
+        assert!(future.is_done(), "createTopics did not complete");
+        future.get().await.expect("createTopics succeeds");
+    }
+
     #[tokio::test]
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();

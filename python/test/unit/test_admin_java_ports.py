@@ -75,8 +75,8 @@ KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient
   testAdminClientFailureWhenClosed | ported before | test_admin_client.py::test_admin_client_failure_when_closed
   testTimeoutWithoutMetadata | ported before | test_admin_client.py::test_timeout_without_metadata
   testConnectionFailureOnMetadataUpdate | skipped | drives MockClient; core: no same-named core test
-  testUnreachableBootstrapServer | skipped | drives MockClient; core: no same-named core test
-  testUnreachableBootstrapServerNoRebootstrap | skipped | drives MockClient; core: no same-named core test
+  testUnreachableBootstrapServer | skipped | drives MockClient; core: test_unreachable_bootstrap_server
+  testUnreachableBootstrapServerNoRebootstrap | skipped | drives MockClient; core: test_unreachable_bootstrap_server_no_rebootstrap
   testPropagatedMetadataFetchException | skipped | drives MockClient; core: no same-named core test
   testAdminClientApisAuthenticationFailure | skipped | drives MockClient; core: no same-named core test
   testDescribeCluster | skipped | drives MockClient; core: test_describe_cluster

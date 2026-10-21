@@ -998,7 +998,7 @@ mod tests {
     }
 
     /// The client reads the socket buffers and the metadata recovery settings
-    /// (`ClientUtils.createNetworkClient`, `KafkaAdminClient.java:561-562`), with
+    /// (`ClientUtils.createNetworkClient`, `KafkaAdminClient.java:617`), with
     /// `AdminClientConfig`'s defaults: 128 KiB / 64 KiB buffers, `rebootstrap` and
     /// 300000 ms.
     #[test]
