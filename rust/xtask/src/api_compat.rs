@@ -29,7 +29,7 @@
 //!
 //! The baseline is `--baseline <tag>`, else `$API_COMPAT_BASELINE`, else the
 //! highest release tag whose version does not exceed the current one, either
-//! `rust/X.Y.Z` (the tags `create-release-tag.yml` pushes) or `vX.Y.Z` (the
+//! `rust/vX.Y.Z` (the tags `create-release-tag.yml` pushes) or `vX.Y.Z` (the
 //! releases before it); for a
 //! pre-release such as `0.3.0-rc.1`, the highest one below `0.3.0`, while the
 //! semver rule reads it as `0.3.0`. Its
@@ -135,10 +135,10 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     let tag = match baseline {
         Some(tag) => tag,
         None => {
-            let tags = git_output(&["tag", "--list", "rust/[0-9]*", "v[0-9]*"])?;
+            let tags = git_output(&["tag", "--list", "rust/v[0-9]*", "v[0-9]*"])?;
             select_baseline(tags.lines(), current, pre_release).with_context(|| {
                 format!(
-                    "no `rust/X.Y.Z` or `vX.Y.Z` tag at or below {shown}; fetch the tags \
+                    "no `rust/vX.Y.Z` or `vX.Y.Z` tag at or below {shown}; fetch the tags \
                      (`git fetch --depth=1 origin 'refs/tags/*:refs/tags/*'`) or pass --baseline"
                 )
             })?
@@ -320,13 +320,13 @@ fn suppression_file(handles: &BTreeSet<String>) -> String {
     )
 }
 
-/// The highest release tag, `rust/X.Y.Z` or `vX.Y.Z`, not above `current`, or
+/// The highest release tag, `rust/vX.Y.Z` or `vX.Y.Z`, not above `current`, or
 /// below it when the crate is at a pre-release of `current`, which comes before
 /// it.
 fn select_baseline<'a>(tags: impl Iterator<Item = &'a str>, current: Version, pre_release: bool) -> Option<String> {
     tags.filter_map(|tag| {
         let tag = tag.trim();
-        let version = tag.strip_prefix("rust/").or_else(|| tag.strip_prefix('v'))?;
+        let version = tag.strip_prefix("rust/v").or_else(|| tag.strip_prefix('v'))?;
         Some((Version::parse(version)?, tag))
     })
     .filter(|(version, _)| {
@@ -340,7 +340,7 @@ fn select_baseline<'a>(tags: impl Iterator<Item = &'a str>, current: Version, pr
     .map(|(_, tag)| tag.to_string())
 }
 
-/// The tag as one path component: `rust/0.2.0` is `rust-0.2.0`.
+/// The tag as one path component: `rust/v0.2.0` is `rust-v0.2.0`.
 fn file_name(tag: &str) -> String {
     tag.replace('/', "-")
 }
@@ -499,24 +499,39 @@ mod tests {
         let tags = [
             "v0.1.0",
             "v0.1.1",
-            "rust/0.2.0-rc.1",
-            "rust/0.2.0",
-            "rust/0.10.0",
-            "python/0.3.0",
-            "rust/x",
+            "rust/v0.2.0-rc.1",
+            "rust/v0.2.0",
+            "rust/v0.10.0",
+            "python/v0.3.0",
+            "rust/vx",
+            // Not this style: never a baseline.
+            "rust/0.3.0",
         ];
         assert_eq!(
             select_baseline(tags.into_iter(), v("0.2.1"), false).as_deref(),
-            Some("rust/0.2.0")
+            Some("rust/v0.2.0")
         );
         assert_eq!(select_baseline(tags.into_iter(), v("0.2.0"), true).as_deref(), Some("v0.1.1"));
         assert_eq!(
             select_baseline(tags.into_iter(), v("1.0.0"), false).as_deref(),
-            Some("rust/0.10.0")
+            Some("rust/v0.10.0")
         );
         // A Python release tag is never a baseline of the crate.
-        assert_eq!(select_baseline(["python/0.3.0"].into_iter(), v("1.0.0"), false), None);
-        assert_eq!(file_name("rust/0.2.0"), "rust-0.2.0");
+        assert_eq!(select_baseline(["python/v0.3.0"].into_iter(), v("1.0.0"), false), None);
+        assert_eq!(file_name("rust/v0.2.0"), "rust-v0.2.0");
+    }
+
+    #[test]
+    fn a_dev_version_compares_with_the_release_below_it() {
+        // The crate at 0.2.0-dev.1, as current_version reads it.
+        let current = PackageVersion::parse("0.2.0-dev.1").unwrap();
+        let (major, minor, patch) = current.release();
+        assert!(current.is_pre_release());
+        let tags = ["v0.1.1", "rust/v0.2.0-beta.1", "rust/v0.2.0-dev.1", "rust/v0.2.0"];
+        assert_eq!(
+            select_baseline(tags.into_iter(), Version { major, minor, patch }, true).as_deref(),
+            Some("v0.1.1")
+        );
     }
 
     #[test]

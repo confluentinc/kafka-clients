@@ -139,9 +139,12 @@ run_matrix() {
         fi
         ( cd /tmp && "$vpy" -c "import _confluentkafka, confluent_kafka; print('import OK: Python $py:', _confluentkafka.__file__, confluent_kafka.__file__)" )
         if [ "$full" = 1 ]; then
-            # typing_extensions as in the `dev` extra of python/pyproject.toml:
-            # the typing tests import it on Python 3.10.
-            retry uv pip install --python "$vpy" pytest pytest-asyncio "typing_extensions>=4.2"
+            # The test tools of the `dev` extra of python/pyproject.toml, as
+            # `pip install .[dev]` installs them for the normal test run (the
+            # unit tests run mypy, and the typing tests import
+            # typing_extensions on Python 3.10); the wheel itself is already
+            # installed.
+            retry uv pip install --python "$vpy" -r "$base/python/pyproject.toml" --extra dev
             ( cd "$base" && "$vpy" -m pytest python/test/unit -q -p no:cacheprovider --import-mode=append )
         fi
         ( cd /tmp && "$vpy" -c "from confluent_kafka.producer import KafkaProducer as P; [P(configs={'bootstrap.servers':'localhost:9092','compression.type':c}).close() or print('OK: compression '+c) for c in ('gzip','snappy','lz4','zstd')]; P(configs={'bootstrap.servers':'localhost:9092','security.protocol':'SSL'}).close(); print('OK: security.protocol=SSL')" )

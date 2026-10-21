@@ -78,7 +78,7 @@ semaphore:
       parameters:
         - name: VERSION
           required: true
-          description: The new version, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-rc.N (e.g. "0.3.0-rc.1"). It must not be below the current one.
+          description: The new version, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-dev.N, X.Y.Z-rc.N (e.g. "0.3.0-rc.1"). It must not be below the current one.
         - name: PYTHON_VERSION
           required: false
           description: A PEP 440 version in normal form for the Python packages instead of VERSION's, e.g. "0.3.0.post1" for a Python-only release. Ignored if not set.

@@ -5,15 +5,15 @@ name: create-release-tag
 # version is entered, and pushes the tags, which start those releases:
 # semaphore.yml runs on each tag and, once every CI job passes, that client's
 # release blocks publish it.
-#   - RUST_VERSION: the tag is rust/<RUST_VERSION>, and "Release (Rust):"
+#   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
-#   - PYTHON_VERSION: the tag is python/<PYTHON_VERSION>, and "Release
+#   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
 #     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
 #     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
 #     publishes it to PyPI.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
-#     like any other, and its tag build tests and packages the client without
-#     publishing it.
+#     like any other. A rust dev version is tested and packaged, never
+#     published; a python dev version is published to Test PyPI only.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -24,10 +24,10 @@ name: create-release-tag
 #     or -dev.N), or [project] version in python/pyproject.toml
 #     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
 #     optionally by .devN);
-#   - the tag does not yet exist, and, unless it is a dev version, the version
-#     is new: for rust, higher than every version on crates.io; for python, not
+#   - the tag does not yet exist, and the version is new: for rust, unless it
+#     is a dev version, higher than every version on crates.io; for python, not
 #     yet on any index it is published to (Test PyPI, and PyPI for a final
-#     version);
+#     version that is not a dev version);
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -96,8 +96,9 @@ blocks:
                     manifest_key=project
                     ;;
                 esac
-                tag="${client}/${version}"
-                # A dev version is tested and packaged, never published.
+                tag="${client}/v${version}"
+                # A rust dev version is never published; a python one is
+                # published to Test PyPI only.
                 dev=""
                 [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
                 return 0
@@ -157,8 +158,9 @@ blocks:
             # need only be new on each index it is published to, Test PyPI and,
             # for a final version, PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
-            # after 4.5.0). A dev version is never published, so it is not
-            # compared with the registries. `fetch` writes the body of a URL to a file, or
+            # after 4.5.0). A rust dev version is never published, so it is
+            # not compared with crates.io; a python dev version only with Test
+            # PyPI. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
             # status, and on an empty body, which no existing page has.
             - |
@@ -174,8 +176,8 @@ blocks:
               published_file=$(mktemp) && body=$(mktemp) || refuse "could not create a temporary file"
               for client in "${clients[@]}"; do
                 use_client "${client}"
-                if [ -n "${dev}" ]; then
-                  echo "${tag} is a dev version, which is never published; not checking the registries"
+                if [ -n "${dev}" ] && [ "${client}" = rust ]; then
+                  echo "${tag} is a dev version, which is never published; not checking crates.io"
                   continue
                 fi
                 case "${client}" in
@@ -209,7 +211,7 @@ blocks:
                     ;;
                   python)
                     indexes=(https://test.pypi.org)
-                    [[ "${version}" =~ (a|b|rc)[0-9]+$ ]] || indexes+=(https://pypi.org)
+                    [[ "${version}" =~ (a|b|rc)[0-9]+$ ]] || [ -n "${dev}" ] || indexes+=(https://pypi.org)
                     for index in "${indexes[@]}"; do
                       fetch "${index}/simple/${PYPI_PACKAGE}/" "${body}" -H 'Accept: application/vnd.pypi.simple.v1+json' \
                         || refuse "could not read ${index} to confirm that ${PYPI_PACKAGE} ${version} is new"
@@ -290,8 +292,12 @@ blocks:
             - |
               for client in "${clients[@]}"; do
                 use_client "${client}"
+                if [ -n "${dev}" ] && [ "${client}" = rust ]; then
+                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${CRATE} ${version}; a dev version publishes nothing."
+                  continue
+                fi
                 if [ -n "${dev}" ]; then
-                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${client} ${version}; a dev version publishes nothing."
+                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
                   continue
                 fi
                 case "${client}" in

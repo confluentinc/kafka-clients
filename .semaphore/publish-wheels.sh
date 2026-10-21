@@ -21,7 +21,7 @@
 # goes to Test PyPI first; a final version then goes to PyPI, after its wheels
 # have passed the post-publish checks on Test PyPI.
 #
-# Usage, from the repository root of a python/<version> tag build:
+# Usage, from the repository root of a python/v<version> tag build:
 #   .semaphore/publish-wheels.sh package
 #       Refuses unless all of the following hold, then records the wheels as
 #       the release: pypi/release/wheels, with `<sha256>  <wheel>` for each in
@@ -34,16 +34,14 @@
 #           wheel verification blocks tested, all of this version, one set per
 #           platform of ${WHEEL_PLATFORMS};
 #         - `twine check` accepts their metadata.
-#       A dev version (a .devN suffix) is packaged like any other, and is
-#       never published: `prepare` and `upload` refuse it.
 #   .semaphore/publish-wheels.sh prepare
 #       Refuses unless all of the following hold, then copies the wheels to
 #       upload into /tmp/pypi-publish/upload and writes `<sha256>  <wheel>` for
 #       each to /tmp/pypi-publish/upload.sha256. It loads no token.
 #         - the tag still points at the commit the build checked out, and that
 #           commit is part of master (checked again, right before the upload);
-#         - the index takes the version: Test PyPI takes every version but a
-#           dev one, PyPI only a final one;
+#         - the index takes the version: Test PyPI takes every version, PyPI
+#           only a final one (no aN, bN, rcN or .devN suffix);
 #         - the version is not yet on the index. The only exception is
 #           completing an interrupted publish of the same version from this
 #           workflow (see `upload`);
@@ -113,27 +111,21 @@ for file in page["files"]:
 # another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the global prologue of
 # semaphore.yml) did not test the tagged commit.
 release_version() {
-    local release_tag_pattern='^python/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
+    local release_tag_pattern='^python/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
     if [ "${SEMAPHORE_GIT_REF_TYPE:-}" != "tag" ]; then
-        refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE:-}'); push a tag python/<version> for the master commit to release"
+        refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE:-}'); push a tag python/v<version> for the master commit to release"
     fi
     if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
-        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Python release tag (python/<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then optionally by .devN)"
+        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Python release tag (python/v<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then optionally by .devN)"
     fi
     if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
         refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"
     fi
-    PACKAGE_VERSION="${SEMAPHORE_GIT_TAG_NAME#python/}"
+    PACKAGE_VERSION="${SEMAPHORE_GIT_TAG_NAME#python/v}"
 }
 
 # Sets the upload URL, token key and artifact directory of ${PYPI_INDEX}.
 index_settings() {
-    # A dev version is built, tested and packaged, never published. The
-    # publish blocks' `run` conditions already skip its tag; the check is
-    # repeated here, before the token is loaded.
-    if [[ "${PACKAGE_VERSION}" =~ \.dev[0-9]+$ ]]; then
-        refuse "${PACKAGE_VERSION} is a dev version: its tag build tests and packages the wheels, and publishes nothing"
-    fi
     case "${PYPI_INDEX:-}" in
         https://test.pypi.org)
             upload_url=https://test.pypi.org/legacy/
@@ -142,8 +134,13 @@ index_settings() {
         https://pypi.org)
             upload_url=https://upload.pypi.org/legacy/
             token_key=pypi_token
-            # A pre-release stops at Test PyPI, whose versions never reach
-            # users of PyPI.
+            # A pre-release or a dev version stops at Test PyPI, whose
+            # versions never reach users of PyPI. The promotion's `run`
+            # condition already skips their tags; the check is repeated here,
+            # before the token is loaded.
+            if [[ "${PACKAGE_VERSION}" =~ \.dev[0-9]+$ ]]; then
+                refuse "${PACKAGE_VERSION} is a dev version, which is published to Test PyPI only"
+            fi
             if [[ "${PACKAGE_VERSION}" =~ (a|b|rc)[0-9]+$ ]]; then
                 refuse "${PACKAGE_VERSION} is a pre-release, which is published to Test PyPI only"
             fi

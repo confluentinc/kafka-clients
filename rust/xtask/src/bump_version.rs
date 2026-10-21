@@ -16,10 +16,14 @@
 //! released together, each manifest in its own syntax.
 //!
 //! The version is given as semver, `X.Y.Z` or `X.Y.Z-alpha.N`, `-beta.N`,
-//! `-rc.N`; PEP 440's `X.Y.ZaN`, `X.Y.ZbN`, `X.Y.ZrcN` are read as the same
-//! versions. Cargo manifests get the semver form, Python packages the PEP 440
-//! one, so `0.3.0-rc.1` is `0.3.0rc1` in `pyproject.toml`. Both orders agree:
-//! alpha < beta < rc < the release.
+//! `-dev.N`, `-rc.N`; PEP 440's `X.Y.ZaN`, `X.Y.ZbN`, `X.Y.Z.devN`,
+//! `X.Y.ZrcN` are read as the same versions. Cargo manifests get the semver
+//! form, Python packages the PEP 440 one, so `0.3.0-rc.1` is `0.3.0rc1` and
+//! `0.3.0-dev.1` is `0.3.0.dev1` in `pyproject.toml`. Versions compare in
+//! semver order, as Cargo and crates.io compare them: alpha < beta < dev < rc
+//! < the release. PEP 440 agrees except for dev, which it puts before alpha,
+//! so going from a beta to a dev version moves the Python packages back;
+//! `--python-version` sets another Python version for such a bump.
 //!
 //! `--python-version <pep440>` gives the Python packages a version of their
 //! own instead, any PEP 440 version in normal form, for a Python-only release
@@ -50,21 +54,27 @@ const PYPROJECTS: [&str; 2] = ["python/pyproject.toml", "tools/translation_agent
 /// Python modules whose `__version__` follows the crate's.
 const PYTHON_VERSION_MODULES: [&str; 1] = ["tools/translation_agent/translation_agent/__init__.py"];
 
-const USAGE: &str = "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-rc.N] [--python-version PEP440_VERSION]";
+const USAGE: &str =
+    "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION]";
 
-/// A pre-release stage, in release order.
+/// A pre-release stage, in semver precedence order (its labels compare as
+/// ASCII text).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Alpha,
     Beta,
+    Dev,
     Rc,
 }
 
 impl Stage {
+    const ALL: [Stage; 4] = [Stage::Alpha, Stage::Beta, Stage::Dev, Stage::Rc];
+
     fn semver(self) -> &'static str {
         match self {
             Stage::Alpha => "alpha",
             Stage::Beta => "beta",
+            Stage::Dev => "dev",
             Stage::Rc => "rc",
         }
     }
@@ -73,6 +83,7 @@ impl Stage {
         match self {
             Stage::Alpha => "a",
             Stage::Beta => "b",
+            Stage::Dev => ".dev",
             Stage::Rc => "rc",
         }
     }
@@ -92,7 +103,11 @@ impl PackageVersion {
     /// else, such as a build suffix or another pre-release label, does not
     /// parse.
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        let release_len = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
+        let mut release_len = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
+        // The dot of PEP 440's `.devN` belongs to the suffix.
+        if text[..release_len].ends_with('.') {
+            release_len -= 1;
+        }
         let (release, suffix) = text.split_at(release_len);
         let mut parts = release.split('.');
         let mut version = PackageVersion {
@@ -110,16 +125,12 @@ impl PackageVersion {
         let (stage, n) = match suffix.strip_prefix('-') {
             Some(semver) => {
                 let (label, n) = semver.split_once('.')?;
-                let stage = [Stage::Alpha, Stage::Beta, Stage::Rc]
-                    .into_iter()
-                    .find(|s| s.semver() == label)?;
+                let stage = Stage::ALL.into_iter().find(|s| s.semver() == label)?;
                 (stage, n)
             },
             None => {
                 let (label, n) = suffix.split_at(suffix.find(|c: char| c.is_ascii_digit())?);
-                let stage = [Stage::Alpha, Stage::Beta, Stage::Rc]
-                    .into_iter()
-                    .find(|s| s.pep440() == label)?;
+                let stage = Stage::ALL.into_iter().find(|s| s.pep440() == label)?;
                 (stage, n)
             },
         };
@@ -441,6 +452,7 @@ mod tests {
             ("0.3.0-alpha.1", "0.3.0a1"),
             ("0.3.0-beta.2", "0.3.0b2"),
             ("1.10.0-rc.0", "1.10.0rc0"),
+            ("0.2.0-dev.1", "0.2.0.dev1"),
         ] {
             assert_eq!(v(semver), v(pep440));
             assert_eq!(v(semver).to_string(), semver);
@@ -466,7 +478,10 @@ mod tests {
             "0.3.0c1",
             "0.3.0-a.1",
             "0.3.0alpha1",
-            "0.3.0.dev1",
+            "0.3.0dev1",
+            "0.3.0-dev1",
+            "0.3.0.dev",
+            "0.3.0a1.dev1",
         ] {
             assert_eq!(PackageVersion::parse(text), None, "{text}");
         }
@@ -479,6 +494,7 @@ mod tests {
             "0.3.0-alpha.1",
             "0.3.0-alpha.2",
             "0.3.0-beta.1",
+            "0.3.0-dev.1",
             "0.3.0-rc.1",
             "0.3.0",
             "0.3.1-alpha.0",

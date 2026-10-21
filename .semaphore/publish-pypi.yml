@@ -2,7 +2,7 @@ version: v1.0
 name: publish-pypi
 
 # The manual "Publish to PyPI" promotion of semaphore.yml. It publishes a
-# final Python version to PyPI from the build of its python/<version> tag,
+# final Python version to PyPI from the build of its python/v<version> tag,
 # with exactly the wheels that this workflow published to Test PyPI and that
 # passed the post-publish checks there (see the Python release blocks of
 # semaphore.yml). Its blocks run only on the tag of a final version: a
@@ -30,12 +30,14 @@ global_job_config:
   prologue:
     commands:
       - checkout
+      # As in semaphore.yml: the `python` that installs twine.
+      - sem-version python 3.10
 
 blocks:
   - name: "Release (Python): publish to PyPI"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -54,7 +56,7 @@ blocks:
     # yank this one if it is unusable.
     dependencies: ["Release (Python): publish to PyPI"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -62,17 +64,17 @@ blocks:
         - name: "PyPI index and downloads match the upload"
           commands:
             - artifact pull workflow pypi/pypi.org/uploaded.sha256 --destination /tmp/uploaded.sha256
-            - /usr/bin/python3 .semaphore/check-published-wheels.py https://pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/}" /tmp/uploaded.sha256
+            - /usr/bin/python3 .semaphore/check-published-wheels.py https://pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/v}" /tmp/uploaded.sha256
 
   - name: "Release (Python): post-publish smoke test (PyPI, Linux amd64)"
     # As for Test PyPI in semaphore.yml, installing from PyPI.
     dependencies: ["Release (Python): post-publish checksum (PyPI)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
     execution_time_limit:
       minutes: 40
     task:
       jobs:
         - name: "Install from PyPI (Linux amd64)"
           commands:
-            - sh .semaphore/test-wheels.sh --index https://pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/}"
+            - sh .semaphore/test-wheels.sh --index https://pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/v}"

@@ -65,22 +65,21 @@ name: build-test-release
 # run either manually or automatically.
 #
 # Releases are driven by git tags, one per package:
-#   - rust/<version> publishes the confluent-kafka crate to crates.io. The
+#   - rust/v<version> publishes the confluent-kafka crate to crates.io. The
 #     version is [package] version in rust/Cargo.toml, and may carry an
 #     -alpha.N, -beta.N, -rc.N or -dev.N suffix.
-#   - python/<version> publishes the confluent-kafka wheels. The version is
+#   - python/v<version> publishes the confluent-kafka wheels. The version is
 #     [project] version in python/pyproject.toml, and may carry an aN, bN or
 #     rcN suffix, optionally followed by .devN, or a .devN suffix alone. Every
-#     version that is not a dev version goes to Test
-#     PyPI first and is checked there; a final version then goes to PyPI
-#     through the manual "Publish to PyPI" promotion of the tag build, while a
-#     pre-release, with an aN, bN or rcN suffix, stops at Test PyPI. The PyPI
+#     version goes to Test PyPI first and is checked there; a final version
+#     then goes to PyPI through the manual "Publish to PyPI" promotion of the
+#     tag build, while a pre-release (an aN, bN or rcN suffix) or a dev version
+#     (a .devN suffix, python/v4.4.0a1.dev1) stops at Test PyPI. The PyPI
 #     project is shared with confluent-kafka-python, the librdkafka-based
 #     client.
-#   - A dev version (rust/0.2.0-dev.1, python/4.4.0a1.dev1) publishes nothing.
-#     Its tag build runs CI and the release blocks that build and test the
-#     package (the .crate, or the wheels, recorded in the workflow's
-#     artifacts), and skips every publish block.
+#   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
+#     runs CI and the blocks that package and test the crate (recorded in the
+#     workflow's artifacts), and skips every publish block.
 # To release a package:
 #   1. Merge the change that sets its version to master.
 #   2. On the build of that master commit, run the manual "Create release tag"
@@ -88,7 +87,7 @@ name: build-test-release
 #      to release, RUST_VERSION and PYTHON_VERSION; a client left empty is not
 #      released. It refuses unless every version entered matches its manifest
 #      and is new, and every CI job passed on that build, then pushes one tag
-#      per client entered, rust/<version> and python/<version>.
+#      per client entered, rust/v<version> and python/v<version>.
 #   3. Each tag push runs this pipeline on that tag. CI runs again, and the
 #      release blocks of that client publish it once every CI job has passed:
 #      the crate to crates.io, the wheels to Test PyPI.
@@ -424,7 +423,7 @@ blocks:
             - make check-api-compat
 
   # Rust release blocks. They run only on the build of a Rust release tag,
-  # rust/<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
+  # rust/v<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
   # and are skipped on every other build. A dev tag runs the two pre-publish
   # blocks only: the publish and post-publish blocks use the same tag pattern
   # without -dev.N. The two patterns must stay identical in all of the blocks
@@ -456,7 +455,7 @@ blocks:
       - "Check crate package (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
     run:
-      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -526,7 +525,7 @@ blocks:
     # project. It starts after the package check, which starts after CI.
     dependencies: ["Release (Rust): pre-publish package check"]
     run:
-      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 40
     task:
@@ -585,7 +584,7 @@ blocks:
     # package check, which starts only when every CI block has passed.
     dependencies: ["Release (Rust): pre-publish smoke test"]
     run:
-      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -634,20 +633,20 @@ blocks:
           # redirected to another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the
           # global prologue) did not test the tagged commit.
           - |
-            release_tag_pattern='^rust/[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
+            release_tag_pattern='^rust/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
             if [ "${SEMAPHORE_GIT_REF_TYPE}" != "tag" ]; then
-              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag rust/<version> for the master commit to release"
+              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag rust/v<version> for the master commit to release"
             fi
-            if [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ^rust/[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]; then
+            if [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ^rust/v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]; then
               refuse "${SEMAPHORE_GIT_TAG_NAME} is a dev tag: its build tests and packages the crate, and publishes nothing"
             fi
             if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
-              refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Rust release tag (rust/<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
+              refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a Rust release tag (rust/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N or -rc.N)"
             fi
             if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
               refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"
             fi
-            export CRATE_VERSION="${SEMAPHORE_GIT_TAG_NAME#rust/}"
+            export CRATE_VERSION="${SEMAPHORE_GIT_TAG_NAME#rust/v}"
           # Because a crates.io version can never be replaced, the tag must
           # still point at the commit this build tested, and that commit must be
           # part of master. Checking immediately before the upload also catches
@@ -817,7 +816,7 @@ blocks:
     # one if it is unusable.
     dependencies: ["Release (Rust): publish to crates.io"]
     run:
-      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -879,7 +878,7 @@ blocks:
     # crate's minimum supported Rust version and the latest stable toolchain.
     dependencies: ["Release (Rust): publish to crates.io"]
     run:
-      when: "tag =~ '^rust/[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
+      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
       minutes: 40
     task:
@@ -897,14 +896,13 @@ blocks:
             - cargo --locked xtask package-smoke-test --registry --with-broker --toolchain stable --release
 
   # Python release blocks. They run only on the build of a Python release tag,
-  # python/<version> where <version> is <major>.<minor>.<patch> with an
+  # python/v<version> where <version> is <major>.<minor>.<patch> with an
   # optional aN, bN or rcN suffix and an optional .devN suffix (PEP 440, in its
-  # normalized form), and are skipped on every other build. A dev tag runs the
-  # wheel, wheel verification and packaging blocks only, and so publishes
-  # nothing: the Test PyPI blocks use the same tag pattern without .devN, and
-  # the blocks of publish-pypi.yml without the aN, bN or rcN suffix either.
-  # Each pattern must stay identical in all of the blocks that use it; the
-  # first is also in publish-wheels.sh and create-release-tag.yml.
+  # normalized form), and are skipped on every other build. A pre-release or
+  # a dev tag stops at Test PyPI: the blocks of publish-pypi.yml use the same
+  # tag pattern without either suffix. Each pattern must stay identical in all
+  # of the blocks that use it; the first is also in publish-wheels.sh and
+  # create-release-tag.yml.
   #
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (Python): wheels (<platform>)" builds the wheels for one
@@ -940,7 +938,7 @@ blocks:
   - name: "Release (Python): wheels (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -961,7 +959,7 @@ blocks:
   - name: "Release (Python): wheels (Linux arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -982,7 +980,7 @@ blocks:
   - name: "Release (Python): wheels (macOS amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1007,7 +1005,7 @@ blocks:
   - name: "Release (Python): wheels (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1032,7 +1030,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux amd64)"
     dependencies: ["Release (Python): wheels (Linux amd64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1057,7 +1055,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux arm64)"
     dependencies: ["Release (Python): wheels (Linux arm64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1082,7 +1080,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS amd64)"
     dependencies: ["Release (Python): wheels (macOS amd64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1107,7 +1105,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS arm64)"
     dependencies: ["Release (Python): wheels (macOS arm64)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1148,7 +1146,7 @@ blocks:
       - "Release (Python): wheel verification (macOS amd64)"
       - "Release (Python): wheel verification (macOS arm64)"
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1169,7 +1167,7 @@ blocks:
     # before the token is loaded.
     dependencies: ["Release (Python): packaging"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -1190,7 +1188,7 @@ blocks:
     # stops the release before PyPI; release a fixed version.
     dependencies: ["Release (Python): publish to Test PyPI"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1201,7 +1199,7 @@ blocks:
             # absent, nothing was published from this workflow and the job
             # fails.
             - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/uploaded.sha256
-            - /usr/bin/python3 .semaphore/check-published-wheels.py https://test.pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/}" /tmp/uploaded.sha256
+            - /usr/bin/python3 .semaphore/check-published-wheels.py https://test.pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/v}" /tmp/uploaded.sha256
 
   - name: "Release (Python): post-publish smoke test (Test PyPI, Linux amd64)"
     # Installs the released version from Test PyPI with each supported Python
@@ -1212,14 +1210,14 @@ blocks:
     # which "Publish to PyPI" requires.
     dependencies: ["Release (Python): post-publish checksum (Test PyPI)"]
     run:
-      when: "tag =~ '^python/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 40
     task:
       jobs:
         - name: "Install from Test PyPI (Linux amd64)"
           commands:
-            - sh .semaphore/test-wheels.sh --index https://test.pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/}"
+            - sh .semaphore/test-wheels.sh --index https://test.pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/v}"
             - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/verified.sha256
             - artifact push workflow /tmp/verified.sha256 --destination pypi/test.pypi.org/verified --force
 
@@ -1228,8 +1226,8 @@ promotions:
     pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
-  # Manual. Tags the commit of this master build as rust/<RUST_VERSION> and
-  # python/<PYTHON_VERSION>, which starts the release of each client (see the
+  # Manual. Tags the commit of this master build as rust/v<RUST_VERSION> and
+  # python/v<PYTHON_VERSION>, which starts the release of each client (see the
   # header and the release blocks). A client left empty is not released. Each
   # version serves as a typed confirmation: unless every version entered
   # equals its client's version at this commit, no tag is created.
@@ -1252,7 +1250,7 @@ promotions:
             4.4.0rc1, published to Test PyPI only). Leave empty to not
             release the wheels."
   # Manual. Publishes a final Python version to PyPI (publish-pypi.yml). Run it
-  # on the build of its python/<version> tag once the Test PyPI blocks have
+  # on the build of its python/v<version> tag once the Test PyPI blocks have
   # passed. Its blocks are skipped on any other build, and its publish job
   # refuses unless the wheels passed the Test PyPI checks in this workflow, so
   # starting it from a failed or unrelated pipeline publishes nothing.

@@ -250,7 +250,7 @@ check-api-compat:
 # in the Cargo manifests and 0.3.0rc1 in the Python packages. PYTHON_VERSION
 # (PEP 440, e.g. 0.3.0.post1) gives the Python packages another version.
 bump-version:
-	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
 	cargo xtask bump-version $(VERSION) $(if $(PYTHON_VERSION),--python-version $(PYTHON_VERSION))
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
