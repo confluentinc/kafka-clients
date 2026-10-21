@@ -23,7 +23,7 @@ use super::ScramCredentialInfo;
 /// be retrieved.
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription")]
 pub struct UserScramCredentialsDescription {
     name: String,

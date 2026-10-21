@@ -467,8 +467,9 @@ Five traps, all encoded in the code rather than left to be rediscovered:
 
    `ccloud.config` — and any `*.config` in this directory — is gitignored, since
    it holds a live API key.
-2. **Unknown config keys are silently accepted by the client** — it only logs a
-   warning and uses the default. A typo would therefore start a two-week run
+2. **Unknown config keys are silently accepted by the client** — it only lists
+   them in one INFO line when it is built ("These configurations '[..]' were
+   supplied but are not used yet.") and uses the default. A typo would therefore start a two-week run
    unauthenticated. So **the soak validates its configuration at startup and
    refuses to start**, naming the offending key. Validation runs before the
    topic is created, so a rejected config leaves nothing behind.

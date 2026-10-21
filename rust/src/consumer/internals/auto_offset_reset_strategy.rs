@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
 use crate::common::LocalIllegalArgumentError;
+use crate::common::config::config_def::{ParsedValue, Validator as ConfigValidator, as_string, config_error};
 
 /// The kind of auto-offset-reset strategy.
 ///
@@ -431,6 +432,39 @@ fn format_iso8601_duration(d: Duration) -> String {
     out
 }
 
+/// The `ConfigDef` validator of `auto.offset.reset`.
+///
+/// Corresponds to Java's nested `AutoOffsetResetStrategy.Validator`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy$Validator")]
+pub(crate) struct Validator;
+
+impl ConfigValidator for Validator {
+    /// Java's `ensureValid`: [`AutoOffsetResetStrategy::ensure_valid`] on the
+    /// string value. Java's `null` fails `fromString` too, so it is rejected with
+    /// the same message, naming `null`.
+    fn ensure_valid(&self, name: &str, value: Option<&ParsedValue>) -> Result<(), Error> {
+        match as_string(value)? {
+            Some(offset_strategy) => AutoOffsetResetStrategy::ensure_valid(name, offset_strategy),
+            None => Err(config_error(
+                name,
+                None,
+                format!(
+                    "Invalid value `null` for configuration {name}. The value must be either \
+                     'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
+                ),
+            )),
+        }
+    }
+}
+
+impl fmt::Display for Validator {
+    /// Java's `toString`: the strategy types in declaration order, `by_duration`
+    /// with its format.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[latest, earliest, none, by_duration:PnDTnHnMn.nS]")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +714,34 @@ mod tests {
             "Negative duration is not supported in by_duration offset reset strategy.",
             cause.message()
         );
+    }
+    /// The `ConfigDef` validator accepts what `fromString` accepts and
+    /// rejects anything else, `null` included, with Java's message.
+    #[test]
+    fn test_config_validator() {
+        let validator = Validator;
+        for value in ["latest", "earliest", "none", "by_duration:PT1H"] {
+            validator
+                .ensure_valid("auto.offset.reset", Some(&ParsedValue::String(value.to_string())))
+                .unwrap_or_else(|e| panic!("{value}: {e:?}"));
+        }
+        let error = validator
+            .ensure_valid("auto.offset.reset", Some(&ParsedValue::String("bad".to_string())))
+            .unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "{error:?}");
+        assert_eq!(
+            "Invalid value bad for configuration auto.offset.reset: Invalid value `bad` for configuration \
+             auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format \
+             'by_duration:<PnDTnHnMn.nS.>'.",
+            error.message()
+        );
+        let error = validator.ensure_valid("auto.offset.reset", None).unwrap_err();
+        assert_eq!(
+            "Invalid value null for configuration auto.offset.reset: Invalid value `null` for configuration \
+             auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format \
+             'by_duration:<PnDTnHnMn.nS.>'.",
+            error.message()
+        );
+        assert_eq!("[latest, earliest, none, by_duration:PnDTnHnMn.nS]", validator.to_string());
     }
 }

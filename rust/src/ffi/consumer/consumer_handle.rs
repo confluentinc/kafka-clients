@@ -65,7 +65,8 @@ use crate::ffi::common::topic_partition::{
     topic_partition_i64_map, topic_partition_ref,
 };
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, kafka_common_Error_t,
+    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_optional_i64, deliver_panic_value,
+    kafka_common_Error_t,
 };
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::consumer_group_metadata::{box_group_metadata, kafka_consumer_ConsumerGroupMetadata_t};
@@ -75,7 +76,8 @@ use crate::ffi::consumer::offset_and_metadata::{
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
 use crate::ffi::consumer::{
-    Client, INVOKE_ROUTE, InvokeRoute, deliver_i64, deliver_ptr, deliver_void, ms, topic_partition_info_map,
+    Client, INVOKE_ROUTE, InvokeRoute, deliver_i64, deliver_optional_i64, deliver_ptr, deliver_void, ms, present_lag,
+    topic_partition_info_map,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t};
@@ -2541,6 +2543,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
 /// group-metadata slot, so it answers from inside a listener while the
 /// consumer's own call is in flight.
 ///
+/// On a consumer without `group.id` the Rust call panics with Java's
+/// `InvalidGroupIdException` message, as the consumer's own `group_metadata` does; the
+/// panic reaches the `_err` twin's `out_err` as an `IllegalStateError` whose message
+/// begins `Rust panic caught at the FFI boundary in`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -2554,24 +2561,27 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_group_metadata(
     box_group_metadata(unsafe { inner(self_) }.handle.group_metadata())
 }
 
-/// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` where Java
-/// returns an empty `OptionalLong`, as `kafka_consumer_Consumer_current_lag`.
+/// `currentLag(TopicPartition topicPartition)`: Java's `OptionalLong` as a
+/// presence flag, as `kafka_consumer_Consumer_current_lag`: 1 with the lag
+/// stored in `*out_lag`, or 0 for `OptionalLong.empty()`, leaving `*out_lag`
+/// unwritten.
 ///
 /// Blocking; callable from inside a listener. On failure the error is stored in
-/// `*out_err` and -1 returned; since -1 is also the empty lag, the caller tells
-/// the two apart by `*out_err`.
+/// `*out_err` and 0 returned, `*out_lag` unwritten; the caller tells an empty
+/// lag from a failure by `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `topic_partition` a valid handle and
-/// `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle, `topic_partition` a valid handle, `out_lag`
+/// a valid pointer to write to and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
     self_: *const kafka_consumer_ConsumerHandle_t,
     topic_partition: *const kafka_common_TopicPartition_t,
+    out_lag: *mut i64,
     out_err: *mut *mut kafka_common_Error_t,
-) -> i64 {
+) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_) };
@@ -2583,14 +2593,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
         h.current_lag(&partition).await
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
-    // to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |lag| lag.unwrap_or(-1)) }
+    // to, as `deliver_value` requires, and `out_lag` a valid pointer to write the lag to, as
+    // `present_lag` requires.
+    unsafe { deliver_value(result, out_err, |lag| present_lag(lag, out_lag)) }
 }
 
-/// The completion of the `_cb` twin: the lag, `-1` for `OptionalLong.empty()`,
-/// beside a null `error` on success; `-1` beside an owned `error` otherwise.
+/// The completion of the `_cb` twin: `present` 1 with the `lag`, or `present` 0
+/// and a `lag` of 0 for `OptionalLong.empty()`, beside a null `error` on
+/// success; `present` 0 and a `lag` of 0 beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2604,8 +2616,8 @@ pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
     // first and hands nothing over; the body hands `cb` over only as the last step of
     // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
     // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
-    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_i64` requires.
-    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_optional_i64` requires.
+    unsafe { deliver_panic_optional_i64(completion_sink(self_), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
@@ -2624,13 +2636,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
     let opaque = SendPtr(opaque);
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_current_lag_cb",
-        async move { h.current_lag(&partition).await.map(|lag| lag.unwrap_or(-1)) },
-        move |client, result| deliver_i64(client, cb, opaque, result),
+        async move { h.current_lag(&partition).await },
+        move |client, result| deliver_optional_i64(client, cb, opaque, result),
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
         // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
         // owned error.
-        |error| unsafe { cb(-1, box_error(error), opaque.get()) },
+        |error| unsafe { cb(0, 0, box_error(error), opaque.get()) },
     )
 }
 

@@ -47,6 +47,14 @@ impl MemberAssignment {
     }
 }
 
+impl std::hash::Hash for MemberAssignment {
+    /// Java's `MemberAssignment.hashCode()` hashes `topicPartitions`, a set,
+    /// independently of its order.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::common::utils::Utils::hash_unordered(&self.topic_partitions, state);
+    }
+}
+
 impl std::fmt::Display for MemberAssignment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts: Vec<String> = self.topic_partitions.iter().map(|tp| tp.to_string()).collect();

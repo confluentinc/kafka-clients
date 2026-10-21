@@ -395,8 +395,8 @@ fn send_test_consumer(ctx: &TestContext) -> Box<dyn confluent_kafka::consumer::D
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("valid consumer config"),
-            Box::new(ByteArrayDeserializer::new()),
-            Box::new(ByteArrayDeserializer::new()),
+            ByteArrayDeserializer::new(),
+            ByteArrayDeserializer::new(),
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -3030,8 +3030,8 @@ async fn test_borrowed_send_delivers_the_record_headers() {
     let props = make_config(ctx.bootstrap_servers());
     let producer = KafkaProducer::new(
         ProducerConfig::new(&props).expect("Invalid test config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to create producer");
     let mut headers = RecordHeaders::new();
@@ -3062,8 +3062,8 @@ async fn test_borrowed_send_delivers_the_record_headers() {
     ]);
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&consumer_props).expect("invalid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("KafkaConsumer::new should succeed");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -3110,12 +3110,8 @@ async fn test_wrong_serializer_errors_send() {
     let mut props = make_config(ctx.protocol_bootstrap_servers());
     ctx.apply_security(&mut props);
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer = KafkaProducer::new(
-        producer_config,
-        Box::new(ByteArraySerializer::default()),
-        Box::new(FailingSerializer),
-    )
-    .expect("Failed to create producer");
+    let producer = KafkaProducer::new(producer_config, ByteArraySerializer::default(), FailingSerializer)
+        .expect("Failed to create producer");
 
     let record = ProducerRecord::with_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
     // UFCS to call the trait method past the inherent shadow.

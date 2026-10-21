@@ -21,7 +21,7 @@ use crate::common::Error;
 /// Options for `Admin::elect_leaders`.
 ///
 /// Translated from `org.apache.kafka.common.ElectionType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ElectionType")]
 pub enum ElectionType {
@@ -29,6 +29,13 @@ pub enum ElectionType {
     Preferred,
     /// Elect any in-sync replica as leader (unclean election).
     Unclean,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for ElectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).name())
+    }
 }
 
 impl ElectionType {

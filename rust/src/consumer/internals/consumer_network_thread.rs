@@ -113,11 +113,11 @@ use super::NetworkClientDelegate;
 use super::RequestManager;
 use super::RequestManagers;
 use super::WakeupTrigger;
-use super::consumer_interceptors::panic_payload_message;
 use super::events::ApplicationEventEnvelope;
 use super::events::ApplicationEventProcessor;
 use super::events::CompletableEventReaper;
 use super::events::EventProcessor;
+use super::panic_payload_message;
 
 /// Consumer background task — single `tokio::spawn` per consumer instance
 /// per `consumer-threading.md` §10. Owns the request managers, the
@@ -1368,7 +1368,10 @@ mod tests {
     }
 
     fn make_config() -> ConsumerConfig {
-        ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
+        ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        }
     }
 
     fn make_metadata(config: &ConsumerConfig, subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {

@@ -24,6 +24,7 @@ use crate::common::{KafkaFuture, Node};
 /// The result of the `Admin::describe_cluster` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult")]
 pub struct DescribeClusterResult {
     nodes: KafkaFuture<Vec<Node>>,

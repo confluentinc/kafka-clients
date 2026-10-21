@@ -21,7 +21,7 @@ use crate::common::Uuid;
 /// A listing of a topic in the cluster.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.TopicListing`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.TopicListing")]
 pub struct TopicListing {
     name: String,
