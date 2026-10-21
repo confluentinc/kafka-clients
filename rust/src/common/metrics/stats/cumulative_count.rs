@@ -59,9 +59,21 @@ impl Measurable for CumulativeCount {
     }
 }
 
+impl std::fmt::Display for CumulativeCount {
+    /// Java's `CumulativeSum.toString()`, which `CumulativeCount` inherits.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(CumulativeCount::new().to_string(), "CumulativeSum(total=0.0)");
+    }
 
     #[test]
     fn test_cumulative_count() {

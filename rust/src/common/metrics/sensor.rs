@@ -31,7 +31,7 @@ use crate::common::{Error, MetricName};
 ///
 /// Mirrors `Sensor.RecordingLevel`. The numeric ids are part of the protocol and
 /// must not change: INFO=0, DEBUG=1, TRACE=2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel")]
 pub enum RecordingLevel {
@@ -41,6 +41,13 @@ pub enum RecordingLevel {
     Debug,
     /// TRACE level (id 2).
     Trace,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for RecordingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 impl RecordingLevel {
@@ -177,6 +184,13 @@ pub struct Sensor {
 struct SensorInner {
     stats: Vec<StatAndConfig>,
     metrics: indexmap::IndexMap<MetricName, Arc<KafkaMetric>>,
+}
+
+impl std::fmt::Debug for Sensor {
+    /// The sensor's name, its identifier in the registry.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sensor").field("name", &self.name).finish_non_exhaustive()
+    }
 }
 
 impl Sensor {

@@ -25,7 +25,7 @@ use std::str::FromStr;
 /// wire-protocol values used by the Java client.
 ///
 /// Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol")]
 pub enum SecurityProtocol {

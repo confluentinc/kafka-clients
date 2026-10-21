@@ -80,6 +80,16 @@ where
     }
 }
 
+impl<F> std::fmt::Debug for ClosureMeasurable<F>
+where
+    F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,
+{
+    /// A closure has nothing to print.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClosureMeasurable").finish_non_exhaustive()
+    }
+}
+
 impl<F> Measurable for ClosureMeasurable<F>
 where
     F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,

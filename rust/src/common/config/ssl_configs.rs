@@ -147,7 +147,7 @@ impl SslConfigs {
 ///
 /// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
 /// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
 pub struct SslConfigs {
@@ -464,19 +464,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clone() {
-        let config = SslConfigs::default();
-        let cloned = config.clone();
-        assert_eq!(config.truststore_type, cloned.truststore_type);
-        assert_eq!(config.keystore_type, cloned.keystore_type);
-        assert_eq!(config.enabled_protocols, cloned.enabled_protocols);
-        assert_eq!(
-            config.endpoint_identification_algorithm,
-            cloned.endpoint_identification_algorithm
-        );
-    }
-
-    #[test]
     fn test_config_key_constants() {
         assert_eq!(SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG, "ssl.truststore.location");
         assert_eq!(SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, "ssl.truststore.certificates");
@@ -575,7 +562,10 @@ mod tests {
         let ssl = SslConfigs::parse_for_test(&[]).unwrap();
         assert_eq!(ssl.protocol, "TLSv1.3");
         assert!(ssl.cipher_suites.is_empty());
-        assert_eq!(ssl, SslConfigs::default());
+        // `SslConfigs` has no `PartialEq` (Java's has no `equals`), so the whole
+        // struct is compared through its `Debug` rendering; the defaults hold no
+        // password, so `Password`'s `[hidden]` hides nothing here.
+        assert_eq!(format!("{ssl:?}"), format!("{:?}", SslConfigs::default()));
     }
 
     /// `ssl.cipher.suites` is validated with Java's

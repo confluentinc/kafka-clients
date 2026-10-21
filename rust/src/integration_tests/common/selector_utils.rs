@@ -67,7 +67,7 @@ pub(crate) fn protocol_selector(ctx: &TestContext) -> Selector {
         TestProtocol::SaslSsl => {
             let channel_builder = SaslChannelBuilder::new(
                 SecurityProtocol::SaslSsl,
-                config.sasl_config().clone(),
+                config.sasl_config(),
                 Some(ssl_factory()),
                 None,
                 "integration-test",

@@ -103,6 +103,19 @@ where
     not_sync: PhantomData<Cell<()>>,
 }
 
+impl<K, V> std::fmt::Debug for KafkaConsumer<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// The delegate's client id and group id, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaConsumer")
+            .field("delegate", &self.delegate)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<K, V> KafkaConsumer<K, V>
 where
     K: Send + Sync + 'static,

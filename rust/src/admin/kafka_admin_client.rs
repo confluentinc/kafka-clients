@@ -262,6 +262,15 @@ pub struct KafkaAdminClient {
     shared: Arc<Shared>,
 }
 
+impl std::fmt::Debug for KafkaAdminClient {
+    /// The client id only, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaAdminClient")
+            .field("client_id", &self.shared.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl KafkaAdminClient {
     /// `KafkaAdminClient.describeFeatures(DescribeFeaturesOptions)` with its
     /// concrete return type, `InternalDescribeFeaturesResult` (KAFKA-19663),
@@ -2389,7 +2398,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 ///
 /// Mirrors `KafkaAdminClient.getOffsetFromSpec`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getOffsetFromSpec")]
-fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
+fn get_offset_from_spec(offset_spec: &OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
         OffsetSpec::Timestamp(spec) => spec.timestamp(),
@@ -4434,7 +4443,7 @@ impl Admin for KafkaAdminClient {
 
         let offset_queries_by_partition: HashMap<TopicPartition, i64> = topic_partition_offsets
             .iter()
-            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(*spec)))
+            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(spec)))
             .collect();
 
         let handler = ListOffsetsHandler::new(
@@ -5088,7 +5097,7 @@ impl Admin for KafkaAdminClient {
         // Snapshot the updates for the (possibly retried) request builder.
         let updates_for_request: Vec<(String, FeatureUpdate)> = feature_updates
             .iter()
-            .map(|(feature, update)| (feature.clone(), *update))
+            .map(|(feature, update)| (feature.clone(), update.clone()))
             .collect();
         let validate_only = options.validate_only();
         let create_request = Box::new(move |timeout_ms: i32| {
@@ -7670,7 +7679,7 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
 
-        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        let error = KafkaAdminClient::new(config).expect_err("creation must fail");
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
@@ -7711,7 +7720,7 @@ mod tests {
             with_positive_timeout("bootstrap.controllers", "c:9093"),
         ] {
             let config = AdminClientConfig::new(&props).unwrap();
-            let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+            let error = KafkaAdminClient::new(config).expect_err("creation must fail");
             assert_eq!(error.message(), "Failed to create new KafkaAdminClient", "{props:?}");
             let cause: &Error = std::error::Error::source(&error)
                 .and_then(|e| e.downcast_ref::<Error>())
@@ -7895,9 +7904,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
         let config = AdminClientConfig::new(&props).expect("the config itself parses");
 
-        let error = KafkaAdminClient::new(config)
-            .err()
-            .expect("an unparseable bootstrap.servers entry must fail construction");
+        let error =
+            KafkaAdminClient::new(config).expect_err("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         // Java's replacement is a bare `KafkaException`.
@@ -11232,7 +11240,11 @@ mod tests {
         let result = mock
             .describe_replica_log_dirs_with_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let info = result.values()[&tpr].get().await.unwrap();
-        assert_eq!(info, ReplicaLogDirInfo::default());
+        let empty = ReplicaLogDirInfo::default();
+        assert_eq!(info.current_replica_log_dir(), empty.current_replica_log_dir());
+        assert_eq!(info.current_replica_offset_lag(), empty.current_replica_offset_lag());
+        assert_eq!(info.future_replica_log_dir(), empty.future_replica_log_dir());
+        assert_eq!(info.future_replica_offset_lag(), empty.future_replica_offset_lag());
     }
 
     // --- electLeaders / (alter|list)PartitionReassignments / listOffsets -------

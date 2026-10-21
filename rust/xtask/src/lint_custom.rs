@@ -19,6 +19,7 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod derive_translation;
 mod ffi_translation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +83,8 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(ConsumerReceiver),
         Box::new(SendFuture),
         Box::new(ErrorPredicate),
+        Box::new(derive_translation::DeriveTranslation::new(ctx)),
+        Box::new(derive_translation::ThreadSafetyProbe::new()),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
 }
@@ -3083,27 +3086,8 @@ impl PublicAudience {
         class
             .supertypes
             .iter()
-            .filter_map(|s| self.supertype(class, s))
+            .filter_map(|s| self.index.supertype(class, s))
             .find_map(|supertype| self.field_from(supertype, name, seen))
-    }
-
-    /// The class supertype `written` of `class` names: in `class`'s package,
-    /// fully qualified below `org.apache.kafka`, or else the only class of that
-    /// simple name (an imported one, `AbstractConfig`).
-    fn supertype(&self, class: &java::JavaClass, written: &str) -> Option<&java::JavaClass> {
-        let classes = || self.index.classes.iter().filter(|c| !c.is_test);
-        let exact = classes().find(|c| {
-            let nested = c.path.join(".");
-            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
-        });
-        exact.or_else(|| {
-            let simple = written.rsplit('.').next().unwrap_or(written);
-            let mut named = classes().filter(|c| c.name() == simple);
-            match (named.next(), named.next()) {
-                (Some(only), None) => Some(only),
-                _ => None,
-            }
-        })
     }
 }
 
@@ -4490,6 +4474,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: java::JavaKind::Class,
@@ -5799,6 +5784,7 @@ mod enum_translation_tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind,
@@ -5933,6 +5919,7 @@ mod functional_interface_trait_tests {
             overloads,
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: if functional {

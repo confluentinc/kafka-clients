@@ -19,7 +19,7 @@
 /// Type of a [`ConfigResource`].
 ///
 /// Corresponds to `ConfigResource.Type`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type")]
 pub enum Type {
@@ -35,6 +35,20 @@ pub enum Type {
     Topic,
     /// An unknown resource type.
     Unknown,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Group => "GROUP",
+            Self::ClientMetrics => "CLIENT_METRICS",
+            Self::BrokerLogger => "BROKER_LOGGER",
+            Self::Broker => "BROKER",
+            Self::Topic => "TOPIC",
+            Self::Unknown => "UNKNOWN",
+        })
+    }
 }
 
 impl Type {

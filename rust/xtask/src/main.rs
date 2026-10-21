@@ -2109,6 +2109,8 @@ fn print_help() {
                     check-consumer-receiver               Consumer methods take &mut self unless Java leaves them unguarded
                     check-send-future                     no public method is a native async fn
                     check-error-predicate                 every Error class has its predicate
+                    check-derive-translation              a public type derives what its Java class overrides
+                    check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
                   With a rule name only that rule runs; `--no-baseline` ignores
                   xtask/ffi-baseline.txt so every FFI finding is shown

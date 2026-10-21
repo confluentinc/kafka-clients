@@ -33,7 +33,7 @@ use crate::common::Error;
 /// `UnsupportedVersion` error for it.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol")]
 pub enum GroupProtocol {

@@ -124,6 +124,9 @@ pub struct JavaClass {
     /// The access level of each of `fields`: an enum constant, or a field of
     /// an interface, is `public`.
     pub field_visibility: BTreeMap<String, Visibility>,
+    /// The enum constants, in declaration order (empty for anything but an
+    /// enum): `Enum.compareTo` orders by it.
+    pub enum_constants: Vec<String>,
     /// Whether the class, or a class enclosing it, is `@Deprecated`.
     pub deprecated: bool,
     /// Whether it comes from the test tree.
@@ -221,6 +224,15 @@ impl JavaClass {
     /// The simple name of the (innermost) class.
     pub fn name(&self) -> &str {
         self.path.last().map(String::as_str).unwrap_or_default()
+    }
+
+    /// Whether the class body declares an instance method `name(params)`, the
+    /// simple parameter type names as [`Overload::params`] holds them: a
+    /// `static` helper of the same name does not count.
+    pub fn declares(&self, name: &str, params: &[&str]) -> bool {
+        self.overloads
+            .iter()
+            .any(|o| !o.is_static && o.name == name && o.params.iter().map(String::as_str).eq(params.iter().copied()))
     }
 
     /// The marker naming this class, e.g.
@@ -605,6 +617,90 @@ impl JavaIndex {
         })
     }
 
+    /// The class supertype `written` of `class` names: in `class`'s package,
+    /// fully qualified below `org.apache.kafka`, or else the only class of that
+    /// simple name (an imported one, `AbstractConfig`). `None` for a JDK type
+    /// (`Object`, `RuntimeException`, `Comparable`).
+    pub fn supertype(&self, class: &JavaClass, written: &str) -> Option<&JavaClass> {
+        let classes = || self.classes.iter().filter(|c| !c.is_test);
+        let exact = classes().find(|c| {
+            let nested = c.path.join(".");
+            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
+        });
+        exact.or_else(|| {
+            let simple = written.rsplit('.').next().unwrap_or(written);
+            let mut named = classes().filter(|c| c.name() == simple);
+            match (named.next(), named.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        })
+    }
+
+    /// The first class of `class`'s supertype tree, `class` included, walked
+    /// depth-first in declaration order, that satisfies `pred`; interfaces are
+    /// walked but never returned, since an interface cannot override an
+    /// `Object` method.
+    pub fn declaring<'a>(&'a self, class: &'a JavaClass, pred: impl Fn(&JavaClass) -> bool) -> Option<&'a JavaClass> {
+        self.declaring_from(class, &pred, &mut BTreeSet::new())
+    }
+
+    fn declaring_from<'a>(
+        &'a self,
+        class: &'a JavaClass,
+        pred: &dyn Fn(&JavaClass) -> bool,
+        seen: &mut BTreeSet<String>,
+    ) -> Option<&'a JavaClass> {
+        if !seen.insert(class.marker()) {
+            return None;
+        }
+        if class.kind != JavaKind::Interface && pred(class) {
+            return Some(class);
+        }
+        class
+            .supertypes
+            .iter()
+            .filter_map(|s| self.supertype(class, s))
+            .find_map(|supertype| self.declaring_from(supertype, pred, seen))
+    }
+
+    /// The simple names of the supertypes of `class`'s tree, `class` excluded,
+    /// that the index cannot resolve: the JDK types it extends or implements
+    /// (`RuntimeException`, `Comparable`).
+    pub fn jdk_supertypes(&self, class: &JavaClass) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut work = vec![class];
+        while let Some(c) = work.pop() {
+            if !seen.insert(c.marker()) {
+                continue;
+            }
+            for written in &c.supertypes {
+                match self.supertype(c, written) {
+                    Some(s) => work.push(s),
+                    None => {
+                        out.insert(written.rsplit('.').next().unwrap_or(written).to_string());
+                    },
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `class` is a `Throwable`: its supertype tree reaches a JDK
+    /// throwable (`Throwable`, `Exception`, `RuntimeException`, `Error`, …).
+    pub fn is_throwable(&self, class: &JavaClass) -> bool {
+        self.jdk_supertypes(class)
+            .iter()
+            .any(|s| s == "Throwable" || s == "Error" || s.ends_with("Exception"))
+    }
+
+    /// Whether `class` implements `java.lang.Comparable`, directly or through a
+    /// supertype.
+    pub fn is_comparable(&self, class: &JavaClass) -> bool {
+        self.jdk_supertypes(class).contains("Comparable")
+    }
+
     /// The class a marker names (ignoring any `#method`).
     pub fn resolve(&self, marker: &str) -> Option<&JavaClass> {
         let path = marker.strip_prefix(MARKER_PREFIX)?;
@@ -848,6 +944,7 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
             overloads: class.overloads,
             fields: class.fields,
             field_visibility: class.field_visibility,
+            enum_constants: class.enum_constants,
             deprecated: class.deprecated,
             is_test,
             kind: class.kind,
@@ -970,6 +1067,7 @@ struct Scanned {
     overloads: Vec<Overload>,
     fields: BTreeMap<String, bool>,
     field_visibility: BTreeMap<String, Visibility>,
+    enum_constants: Vec<String>,
     deprecated: bool,
     kind: JavaKind,
     is_abstract: bool,
@@ -1107,6 +1205,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         overloads: Vec::new(),
                         fields: BTreeMap::new(),
                         field_visibility: BTreeMap::new(),
+                        enum_constants: Vec::new(),
                         deprecated: dep,
                         kind: match keyword.as_str() {
                             "interface" => JavaKind::Interface,
@@ -1207,6 +1306,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 if is_constant {
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                     out[idx].field_visibility.insert(name.clone(), Visibility::Public);
+                    out[idx].enum_constants.push(name.clone());
                 } else if next == Some(&Tok::Punct('(')) {
                     if is_method_decl(&toks, i, &out[idx].path) {
                         let (params, param_names) = params(&toks, i + 1);
@@ -1834,6 +1934,27 @@ mod tests {
     }
 
     #[test]
+    fn scans_enum_constants_in_declaration_order() {
+        let src = r#"
+            package x;
+            public enum Level {
+                @Deprecated
+                TRACE((byte) 2),
+                INFO((byte) 0) { @Override public String toString() { return "i"; } },
+                DEBUG((byte) 1);
+                public static final int MAX = 2;
+                private final byte id;
+                Level(byte id) { this.id = id; }
+            }
+            public class NotAnEnum {
+                public static final int A = 1;
+            }
+        "#;
+        assert_eq!(class_of(src, &["Level"]).enum_constants, ["TRACE", "INFO", "DEBUG"]);
+        assert!(class_of(src, &["NotAnEnum"]).enum_constants.is_empty());
+    }
+
+    #[test]
     fn scans_deprecations() {
         let src = r#"
             package x;
@@ -1948,6 +2069,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: JavaKind::Class,
@@ -1979,6 +2101,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: JavaKind::Class,

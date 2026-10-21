@@ -25,7 +25,7 @@
 /// in both files must match and must not change. The type field is used both for
 /// passing `ScramCredentialUpsertion` and for the internal
 /// `UserScramCredentialRecord`. Do not change the type field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism")]
 pub enum ScramMechanism {
@@ -35,6 +35,17 @@ pub enum ScramMechanism {
     ScramSha256,
     /// SCRAM-SHA-512 (type indicator `2`).
     ScramSha512,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for ScramMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "UNKNOWN",
+            Self::ScramSha256 => "SCRAM_SHA_256",
+            Self::ScramSha512 => "SCRAM_SHA_512",
+        })
+    }
 }
 
 impl ScramMechanism {

@@ -132,7 +132,7 @@ async fn new_consumer_rejects_classic_group_protocol() {
 
     let result = KafkaConsumer::<String, String>::new(config, StringDeserializer, StringDeserializer);
 
-    let err = result.err().expect("classic protocol must be rejected");
+    let err = result.expect_err("classic protocol must be rejected");
     assert!(
         err.is_local_unsupported_operation_error(),
         "expected LocalUnsupportedOperation, got: {err:?}"
@@ -364,8 +364,7 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
         CloseCountingDeserializer { closes: Arc::clone(&key_closes) },
         CloseCountingDeserializer { closes: Arc::clone(&value_closes) },
     )
-    .err()
-    .expect("construction must fail");
+    .expect_err("construction must fail");
     assert_eq!(key_closes.load(Ordering::SeqCst), 1, "the key deserializer is closed once");
     assert_eq!(value_closes.load(Ordering::SeqCst), 1, "the value deserializer is closed once");
     assert_eq!(error.message(), "Failed to construct kafka consumer");

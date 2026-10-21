@@ -212,7 +212,8 @@ mod tests {
         // once, last; `s` is the owned string `kafka_admin_NewPartitions_to_string` returned, read
         // while alive and freed once with `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
-            assert_eq!(*new_partitions_ref(partitions), NewPartitions::increase_to(4));
+            let view = new_partitions_ref(partitions);
+            assert_eq!((view.total_count(), view.assignments()), (4, None));
             assert_eq!(kafka_admin_NewPartitions_total_count(partitions), 4);
             assert!(kafka_admin_NewPartitions_assignments(partitions).is_null());
             let s = kafka_admin_NewPartitions_to_string(partitions);
@@ -243,10 +244,8 @@ mod tests {
             kafka_List_destroy(outer);
             kafka_List_destroy(inner);
 
-            assert_eq!(
-                *new_partitions_ref(partitions),
-                NewPartitions::increase_to_with_new_assignments(2, vec![vec![1, 2]])
-            );
+            let view = new_partitions_ref(partitions);
+            assert_eq!((view.total_count(), view.assignments()), (2, Some(&vec![vec![1, 2]])));
             let assignments = kafka_admin_NewPartitions_assignments(partitions);
             assert_eq!(kafka_List_size(assignments), 1);
             let first = kafka_List_get(assignments, 0) as *const kafka_List_t;

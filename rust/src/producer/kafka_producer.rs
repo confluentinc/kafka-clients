@@ -297,6 +297,15 @@ pub struct KafkaProducer<K, V> {
     log_context: LogContext,
 }
 
+impl<K, V> std::fmt::Debug for KafkaProducer<K, V> {
+    /// The client id only, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaProducer")
+            .field("client_id", &self.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Parameters for [`KafkaProducer::with_options`].
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
@@ -4779,8 +4788,7 @@ mod tests {
             MockSerializer::new(&init_count, &close_count),
             MockSerializer::new(&init_count, &close_count),
         )
-        .err()
-        .expect("delivery.timeout.ms below linger.ms + request.timeout.ms fails construction");
+        .expect_err("delivery.timeout.ms below linger.ms + request.timeout.ms fails construction");
 
         assert_eq!("Failed to construct kafka producer", error.message());
         assert_eq!(2, init_count.load(Ordering::SeqCst));
@@ -4802,8 +4810,7 @@ mod tests {
         let config = ProducerConfig::new(&props).expect("valid config");
 
         let error = KafkaProducer::<String, String>::new(config, key, MockSerializer::new(&init_count, &close_count))
-            .err()
-            .expect("the construction fails");
+            .expect_err("the construction fails");
 
         assert_eq!("Failed to construct kafka producer", error.message());
         assert_eq!(2, close_count.load(Ordering::SeqCst), "the value serializer is closed too");
@@ -8858,8 +8865,7 @@ mod tests {
             }
             let config = ProducerConfig::new(&guard_props(&extra)).expect("valid config");
             let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
-                .err()
-                .expect("rack-aware without client.rack must fail construction");
+                .expect_err("rack-aware without client.rack must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer", "{partitioner_type:?}");
             let cause: &Error = std::error::Error::source(&error)
                 .and_then(|e| e.downcast_ref::<Error>())
@@ -8894,8 +8900,7 @@ mod tests {
                 MockSerializer::new(&init_count, &serializer_closes),
                 MockSerializer::new(&init_count, &serializer_closes),
             )
-            .err()
-            .expect("rack-aware without client.rack must fail construction");
+            .expect_err("rack-aware without client.rack must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer");
 
             assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
@@ -8977,8 +8982,7 @@ mod tests {
         ]))
         .expect("valid config");
         let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
-            .err()
-            .expect("incremental with compression must fail construction");
+            .expect_err("incremental with compression must fail construction");
         assert_eq!(error.message(), "Failed to construct kafka producer");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
@@ -9019,8 +9023,7 @@ mod tests {
             .expect("valid config")
             .set_partitioner(partitioner);
             let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
-                .err()
-                .expect("incremental with compression must fail construction");
+                .expect_err("incremental with compression must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer");
 
             assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
@@ -9041,8 +9044,7 @@ mod tests {
         let props = HashMap::from([("bootstrap.servers".to_string(), "not-a-host-port".to_string())]);
         let config = ProducerConfig::new(&props).expect("the config itself parses");
         let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
-            .err()
-            .expect("an unparseable bootstrap.servers entry must fail construction");
+            .expect_err("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to construct kafka producer");
         // Java's replacement is a bare `KafkaException`.
@@ -9229,8 +9231,7 @@ mod tests {
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_resolve_timeout_ms, 0);
         let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
-            .err()
-            .expect("construction must fail");
+            .expect_err("construction must fail");
         assert_eq!(error.message(), "Failed to construct kafka producer");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())

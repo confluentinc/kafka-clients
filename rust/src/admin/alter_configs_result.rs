@@ -24,6 +24,7 @@ use crate::common::config::ConfigResource;
 /// The result of the `Admin::incremental_alter_configs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConfigsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult")]
 pub struct AlterConfigsResult {
     futures: HashMap<ConfigResource, KafkaFuture<()>>,

@@ -60,9 +60,24 @@ breaking changes.
   `partitioner.class`, `interceptor.classes`, `metric.reporters` and
   `security.providers` are not producer configs here (the config takes no
   class), so they are listed too.
+- `KafkaProducer`, `MockProducer`, `MockProducerOptions`,
+  `MockProducerOptionsBuilder`, `ProducerRecordOptionsBuilder` and
+  `RoundRobinPartitioner` implement `Debug`. `KafkaProducer` prints its client
+  id only, never its configuration; `MockProducer` its flags and how many
+  records it sent; the mock's options whether a partitioner and serializers
+  are set.
 
 ### Consumer
 
+- **Breaking:** `ConsumerConfig` is no longer `Clone`: a configuration holder
+  belongs to the client built from it, as Java's `KafkaConsumer` builds its
+  own `ConsumerConfig` from the properties. Build another one with
+  `ConsumerConfig::new(&props)` for a second consumer.
+- **Breaking:** `ConsumerRecord`, `ConsumerRecords`, `CloseOptions` and
+  `ConsumerPartitionAssignor`'s `Subscription` and `Assignment` no longer
+  implement `PartialEq` and `Eq`: Java's classes do not override `equals`, so
+  a field added to them later cannot break a promise of equality. Compare the
+  getters instead.
 - **Breaking:** `KafkaConsumer::new` takes its deserializers as
   `impl Deserializer<K>` / `impl Deserializer<V>` and boxes them itself: pass
   `StringDeserializer::new()` where `Box::new(StringDeserializer::new())` was
@@ -142,9 +157,36 @@ breaking changes.
   as the producer and the admin client already did, instead of
   `LocalIllegalArgumentError`; the outer "Failed to construct kafka consumer"
   error is unchanged.
+- `MockConsumer` is `Send` but not `Sync` by declaration, as `KafkaConsumer`
+  is, rather than through one of its fields: a future field cannot make it
+  `Sync` by accident.
+- `GroupProtocol` and `CloseOptions`' `GroupMembershipOperation` implement
+  `PartialOrd` and `Ord`, ordering their values as Java's `Enum.compareTo`,
+  by declaration.
+- `GroupMembershipOperation` implements `Display`, printing the Java
+  constant's name (`LEAVE_GROUP`), as Java's `Enum.toString()` does.
+- `ConsumerPartitionAssignor`'s `Subscription` and `Assignment` implement
+  `Display` in the format of Java's `toString()`: lists print as `[a, b]`,
+  an absent group instance id or rack id as `null`, and the user data, when
+  set (even empty), only as its size.
+- `KafkaConsumer`, `MockConsumer`, `ConsumerHandle`, `ConsumerRecordOptions`,
+  `ConsumerRecordOptionsBuilder` and `SubscriptionOptionsBuilder` implement
+  `Debug`. `KafkaConsumer` prints its client id and group id only, never its
+  configuration; `MockConsumer` whether it is closed.
 
 ### Admin client
 
+- **Breaking:** `DeletedRecords`, `RecordsToDelete`, `FeatureUpdate`,
+  `FinalizedVersionRange`, `SupportedVersionRange`, `OffsetSpec` and its
+  `TimestampSpec` are no longer `Copy`: a public struct is never `Copy`, so a
+  field added to it later (a `String`, a collection) cannot break the promise.
+  They stay `Clone`; write `.clone()` where a value was copied implicitly.
+- **Breaking:** the admin `*Options` types, `DeletedRecords`,
+  `ListOffsetsResultInfo`, `NewPartitionReassignment`, `NewPartitions`,
+  `OffsetSpec` and its `TimestampSpec`, `PartitionProducerState`,
+  `PartitionReassignment`, `ReplicaInfo`, `ReplicaLogDirInfo` and
+  `TopicListing` no longer implement `PartialEq` and `Eq`: Java's classes do
+  not override `equals`. Compare the getters instead.
 - **Breaking:** `AdminClientConfig::new` parses and validates every key with
   Java's `ConfigDef` (`AdminClientConfig.java`), so values Java rejects now
   fail with Java's `ConfigError` message, `Invalid value <v> for configuration
@@ -202,9 +244,47 @@ breaking changes.
   the unused configurations.
 - `socket.connection.setup.timeout.max.ms` is honoured; the admin client used
   `socket.connection.setup.timeout.ms` for both bounds.
+- The admin types whose Java class overrides `hashCode()` implement `Hash`, so
+  they can key a `HashMap` or fill a `HashSet` as in Java:
+  `AbortTransactionSpec`, `AlterConfigOp`, `ClassicGroupDescription`, `Config`,
+  `ConfigEntry`, `ConfigSynonym`, `ConsumerGroupDescription`, `FeatureMetadata`,
+  `ListConsumerGroupOffsetsSpec`, `MemberAssignment`, `MemberDescription`,
+  `NewTopic`, `DescribeProducersOptions`, `ListTopicsOptions`,
+  `ListTransactionsOptions`, `TopicDescription` (without its topic id, as its
+  equality), `TransactionDescription` and `UserScramCredentialsDescription`.
+  A set or map field hashes independently of its order, as Java's
+  `Set.hashCode()` and `Map.hashCode()` do.
+- The admin enums `OpType`, `ConfigSource`, `ConfigType`, `UpgradeType`,
+  `ScramMechanism` and `TransactionState` implement `PartialOrd` and `Ord`,
+  ordering their values as Java's `Enum.compareTo`, by declaration.
+- `FeatureUpdate`'s `UpgradeType` and `ScramMechanism` implement `Display`,
+  printing the Java constant's name (`SAFE_DOWNGRADE`, `SCRAM_SHA_256`), as
+  Java's `Enum.toString()` does.
+- `ConsumerGroupDescription`, `ClassicGroupDescription`,
+  `AbortTransactionOptions`, `DescribeProducersOptions`,
+  `DescribeTransactionsOptions`, `FenceProducersOptions`,
+  `TerminateTransactionOptions` and `ListTransactionsOptions` implement
+  `Display` in the format of Java's `toString()`. An absent value prints as
+  `null`, and a set as `[a, b]`. `ListTransactionsOptions` prints its states
+  in declaration order and its producer ids in ascending order.
+- `KafkaAdminClient`, `AlterConfigsResult`, `AlterReplicaLogDirsResult`,
+  `DescribeClusterResult`, `DescribeConfigsResult`, `DescribeLogDirsResult`,
+  `DescribeReplicaLogDirsResult`, `ListConfigResourcesResult` and
+  `ConfigEntryOptionsBuilder` implement `Debug`. `KafkaAdminClient` prints its
+  client id only, never its configuration.
 
 ### Common
 
+- **Breaking:** `SslConfigs` and `SaslConfigs` are no longer `Clone`, like the
+  client configurations that hold them.
+- **Breaking:** `Quota` is no longer `Copy`, and `MetricConfig::quota()`
+  returns `Option<&Quota>` instead of a copy. `Quota` stays `Clone`; write
+  `config.quota().cloned()` where an owned quota is needed.
+- **Breaking:** `TopicCollection` and its `TopicIdCollection` and
+  `TopicNameCollection`, `ClientQuotaAlteration`, `SslConfigs` and
+  `SaslConfigs` no longer implement `PartialEq` (and `Eq`): Java's classes do
+  not override `equals`. `ClientQuotaAlteration`'s `Op` keeps its equality,
+  as Java's `Op.equals`. Compare the getters instead.
 - **Breaking:** `ProducerConfig`, `ConsumerConfig` and `AdminClientConfig` no
   longer implement `Default`. Build them with `::new(&configs)` from a
   `HashMap<String, String>` (an empty map gives the defaults).
@@ -343,9 +423,43 @@ breaking changes.
   verification checks it as in Java, where it used to be the textual IP; an
   empty canonical name becomes `localhost`, Java's node host for it. The
   warning these configurations logged for this mode with TLS is removed.
+- `TopicPartitionInfo`, `MetricNameTemplate`, `ClientQuotaFilter`, `Quota`,
+  `SslClientAuth`, `RecordingLevel` and `DeserializationErrorOrigin` implement
+  `Hash`, as their Java classes override `hashCode()`.
+- `ClientQuotaAlteration`'s `Op` implements `Eq` and `Hash`. Its value is
+  compared as Java's `Double.equals` compares it: every `NaN` equals every
+  other, and `0.0` differs from `-0.0`.
+- `Quota` compares its bound the same way. Java compares it with the
+  primitive `==`, under which `NaN` differs from itself, which an `Eq` cannot
+  express. A `NaN` quota now equals itself, and an upper bound of `0.0` no
+  longer equals one of `-0.0`; every other bound compares as before.
+- Every enum translating a Java enum implements `PartialOrd` and `Ord`,
+  ordering its values as Java's `Enum.compareTo`, by declaration. New here:
+  `ClassicGroupState`, `ConfigResource`'s `Type`, `SslClientAuth`,
+  `ElectionType`, `DeserializationErrorOrigin`, `GroupState`, `GroupType`,
+  `IsolationLevel`, `RecordingLevel`, `TimestampType` and `SecurityProtocol`.
+- `ConfigResource`'s `Type`, `ElectionType`, `RecordingLevel` and
+  `DeserializationErrorOrigin` implement `Display`, printing the Java
+  constant's name (`BROKER_LOGGER`, `UNCLEAN`), as Java's `Enum.toString()`
+  does.
+- The metric stats implement `Display` in the format of Java's `toString()`,
+  doubles printed as Java's `Double.toString`. `SampledStat` and its
+  `Sample` print their own format, and `Avg`, `Max`, `Min`, `WindowedCount`
+  and `WindowedSum` print the `SampledStat` they inherit it from, as in
+  Java. `CumulativeCount` prints as `CumulativeSum`, `SimpleRate` as `Rate`,
+  and `Meter` prints its rate, total and the two metric names.
+- `Metrics`, `Sensor`, `KafkaMetric`, `NamedMeasurable`, `ClosureMeasurable`,
+  `SensorOptions`, `SensorOptionsBuilder` and the metric stats (`SampledStat`,
+  `Avg`, `Max`, `Min`, `WindowedCount`, `WindowedSum`, `Rate`, `SimpleRate`,
+  `Meter`) implement `Debug`. `Metrics` prints how many sensors and metrics it
+  holds, `Sensor` its name, and `KafkaMetric` what its `Display` prints.
 
 ### C API
 
+- **Breaking (C API):** `kafka_common_metrics_MetricConfig_quota` returns a
+  borrowed `const kafka_common_metrics_Quota_t *`, valid until the config
+  handle is destroyed or one of its setters runs, instead of an owned copy:
+  do not pass it to `kafka_common_metrics_Quota_destroy`.
 - **Breaking (C API):** serializers and deserializers are registered only
   through `kafka_common_serialization_Serializer_new_async` /
   `kafka_common_serialization_Deserializer_new_async`. The synchronous
@@ -403,6 +517,41 @@ breaking changes.
   one config object per client logs it once. `_new` sets up the default
   stderr logger first, as creating a client does, so the warnings are not
   lost when the handle is created before any client.
+- New `_to_string` exports, each returning an owned string freed with
+  `kafka_string_destroy`, for the enums that gained `Display`:
+  `kafka_admin_FeatureUpdate_UpgradeType_to_string`,
+  `kafka_admin_ScramMechanism_to_string`,
+  `kafka_common_ElectionType_to_string`,
+  `kafka_common_config_ConfigResource_Type_to_string`,
+  `kafka_common_metrics_Sensor_RecordingLevel_to_string`,
+  `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string`
+  and `kafka_consumer_CloseOptions_GroupMembershipOperation_to_string`.
+- New `_to_string` exports for the admin types that gained `Display`:
+  `kafka_admin_ConsumerGroupDescription_to_string`,
+  `kafka_admin_ClassicGroupDescription_to_string`,
+  `kafka_admin_AbortTransactionOptions_to_string`,
+  `kafka_admin_DescribeProducersOptions_to_string`,
+  `kafka_admin_DescribeTransactionsOptions_to_string`,
+  `kafka_admin_FenceProducersOptions_to_string`,
+  `kafka_admin_TerminateTransactionOptions_to_string` and
+  `kafka_admin_ListTransactionsOptions_to_string`. Each returns an owned
+  string freed with `kafka_string_destroy`.
+- New `_to_string` exports for the stats and assignor types that gained
+  `Display`: `kafka_common_metrics_stats_SampledStat_to_string`,
+  `kafka_common_metrics_stats_SampledStat_Sample_to_string`,
+  `kafka_common_metrics_stats_Avg_to_string`,
+  `kafka_common_metrics_stats_Max_to_string`,
+  `kafka_common_metrics_stats_Min_to_string`,
+  `kafka_common_metrics_stats_WindowedCount_to_string`,
+  `kafka_common_metrics_stats_WindowedSum_to_string`,
+  `kafka_common_metrics_stats_CumulativeSum_to_string`,
+  `kafka_common_metrics_stats_CumulativeCount_to_string`,
+  `kafka_common_metrics_stats_Rate_to_string`,
+  `kafka_common_metrics_stats_SimpleRate_to_string`,
+  `kafka_common_metrics_stats_Meter_to_string`,
+  `kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string` and
+  `kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string`. Each
+  returns an owned string freed with `kafka_string_destroy`.
 
 ## [0.2.0-beta.1] - 2026-10-19
 

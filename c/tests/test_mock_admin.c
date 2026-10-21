@@ -5153,6 +5153,83 @@ static void test_mock_admin_transactions_async_fires_once(void) {
     fixture_destroy(&f);
 }
 
+/* Each enum's `_to_string` prints the Java constant's name, as Java's inherited
+ * `Enum.toString()` does. */
+static void test_admin_enums_to_string_print_the_java_constant_name(void) {
+    assert_owned_string("UNSAFE_DOWNGRADE", kafka_admin_FeatureUpdate_UpgradeType_to_string(
+                                                kafka_admin_FeatureUpdate_UpgradeType_unsafe_downgrade()));
+    assert_owned_string("SCRAM_SHA_512", kafka_admin_ScramMechanism_to_string(kafka_admin_ScramMechanism_scram_sha_512()));
+    assert_owned_string("UNCLEAN", kafka_common_ElectionType_to_string(kafka_common_ElectionType_unclean()));
+    assert_owned_string("BROKER_LOGGER", kafka_common_config_ConfigResource_Type_to_string(
+                                             kafka_common_config_ConfigResource_Type_broker_logger()));
+}
+
+/* The group descriptions' and transaction options' `_to_string` follow Java's
+ * `toString()`: an absent value prints as `null`, a set as `[a, b]`. */
+static void test_admin_descriptions_and_options_to_string_follow_java(void) {
+    kafka_admin_ConsumerGroupDescription_t *consumer = kafka_admin_ConsumerGroupDescription_new(
+        "cg", 0, NULL, "uniform", kafka_common_GroupType_consumer(), kafka_common_GroupState_stable(), NULL, NULL, 3,
+        -1);
+    assert_owned_string("(groupId=cg, isSimpleConsumerGroup=false, members=, partitionAssignor=uniform, type=Consumer, "
+                        "groupState=Stable, coordinator=null, authorizedOperations=null, groupEpoch=3, "
+                        "targetAssignmentEpoch=null)",
+                        kafka_admin_ConsumerGroupDescription_to_string(consumer));
+    kafka_admin_ConsumerGroupDescription_destroy(consumer);
+
+    kafka_admin_ClassicGroupDescription_t *classic = kafka_admin_ClassicGroupDescription_new(
+        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
+    assert_owned_string("(groupId=classic, protocol='consumer', protocolData=range, members=, state=Stable, "
+                        "coordinator=null, authorizedOperations=null)",
+                        kafka_admin_ClassicGroupDescription_to_string(classic));
+    kafka_admin_ClassicGroupDescription_destroy(classic);
+
+    kafka_admin_AbortTransactionOptions_t *abort = kafka_admin_AbortTransactionOptions_new();
+    assert_owned_string("AbortTransactionOptions(timeoutMs=null)", kafka_admin_AbortTransactionOptions_to_string(abort));
+    kafka_admin_AbortTransactionOptions_set_timeout_ms(abort, 500);
+    assert_owned_string("AbortTransactionOptions(timeoutMs=500)", kafka_admin_AbortTransactionOptions_to_string(abort));
+    kafka_admin_AbortTransactionOptions_destroy(abort);
+
+    kafka_admin_DescribeTransactionsOptions_t *describe = kafka_admin_DescribeTransactionsOptions_new();
+    assert_owned_string("DescribeTransactionsOptions(timeoutMs=null)",
+                        kafka_admin_DescribeTransactionsOptions_to_string(describe));
+    kafka_admin_DescribeTransactionsOptions_destroy(describe);
+
+    kafka_admin_FenceProducersOptions_t *fence = kafka_admin_FenceProducersOptions_new();
+    assert_owned_string("FenceProducersOptions{timeoutMs=null}", kafka_admin_FenceProducersOptions_to_string(fence));
+    kafka_admin_FenceProducersOptions_destroy(fence);
+
+    kafka_admin_TerminateTransactionOptions_t *terminate = kafka_admin_TerminateTransactionOptions_new();
+    assert_owned_string("TerminateTransactionOptions{timeoutMs=null}",
+                        kafka_admin_TerminateTransactionOptions_to_string(terminate));
+    kafka_admin_TerminateTransactionOptions_destroy(terminate);
+
+    kafka_admin_DescribeProducersOptions_t *producers = kafka_admin_DescribeProducersOptions_new();
+    assert_owned_string("DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)",
+                        kafka_admin_DescribeProducersOptions_to_string(producers));
+    kafka_admin_DescribeProducersOptions_set_broker_id(producers, 3);
+    assert_owned_string("DescribeProducersOptions(brokerId=OptionalInt[3], timeoutMs=null)",
+                        kafka_admin_DescribeProducersOptions_to_string(producers));
+    kafka_admin_DescribeProducersOptions_destroy(producers);
+
+    kafka_admin_ListTransactionsOptions_t *list = kafka_admin_ListTransactionsOptions_new();
+    kafka_List_t *states = kafka_List_new();
+    kafka_List_add(states, (void *)kafka_admin_TransactionState_prepare_commit());
+    kafka_List_add(states, (void *)kafka_admin_TransactionState_ongoing());
+    kafka_admin_ListTransactionsOptions_filter_states(list, states);
+    kafka_List_destroy(states);
+    int64_t ids[] = {12, 3};
+    kafka_List_t *producer_ids = kafka_List_new();
+    kafka_List_add(producer_ids, &ids[0]);
+    kafka_List_add(producer_ids, &ids[1]);
+    kafka_admin_ListTransactionsOptions_filter_producer_ids(list, producer_ids);
+    kafka_List_destroy(producer_ids);
+    kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern(list, "^special-.*");
+    assert_owned_string("ListTransactionsOptions(filteredStates=[Ongoing, PrepareCommit], filteredProducerIds=[3, 12], "
+                        "filteredDuration=-1, filteredTransactionalIdPattern=^special-.*, timeoutMs=null)",
+                        kafka_admin_ListTransactionsOptions_to_string(list));
+    kafka_admin_ListTransactionsOptions_destroy(list);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
@@ -5289,5 +5366,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
     RUN_TEST(test_mock_admin_unregister_controller_follows_raft_controller);
     RUN_TEST(test_mock_admin_transactions_async_fires_once);
+    RUN_TEST(test_admin_enums_to_string_print_the_java_constant_name);
+    RUN_TEST(test_admin_descriptions_and_options_to_string_follow_java);
     return UNITY_END();
 }

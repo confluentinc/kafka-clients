@@ -70,7 +70,6 @@ pub(crate) struct AbstractConfig {
     originals: ConfigMap,
     /// The parsed values.
     values: ConfigMap,
-    definition: &'static ConfigDef,
 }
 
 impl AbstractConfig {
@@ -156,7 +155,7 @@ impl AbstractConfig {
     ) -> Result<Self, Error> {
         let originals = pre_process(originals);
         let values = definition.parse_with_log_warnings(&originals, log_warnings)?;
-        let mut config = Self { used: Mutex::new(HashSet::new()), originals, values, definition };
+        let mut config = Self { used: Mutex::new(HashSet::new()), originals, values };
         let config_updates = post_process(&config)?;
         config.values.extend(config_updates);
         definition.parse_with_log_warnings(&config.values, log_warnings)?;
@@ -535,18 +534,6 @@ fn non_null<T>(key: &str, value: Option<T>) -> Result<T, Error> {
     value.ok_or_else(|| Error::local_illegal_state(format!("Configuration '{key}' has no value")))
 }
 
-impl Clone for AbstractConfig {
-    /// A copy with its own used set, starting as a copy of this one's.
-    fn clone(&self) -> Self {
-        Self {
-            used: Mutex::new(self.used.lock().unwrap_or_else(PoisonError::into_inner).clone()),
-            originals: self.originals.clone(),
-            values: self.values.clone(),
-            definition: self.definition,
-        }
-    }
-}
-
 impl PartialEq for AbstractConfig {
     /// Java's `equals`: the originals are equal.
     fn eq(&self, other: &Self) -> bool {
@@ -842,10 +829,9 @@ mod tests {
         );
     }
 
-    /// Java's `equals` / `hashCode` compare the originals only; a clone copies
-    /// the used set without sharing it.
+    /// Java's `equals` / `hashCode` compare the originals only.
     #[test]
-    fn test_equals_hash_and_clone() {
+    fn test_equals_and_hash() {
         use std::collections::hash_map::DefaultHasher;
         let hash = |c: &AbstractConfig| {
             let mut h = DefaultHasher::new();
@@ -859,11 +845,6 @@ mod tests {
         assert_eq!(hash(&a), hash(&b));
         assert_ne!(a, c);
 
-        a.ignore("x");
-        let clone = a.clone();
-        assert_eq!(clone.unused(), HashSet::from(["int".to_string()]));
-        clone.ignore("int");
-        assert_eq!(a.unused(), HashSet::from(["int".to_string()]));
         assert_eq!(format!("{a:?}"), "AbstractConfig { originals: [\"int\", \"x\"], .. }");
     }
 }

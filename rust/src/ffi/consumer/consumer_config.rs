@@ -51,9 +51,10 @@ pub struct kafka_consumer_ConsumerConfig_t {
     _private: [u8; 0],
 }
 
-/// What a handle points at: the configuration, and the strings its getters
-/// lent out, kept so the pointers they return live as long as the handle, as a
-/// Rust `&str` borrowed from the configuration does.
+/// What a handle points at: the configuration, the properties it was built
+/// from, and the strings its getters lent out, kept so the pointers they
+/// return live as long as the handle, as a Rust `&str` borrowed from the
+/// configuration does.
 struct ConsumerConfigHandle {
     /// The configuration the getters read.
     config: ConsumerConfig,

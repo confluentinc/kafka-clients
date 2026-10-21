@@ -82,6 +82,31 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - No public method is a native `async fn`: it is declared `fn name(..) -> impl Future<Output = T> + Send`, so `Send` is part of the signature rather than inferred from the body; an `#[async_trait]` method is exempt, its boxed future already being `Send` (`check-send-future`). A trait with such methods has a sealed, dyn-compatible `Dyn<Name>` companion blanket-implemented for it (`check-dyn-compatible`)
     - A `Dyn<Name>` companion declares the same methods as its trait; its blanket impl forwards each to `Name::<method>` and `impl Name for dyn Dyn<Name>` forwards each, defaulted ones included, to `Dyn<Name>::<method>`, the parameters in order (`check-dyn-forwarding`)
     - A public Java `@FunctionalInterface` is a trait, never a closure type, enum or struct, and no public method takes a closure in its place (`check-functional-interface-trait`)
+    - Super and auto traits (`cargo xtask lint-custom`, `check-derive-translation`,
+      `check-thread-safety-probe`):
+      - `Debug`: every public type; a client, result or metrics type hand-writes one printing
+        its identifiers, a type holding a secret renders what `Display` renders
+      - `Clone`: on a value type (Java overrides `equals()`, an enum, an exception,
+        `KafkaFuture`, an `*Options`), since cloning is how Rust aliases what Java shares by
+        reference; never on a client (an implementor of `Producer`, `Consumer` or `Admin`) or
+        a `*Config` holder
+      - `Copy`: never on a struct or a data-carrying enum, except `Uuid` (a 128-bit value by
+        definition, as `std`'s `Ipv6Addr`); a fieldless enum translating a Java enum may keep it
+      - `PartialEq + Eq` and `Hash`: together, iff Java overrides `equals()` / `hashCode()`,
+        directly or in a superclass of the client tree (`AbstractConfig`, `SampledStat`); a
+        Java enum or record counts; an `f64` field hand-writes them over `to_bits()`
+      - `PartialOrd + Ord`: iff Java implements `Comparable` (`Uuid`) or is an enum
+        (`Enum.compareTo` by ordinal, so variants stay in Java declaration order)
+      - `Display`: iff Java overrides `toString()`, directly or in a client-tree superclass; a
+        Java enum prints the constant's name unless Java overrides it; an exception always has
+        it (`Throwable.toString()`); each `Display` has the C `_to_string` export
+      - `Send` and `Sync`: every public type is `Send + Sync`, except a type whose Java class
+        is not thread-safe and whose methods Rust exposes through `&mut self`: the consumers
+        (`KafkaConsumer`, `MockConsumer`, `DynConsumer`, and the share consumers once
+        translated). Those carry a `PhantomData<Cell<()>>` field so they are `Send + !Sync`
+        whatever their fields are, and `ConsumerHandle` is their `Sync` cross-thread view. A
+        lazily computed field uses an atomic or `OnceLock`, never `Cell`/`RefCell`.
+        `rust/src/api_promises.rs` asserts the auto traits of every public type
 4. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
