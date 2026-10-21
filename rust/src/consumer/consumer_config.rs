@@ -997,29 +997,63 @@ impl ConsumerConfig {
     ///   `group.instance.id` when `client.id` is derived from it.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let config = AbstractConfig::with_hooks(
-            &CONFIG,
-            string_originals(props),
-            false,
-            "ConsumerConfig",
-            |originals| originals,
-            Self::post_process_parsed_config,
-        )?;
-        let config = Self::from_abstract(config)?;
+        let config = Self::build(string_originals(props), None)?;
         config
             .client_dns_lookup
             .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
 
+    /// The configuration of one more client given this one: the same
+    /// properties and this configuration's resolved `client.id`, with its
+    /// own record of the keys used, as [`Self::new`] leaves it.
+    ///
+    /// Java hands each client the `ConsumerConfig` it is given, which took
+    /// its one number from the `client.id` sequence when it was built
+    /// (`AsyncKafkaConsumer.java:476` reads it), so clients given one
+    /// configuration share its id. Building the configuration again would
+    /// take a second number; this copy does not. It is not `Clone`
+    /// (CLAUDE.md §3), and it does not repeat `new`'s warnings.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::new`] does; this configuration's properties already
+    /// passed it, so it does not in practice.
+    #[cfg_attr(
+        not(any(feature = "ffi", test)),
+        expect(dead_code, reason = "only the C config handle copies a configuration")
+    )]
+    pub(crate) fn copy_for_client(&self) -> Result<Self, Error> {
+        Self::build(self.config.originals_map().clone(), Some(&self.client_id))
+    }
+
+    /// Java's `ConsumerConfig(Map)` without its logging: parses `originals`
+    /// and post-processes them, `resolved_client_id` standing in for the
+    /// sequence number `client.id` would take.
+    fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
+        let config = AbstractConfig::with_hooks(
+            &CONFIG,
+            originals,
+            false,
+            "ConsumerConfig",
+            |originals| originals,
+            |config| Self::post_process_parsed_config(config, resolved_client_id),
+        )?;
+        Self::from_abstract(config)
+    }
+
     /// Java's `ConsumerConfig.postProcessParsedConfig`: the values that
-    /// replace the parsed ones.
-    fn post_process_parsed_config(config: &AbstractConfig) -> Result<ConfigMap, Error> {
+    /// replace the parsed ones. A `resolved_client_id` is the id a derived
+    /// `client.id` takes, in place of a new one.
+    fn post_process_parsed_config(
+        config: &AbstractConfig,
+        resolved_client_id: Option<&str>,
+    ) -> Result<ConfigMap, Error> {
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
         CommonClientConfigs::warn_disabling_exponential_backoff(config)?;
         let mut refined_configs =
             CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values());
-        Self::maybe_override_client_id_with_configs(config, &mut refined_configs)?;
+        Self::maybe_override_client_id_with_configs(config, &mut refined_configs, resolved_client_id)?;
         Self::maybe_override_enable_auto_commit(config, &mut refined_configs)?;
         Self::check_unsupported_configs_post_process(config)?;
         Self::warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config)?;
@@ -1057,7 +1091,15 @@ impl ConsumerConfig {
     /// which yields the literal `null`; that is preserved (`consumer-null-1`) so
     /// the wire `client_id` matches a Java consumer with the same
     /// configuration.
-    fn maybe_override_client_id_with_configs(config: &AbstractConfig, configs: &mut ConfigMap) -> Result<(), Error> {
+    ///
+    /// A `resolved_client_id` (the id of the configuration this one copies)
+    /// is put in `configs` instead of a derived one, after the same reads and
+    /// checks.
+    fn maybe_override_client_id_with_configs(
+        config: &AbstractConfig,
+        configs: &mut ConfigMap,
+        resolved_client_id: Option<&str>,
+    ) -> Result<(), Error> {
         let client_id = config.get_string(Self::CLIENT_ID_CONFIG)?;
         if client_id.is_none_or(str::is_empty) {
             let group_id = config.get_string(Self::GROUP_ID_CONFIG)?;
@@ -1065,11 +1107,16 @@ impl ConsumerConfig {
             if let Some(group_instance_id) = group_instance_id {
                 JoinGroupRequest::validate_group_instance_id(group_instance_id)?;
             }
-            let group_instance_id_part = match group_instance_id {
-                Some(group_instance_id) => group_instance_id.to_string(),
-                None => CONSUMER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed).to_string(),
+            let generated_client_id = match resolved_client_id {
+                Some(resolved_client_id) => resolved_client_id.to_string(),
+                None => {
+                    let group_instance_id_part = match group_instance_id {
+                        Some(group_instance_id) => group_instance_id.to_string(),
+                        None => CONSUMER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed).to_string(),
+                    };
+                    format!("consumer-{}-{group_instance_id_part}", group_id.unwrap_or("null"))
+                },
             };
-            let generated_client_id = format!("consumer-{}-{group_instance_id_part}", group_id.unwrap_or("null"));
             configs.insert(
                 Self::CLIENT_ID_CONFIG.to_string(),
                 Some(ParsedValue::String(generated_client_id)),
@@ -2008,6 +2055,48 @@ mod tests {
         // Other tests may draw from the shared sequence concurrently, so only
         // the direction is fixed, not the gap.
         assert!(n2 > n1, "{} then {}", first.client_id(), second.client_id());
+    }
+
+    /// A copy keeps the configuration's resolved `client.id` and takes no
+    /// sequence number, while the next configuration built takes the next
+    /// one, as Java's next `new ConsumerConfig(props)` does. The copy's used
+    /// set is its own, as `new` leaves it.
+    #[test]
+    fn test_copy_for_client_keeps_the_resolved_client_id() {
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:9092".to_string(),
+            ),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "copy-group".to_string()),
+        ]);
+        let first = ConsumerConfig::new(&props).unwrap();
+        let copy = first.copy_for_client().unwrap();
+        let second_copy = first.copy_for_client().unwrap();
+        let next = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(copy.client_id(), first.client_id());
+        assert_eq!(second_copy.client_id(), first.client_id());
+        assert_eq!(
+            copy.config.get_string(ConsumerConfig::CLIENT_ID_CONFIG).unwrap(),
+            Some(first.client_id())
+        );
+        let n1: i32 = sequence_suffix(first.client_id(), "consumer-copy-group-").parse().unwrap();
+        let n2: i32 = sequence_suffix(next.client_id(), "consumer-copy-group-").parse().unwrap();
+        // Other tests take numbers concurrently, so the next one is only later.
+        assert!(n2 > n1, "{} then {}", first.client_id(), next.client_id());
+        assert_eq!(copy.unused(), first.unused());
+        first.config.ignore(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG);
+        assert!(copy.unused().contains(ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG));
+
+        let explicit = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:9092".to_string(),
+            ),
+            (ConsumerConfig::CLIENT_ID_CONFIG.to_string(), "mine".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&explicit).unwrap();
+        assert_eq!(config.copy_for_client().unwrap().client_id(), "mine");
     }
 
     /// A static member uses its `group.instance.id` instead of the sequence.

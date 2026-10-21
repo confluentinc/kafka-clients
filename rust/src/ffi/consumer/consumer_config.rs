@@ -21,11 +21,12 @@
 //! configuration.
 //!
 //! `KafkaConsumer::new` takes a `ConsumerConfig` by value, which is not
-//! `Clone` (CLAUDE.md §3), while the C constructor borrows the handle; the
-//! handle therefore keeps the validated properties and rebuilds the Rust value
-//! for every consumer created from it, so one configuration can build several
-//! consumers (Java's `Properties` can be reused the same way), each with its
-//! own record of the keys it used.
+//! `Clone` (CLAUDE.md §3), while the C constructor borrows the handle; each
+//! consumer created from it therefore gets a copy of the handle's
+//! configuration, so one configuration can build several consumers. Like
+//! Java's consumers given one `ConsumerConfig`, they share its resolved
+//! `client.id`, the one `kafka_consumer_ConsumerConfig_get_string` answers,
+//! and each keeps its own record of the keys it used.
 //!
 //! The map is the only input, as in Rust: a typed setter would skip the
 //! `ConfigDef` validators `new` runs. Values are read back by key through
@@ -54,9 +55,6 @@ pub struct kafka_consumer_ConsumerConfig_t {
 /// lent out, kept so the pointers they return live as long as the handle, as a
 /// Rust `&str` borrowed from the configuration does.
 struct ConsumerConfigHandle {
-    /// The validated properties, from which each consumer's configuration is
-    /// built ([`consumer_config_build`]).
-    props: HashMap<String, String>,
     /// The configuration the getters read.
     config: ConsumerConfig,
     /// The values [`kafka_consumer_ConsumerConfig_get_string`] lent out.
@@ -76,13 +74,14 @@ unsafe fn handle_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a 
     unsafe { &*(config as *const ConsumerConfigHandle) }
 }
 
-/// A fresh configuration built from the handle's properties, with its own
-/// record of the keys used, for a consumer created from the handle.
+/// The configuration of a consumer created from the handle: a copy of the
+/// handle's ([`ConsumerConfig::copy_for_client`]), with its `client.id` and
+/// its own record of the keys used.
 ///
 /// # Errors
 ///
-/// Fails as [`ConsumerConfig::new`] does; the properties were validated when
-/// the handle was built, so it does not in practice.
+/// Fails as [`ConsumerConfig::copy_for_client`] does, which it does not in
+/// practice.
 ///
 /// # Safety
 ///
@@ -92,7 +91,7 @@ pub(crate) unsafe fn consumer_config_build(
 ) -> Result<ConsumerConfig, Error> {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for this call,
     // as `handle_ref` requires; the reference does not outlive it.
-    ConsumerConfig::new(&unsafe { handle_ref(config) }.props)
+    unsafe { handle_ref(config) }.config.copy_for_client()
 }
 
 /// The configuration behind a handle.
@@ -126,11 +125,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
-        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle {
-            props,
-            config,
-            strings: LentStrings::default(),
-        })) as *mut kafka_consumer_ConsumerConfig_t,
+        Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle { config, strings: LentStrings::default() }))
+            as *mut kafka_consumer_ConsumerConfig_t,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
     }
@@ -359,7 +355,8 @@ pub extern "C" fn kafka_consumer_ConsumerConfig_config_names() -> *mut kafka_Lis
 /// from the handle and valid until it is destroyed, or `NULL` with `*out_err` still
 /// `NULL` when the key has no value (Java's `null`, which is also what an unset
 /// `PASSWORD` key such as `ssl.truststore.password` answers). `client.id` is the
-/// resolved id, generated when the property is unset. A key of another type
+/// resolved id, generated when the property is unset, under which every
+/// consumer created from the handle runs. A key of another type
 /// (`max.poll.records`, a set `PASSWORD` key) fails as Java's cast does, with an
 /// `IllegalArgumentError`, and a key the configuration does not hold is Java's
 /// `ConfigException` (`Unknown configuration '<key>'`), both delivered through

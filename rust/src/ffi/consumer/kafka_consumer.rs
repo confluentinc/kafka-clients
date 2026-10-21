@@ -132,9 +132,10 @@ unsafe fn deserializer_from(
 /// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
 /// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
 /// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
-/// `*out_err` and returns `NULL`. The consumer gets its own configuration,
-/// built from the handle's properties, so the handle stays the caller's and can
-/// build further consumers; each
+/// `*out_err` and returns `NULL`. The consumer gets its own copy of the
+/// handle's configuration, with the handle's `client.id` (the consumers of one
+/// handle share it, as Java's consumers given one `ConsumerConfig` do), so the
+/// handle stays the caller's and can build further consumers; each
 /// deserializer handle is consumed (its `self` stays the caller's until the
 /// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
 /// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
@@ -166,8 +167,8 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     let (value, owns_value) = unsafe { deserializer_from(value_deserializer) };
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
         // The boxes go in as they are: `new` would box them again (see
-        // `with_boxed_deserializers`). The properties were validated when the
-        // handle was built, so the configuration does not fail in practice; if
+        // `with_boxed_deserializers`). The copy parses properties the handle
+        // already validated, so the configuration does not fail in practice; if
         // it did, the deserializers would be dropped unclosed, as Java's
         // constructor fails building its `ConsumerConfig` before it takes them.
         config
@@ -513,6 +514,71 @@ mod tests {
                 kafka_List_destroy(unused);
             }
             kafka_consumer_ConsumerConfig_destroy(config);
+            for class in classes {
+                kafka_consumer_KafkaConsumer_destroy(class);
+            }
+        }
+    }
+
+    /// A consumer created from a handle runs under the handle's resolved
+    /// `client.id`, the one `_get_string` answers, so the consumers of one
+    /// handle share it, as Java's consumers given one `ConsumerConfig` do;
+    /// the next handle takes the next number from the sequence, as Java's
+    /// next `ConsumerConfig` does (`consumer-g-1`, then `consumer-g-2`).
+    #[test]
+    fn consumers_run_under_the_client_id_of_their_handle() {
+        use crate::ffi::consumer::consumer_config::{
+            kafka_consumer_ConsumerConfig_destroy, kafka_consumer_ConsumerConfig_get_string,
+            kafka_consumer_ConsumerConfig_new,
+        };
+        use crate::ffi::util::{box_string_map, kafka_Map_destroy};
+        // SAFETY: Test code: `class` is a live class handle; the view is used only within this
+        // call, while the handle lives.
+        let client_ids = |class: *mut kafka_consumer_KafkaConsumer_t| unsafe {
+            crate::ffi::consumer::client_ref(kafka_consumer_KafkaConsumer__as_Consumer(class))
+                .handle()
+                .metrics()
+                .keys()
+                .filter_map(|name| name.tags().get("client-id").cloned())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let group = "client-id-of-their-handle";
+        let props = box_string_map([
+            ("bootstrap.servers", "127.0.0.1:1"),
+            ("group.protocol", "consumer"),
+            ("group.id", group),
+        ]);
+        // SAFETY: Test code: the map, both configs and every consumer handle are live until they
+        // are destroyed once below; the strings `_get_string` lends are copied before their
+        // handle is destroyed; `err` is a valid slot pointing at null before each call.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let mut handle_ids = Vec::new();
+            let mut classes = Vec::new();
+            for _ in 0..2 {
+                let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
+                assert!(err.is_null());
+                let id = kafka_consumer_ConsumerConfig_get_string(config, c"client.id".as_ptr(), &mut err);
+                assert!(err.is_null());
+                let id = std::ffi::CStr::from_ptr(id).to_str().unwrap().to_string();
+                for _ in 0..2 {
+                    let class =
+                        kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
+                    assert!(err.is_null());
+                    assert_eq!(client_ids(class), std::collections::HashSet::from([id.clone()]));
+                    classes.push(class);
+                }
+                kafka_consumer_ConsumerConfig_destroy(config);
+                handle_ids.push(id);
+            }
+            kafka_Map_destroy(props);
+            let prefix = format!("consumer-{group}-");
+            let numbers: Vec<i32> = handle_ids
+                .iter()
+                .map(|id| id.strip_prefix(&prefix).unwrap().parse().unwrap())
+                .collect();
+            // Other tests take numbers concurrently, so the next one is only later.
+            assert!(numbers[1] > numbers[0], "{handle_ids:?}");
             for class in classes {
                 kafka_consumer_KafkaConsumer_destroy(class);
             }

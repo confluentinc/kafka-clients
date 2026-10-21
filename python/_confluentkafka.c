@@ -4220,7 +4220,7 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
 // the handle is 0 and `error` the owned error handle (an int, 0 on success);
 // the construction runs with the GIL released (it resolves the bootstrap
 // servers). The handle keeps the configuration's `client.id`, generated when
-// unset, for Consumer_client_id.
+// unset, for Consumer_client_id: the consumer runs under that same id.
 static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     PyObject* config_dict;
@@ -4255,7 +4255,7 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
             py_client_id = PyUnicode_FromString(client_id);
         if (err == NULL && py_client_id != NULL) {
             Py_BEGIN_ALLOW_THREADS
-            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
+            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // copies config, keeping its client.id
             Py_END_ALLOW_THREADS
         }
         destroy_err = (kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err));

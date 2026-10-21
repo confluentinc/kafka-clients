@@ -277,7 +277,9 @@ breaking changes.
   `_get_double`, `_get_boolean`, `_get_list`, `_unused`,
   `_ignore`, `_log_unused` and `_config_names`, beside the existing
   `_get_string`. A consumer created from the handle keeps its own record of
-  the keys it used.
+  the keys it used, and runs under the handle's `client.id`, the one
+  `_get_string` answers: the consumers of one handle share it, as Java's
+  consumers given one `ConsumerConfig` do.
 - `kafka_producer_ProducerConfig_t` answers the same getters:
   `kafka_producer_ProducerConfig_get_short`, `_get_int`, `_get_long`,
   `_get_double`, `_get_boolean`, `_get_string`, `_get_list`, `_unused`,
