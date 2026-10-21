@@ -155,6 +155,18 @@ breaking changes.
   `send.buffer.bytes` / `receive.buffer.bytes` below `-1`;
   `metrics.num.samples` below `1`; and a `metrics.recording.level` or
   `metadata.recovery.strategy` outside Java's values.
+- **Breaking (Rust, C API, Python):** `bootstrap.controllers` is no longer
+  defined, and `AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG` is removed.
+  Bootstrapping through the controllers (KIP-919) is not implemented, so the
+  key stays undefined until it is: a value set for it is listed among the
+  unused configurations, where `AdminClientConfig::new` used to fail. Without
+  `bootstrap.servers` the configuration now builds, as Java's does, and the
+  client's constructor fails with `Failed to create new KafkaAdminClient`
+  caused by `ClientUtils`'s `ConfigError` `No resolvable bootstrap urls given
+  in bootstrap.servers`, the producer's and the consumer's message, where
+  `AdminClientConfig::new` used to fail with Java's
+  `KafkaAdminClient.determineBootstrapType` message `You must set either
+  bootstrap.servers or bootstrap.controllers`.
 - `AdminClientConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),
@@ -192,8 +204,6 @@ breaking changes.
   (code 35):
   - `KafkaConsumer::new` with `group.protocol=classic`, the default, so every
     consumer that does not set the key;
-  - `AdminClientConfig::new` with `bootstrap.controllers` and no
-    `bootstrap.servers`;
   - `KafkaProducer::new` with the incremental `buffer.memory` allocation
     strategy and a compression type;
   - the `MockAdminClient` methods Java's mock leaves "Not implemented yet", and

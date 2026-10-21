@@ -978,7 +978,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Builds the internal broker metadata refresh call.
     ///
     /// Translated from `makeBrokerMetadataCall` (the only variant needed while
-    /// `bootstrap.controllers` is unsupported — see the phase self-review).
+    /// `AdminClientConfig` leaves `bootstrap.controllers` undefined).
     fn make_metadata_call(&self, now: i64) -> Call {
         let deadline = now + self.request_timeout_ms as i64;
         let mm_ok = self.metadata_manager.clone();

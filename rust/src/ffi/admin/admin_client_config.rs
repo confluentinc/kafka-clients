@@ -561,7 +561,9 @@ mod tests {
             v
         };
         assert_eq!(names, expected);
-        assert!(names.iter().any(|n| n == "bootstrap.controllers"));
+        assert!(names.iter().any(|n| n == "bootstrap.servers"));
+        // Not defined until KIP-919 controller bootstrap is implemented.
+        assert!(!names.iter().any(|n| n == "bootstrap.controllers"));
     }
 
     /// The handle logs the configuration's warnings once, when it is built;

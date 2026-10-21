@@ -31,10 +31,11 @@
 //! By **id** Java uses the Metadata API only (`handleDescribeTopicsByIds`), and
 //! so does this port.
 //!
-//! `bootstrap.controllers` (KIP-919) is unsupported in Phase 1, so the metadata
-//! refresh always uses the broker `Metadata` API (never `DescribeCluster`), and
-//! controller/least-loaded node selection never needs the
-//! `LeastLoadedBrokerOrActiveKController` provider.
+//! `bootstrap.controllers` (KIP-919) is not defined by [`AdminClientConfig`]
+//! until bootstrapping through the controllers is implemented, so the client
+//! always bootstraps through `bootstrap.servers`: the metadata refresh always
+//! uses the broker `Metadata` API (never `DescribeCluster`), and the
+//! `LeastLoadedBrokerOrActiveKController` provider always picks a broker.
 
 use crate::admin::CreateTopicsResult;
 use crate::common::requests::DescribeClusterRequest;
@@ -419,9 +420,14 @@ impl KafkaAdminClient {
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
-        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
-        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
-        // already rejected it, so it is always `bootstrap.servers`.
+        // Java's `bootstrapAddressesToUse`, chosen by `determineBootstrapType`
+        // (`KafkaAdminClient.java:533-560`). `bootstrap.controllers` is not
+        // defined, so it is always `bootstrap.servers`, and there is nothing to
+        // determine. Deviation: Java fails an empty `bootstrap.servers` there
+        // with "You must set either bootstrap.servers or bootstrap.controllers";
+        // here the empty list reaches `ClientUtils::parse_and_validate_addresses`
+        // and fails with its "No resolvable bootstrap urls given in
+        // bootstrap.servers", as the producer and the consumer do.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
 
         // Java's `Time.SYSTEM`.
@@ -430,7 +436,7 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
+            false, // `determineBootstrapType`: bootstrap.controllers is not defined
             log_context.clone(),
         );
         // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
@@ -510,47 +516,6 @@ impl KafkaAdminClient {
         config.log_unused();
         admin.spawn(runnable);
         Ok(admin)
-    }
-
-    /// Determines which bootstrap configuration to use based on the provided
-    /// lists. Validates that exactly one of `bootstrap.servers` or
-    /// `bootstrap.controllers` is configured.
-    ///
-    /// Returns `true` if using `bootstrap.controllers`, `false` if using
-    /// `bootstrap.servers`.
-    ///
-    /// Java takes the `AdminClientConfig` and reads both lists from it; the
-    /// Rust config does not keep `bootstrap.controllers` (no client can use
-    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
-    /// parses them.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Config`] if both or neither bootstrap configurations are set.
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
-    pub(crate) fn determine_bootstrap_type(
-        bootstrap_servers: &[String],
-        controller_servers: &[String],
-    ) -> Result<bool, Error> {
-        if bootstrap_servers.is_empty() {
-            if controller_servers.is_empty() {
-                Err(Error::config_message(format!(
-                    "You must set either {} or {}",
-                    AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
-                    AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
-                )))
-            } else {
-                Ok(true) // Using bootstrap.controllers
-            }
-        } else if controller_servers.is_empty() {
-            Ok(false) // Using bootstrap.servers
-        } else {
-            Err(Error::config_message(format!(
-                "You cannot set both {} and {}",
-                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
-                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
-            )))
-        }
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -4076,8 +4041,8 @@ impl Admin for KafkaAdminClient {
         let mut all_futures: HashMap<ConfigResource, KafkaFuture<()>> = HashMap::new();
         // BROKER_LOGGER requests always go to a specific broker; a non-default
         // BROKER resource goes to that specific node; everything else goes to
-        // the least loaded broker (bootstrap.controllers is unsupported here,
-        // so the controller special-casing never triggers).
+        // the least loaded broker (bootstrap.controllers is not defined by
+        // `AdminClientConfig`, so the controller special-casing never triggers).
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
         for resource in configs.keys() {
@@ -6297,8 +6262,8 @@ mod tests {
     /// Java sets `bootstrap.controllers`, which makes
     /// `LeastLoadedBrokerOrActiveKController` route to the active controller and
     /// refresh metadata via `DescribeCluster` between the NOT_CONTROLLER attempt
-    /// and the retry. On this branch `AdminMetadataManager` stubs
-    /// `using_bootstrap_controllers()` to `false`, so the provider behaves like
+    /// and the retry. `bootstrap.controllers` is not defined by
+    /// `AdminClientConfig`, so `using_bootstrap_controllers()` is `false` and the provider behaves like
     /// `LeastLoaded`: after clearing the controller it retries straight to a
     /// least-loaded broker (no interposed metadata call). The observable
     /// contract — retry after NOT_CONTROLLER, then success — is preserved.
@@ -6402,7 +6367,7 @@ mod tests {
     /// Translated from `KafkaAdminClientTest.testDeleteAclsToController`.
     ///
     /// As with `test_create_acls_to_controller`, `bootstrap.controllers` is
-    /// stubbed off on this branch so the NOT_CONTROLLER retry goes straight to a
+    /// not defined by `AdminClientConfig`, so the NOT_CONTROLLER retry goes straight to a
     /// least-loaded broker without an interposed metadata refresh.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testDeleteAclsToController")]
@@ -7602,6 +7567,31 @@ mod tests {
         assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
     }
 
+    /// Without `bootstrap.servers` (and with no `bootstrap.controllers`, which
+    /// `AdminClientConfig` does not define) the constructor fails in
+    /// `ClientUtils.parseAndValidateAddresses`, wrapped as every construction
+    /// failure is. Deviation from Java, whose `determineBootstrapType` fails
+    /// first with "You must set either bootstrap.servers or
+    /// bootstrap.controllers": with no controllers key there is nothing to
+    /// determine, and the message is the one the producer and consumer give.
+    #[test]
+    fn test_missing_bootstrap_fails_creation() {
+        for props in [
+            HashMap::new(),
+            HashMap::from([("bootstrap.servers".to_string(), " ".to_string())]),
+            HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]),
+        ] {
+            let config = AdminClientConfig::new(&props).unwrap();
+            let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+            assert_eq!(error.message(), "Failed to create new KafkaAdminClient", "{props:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+        }
+    }
+
     /// A [`Call`] whose failure hook records the error it was failed with.
     fn recording_call(name: &str) -> (Call, Arc<Mutex<Option<Error>>>) {
         let failure = Arc::new(Mutex::new(None));
@@ -7759,26 +7749,6 @@ mod tests {
             error.message().starts_with("Exceeded maxRetries after"),
             "got {:?}",
             error.message()
-        );
-    }
-
-    /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
-    /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
-    #[test]
-    fn test_determine_bootstrap_type() {
-        let servers = vec!["localhost:9092".to_string()];
-        let none: Vec<String> = Vec::new();
-        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
-        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
-            "You must set either bootstrap.servers or bootstrap.controllers"
-        );
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
-                .unwrap_err()
-                .message(),
-            "You cannot set both bootstrap.servers and bootstrap.controllers"
         );
     }
 

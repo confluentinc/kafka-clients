@@ -215,7 +215,8 @@ def test_config_key_must_be_a_string() -> None:
 def test_config_values_checked_by_admin_client_config() -> None:
     """``AdminClientConfig``'s ``ConfigDef`` types: a wrong Python type for an
     ``INT`` raises Java's message; a ``LIST`` may be given as a list;
-    ``bootstrap.controllers`` is an admin key; a ``None`` value is not set."""
+    ``bootstrap.controllers`` is an admin key of Java's ``ConfigDef``, so its type is
+    checked although the core leaves it undefined; a ``None`` value is not set."""
     with pytest.raises(ConfigError) as info:
         _admin(**{"request.timeout.ms": 1.5})
     assert str(info.value) == (
@@ -233,11 +234,17 @@ def test_config_values_checked_by_admin_client_config() -> None:
 
 
 def test_config_without_bootstrap() -> None:
-    """The core rejects the config; ``Admin_AdminClient_new`` hands its error back
-    as an owned handle, raised as its class (``from_ffi_error``)."""
-    with pytest.raises(ConfigError) as info:
+    """The core fails the client; ``Admin_AdminClient_new`` hands its error back
+    as an owned handle, raised as its class with its cause (``from_ffi_error``).
+    ``bootstrap.controllers`` is not defined by the core, so an empty
+    ``bootstrap.servers`` fails in ``ClientUtils.parseAndValidateAddresses``
+    *(deviation: Java's ``determineBootstrapType`` fails first with "You must set
+    either bootstrap.servers or bootstrap.controllers")*."""
+    with pytest.raises(KafkaError) as info:
         Admin.create(configs={})
-    assert str(info.value) == "You must set either bootstrap.servers or bootstrap.controllers"
+    assert str(info.value) == "Failed to create new KafkaAdminClient"
+    assert type(info.value.__cause__) is ConfigError
+    assert str(info.value.__cause__) == "No resolvable bootstrap urls given in bootstrap.servers"
 
 
 # ---- close ------------------------------------------------------------------

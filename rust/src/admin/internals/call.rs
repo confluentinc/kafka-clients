@@ -100,8 +100,8 @@ pub(crate) enum NodeProvider {
     LeastLoaded,
     /// Targets the least-loaded broker, or the active controller when the
     /// client uses `bootstrap.controllers` (KIP-919). Mirrors
-    /// `LeastLoadedBrokerOrActiveKController`. Because `bootstrap.controllers`
-    /// is unsupported here (`using_bootstrap_controllers()` is always false),
+    /// `LeastLoadedBrokerOrActiveKController`. Because `AdminClientConfig` leaves
+    /// `bootstrap.controllers` undefined (`using_bootstrap_controllers()` is always false),
     /// its `provide` behaves like [`NodeProvider::LeastLoaded`]; it differs only
     /// in `supports_use_controllers`, used by `describeCluster` /
     /// `describeConfigs` / `incrementalAlterConfigs`.

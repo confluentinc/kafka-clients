@@ -28,6 +28,12 @@
 //! - `config.providers`: config providers are not translated, so the key is
 //!   left undefined and a value set for it is reported as unused, rather than
 //!   accepted and ignored.
+//! - `bootstrap.controllers`: bootstrapping through the controllers (KIP-919)
+//!   is not implemented, so the key is left undefined and a value set for it
+//!   is reported as unused. Without `bootstrap.servers` the client then fails
+//!   to build with `ClientUtils`'s "No resolvable bootstrap urls given in
+//!   bootstrap.servers", where Java's `KafkaAdminClient.determineBootstrapType`
+//!   says "You must set either bootstrap.servers or bootstrap.controllers".
 //!
 //! `AbstractConfig`'s `getPassword`, `typeOf`, `originals*()` and `values*()`
 //! are not translated yet: each needs a public type the crate does not have
@@ -57,13 +63,9 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ValidList::any_non_duplicate_values(true, false),
             Importance::High,
         )
-        .define_with_validator(
-            AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG,
-            Type::List,
-            Vec::<String>::new(),
-            ValidList::any_non_duplicate_values(true, false),
-            Importance::High,
-        )
+        // Java defines `bootstrap.controllers` here
+        // (`AdminClientConfig.java:173-178`); it is left undefined until
+        // bootstrapping through the controllers (KIP-919) is implemented.
         .define(AdminClientConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium)
         .define_with_validator(
             AdminClientConfig::METADATA_MAX_AGE_CONFIG,
@@ -356,10 +358,6 @@ impl Hash for AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// `bootstrap.controllers` (KIP-919). Accepted and validated as in Java,
-    /// but connecting through controllers is not implemented, so setting it
-    /// makes [`Self::new`] fail (see there).
-    pub const BOOTSTRAP_CONTROLLERS_CONFIG: &'static str = "bootstrap.controllers";
     /// Config key: `client.dns.lookup`. Java's `AdminClientConfig.java` declares it as its
     /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
@@ -413,15 +411,9 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::Config`] if a value fails to parse or validate, with
     /// `ConfigDef`'s message, or if a SASL `security.protocol` has an empty
-    /// `sasl.mechanism`. Following Java's
-    /// `KafkaAdminClient.determineBootstrapType`, setting neither or both of
-    /// `bootstrap.servers` and `bootstrap.controllers` is an [`Error::Config`].
-    /// Setting only `bootstrap.controllers` returns a
-    /// [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
-    /// ([`Error::local_unsupported_operation`]): Java
-    /// accepts it (KIP-919), but this client does not implement bootstrapping
-    /// through controllers, and silently ignoring the key would leave the
-    /// client with no bootstrap address at all.
+    /// `sasl.mechanism`. An empty `bootstrap.servers` is accepted here, as in
+    /// Java; the client built from it fails (see
+    /// [`KafkaAdminClient::new`](crate::admin::KafkaAdminClient::new)).
     ///
     /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
     /// returns a
@@ -488,22 +480,6 @@ impl AdminClientConfig {
         )?;
         let mut values = ValuesReader::new(&config);
         let bootstrap_servers = values.list(Self::BOOTSTRAP_SERVERS_CONFIG)?.to_vec();
-        let bootstrap_controllers = values.list(Self::BOOTSTRAP_CONTROLLERS_CONFIG)?;
-        // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
-        // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
-        // `createInternal`; this crate has always run the check here, when the
-        // config is built, because no client can use `bootstrap.controllers`
-        // (see below).
-        if crate::admin::KafkaAdminClient::determine_bootstrap_type(&bootstrap_servers, bootstrap_controllers)? {
-            // Java bootstraps through the controllers here
-            // (`usingBootstrapControllers = true`); that path is not
-            // implemented, so fail explicitly rather than drop the key.
-            return Err(Error::local_unsupported_operation(format!(
-                "{} is not supported by this client; set {} instead",
-                Self::BOOTSTRAP_CONTROLLERS_CONFIG,
-                Self::BOOTSTRAP_SERVERS_CONFIG
-            )));
-        }
         let client_dns_lookup = ClientDnsLookup::parse_config_value(values.string(Self::CLIENT_DNS_LOOKUP_CONFIG)?)?;
         let client_id = values.string(Self::CLIENT_ID_CONFIG)?.to_string();
         let request_timeout_ms = values.int(Self::REQUEST_TIMEOUT_MS_CONFIG)?;
@@ -868,51 +844,20 @@ mod tests {
         );
     }
 
+    /// Without `bootstrap.servers` the configuration builds, as Java's does;
+    /// the client fails later (`kafka_admin_client.rs`'s
+    /// `test_missing_bootstrap_fails_creation`). `bootstrap.controllers` is
+    /// not defined, so a value set for it is only reported as unused.
     #[test]
-    fn missing_bootstrap_is_error_with_exact_message() {
-        let props = HashMap::new();
-        let err = AdminClientConfig::new(&props).unwrap_err();
-        assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
-    }
+    fn missing_bootstrap_builds_and_controllers_is_unused() {
+        let config = AdminClientConfig::new(&HashMap::new()).unwrap();
+        assert!(config.bootstrap_servers().is_empty());
 
-    /// `KafkaAdminClient.determineBootstrapType`'s branches for
-    /// `bootstrap.controllers`: only controllers is an explicit unsupported
-    /// error (never silently dropped), both is Java's `ConfigException`, and
-    /// an empty controllers list counts as unset.
-    #[test]
-    fn bootstrap_controllers() {
         let props = HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]);
-        let error = AdminClientConfig::new(&props).unwrap_err();
-        assert!(error.is_local_unsupported_operation_error(), "{error:?}");
-        assert_eq!(
-            error.message(),
-            "bootstrap.controllers is not supported by this client; set bootstrap.servers instead"
-        );
-
-        let props = HashMap::from([
-            ("bootstrap.servers".to_string(), "a:9092".to_string()),
-            ("bootstrap.controllers".to_string(), "c:9093".to_string()),
-        ]);
-        match AdminClientConfig::new(&props) {
-            Err(Error::Config(e)) => {
-                assert_eq!(e.message(), "You cannot set both bootstrap.servers and bootstrap.controllers")
-            },
-            other => panic!("Expected Config, got: {other:?}"),
-        }
-
-        let props = HashMap::from([("bootstrap.controllers".to_string(), " ".to_string())]);
-        assert_eq!(
-            AdminClientConfig::new(&props).unwrap_err().message(),
-            "You must set either bootstrap.servers or bootstrap.controllers"
-        );
-        let props = HashMap::from([
-            ("bootstrap.servers".to_string(), "a:9092".to_string()),
-            ("bootstrap.controllers".to_string(), String::new()),
-        ]);
-        assert_eq!(
-            AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
-            ["a:9092".to_string()]
-        );
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert!(config.bootstrap_servers().is_empty());
+        config.mark_read_keys_used();
+        assert!(config.unused().contains("bootstrap.controllers"));
     }
 
     #[test]
@@ -1072,7 +1017,10 @@ mod tests {
         assert_eq!(config.get_boolean("enable.metrics.push").unwrap(), Some(false));
         assert_eq!(config.get_string("client.id").unwrap(), Some("admin-1"));
         assert_eq!(config.get_list("bootstrap.servers").unwrap(), Some(&["a:9092".to_string()][..]));
-        assert_eq!(config.get_list("bootstrap.controllers").unwrap(), Some(&[][..]));
+        assert_eq!(
+            config.get_list("bootstrap.controllers").unwrap_err().message(),
+            "Unknown configuration 'bootstrap.controllers'"
+        );
         assert_eq!(config.get_string("sasl.jaas.config").unwrap(), None);
 
         let err = config.get_int("no.such.key").unwrap_err();
@@ -1091,7 +1039,6 @@ mod tests {
         let names = AdminClientConfig::config_names();
         for key in [
             "bootstrap.servers",
-            "bootstrap.controllers",
             "client.id",
             "metadata.recovery.strategy",
             "metadata.cluster.check.enable",
@@ -1104,6 +1051,7 @@ mod tests {
             "metric.reporters",
             "security.providers",
             "config.providers",
+            "bootstrap.controllers",
             "ssl.cipher.suites",
             "ssl.keystore.password",
             "ssl.key.password",
@@ -1412,12 +1360,12 @@ mod tests {
             "Configuration 'bootstrap.servers' values must not be empty."
         );
         // Admin allows an empty list (`isEmptyAllowed = true`), so the
-        // ValidList message never appears; `KafkaAdminClient.determineBootstrapType`'s
-        // check reports it instead.
+        // ValidList message never appears and the configuration builds; the
+        // client built from it fails in `ClientUtils.parseAndValidateAddresses`.
         for value in ["", "  "] {
-            assert_eq!(
-                error_message(value),
-                "You must set either bootstrap.servers or bootstrap.controllers",
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            assert!(
+                AdminClientConfig::new(&props).unwrap().bootstrap_servers().is_empty(),
                 "{value:?}"
             );
         }
