@@ -14768,6 +14768,83 @@ mod tests {
         let _phantom: fn(AsyncKafkaConsumer<Vec<u8>, Vec<u8>>) = _accept_consumer;
     }
 
+    /// Audit finding C1-22, through the production constructor. Java's
+    /// `ConsumerNetworkThread.run()` (4.4) wraps every `runOnce()` in
+    /// `catch (final Throwable e)`, logs "Unexpected error caught in consumer
+    /// network thread" and keeps looping. The Rust constructor once drove its
+    /// own copy of the loop without that catch, so one panicking iteration
+    /// ended the bg thread and every later call failed with "The consumer
+    /// background task is not running". The `consumer_network_thread` tests
+    /// start the loop through `spawn_dedicated` directly; this one builds the
+    /// consumer with `AsyncKafkaConsumer::new` (what `KafkaConsumer::new`
+    /// calls), so it fails if the constructor stops going through
+    /// `ConsumerNetworkThread::run`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn constructed_consumer_survives_a_panicking_background_iteration() {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicUsize;
+
+        use crate::common::serialization::ByteArrayDeserializer;
+        use crate::consumer::internals::PollResult;
+        use crate::consumer::internals::RequestManager;
+
+        /// Panics on its first poll only, and counts every poll.
+        struct PanicOnceRequestManager {
+            poll_calls: Arc<AtomicUsize>,
+        }
+
+        impl RequestManager for PanicOnceRequestManager {
+            fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+                if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("request manager failure");
+                }
+                PollResult::with_time_until_next_poll_ms(10)
+            }
+
+            fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+                10
+            }
+        }
+
+        // No group.id: `assign` is then served by the bg loop alone, with no
+        // broker round trip. The bootstrap address refuses connections.
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+        ]);
+        let mut consumer = AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        consumer
+            .request_managers
+            .lock()
+            .unwrap()
+            .add_dyn_manager_for_test(Box::new(PanicOnceRequestManager { poll_calls: Arc::clone(&poll_calls) }));
+
+        // Wait for the loop to run the panicking iteration and at least one
+        // more.
+        let start = std::time::Instant::now();
+        while poll_calls.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let polls = poll_calls.load(Ordering::SeqCst);
+
+        let assigned = consumer.assign(vec![TopicPartition::new("topic1".to_string(), 0)]).await;
+        assert!(
+            polls >= 2 && assigned.is_ok(),
+            "Java: the network thread logs the error and keeps running, so later calls still succeed; Rust: \
+             manager polls={polls}, assign after the panicking iteration returned {assigned:?}"
+        );
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
+    }
+
     // ── Phase 21: dedicated-IO-thread `NetworkThreadCloseHandle` tests ──
     //
     // The production `AsyncKafkaConsumer::new()` runs the bg loop on a
