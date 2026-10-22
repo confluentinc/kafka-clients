@@ -34,10 +34,18 @@
 //! short wait, as a broker does when `fetch.max.wait.ms` elapses with no data.
 //! Every other request is read and left unanswered.
 //!
+//! [`FakeBroker::start_with_group_coordinator`] additionally acts as the group
+//! coordinator: `FindCoordinator` names this listener, and a joining or
+//! heartbeating `ConsumerGroupHeartbeat` gets member epoch 1 with an empty
+//! assignment. A leave heartbeat (member epoch -1) is recorded and left
+//! unanswered, so the client's leave can only end by a timeout.
+//!
 //! Requests are recorded when they arrive, as Java's `MockClient` records them
 //! when the client sends them, even while an earlier request on the same
 //! connection is held: a reader task records each frame and hands it to the
 //! connection's responder, which answers in arrival order, as a broker must.
+//! A request left unanswered is recorded but never handed to the responder, so
+//! it does not hold back the responses to the requests after it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,8 +60,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
+use crate::ConsumerGroupHeartbeatRequestData;
+use crate::ConsumerGroupHeartbeatResponseData;
 use crate::FetchRequestData;
 use crate::FetchResponseData;
+use crate::FindCoordinatorRequestData;
+use crate::FindCoordinatorResponseData;
 use crate::ListOffsetsRequestData;
 use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
@@ -64,7 +76,9 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::record::TimestampType;
 use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
 use crate::common::requests::{ApiVersionsResponse, FetchResponse, RequestHeader, RequestUtils, ResponseHeader};
+use crate::consumer_group_heartbeat_response_data::Assignment;
 use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as FetchPartitionData};
+use crate::find_coordinator_response_data::Coordinator;
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
@@ -122,6 +136,11 @@ struct Shared {
     fetch_requests: AtomicUsize,
     /// The answer for the next `Fetch`, taken by the one that uses it.
     fetch_answer: Mutex<Option<FetchAnswer>>,
+    /// Whether the fake acts as the group coordinator.
+    group_coordinator: bool,
+    /// The member epoch of every `ConsumerGroupHeartbeat` received, in arrival
+    /// order (only recorded when acting as the group coordinator).
+    heartbeat_epochs: Mutex<Vec<i32>>,
 }
 
 /// A request read from a connection, waiting for its turn to be answered.
@@ -153,6 +172,16 @@ impl FakeBroker {
     /// Binds `127.0.0.1:0` and serves every accepted connection. Metadata
     /// responses carry `cluster_id` and a single-partition `topic`.
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, false).await
+    }
+
+    /// Like [`Self::start`], and also acts as the group coordinator (see the
+    /// module docs): joins are answered, leave heartbeats are not.
+    pub(crate) async fn start_with_group_coordinator(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, true).await
+    }
+
+    async fn start_inner(cluster_id: &str, topic: &str, group_coordinator: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
         let shared = Arc::new(Shared {
@@ -161,6 +190,8 @@ impl FakeBroker {
             list_offsets_answer: watch::Sender::new(None),
             fetch_requests: AtomicUsize::new(0),
             fetch_answer: Mutex::new(None),
+            group_coordinator,
+            heartbeat_epochs: Mutex::new(Vec::new()),
         });
         let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
@@ -217,6 +248,13 @@ impl FakeBroker {
     /// How many `Fetch` requests have arrived so far.
     pub(crate) fn fetch_requests(&self) -> usize {
         self.shared.fetch_requests.load(Ordering::SeqCst)
+    }
+
+    /// The member epochs of the `ConsumerGroupHeartbeat` requests received so
+    /// far, in arrival order (always empty unless started with
+    /// [`Self::start_with_group_coordinator`]).
+    pub(crate) fn heartbeat_epochs(&self) -> Vec<i32> {
+        self.shared.heartbeat_epochs.lock().expect("fake broker mutex poisoned").clone()
     }
 
     /// Waits (up to `timeout`) until at least `count` ApiVersions requests have
@@ -335,6 +373,38 @@ async fn read_requests(
             let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
             seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
             Pending::Fetch { response_header, version, request }
+        } else if *header.api_key() == ApiKeys::FIND_COORDINATOR && seen.group_coordinator {
+            let request =
+                FindCoordinatorRequestData::read(&mut accessor, version).expect("fake broker: FindCoordinator body");
+            let mut body = find_coordinator_response(addr, &request, version);
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::CONSUMER_GROUP_HEARTBEAT && seen.group_coordinator {
+            let request = ConsumerGroupHeartbeatRequestData::read(&mut accessor, version)
+                .expect("fake broker: ConsumerGroupHeartbeat body");
+            seen.heartbeat_epochs
+                .lock()
+                .expect("fake broker mutex poisoned")
+                .push(request.member_epoch);
+            if request.member_epoch < 0 {
+                // A leave heartbeat: recorded above, never answered.
+                continue;
+            }
+            let mut body = ConsumerGroupHeartbeatResponseData::new();
+            body.member_id = Some(request.member_id.clone());
+            body.member_epoch = 1;
+            body.heartbeat_interval_ms = 100;
+            body.assignment = Some(Assignment::new());
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else {
             continue;
         };
@@ -379,6 +449,35 @@ async fn respond(seen: &Shared, pending: Pending) -> Option<Vec<u8>> {
 /// The bytes of a serialized response.
 fn serialize<E: std::fmt::Debug>(response: Result<ByteBufferAccessor, E>) -> Vec<u8> {
     response.expect("fake broker: serialize response").into_buffer()
+}
+
+fn find_coordinator_response(
+    addr: SocketAddr,
+    request: &FindCoordinatorRequestData,
+    version: i16,
+) -> FindCoordinatorResponseData {
+    let mut data = FindCoordinatorResponseData::new();
+    data.error_message = None;
+    if version >= 4 {
+        data.coordinators = request
+            .coordinator_keys
+            .iter()
+            .map(|key| {
+                let mut coordinator = Coordinator::new();
+                coordinator.key = key.clone();
+                coordinator.node_id = FAKE_BROKER_NODE_ID;
+                coordinator.host = addr.ip().to_string();
+                coordinator.port = i32::from(addr.port());
+                coordinator.error_message = None;
+                coordinator
+            })
+            .collect();
+    } else {
+        data.node_id = FAKE_BROKER_NODE_ID;
+        data.host = addr.ip().to_string();
+        data.port = i32::from(addr.port());
+    }
+    data
 }
 
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {
