@@ -311,7 +311,8 @@ public sealed class PublicAdminShapeParityTests
     {
         const string Topic = "shape-parity-topic";
 
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });
 

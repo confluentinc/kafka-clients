@@ -15,6 +15,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
@@ -25,177 +27,90 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The <b>multi-shot</b> rebalance-listener registration bridge (ffi-marshalling.md §B6) —
-/// the one callback family in this binding that is not a one-shot per-operation completion.
-/// Covers what the public surface does not pin on its own: each trampoline driven the way
-/// the core drives it (<c>on_partitions_lost</c> included), the returned-error-handle
-/// contract, the free-exactly-once properties, and the Java-faithful registration-release
-/// rules.
+/// The rebalance-listener registration: each method driven through the core's listener invokers, its report,
+/// and when the registration's <c>self_</c> is released.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Why some tests invoke a trampoline directly.</b> Before Kafka 4.4 the mock had no way
-/// to fire <c>on_partitions_lost</c>, so calling the trampoline the way the core would was
-/// the only coverage of it — and of the Java default <c>lost → revoked</c> delegation
-/// carried by <see cref="ConsumerRebalanceListenerBase"/>. <c>MockConsumer.LosePartitions</c>
-/// now fires it end to end (<c>PublicConsumerRebalanceListenerTests</c>); the direct tests
-/// stay, because they pin the trampoline's own contract apart from the core's driver. The
-/// Rust side does exactly the same in its own <c>#[cfg(test)]</c> coverage. The delivered
-/// list is a genuine owned <c>TopicPartitionList_t</c> obtained from
-/// <c>Consumer_assignment</c>, so the callback-owns-the-handle contract is exercised for
-/// real rather than simulated.
-/// </para>
-/// <para>
-/// <b>DoD #10 (hot-path allocation audit) is N/A for this phase</b> and is stated rather
-/// than skipped: a rebalance listener fires per <em>rebalance</em>, not per record, so there
-/// is no per-message hot path to budget.
-/// </para>
-/// </remarks>
 public sealed class ConsumerRebalanceListenerBridgeTests
 {
     private const string Topic = "listener-bridge-topic";
 
-    // The core maps any code outside the protocol range to UnknownServerError, whose code
-    // is -1 — the value Python pins for a throwing listener.
-    private const int ListenerErrorCode = -1;
-
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Drives a mock to a known non-empty assignment and hands back the owned
-    /// <c>TopicPartitionList_t</c> the core would deliver to a listener callback. Ownership
-    /// transfers to the caller, exactly as it does to a real callback.
-    /// </summary>
-    private static IntPtr OwnedAssignment(NativeConsumer consumer, params TopicPartition[] partitions)
-    {
-        consumer.Assign(partitions);
-        return NativeMethods.ConsumerAssignment(consumer.Handle);
-    }
+    private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
-    // ---- The on_partitions_lost trampoline, driven directly ----
+    /// <summary>The listener method a theory drives.</summary>
+    public enum Method
+    {
+        Revoked,
+        Assigned,
+        Lost,
+    }
 
     [Fact]
     public void PartitionsLost_OnListenerBase_DelegatesToRevoked_JavaDefault()
     {
-        // Java's default `lost -> revoked` delegation lives on ConsumerRebalanceListenerBase
-        // here, because the netstandard2.0 floor has no default interface methods. This drives
-        // the trampoline the way the core does; the end-to-end twin through
-        // MockConsumer.LosePartitions is in PublicConsumerRebalanceListenerTests.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
         RecordingListenerBase listener = new RecordingListenerBase();
-        ListenerRegistration registration = ListenerRegistration.Root(listener);
-        try
-        {
-            IntPtr list = OwnedAssignment(consumer, new TopicPartition(Topic, 0), new TopicPartition(Topic, 3));
 
-            IntPtr error = ConsumerCallbacks.PartitionsLost(list, registration.UserData);
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, Reporter()),
+            Method.Lost,
+            new TopicPartition(Topic, 0),
+            new TopicPartition(Topic, 3));
 
-            Assert.Equal(IntPtr.Zero, error);
-            Assert.Empty(listener.Lost);
-            TopicPartition[] revoked = Assert.Single(listener.Revoked).OrderBy(tp => tp.Partition).ToArray();
-            Assert.Equal(new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 3) }, revoked);
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.Null(failure);
+        Assert.Empty(listener.Lost);
+        TopicPartition[] revoked = Assert.Single(listener.Revoked).OrderBy(tp => tp.Partition).ToArray();
+        Assert.Equal(new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 3) }, revoked);
     }
 
     [Fact]
     public void PartitionsLost_OnDirectInterfaceImplementation_DeliversToLost()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
         RecordingListener listener = new RecordingListener();
-        ListenerRegistration registration = ListenerRegistration.Root(listener);
-        try
-        {
-            IntPtr list = OwnedAssignment(consumer, new TopicPartition(Topic, 7));
 
-            IntPtr error = ConsumerCallbacks.PartitionsLost(list, registration.UserData);
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, Reporter()), Method.Lost, new TopicPartition(Topic, 7));
 
-            Assert.Equal(IntPtr.Zero, error);
-            Assert.Empty(listener.Revoked);
-            Assert.Equal(new[] { new TopicPartition(Topic, 7) }, Assert.Single(listener.Lost));
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.Null(failure);
+        Assert.Empty(listener.Revoked);
+        Assert.Equal(new[] { new TopicPartition(Topic, 7) }, Assert.Single(listener.Lost));
     }
 
     [Fact]
     public void ListenerCallback_NonAsciiTopic_RoundTripsThroughDeliveredPartitions()
     {
-        // Guards a MarshalAs(LPStr) mistake, which corrupts non-ASCII silently and hides in
-        // ASCII-only tests (ffi §B3). The delivered topic is NUL-terminated (the list's own
-        // getter), not the length-delimited receive-path form.
         const string NonAscii = "témas-日本語-🎉";
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
         RecordingListener listener = new RecordingListener();
-        ListenerRegistration registration = ListenerRegistration.Root(listener);
-        try
-        {
-            IntPtr list = OwnedAssignment(consumer, new TopicPartition(NonAscii, 2));
 
-            Assert.Equal(IntPtr.Zero, ConsumerCallbacks.PartitionsAssigned(list, registration.UserData));
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, Reporter()), Method.Assigned, new TopicPartition(NonAscii, 2));
 
-            TopicPartition delivered = Assert.Single(Assert.Single(listener.Assigned));
-            Assert.Equal(NonAscii, delivered.Topic);
-            Assert.Equal(2, delivered.Partition);
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.Null(failure);
+        TopicPartition delivered = Assert.Single(Assert.Single(listener.Assigned));
+        Assert.Equal(NonAscii, delivered.Topic);
+        Assert.Equal(2, delivered.Partition);
     }
 
-    // ---- The throwing-listener contract ----
-
-    [Fact]
-    public void ThrowingListener_DoesNotUnwind_ReturnsErrorHandleWithCodeAndVerbatimMessage()
+    [Theory]
+    [InlineData(Method.Revoked)]
+    [InlineData(Method.Assigned)]
+    [InlineData(Method.Lost)]
+    public void ThrowingListener_DoesNotUnwind_ReportsTheSameInstance(Method method)
     {
-        // A managed exception must never unwind into native (there is no caller frame — it
-        // would be UB). It is converted into an owned Error* returned to the core; the
-        // observable contract Python pins is code -1 plus the message verbatim.
-        const string Message = "listener blew up — 例外";
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        ThrowingListener listener = new ThrowingListener(Message);
-        ListenerRegistration registration = ListenerRegistration.Root(listener);
-        try
-        {
-            IntPtr list = OwnedAssignment(consumer, new TopicPartition(Topic, 0));
+        InvalidOperationException thrown = new InvalidOperationException("listener blew up — 例外");
+        ConsumerCallbackReporter reporter = Reporter();
 
-            IntPtr error = ConsumerCallbacks.PartitionsRevoked(list, registration.UserData);
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(new ThrowingListener(thrown), reporter), method, new TopicPartition(Topic, 0));
 
-            Assert.NotEqual(IntPtr.Zero, error);
-            try
-            {
-                Assert.Equal(ListenerErrorCode, NativeMethods.Code(error));
-                Assert.Equal(Message, Utf8Marshal.PtrToString(NativeMethods.Message(error)));
-            }
-            finally
-            {
-                // The trampoline correctly did NOT destroy the handle it returned (ownership
-                // transfers to the core). This test stands in for the core, so it frees it.
-                NativeMethods.ErrorDestroy(error);
-            }
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.Same(thrown, failure);
+        Assert.False(reporter.InCallback);
     }
-
-    // ---- Free exactly once ----
 
     [Fact]
     public void ListenerRegistration_ReleasedTwice_FreesExactlyOnce()
     {
-        // GCHandle.Free() on an already-freed handle throws InvalidOperationException, so
-        // "does not throw" is the observable proof that the single free site is
-        // idempotent-safe. It has to be: the "native never ran" abandon path and the release
-        // hook can both reach it.
-        ListenerRegistration registration = ListenerRegistration.Root(new RecordingListener());
+        ListenerRegistration registration = ListenerRegistration.Root(new RecordingListener(), Reporter());
 
         registration.Release();
         registration.Release();
@@ -204,17 +119,96 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     [Fact]
+    public void ListenerRegistration_IsInsideACallbackOnlyWhileTheListenerRuns()
+    {
+        ConsumerCallbackReporter reporter = Reporter();
+        bool? inside = null;
+        Probe listener = new Probe(() => inside = reporter.InCallback);
+
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, reporter), Method.Assigned, new TopicPartition(Topic, 0));
+
+        Assert.Null(failure);
+        Assert.True(inside);
+        Assert.False(reporter.InCallback);
+    }
+
+    [Fact]
+    public async Task AsyncListener_IsReportedWhenItsTaskEnds_NotWhenItReturns()
+    {
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ManualResetEventSlim entered = new ManualResetEventSlim();
+        AsyncProbe listener = new AsyncProbe(() =>
+        {
+            entered.Set();
+            return release.Task;
+        });
+
+        Task<Exception?> invoked = Task.Run(() => Invoke(
+            ListenerRegistration.Root(listener, Reporter()), Method.Assigned, new TopicPartition(Topic, 0)));
+
+        Assert.True(entered.Wait(s_deadline), "the listener was not called");
+        await Task.WhenAny(invoked, Task.Delay(s_notYetWindow));
+        Assert.False(invoked.IsCompleted, "the invoker returned before the listener's Task ended");
+
+        release.SetResult(true);
+        await TestTimeout.Run(() => invoked, s_deadline);
+        Assert.Null(await invoked);
+    }
+
+    [Fact]
+    public async Task AsyncListener_FaultedTask_ReportsTheSameInstance()
+    {
+        InvalidOperationException thrown = new InvalidOperationException("async listener blew up");
+        TaskCompletionSource<bool> outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Task<Exception?> invoked = InvokeOnAPendingTask(outcome, Method.Revoked);
+        outcome.SetException(thrown);
+
+        await TestTimeout.Run(() => invoked, s_deadline);
+        Assert.Same(thrown, await invoked);
+    }
+
+    [Fact]
+    public async Task AsyncListener_CanceledTask_ReportsTheCancellation()
+    {
+        TaskCompletionSource<bool> outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Task<Exception?> invoked = InvokeOnAPendingTask(outcome, Method.Revoked);
+        outcome.SetCanceled();
+
+        await TestTimeout.Run(() => invoked, s_deadline);
+        Assert.IsAssignableFrom<OperationCanceledException>(await invoked);
+    }
+
+    [Fact]
+    public void AsyncListener_ThrowingBeforeItReturnsATask_ReportsTheSameInstance()
+    {
+        InvalidOperationException thrown = new InvalidOperationException("thrown before the Task");
+        AsyncProbe listener = new AsyncProbe(() => throw thrown);
+
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, Reporter()), Method.Lost, new TopicPartition(Topic, 0));
+
+        Assert.Same(thrown, failure);
+    }
+
+    [Fact]
+    public void AsyncListener_ReturningANullTask_IsReportedAsSuccess()
+    {
+        AsyncProbe listener = new AsyncProbe(() => null!);
+
+        Exception? failure = Invoke(
+            ListenerRegistration.Root(listener, Reporter()), Method.Assigned, new TopicPartition(Topic, 0));
+
+        Assert.Null(failure);
+    }
+
+    [Fact]
     public void Rebalance_Churned_NoCorruption()
     {
-        // The loop guards the registration GCHandle across N fires: it must NOT be freed
-        // per fire, and a per-fire free is a use-after-free on iteration 2 (verified — the
-        // injection turns this test and five others red).
-        //
-        // It does NOT assert anything about the delivered TopicPartitionList_t. Freeing
-        // that is inherited from the shared, pre-existing CopyOutAndDestroy (which destroys
-        // in a finally); nothing here observes native memory, so a leaked list would pass
-        // silently. The guard is correct, but this test cannot tell it from a broken one.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -223,22 +217,15 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             consumer.Rebalance(new[] { new TopicPartition(Topic, i % 4) });
         }
 
-        // Assigned fires unconditionally while a listener is registered; revoked only when
-        // something was removed. 200 fires of assigned proves the registration survived.
         Assert.Equal(200, listener.Assigned.Count);
         Assert.False(consumer.CurrentListenerRegistration!.IsReleased);
     }
 
-    // ---- Keep-alive under GC ----
-
     [Fact]
     public void LiveRegistration_SurvivesAggressiveGc()
     {
-        // The three thunks are static readonly (process-rooted) and the registration is
-        // rooted by its GCHandle (Normal), so aggressive GC across a LIVE registration must
-        // not collect either. Unlike the one-shot bridge's in-flight window, this window is
-        // the whole subscription — the registration outlives the subscribe call by design.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -253,15 +240,11 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.Equal(50, listener.Assigned.Count);
     }
 
-    // ---- Registration lifetime (Java-faithful) ----
-
     [Fact]
     public void ReplacingListenerlessSubscribe_ReleasesTheRegistration()
     {
-        // Java's registerRebalanceListener(Optional.empty()): a listener-less subscribe is
-        // how you deregister. The core fires the release hook, which is the single site that
-        // frees the registration GCHandle.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new RecordingListener());
         ListenerRegistration registration = consumer.CurrentListenerRegistration!;
         Assert.False(registration.IsReleased);
@@ -269,12 +252,28 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         consumer.Subscribe(new[] { Topic });
 
         Assert.True(registration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+    }
+
+    [Fact]
+    public async Task ReplacingListenerlessAsyncSubscribe_ReleasesTheRegistration()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener());
+        ListenerRegistration registration = consumer.CurrentListenerRegistration!;
+
+        await consumer.SubscribeWithCallback(new[] { Topic });
+
+        Assert.True(registration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
     }
 
     [Fact]
     public void ReplacingListenerSubscribe_ReleasesTheOldRegistrationOnly()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new RecordingListener());
         ListenerRegistration first = consumer.CurrentListenerRegistration!;
 
@@ -285,18 +284,48 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.True(first.IsReleased);
         Assert.False(secondRegistration.IsReleased);
 
-        // And the surviving registration is the one that fires.
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
         Assert.Single(second.Assigned);
     }
 
     [Fact]
+    public void FailedSubscribe_ReleasesTheNewRegistration_AndKeepsTheOld()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Subscribe(new[] { Topic }, new RecordingListener());
+        ListenerRegistration kept = consumer.CurrentListenerRegistration!;
+        consumer.Unsubscribe();
+        consumer.Assign(new[] { new TopicPartition(Topic, 0) });
+
+        Assert.Throws<InvalidOperationException>(() => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
+
+        Assert.Same(kept, consumer.CurrentListenerRegistration);
+        Assert.False(kept.IsReleased);
+    }
+
+    [Fact]
+    public async Task FailedAsyncSubscribe_ReleasesTheNewRegistration_AndKeepsTheOld()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener());
+        ListenerRegistration kept = consumer.CurrentListenerRegistration!;
+        await consumer.UnsubscribeWithCallback();
+        await consumer.AssignWithCallback(new[] { new TopicPartition(Topic, 0) });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener()));
+
+        Assert.Same(kept, consumer.CurrentListenerRegistration);
+        Assert.False(kept.IsReleased);
+    }
+
+    [Fact]
     public void Unsubscribe_DoesNotReleaseTheRegistration()
     {
-        // Java's SubscriptionState.unsubscribe() clears the subscription but KEEPS the
-        // registered listener. Releasing here would be a behaviour change, so it is asserted
-        // rather than assumed.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new RecordingListener());
         ListenerRegistration registration = consumer.CurrentListenerRegistration!;
 
@@ -304,8 +333,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         Assert.False(registration.IsReleased);
     }
-
-    // ---- Teardown with a live registration ----
 
     [Fact]
     public void Dispose_WithLiveRegistration_ReturnsWithoutHanging()
@@ -316,7 +343,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         TestTimeout.Run(() => consumer.Dispose(), s_deadline);
 
-        // Trigger 5: the consumer is destroyed, so the core released the registration.
         Assert.True(registration.IsReleased);
     }
 
@@ -332,12 +358,61 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.True(registration.IsReleased);
     }
 
-    // ---- Fixtures ----
+    private static ConsumerCallbackReporter Reporter() => new ConsumerCallbackReporter(IntPtr.Zero);
 
-    /// <summary>
-    /// Records every delivered collection. Implements the interface <b>directly</b>, so
-    /// <see cref="OnPartitionsLost"/> is a real distinct method (no Java-default delegation).
-    /// </summary>
+    private static Task<Exception?> InvokeOnAPendingTask(TaskCompletionSource<bool> outcome, Method method)
+    {
+        ManualResetEventSlim entered = new ManualResetEventSlim();
+        AsyncProbe listener = new AsyncProbe(() =>
+        {
+            entered.Set();
+            return outcome.Task;
+        });
+
+        Task<Exception?> invoked = Task.Run(() => Invoke(
+            ListenerRegistration.Root(listener, Reporter()), method, new TopicPartition(Topic, 0)));
+        Assert.True(entered.Wait(s_deadline), "the listener was not called");
+        Assert.False(invoked.Wait(s_notYetWindow), "the invoker returned before the listener's Task ended");
+        return invoked;
+    }
+
+    private static Exception? Invoke(ListenerRegistration registration, Method method, params TopicPartition[] partitions)
+    {
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
+            IntPtr list = arguments.TopicPartitionList(partitions.Select(tp => (tp.Topic, tp.Partition)).ToArray());
+            IntPtr handle = registration.NewHandle();
+            IntPtr outErr = IntPtr.Zero;
+            try
+            {
+                switch (method)
+                {
+                    case Method.Revoked:
+                        NativeMethods.ConsumerRebalanceListenerOnPartitionsRevoked(handle, list, ref outErr);
+                        break;
+                    case Method.Assigned:
+                        NativeMethods.ConsumerRebalanceListenerOnPartitionsAssigned(handle, list, ref outErr);
+                        break;
+                    default:
+                        NativeMethods.ConsumerRebalanceListenerOnPartitionsLost(handle, list, ref outErr);
+                        break;
+                }
+            }
+            finally
+            {
+                ListenerRegistration.DestroyHandle(handle);
+            }
+
+            return KafkaException.FromFfiError(outErr, owned: true);
+        }
+        finally
+        {
+            registration.Release();
+        }
+    }
+
+    /// <summary>Records the partitions each listener method receives.</summary>
     private sealed class RecordingListener : IConsumerRebalanceListener
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
@@ -356,11 +431,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             Lost.Add(partitions.ToArray());
     }
 
-    /// <summary>
-    /// Derives from <see cref="ConsumerRebalanceListenerBase"/> and deliberately does
-    /// <b>not</b> override <c>OnPartitionsLost</c>, so a lost callback must land in
-    /// <see cref="Revoked"/> via Java's default delegation.
-    /// </summary>
+    /// <summary>Records the partitions each method receives, with the base's default for lost partitions.</summary>
     private sealed class RecordingListenerBase : ConsumerRebalanceListenerBase
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
@@ -376,22 +447,54 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             Assigned.Add(partitions.ToArray());
     }
 
+    /// <summary>A listener whose every method throws the exception it is given.</summary>
     private sealed class ThrowingListener : IConsumerRebalanceListener
     {
-        private readonly string _message;
+        private readonly Exception _thrown;
 
-        internal ThrowingListener(string message)
+        internal ThrowingListener(Exception thrown)
         {
-            _message = message;
+            _thrown = thrown;
         }
 
-        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
-            throw new InvalidOperationException(_message);
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
 
-        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
-            throw new InvalidOperationException(_message);
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
 
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
-            throw new InvalidOperationException(_message);
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
+    }
+
+    /// <summary>A listener whose every method runs the action it is given.</summary>
+    private sealed class Probe : IConsumerRebalanceListener
+    {
+        private readonly Action _call;
+
+        internal Probe(Action call)
+        {
+            _call = call;
+        }
+
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => _call();
+
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _call();
+
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => _call();
+    }
+
+    /// <summary>An async listener whose every method runs the function it is given.</summary>
+    private sealed class AsyncProbe : IAsyncConsumerRebalanceListener
+    {
+        private readonly Func<Task> _call;
+
+        internal AsyncProbe(Func<Task> call)
+        {
+            _call = call;
+        }
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => _call();
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _call();
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => _call();
     }
 }

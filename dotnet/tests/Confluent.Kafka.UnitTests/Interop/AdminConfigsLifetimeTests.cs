@@ -231,7 +231,8 @@ public sealed class AdminConfigsLifetimeTests
     [Fact]
     public async Task ASubmitFailure_FaultsEveryResource_IncludingAZeroOpOne()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource withOps = new ConfigResource(ConfigResourceType.Topic, "cfg-fail-with-ops");
         ConfigResource zeroOps = new ConfigResource(ConfigResourceType.Topic, "cfg-fail-zero-ops");
@@ -404,7 +405,8 @@ public sealed class AdminConfigsLifetimeTests
     [InlineData(Rpc.IncrementalAlterConfigs)]
     public async Task TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce(Rpc rpc)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         for (int i = 0; i < 50; i++)
         {

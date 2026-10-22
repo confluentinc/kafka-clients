@@ -69,7 +69,8 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     [Fact]
     public async Task AlterConsumerGroupOffsets_SurfacesTheMocksDocumentedRefusal()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         TopicPartition tp = new TopicPartition("p5-acgo", 0);
         AsyncAlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
@@ -92,7 +93,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     public async Task AlterConsumerGroupOffsets_ThrowsAfterDispose()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.AlterConsumerGroupOffsets(
             "p5-group",

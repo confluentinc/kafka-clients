@@ -44,7 +44,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     [Fact]
     public void Send_MutatingBufferAfterSend_ProducesUnchangedRecord()
     {
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         byte[] key = Encoding.UTF8.GetBytes("key");
         byte[] value = Encoding.UTF8.GetBytes("value-original");
@@ -105,7 +106,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Pre-allocated OUTSIDE every measured window; storing a struct into it allocates nothing.
         KafkaFuture<RecordMetadata>[] futures = new KafkaFuture<RecordMetadata>[SendCount];
@@ -155,7 +157,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Warm up the send path (JIT) so the measured runs are steady-state.
         _ = MeasureSends(producer, smallValue, key);

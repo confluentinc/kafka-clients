@@ -78,7 +78,8 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
@@ -95,7 +96,8 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task Values_IsTheSameTaskEveryCall()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
         Assert.Same(result.Values().Get(), result.Values().Get());
@@ -112,7 +114,8 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task WildcardFilter_IsAccepted_NotRejected()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(
             new AclBindingFilter(
@@ -131,7 +134,8 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "filter",
@@ -148,7 +152,7 @@ public sealed class PublicAdminDescribeAclsTests
     public void AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeAcls(Filter("gone")));
     }

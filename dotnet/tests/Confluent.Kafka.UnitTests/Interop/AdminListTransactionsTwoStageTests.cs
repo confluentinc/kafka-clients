@@ -86,7 +86,8 @@ public sealed class AdminListTransactionsTwoStageTests
     [InlineData(Async)]
     public async Task TheDiscovery_ResolvesByBrokerId_WhileEveryBrokerIsStillPending(string flavour)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Submission submission = Submit(admin, flavour);
         ListTransactionsHarness views = submission.Views;
 
@@ -124,7 +125,8 @@ public sealed class AdminListTransactionsTwoStageTests
     [InlineData(Async)]
     public async Task EachBroker_CompletesIndependently_WithItsOwnError(string flavour)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Submission submission = Submit(admin, flavour);
         ListTransactionsHarness views = submission.Views;
         Discover(submission, 1, 2);
@@ -156,7 +158,8 @@ public sealed class AdminListTransactionsTwoStageTests
     [InlineData(Async)]
     public async Task AllByBrokerIdAndAll_FailFast_WhileAnotherBrokerIsPending(string flavour)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Submission submission = Submit(admin, flavour);
         ListTransactionsHarness views = submission.Views;
         Discover(submission, 1, 2);

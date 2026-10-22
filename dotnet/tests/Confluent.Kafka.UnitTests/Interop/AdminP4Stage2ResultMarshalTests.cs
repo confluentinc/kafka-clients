@@ -85,7 +85,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
     [Fact]
     public void LeaderEpoch_PresenceComesFromTheBoolReturn_NotFromTheValue()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = SeedTopic(admin, "p4s2-epoch");
 
         OffsetsCapture captured = Assert.Single(
@@ -142,7 +143,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
     [Fact]
     public async Task ListOffsets_ThePerKeyError_IsOwned_AndValuesSurviveTheValuesDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition good = SeedTopic(admin, "p4s2-owned", partitions: 2);
         TopicPartition bad = new TopicPartition(good.Topic, 1);
 
@@ -210,7 +212,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
     [Fact]
     public async Task PartitionReassignment_ThreeListsAreCopiedOut_AndSurviveTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(3);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = SeedTopic(admin, "p4s2-lpr-marshal", replicationFactor: 2);
 
         await TestTimeout.Run(
@@ -268,7 +271,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
     [Fact]
     public void TheAbiRejectsABadSentinelAndABadIsolationLevel_OnTheInlinePath()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = SeedTopic(admin, "p4s2-reject");
 
         // ---- control-positive: a recognised sentinel and a valid level SUCCEED ----

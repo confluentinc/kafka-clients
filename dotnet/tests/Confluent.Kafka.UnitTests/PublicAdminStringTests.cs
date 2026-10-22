@@ -341,7 +341,8 @@ public sealed class PublicAdminStringTests
     [MemberData(nameof(Cases))]
     public void AStringTheAbiWouldChange_IsRejectedSynchronously(string site, string kind)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         (string parameter, Action<MockAdminClient, string> call) = s_sites[site];
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => call(admin, s_badStrings[kind]));
@@ -361,7 +362,8 @@ public sealed class PublicAdminStringTests
     [InlineData("lone-surrogate")]
     public void DescribeUserScramCredentials_ADescriptionLookupName_IsRejectedSynchronously(string kind)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice" });
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(
@@ -382,8 +384,9 @@ public sealed class PublicAdminStringTests
     [InlineData("lone-surrogate")]
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
-        await using AsyncKafkaAdminClient admin =
+        AsyncKafkaAdminClient admin =
             new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentException rejected =
             Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(s_badStrings[kind]));
@@ -401,7 +404,8 @@ public sealed class PublicAdminStringTests
     [Fact]
     public async Task TwoKeysThatWouldCollapseAtTheAbi_AreRejected_AndTheClientStaysUsable()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(
             () => admin.CreateTopics(new[] { new NewTopic("a\0b", 1, 1), new NewTopic("a\0c", 1, 1) }));
@@ -429,7 +433,8 @@ public sealed class PublicAdminStringTests
     [InlineData("日本語")]
     public async Task AKeyStringThatCrossesUnchanged_IsAccepted(string name)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
         Assert.Equal(new[] { name }, created.Values.Keys);
@@ -457,7 +462,8 @@ public sealed class PublicAdminStringTests
     [MemberData(nameof(AcceptedCases))]
     public void AStringThatCrossesUnchanged_RaisesNoSynchronousException(string site, string kind)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         (_, Action<MockAdminClient, string> call) = s_sites[site];
 
         call(admin, s_goodStrings[kind]);
@@ -471,7 +477,8 @@ public sealed class PublicAdminStringTests
     [Fact]
     public void NullWildcards_AreNotRejected()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         _ = admin.DeleteAcls(new[] { new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any) });
         _ = admin.AlterClientQuotas(new[] { Quota(ClientQuotaEntity.User, null) });

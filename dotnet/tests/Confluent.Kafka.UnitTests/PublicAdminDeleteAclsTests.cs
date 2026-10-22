@@ -58,7 +58,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("keyed-by-value") });
 
@@ -79,7 +80,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task NullAndEmpty_RoundTripAsDistinctKeys()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter wildcard = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
@@ -112,7 +114,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task EachFilter_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter alpha = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, "rt-alpha", PatternType.Literal),
@@ -143,7 +146,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter first = Filter("solo-first");
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { first, Filter("solo-second") });
@@ -162,7 +166,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task All_OverAnEmptyRequest_IsAnEmptyCollection()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(Array.Empty<AclBindingFilter>());
 
@@ -177,7 +182,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task DuplicateFilters_CollapseToOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
 
@@ -192,7 +198,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter filter = Filter("tópico-café-日本");
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { filter });
@@ -207,7 +214,8 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "filters",
@@ -230,7 +238,7 @@ public sealed class PublicAdminDeleteAclsTests
     public void AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteAcls(new[] { Filter("gone") }));
     }

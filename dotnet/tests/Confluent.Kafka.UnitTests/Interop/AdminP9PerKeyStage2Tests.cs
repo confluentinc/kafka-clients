@@ -60,7 +60,8 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeTopicsByName_PerKeyOutcomes_AreIndependent()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -87,7 +88,8 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeTopicsById_ResolvesTheRequestedUuid()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created =
             AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, options: null, AdminFlavour.Async));
@@ -111,7 +113,8 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeConfigs_ResolvesTheCompositeResourceKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -142,7 +145,8 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeLogDirs_ResolvesTheInt32BrokerKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -188,7 +192,8 @@ public sealed class AdminP9PerKeyStage2Tests
     [InlineData(Rpc.FenceProducers)]
     public async Task EveryKeyFaultsIndependently_WithJavasOwnMessage(Rpc rpc)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         string[] keys = new[] { "cp3-key-a", "cp3-key-b", "cp3-key-c" };
         IReadOnlyList<Func<Task>> awaitables = Submit(admin, rpc, keys);

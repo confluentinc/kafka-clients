@@ -37,7 +37,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_OnAutoCompleteMock_ResolvesWithMetadata()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
             producer,
@@ -53,7 +54,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_SequentialToSamePartition_OffsetsIncrement()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 5; i++)
         {
@@ -68,7 +70,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_FaultsWithKafkaException()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
@@ -86,7 +89,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_FaultsWithTheSameInstance()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
@@ -102,7 +106,8 @@ public sealed class PublicProducerSendTests
     public async Task Send_AbsentKeyAndValue_Resolves()
     {
         // Absent key and value: no key, and a tombstone.
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, value: null, key: null, partition: 1));
 
@@ -114,7 +119,8 @@ public sealed class PublicProducerSendTests
     public async Task Send_EmptyKeyAndValue_Resolves()
     {
         // Empty key and value: a non-null pointer with length 0, distinct from absent.
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
             producer,
@@ -129,7 +135,8 @@ public sealed class PublicProducerSendTests
     {
         // The async send borrows the caller's buffers until the hand-over, so a mutation before then may reach the wire,
         // and must stay memory-safe. The mock cannot read the sent bytes back, so the test asserts the send resolves.
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         byte[] key = Enumerable.Repeat((byte)0xAB, 32).ToArray();
         byte[] value = Enumerable.Repeat((byte)0xCD, 256 * 1024).ToArray();
@@ -149,7 +156,8 @@ public sealed class PublicProducerSendTests
     public async Task Send_NonAsciiTopic_RoundTripsToMetadataTopic()
     {
         const string nonAsciiTopic = "témás-topic-日本語-🚀";
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
             producer,
@@ -161,7 +169,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ManyThreadsConcurrently_AllResolve()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         const int threadCount = 8;
         const int perThread = 50;
@@ -192,7 +201,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_NullRecord_ThrowsArgumentNull()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
@@ -204,7 +214,7 @@ public sealed class PublicProducerSendTests
     public async Task Send_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await producer.DisposeAsync();
+        await TestTimeout.DisposeAsync(producer);
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"))).Delivery());
@@ -213,7 +223,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_PreCanceledToken_ThrowsOperationCanceled()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -232,7 +243,8 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Get_TokenCancelsOnlyTheWait_TheSendStillCompletes()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
 
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
@@ -424,7 +436,8 @@ public sealed class PublicProducerSendTests
             TestTimeout.Run(
                 () =>
                 {
-                    using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    using IDisposable producerDisposal = TestTimeout.Disposal(producer);
                     Task<RecordMetadata>[] sends = new Task<RecordMetadata>[8];
                     for (int i = 0; i < sends.Length; i++)
                     {

@@ -319,18 +319,10 @@ internal sealed class AsyncConsumerServiceImpl
             if (request.Offsets.Count > 0)
             {
                 // This overload honours a null callback (Java's commitAsync(Map, null)).
-                c.CommitAsync(Translate.ProtoOffsetsToDictionary(request.Offsets), callback);
-            }
-            else if (callback is not null)
-            {
-                c.CommitAsync(callback);
-            }
-            else
-            {
-                c.CommitAsync();
+                return c.CommitAsync(Translate.ProtoOffsetsToDictionary(request.Offsets), callback);
             }
 
-            return Task.CompletedTask;
+            return callback is not null ? c.CommitAsync(callback) : c.CommitAsync();
         });
     }
 
@@ -349,11 +341,14 @@ internal sealed class AsyncConsumerServiceImpl
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result =
+                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result =
                     await entry.Consumer.Committed(ToTopicPartitions(request.Partitions)).ConfigureAwait(false);
-                foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> pair in result)
+                foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> pair in result)
                 {
-                    map.Entries.Add(new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OamToProto(pair.Value) });
+                    if (pair.Value is not null)
+                    {
+                        map.Entries.Add(new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OamToProto(pair.Value) });
+                    }
                 }
             }
             finally
@@ -403,22 +398,16 @@ internal sealed class AsyncConsumerServiceImpl
     public override Task<Proto.StatusResponse> Seek(Proto.SeekRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c =>
         {
-            // Seek (both overloads) is SYNCHRONOUS on IConsumerCommon (Python-parity §4 divergence),
-            // so call it directly (no await); return a completed Task to reuse the awaited gate helper.
             TopicPartition partition = Translate.Tp(request.Partition);
             // metadata / leader_epoch present => Seek(tp, OffsetAndMetadata); else Seek(tp, offset).
             if (request.HasMetadata || request.HasLeaderEpoch)
             {
                 int? leaderEpoch = request.HasLeaderEpoch ? request.LeaderEpoch : (int?)null;
                 string metadata = request.HasMetadata ? request.Metadata : string.Empty;
-                c.Seek(partition, new OffsetAndMetadata(request.Offset, metadata, leaderEpoch));
-            }
-            else
-            {
-                c.Seek(partition, request.Offset);
+                return c.Seek(partition, new OffsetAndMetadata(request.Offset, metadata, leaderEpoch));
             }
 
-            return Task.CompletedTask;
+            return c.Seek(partition, request.Offset);
         });
 
     /// <inheritdoc/>
@@ -466,11 +455,14 @@ internal sealed class AsyncConsumerServiceImpl
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> result =
+                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> result =
                     await entry.Consumer.OffsetsForTimes(spec).ConfigureAwait(false);
-                foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp> pair in result)
+                foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp?> pair in result)
                 {
-                    map.Entries.Add(new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OatToProto(pair.Value) });
+                    if (pair.Value is not null)
+                    {
+                        map.Entries.Add(new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OatToProto(pair.Value) });
+                    }
                 }
             }
             finally

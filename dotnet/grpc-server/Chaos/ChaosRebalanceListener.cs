@@ -160,7 +160,7 @@ internal sealed class ChaosCommitCallback : IOffsetCommitCallback
     }
 
     /// <inheritdoc/>
-    public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception)
+    public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
     {
         if (exception is not null)
         {

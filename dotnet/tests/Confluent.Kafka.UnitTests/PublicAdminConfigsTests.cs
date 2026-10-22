@@ -44,7 +44,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task DescribeConfigs_ReportsATopicsConfiguration()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[]
@@ -77,7 +78,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_SetIsVisibleToASubsequentDescribe()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -111,7 +113,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_DeleteWithANullValue_RemovesTheEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[]
@@ -147,7 +150,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_AnUnknownTopic_FaultsOnlyItsOwnAwaitable()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -180,7 +184,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task ListConfigResources_ReportsASeededClientMetricsResource()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource subscription = new ConfigResource(ConfigResourceType.ClientMetrics, "sub-1");
 
@@ -233,7 +238,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(
@@ -274,7 +280,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_OnlyZeroOpResources_CompletesSuccessfully()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -308,7 +315,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "public-cfg-never-created");
 
@@ -351,7 +359,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task DescribeConfigs_OfAnUndefinedType_IsAnsweredAsUnknown()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
@@ -375,7 +384,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public void NegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
         Assert.Null(Record.Exception(
@@ -392,7 +402,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public void NullInputs_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeConfigs(null!));
         Assert.Throws<ArgumentNullException>(() => admin.IncrementalAlterConfigs(null!));
@@ -440,7 +451,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task TfmSmoke_TheTwoNewRpcsWorkOnThisFramework()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("cfg-smoke", 1, 1) }).All().Get(), s_deadline);
@@ -467,7 +479,8 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task TheTwoRpcs_AreReachableThroughIAdmin()
     {
-        using IAsyncAdmin admin = new AsyncMockAdminClient();
+        IAsyncAdmin admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 

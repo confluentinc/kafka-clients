@@ -48,7 +48,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task DescribeLogDirs_ReportsABrokersDirectoriesAndReplicas()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }).All().Get(), s_deadline);
 
@@ -97,7 +98,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task DescribeLogDirs_CarriesTheCordonedFlag()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -118,7 +120,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task DescribeLogDirs_ABrokerWithNoTopics_SucceedsWithAnEmptyMap()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
@@ -141,7 +144,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task AMoveIsAccepted_AndThenDescribedAsInProgress()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -176,7 +180,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task AReplicaAtRest_RendersWithTheAtRestShape()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -203,7 +208,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task AMoveToAnUnknownDirectory_IsRejectedPerReplica()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -224,7 +230,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task AMoveToAnUnknownBroker_IsRejectedNamingTheReplica()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -251,7 +258,8 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public async Task AFreshlyBuiltKey_LooksUpTheSameEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
@@ -320,7 +328,7 @@ public sealed class PublicAdminLogDirsTests
     public void EveryNewRpc_ThrowsAfterDispose()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
 

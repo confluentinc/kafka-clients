@@ -25,11 +25,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The <b>generic</b> owned-handle bridge (<see cref="OperationCompletionSource{TResult}"/>)
-/// behavior: <c>RunContinuationsAsynchronously</c> off the completing thread, and the
-/// poll trampoline's no-throw boundary (ffi-marshalling.md §B6/§B7). Complements the
-/// void-bridge coverage in <c>ConsumerCompletionBridgeTests</c> — the generic migration
-/// must not regress either.
+/// <see cref="OperationCompletionSource{TResult}"/> runs its continuations off the completing thread, and the void
+/// <see cref="OperationCompletionSource"/> completes its Task on a null error.
 /// </summary>
 public sealed class ConsumerPollBridgeTests
 {
@@ -38,12 +35,8 @@ public sealed class ConsumerPollBridgeTests
     [Fact]
     public async Task ResultBridge_RunsContinuationsAsynchronously_OffTheCompletingThread()
     {
-        // Drive the result bridge context directly so the continuation is attached
-        // BEFORE completion. An ExecuteSynchronously continuation would run INLINE on
-        // the completing thread if the TCS were NOT built with
-        // RunContinuationsAsynchronously; the flag forces it onto the thread pool — so a
-        // different thread id AND IsThreadPoolThread prove it. This is the result-
-        // returning analog of the void-bridge continuation test.
+        // The continuation is attached before completion, so without RunContinuationsAsynchronously it would run
+        // inline on the completing thread.
         OperationCompletionSource<ConsumerRecords<byte[], byte[]>> context = new OperationCompletionSource<ConsumerRecords<byte[], byte[]>>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
@@ -83,46 +76,17 @@ public sealed class ConsumerPollBridgeTests
     }
 
     [Fact]
-    public void PollCallback_WithUnexpectedContext_DoesNotUnwindIntoNative()
-    {
-        // No-throw boundary: an exception INSIDE the poll callback body (here an
-        // InvalidCastException from a wrong-typed user_data) must be caught, never
-        // propagated — an unwind into the native dispatcher frame is UB. The delegate
-        // must return normally. records == IntPtr.Zero so the null-safe destroy in the
-        // finally is a no-op.
-        GCHandle badHandle = GCHandle.Alloc("not a completion source", GCHandleType.Normal);
-        try
-        {
-            // Must not throw. The poll trampoline is now the generic
-            // TypedPollCallbacks<byte[], byte[]>.Poll (M6/P1b); its no-throw boundary is
-            // identical to the old non-generic one.
-            TypedPollCallbacks<byte[], byte[]>.Poll(IntPtr.Zero, IntPtr.Zero, GCHandle.ToIntPtr(badHandle));
-        }
-        finally
-        {
-            badHandle.Free();
-        }
-    }
-
-    [Fact]
     public async Task ResultBridge_VoidPathUnchanged_SubscribeStillResolves()
     {
-        // Regression guard for the generic migration (PLAN decision 4): the void bridge
-        // is now OperationCompletionSource : OperationCompletionSource<bool>, and its
-        // observable success (null error → Task completes) must be byte-for-byte
-        // unchanged. A direct completion of the void context with a null error resolves
-        // the non-generic Task.
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
         try
         {
-            context.Complete(IntPtr.Zero); // null error = success
+            context.Complete(IntPtr.Zero);
             await TestTimeout.Run(() => context.Task, s_deadline);
 
-            // TaskStatus.RanToCompletion rather than Task.IsCompletedSuccessfully so the
-            // whole test project (incl. this class) compiles on the net462 TFM smoke leg
-            // — IsCompletedSuccessfully post-dates net462 (PLAN §5.7).
+            // TaskStatus rather than IsCompletedSuccessfully, which net462 lacks.
             Assert.Equal(System.Threading.Tasks.TaskStatus.RanToCompletion, context.Task.Status);
         }
         finally

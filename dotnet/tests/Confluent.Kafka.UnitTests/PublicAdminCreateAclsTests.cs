@@ -57,7 +57,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
 
@@ -78,7 +79,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task EachBinding_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding alpha = new AclBinding(
             new ResourcePattern(ResourceType.Topic, "rt-alpha", PatternType.Literal),
@@ -111,7 +113,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding first = Binding("solo-first");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
@@ -130,7 +133,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task All_FaultsWhenAnyBindingFails()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
 
@@ -146,7 +150,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
 
@@ -160,7 +165,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task DuplicateBindings_CollapseToOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
 
@@ -175,7 +181,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding binding = Binding("tópico-café-日本");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { binding });
@@ -194,7 +201,8 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "acls",
@@ -219,7 +227,7 @@ public sealed class PublicAdminCreateAclsTests
     public void AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.CreateAcls(new[] { Binding("gone") }));
     }

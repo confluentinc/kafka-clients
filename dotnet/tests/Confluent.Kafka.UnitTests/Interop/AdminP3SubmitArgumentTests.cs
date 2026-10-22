@@ -200,7 +200,8 @@ public sealed class AdminP3SubmitArgumentTests
     /// </remarks>
     private static Captured CaptureDescribeCluster(DescribeClusterOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncDescribeClusterResult.From(admin.DescribeCluster(
@@ -221,7 +222,8 @@ public sealed class AdminP3SubmitArgumentTests
     /// <inheritdoc cref="CaptureDescribeCluster"/>
     private static Captured CaptureListConfigResources(ListConfigResourcesOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncListConfigResourcesResult result = AsyncListConfigResourcesResult.From(admin.ListConfigResources(

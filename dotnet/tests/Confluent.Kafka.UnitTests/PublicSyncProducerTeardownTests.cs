@@ -103,7 +103,7 @@ public sealed class PublicSyncProducerTeardownTests
     public void Ops_AfterClose_ThrowObjectDisposed()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        producer.Close();
+        TestTimeout.Teardown(producer, () => producer.Close());
 
         // Every operation throws ObjectDisposedException after teardown; the type only, as for the consumer.
         Assert.Throws<ObjectDisposedException>(
@@ -111,7 +111,7 @@ public sealed class PublicSyncProducerTeardownTests
         Assert.Throws<ObjectDisposedException>(() => producer.Flush());
         Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
 
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
     }
 
     [Fact]

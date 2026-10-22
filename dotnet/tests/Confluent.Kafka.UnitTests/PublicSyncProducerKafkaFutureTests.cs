@@ -87,7 +87,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
     [Fact]
     public void Callback_Sync_RunsOnThePumpThread_NotTheCaller()
     {
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         int callerThreadId = 0;
@@ -112,7 +113,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
         const int Threads = 8;
         const int SendsPerThread = 50;
 
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ConcurrencyProbeCallback callback = new ConcurrencyProbeCallback();
         using Barrier start = new Barrier(Threads);
 
@@ -201,7 +203,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
     [Fact]
     public void SendInsideCallback_GetFromAnotherThread_Completes()
     {
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ReentrantSendCallback callback = new ReentrantSendCallback(() => producer.Send(Record()));
 
         TestTimeout.Run(

@@ -13,39 +13,24 @@
 // limitations under the License.
 
 using System;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The record-header copy-out (M3/P3, PLAN decision 2 — headers included, internal
-/// only). Headers land on the internal <see cref="ConsumerRecord"/> with each key
-/// marshalled via the <b>length-delimited</b> <c>out_len</c> path (ffi-marshalling.md
-/// §B3, never a NUL-scan). The empty-headers case is covered by the round-trip suite;
-/// here we exercise the header-key §B3 path and the null-value case.
+/// The record-header copy-out of the mock consumer's poll: a record without headers has an empty, non-null list, and
+/// a record with headers hands them out in their order, each key decoded from UTF-8 and each value copied, a null
+/// value as <see langword="null"/> and an empty one as an empty array.
 /// </summary>
 /// <remarks>
-/// <b>Scope note (source-verified).</b> The <c>MockConsumer</c> broker-free driver
-/// exposed at the C ABI is <c>MockConsumer_add_record(topic, partition, offset, key,
-/// value)</c> — it does <b>not</b> accept headers. The record built by the mock
-/// therefore has no headers, so a header <em>round-trip</em> through the mock is not
-/// reachable this phase; only the <b>empty-headers</b> case
-/// (<c>header_count == 0</c>) is exercisable end to end (see
-/// <c>ConsumerPollReceivePathTests.PollWithCallback_RoundTripsAllFields</c>, which asserts
-/// <c>Headers</c> is empty). The header copy-out marshaller
-/// (<c>ConsumerRecordsMarshal.CopyHeaders</c>) — count → per-index length-delimited
-/// key (§B3) + copy-out value — is verified by inspection against the header
-/// accessors, and the length-delimited §B3 path itself is directly and thoroughly
-/// tested through the <b>topic</b> and via <see cref="Utf8MarshalLengthDelimitedTests"/>
-/// (which share the exact <see cref="Utf8Marshal.PtrToString(IntPtr, int)"/> primitive
-/// the header-key path uses). This residual mirrors the M3/P2 D-Q4 precedent: the
-/// driver the phase can reach does not exercise every branch, so the unreachable
-/// branch is documented rather than faked. It closes when a header-carrying mock
-/// driver (or the public client's typed producer→consumer round-trip) lands.
+/// The mock consumer's <c>AddRecord</c> builds its record with ConsumerRecord_new, which takes no headers, so the
+/// record with headers is built here through ConsumerRecord_with_options and added with MockConsumer_add_record.
 /// </remarks>
 public sealed class ConsumerPollHeadersTests
 {
@@ -53,15 +38,19 @@ public sealed class ConsumerPollHeadersTests
 
     private const string Topic = "hdr-topic";
     private const int Partition = 0;
+    private const string NonAsciiKey = "clé-ключ-鍵-🔑";
+
+    private static readonly byte[] s_valueWithNul = { 0x01, 0x00, 0xFF };
+
+    private delegate void NativeDestroy(IntPtr self, ref IntPtr outErr);
 
     [Fact]
     public async Task PollWithCallback_RecordWithoutHeaders_HasEmptyHeaders()
     {
-        // The end-to-end reachable header case on the mock: header_count == 0 →
-        // an empty (shared, non-null) header list. (add_record carries no headers.)
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0); // sync (M5/P7)
+        consumer.Seek(Topic, Partition, offset: 0);
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
         ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
@@ -69,5 +58,190 @@ public sealed class ConsumerPollHeadersTests
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers);
         Assert.Empty(record.Headers);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_RecordWithHeaders_CopiesEachHeaderInOrder()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { (Topic, Partition) });
+        consumer.Seek(Topic, Partition, offset: 0);
+        AddRecordWithHeaders(
+            consumer,
+            offset: 0,
+            ("null-value", null),
+            (NonAsciiKey, s_valueWithNul),
+            ("empty-value", Array.Empty<byte>()));
+
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Collection(
+            record.Headers,
+            header =>
+            {
+                Assert.Equal("null-value", header.Key);
+                Assert.Null(header.Value);
+            },
+            header =>
+            {
+                Assert.Equal(NonAsciiKey, header.Key);
+                Assert.Equal(s_valueWithNul, header.Value);
+            },
+            header =>
+            {
+                Assert.Equal("empty-value", header.Key);
+                Assert.NotNull(header.Value);
+                Assert.Empty(header.Value);
+            });
+    }
+
+    private static void AddRecordWithHeaders(NativeConsumer consumer, long offset, params (string Key, byte[]? Value)[] headers)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr recordHeaders = TestNativeMethods.RecordHeadersNew(ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr builder = IntPtr.Zero;
+        IntPtr options = IntPtr.Zero;
+        IntPtr record = IntPtr.Zero;
+        try
+        {
+            IntPtr view = NativeMethods.RecordHeadersAsHeaders(recordHeaders, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            foreach ((string key, byte[]? value) in headers)
+            {
+                AddHeader(view, key, value);
+            }
+
+            builder = TestNativeMethods.OptionsBuilderNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(Topic))
+            {
+                TestNativeMethods.OptionsBuilderSetTopic(builder, topic.Pointer, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            TestNativeMethods.OptionsBuilderSetPartition(builder, Partition, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TestNativeMethods.OptionsBuilderSetOffset(builder, offset, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TestNativeMethods.OptionsBuilderSetKey(builder, IntPtr.Zero, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TestNativeMethods.OptionsBuilderSetValue(builder, IntPtr.Zero, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TestNativeMethods.OptionsBuilderSetHeaders(builder, recordHeaders, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            options = TestNativeMethods.OptionsBuilderBuild(builder, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            record = TestNativeMethods.ConsumerRecordWithOptions(options, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+
+            SafeConsumerHandle handle = consumer.Handle;
+            bool added = false;
+            try
+            {
+                NativeMethods.MockConsumerAddRecord(handle.DangerousAddRefClass(ref added), record, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+            finally
+            {
+                if (added)
+                {
+                    handle.DangerousRelease();
+                }
+            }
+        }
+        finally
+        {
+            Destroy(NativeMethods.ConsumerRecordDestroy, record);
+            Destroy(TestNativeMethods.OptionsDestroy, options);
+            Destroy(TestNativeMethods.OptionsBuilderDestroy, builder);
+            Destroy(TestNativeMethods.RecordHeadersDestroy, recordHeaders);
+        }
+    }
+
+    private static void AddHeader(IntPtr headers, string key, byte[]? value)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+        if (value is null)
+        {
+            TestNativeMethods.HeadersAddWithKeyValue(headers, pinnedKey.Pointer, default, ref outErr);
+        }
+        else
+        {
+            GCHandle pinnedValue = GCHandle.Alloc(value.Length == 0 ? new byte[1] : value, GCHandleType.Pinned);
+            try
+            {
+                KafkaBytes bytes = new KafkaBytes(pinnedValue.AddrOfPinnedObject(), value.Length);
+                TestNativeMethods.HeadersAddWithKeyValue(headers, pinnedKey.Pointer, bytes, ref outErr);
+            }
+            finally
+            {
+                pinnedValue.Free();
+            }
+        }
+
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    private static void Destroy(NativeDestroy destroy, IntPtr self)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        destroy(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    /// <summary>
+    /// The record-headers and record-options entry points the binding does not import. The test owns and destroys
+    /// the headers, the builder (which build consumes), the options and the record; set_headers, add_with_key_value,
+    /// with_options and add_record copy what they are given, and the Headers view is borrowed from the headers.
+    /// </summary>
+    private static class TestNativeMethods
+    {
+        private const string DllName = "confluent_kafka";
+
+        [DllImport(DllName, EntryPoint = "kafka_common_header_internals_RecordHeaders_new_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr RecordHeadersNew(ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_header_internals_RecordHeaders_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void RecordHeadersDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_header_Headers_add_with_key_value", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void HeadersAddWithKeyValue(IntPtr self, IntPtr key, KafkaBytes value, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_new_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr OptionsBuilderNew(ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_topic_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetTopic(IntPtr self, IntPtr topic, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_partition_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetPartition(IntPtr self, int partition, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_offset_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetOffset(IntPtr self, long offset, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_key_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetKey(IntPtr self, IntPtr key, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_value_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetValue(IntPtr self, IntPtr value, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_headers_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderSetHeaders(IntPtr self, IntPtr headers, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_build", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr OptionsBuilderBuild(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsBuilderDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptions_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void OptionsDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_with_options_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ConsumerRecordWithOptions(IntPtr options, ref IntPtr outErr);
     }
 }

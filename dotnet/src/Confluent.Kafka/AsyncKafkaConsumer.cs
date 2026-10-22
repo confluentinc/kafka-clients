@@ -22,47 +22,10 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The real (KIP-848) Kafka consumer — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.KafkaConsumer</c>. A thin, Java-shaped forwarder
-/// over the internal <see cref="NativeConsumer"/> lifecycle wrapper, which owns the
-/// native handle, the completion bridge, and the receive-path copy-out (ffi-marshalling.md
-/// §B). All Kafka logic lives in the Rust core; this type only restores the Java shape.
+/// The Kafka consumer with an asynchronous surface, Java's <c>org.apache.kafka.clients.consumer.KafkaConsumer</c>
+/// under the KIP-848 group protocol. <see cref="IAsyncConsumer{TKey, TValue}"/> describes its threads,
+/// cancellation and disposal; <see cref="KafkaConsumer{TKey, TValue}"/> is its synchronous sibling.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Single-owner / not thread-safe (inherited from <see cref="NativeConsumer"/>).</b>
-/// At most one operation in flight; concurrency is serialized by the Rust core (a
-/// concurrent async op faults its <see cref="Task"/>, a concurrent
-/// <see cref="GroupMetadata"/> throws <see cref="InvalidOperationException"/>). Do not
-/// share one instance across threads without external synchronization.
-/// <see cref="Wakeup"/> is the one deliberately cross-thread member; the canonical
-/// pattern (thread A blocked in <see cref="Poll"/>, thread B wakes it, thread A
-/// then disposes) is safe. Racing <see cref="Wakeup"/> against disposal from a second
-/// thread is <b>also</b> safe as of M9/P4 H1d — it used to be an accepted residual, but the
-/// underlying handle race is now closed (the call holds a marshaller reference for its
-/// duration, and <see cref="Wakeup"/> stays a no-op once closing/closed). Concurrent
-/// <em>operations</em> are still the caller's responsibility, as above.
-/// </para>
-/// <para>
-/// <b>Disposal.</b> <see cref="DisposeAsync"/> is the primary path (graceful async close
-/// then destroy; swallows any close error); <see cref="Dispose"/> is the blocking
-/// fallback. <see cref="Close"/> is the explicit graceful close that <em>surfaces</em>
-/// a close failure. All are idempotent and gated by a single atomic closed flag.
-/// <b>Deterministic native release requires that no operation is in flight — await your
-/// operations before disposing.</b> Disposing while an unawaited operation is still
-/// running defers the native release until that operation completes (bounded by its own
-/// timeout); it is accepted and documented, not a leak (M9/P4 decision Q1).
-/// </para>
-/// <para>
-/// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's
-/// <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>. The key/value
-/// deserializers decode each polled record's raw bytes (the typed zero-copy poll path,
-/// ffi §B4) — here on the core's foreign dispatcher thread inside the poll callback, so a
-/// throwing deserializer faults the <see cref="Task"/> with a
-/// <see cref="SerializationException"/> and never unwinds into native (PLAN §5/§6). Bytes
-/// users pass <see cref="Serdes.ByteArray"/> for both.
-/// </para>
-/// </remarks>
 /// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
 /// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
 public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue>
@@ -112,20 +75,30 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.SubscribeWithCallback(topics, listener, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Subscribe(
+        IReadOnlyCollection<string> topics,
+        IAsyncConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void Seek(TopicPartition partition, long offset) =>
-        _native.Seek(partition.Topic, partition.Partition, offset);
+    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
+        _native.SeekWithCallback(partition, offset, cancellationToken);
 
     /// <inheritdoc/>
-    public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+    public Task Seek(
+        TopicPartition partition,
+        OffsetAndMetadata offsetAndMetadata,
+        CancellationToken cancellationToken = default) =>
+        _native.SeekWithCallback(partition, offsetAndMetadata, cancellationToken);
 
     /// <inheritdoc/>
-    public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic, partition.Partition);
+    public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default) =>
+        _native.CurrentLagWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
@@ -152,8 +125,16 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.PositionWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<long> Position(TopicPartition partition, TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.PositionWithCallback(partition, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Commit(CancellationToken cancellationToken = default) =>
         _native.CommitWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task Commit(
@@ -161,14 +142,35 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.CommitWithCallback(offsets, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+    public Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(offsets, timeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
         _native.CommittedWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.CommittedWithCallback(partitions, timeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default) =>
         _native.OffsetsForTimesWithCallback(timestampsToSearch, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.OffsetsForTimesWithCallback(timestampsToSearch, timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
@@ -176,21 +178,52 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.BeginningOffsetsWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.BeginningOffsetsWithCallback(partitions, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
         _native.EndOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.EndOffsetsWithCallback(partitions, timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
         _native.PartitionsForWithCallback(topic, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(
+        string topic,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
         _native.ListTopicsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
+
+    /// <inheritdoc/>
+    public Task Close(CloseOptions option, CancellationToken cancellationToken = default) =>
+        _native.CloseWithCallback(option, cancellationToken).AsTask();
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();
@@ -211,22 +244,33 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
-    public void CommitAsync() => _native.CommitAsync();
+    public Task CommitAsync(CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void CommitAsync(IOffsetCommitCallback callback) => _native.CommitAsync(callback);
+    public Task CommitAsync(IOffsetCommitCallback callback, CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(callback, cancellationToken);
 
     /// <inheritdoc/>
-    public void CommitAsync(
+    public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
-        _native.CommitAsync(offsets, callback);
+        IOffsetCommitCallback? callback = null,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitAsync(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IAsyncOffsetCommitCallback callback,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
-
-    /// <inheritdoc/>
-    public string ClientId() => _native.ClientId();
 
     /// <inheritdoc/>
     public ConsumerHandle Handle() => _native.CreateReentrancyHandle();

@@ -535,7 +535,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     public async Task AsyncDeliveryCallback_ReceivesTheErrorNextInstance()
     {
         AsyncProbe callback = new AsyncProbe(_ => Task.CompletedTask);
-        await using AsyncMockProducer<byte[], byte[]> producer = ManualMock();
+        AsyncMockProducer<byte[], byte[]> producer = ManualMock();
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         AsyncKafkaFuture<RecordMetadata> future =
             await FirstStage(producer.Send(Record(Topic("async-error-next")), callback));
         KafkaException injected = new KafkaException(2, "the injected instance", isRetriable: true);
@@ -556,7 +557,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         TaskCompletionSource<bool> gate = NewGate();
         AsyncProbe callback = new AsyncProbe(_ => gate.Task);
         string topic = Topic("async-complete-next");
-        await using AsyncMockProducer<byte[], byte[]> producer = ManualMock();
+        AsyncMockProducer<byte[], byte[]> producer = ManualMock();
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         try
         {
             AsyncKafkaFuture<RecordMetadata> future = await FirstStage(producer.Send(Record(topic), callback));

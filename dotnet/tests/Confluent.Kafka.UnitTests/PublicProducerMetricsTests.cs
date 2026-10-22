@@ -35,7 +35,8 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
     {
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         IReadOnlyDictionary<MetricName, IMetric> metrics = producer.Metrics();
         Assert.NotNull(metrics);
         Assert.Empty(metrics);
@@ -44,15 +45,17 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         Assert.Empty(producer.Metrics());
     }
 
     [Fact]
     public void Metrics_SyncRealProducer_IsPopulatedAndWellFormed()
     {
-        using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         AssertPopulatedAndWellFormed(producer.Metrics());
     }
@@ -60,8 +63,9 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_AsyncRealProducer_IsPopulatedAndWellFormed()
     {
-        using AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         AssertPopulatedAndWellFormed(producer.Metrics());
     }
@@ -71,8 +75,9 @@ public sealed class PublicProducerMetricsTests
     {
         // Rebuild a real key with the same name, group and tags but another description: the dictionary keys on value
         // identity, which excludes the description.
-        using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyDictionary<MetricName, IMetric> metrics = producer.Metrics();
         Assert.NotEmpty(metrics);
@@ -96,8 +101,9 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_CalledTwice_ReturnsIndependentSnapshots()
     {
         // Each call copies out a fresh map and destroys its native root, so both results stay readable.
-        using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyDictionary<MetricName, IMetric> first = producer.Metrics();
         IReadOnlyDictionary<MetricName, IMetric> second = producer.Metrics();
@@ -114,7 +120,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_SyncMockAfterDispose_ThrowsObjectDisposed()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
         Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
     }
 
@@ -123,7 +129,7 @@ public sealed class PublicProducerMetricsTests
     {
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
         Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
     }
 
@@ -131,7 +137,7 @@ public sealed class PublicProducerMetricsTests
     public async Task Metrics_AsyncMockAfterDisposeAsync_ThrowsObjectDisposed()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await producer.DisposeAsync();
+        await TestTimeout.DisposeAsync(producer);
         Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
     }
 
@@ -140,7 +146,7 @@ public sealed class PublicProducerMetricsTests
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
-        await producer.DisposeAsync();
+        await TestTimeout.DisposeAsync(producer);
         Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
     }
 
@@ -149,7 +155,8 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIProducer()
     {
-        using MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());
     }
@@ -157,7 +164,8 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIAsyncProducer()
     {
-        using AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());
     }

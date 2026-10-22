@@ -13,37 +13,71 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The bits shared by the three offset-map copy-out marshallers
-/// (<see cref="OffsetMapMarshal"/> / <see cref="OffsetAndTimestampMapMarshal"/> /
-/// <see cref="LongOffsetMapMarshal"/>): copying a borrowed <c>TopicPartition_t</c> map
-/// key into an owned <see cref="TopicPartition"/>, and mapping the ABI's leader-epoch
-/// presence flag to a nullable <see cref="int"/>. Every map has the same key shape, so
-/// this avoids repeating the key copy-out and the presence-flag decode three times.
+/// What the three offset-map marshallers share: copying a borrowed <c>TopicPartition_t</c> key, reading the leader
+/// epoch's presence flag, and giving every requested partition an entry, <see langword="null"/> where the map has
+/// none.
 /// </summary>
 internal static class OffsetMapMarshalShared
 {
-    /// <summary>
-    /// Copies a <b>borrowed</b> (Category-4) <c>TopicPartition_t</c> map key into an
-    /// owned <see cref="TopicPartition"/>. The topic is a NUL-terminated, handle-owned
-    /// <c>const char*</c> (§B3 NUL-scan form), copied out before the owning map root is
-    /// destroyed. Never frees the borrowed key.
-    /// </summary>
-    internal static TopicPartition CopyKey(IntPtr keyPtr)
+    internal static IReadOnlyDictionary<TopicPartition, TValue?> EveryRequested<TValue>(
+        IReadOnlyDictionary<TopicPartition, TValue> found, (string Topic, int Partition)[]? requested)
+        where TValue : class
     {
-        string topic = Utf8Marshal.PtrToString(NativeMethods.TopicPartitionTopic(keyPtr)) ?? string.Empty;
-        int partition = NativeMethods.TopicPartitionPartition(keyPtr);
-        return new TopicPartition(topic, partition);
+        Dictionary<TopicPartition, TValue?> result = Copy(found, requested?.Length ?? 0);
+        if (requested is not null)
+        {
+            foreach ((string topic, int partition) in requested)
+            {
+                AddMissing(result, topic, partition);
+            }
+        }
+
+        return result;
     }
 
-    /// <summary>
-    /// Maps the ABI leader-epoch presence flag to a nullable epoch: <paramref name="present"/>
-    /// <c>false</c> ⇒ <see langword="null"/> (absent), <c>true</c> ⇒
-    /// <paramref name="epoch"/>. Honors the presence flag rather than hardcoding the
-    /// out-value (PLAN §1 Critic check).
-    /// </summary>
+    internal static IReadOnlyDictionary<TopicPartition, TValue?> EveryRequested<TValue>(
+        IReadOnlyDictionary<TopicPartition, TValue> found, string[] topics, int[] partitions, int count)
+        where TValue : class
+    {
+        Dictionary<TopicPartition, TValue?> result = Copy(found, count);
+        for (int i = 0; i < count; i++)
+        {
+            AddMissing(result, topics[i], partitions[i]);
+        }
+
+        return result;
+    }
+
+    private static Dictionary<TopicPartition, TValue?> Copy<TValue>(
+        IReadOnlyDictionary<TopicPartition, TValue> found, int requested)
+        where TValue : class
+    {
+        Dictionary<TopicPartition, TValue?> result =
+            new Dictionary<TopicPartition, TValue?>(Math.Max(found.Count, requested));
+        foreach (KeyValuePair<TopicPartition, TValue> entry in found)
+        {
+            result[entry.Key] = entry.Value;
+        }
+
+        return result;
+    }
+
+    private static void AddMissing<TValue>(Dictionary<TopicPartition, TValue?> result, string topic, int partition)
+        where TValue : class
+    {
+        TopicPartition key = new TopicPartition(topic, partition);
+        if (!result.ContainsKey(key))
+        {
+            result[key] = null;
+        }
+    }
+
+    internal static TopicPartition CopyKey(IntPtr keyPtr) => TopicPartitionListMarshal.CopyOutElement(keyPtr);
+
     internal static int? ReadLeaderEpoch(bool present, int epoch) => present ? epoch : (int?)null;
 }

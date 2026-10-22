@@ -161,7 +161,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
             CaptureOffsets(
                 request, new ListOffsetsOptions { IsolationLevel = IsolationLevel.ReadCommitted }).IsolationLevel);
 
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
         ArgumentOutOfRangeException rejected = Assert.Throws<ArgumentOutOfRangeException>(() =>
             AsyncListOffsetsResult.From(admin.ListOffsets(
@@ -222,7 +223,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     [Fact]
     public void BothRpcs_RejectANullTopic_BeforeTheNativeCall()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         ArgumentException listing = Assert.Throws<ArgumentException>(() =>
@@ -256,7 +258,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     [Fact]
     public void ListOffsets_RejectsANullSpecAndANullMap()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException nullSpec = Assert.Throws<ArgumentException>(() =>
             AsyncListOffsetsResult.From(admin.ListOffsets(
@@ -322,7 +325,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     [Fact]
     public async Task EachRpc_RegistersTheBridgeItsJavaShapeRequires()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         object? listingContext = null;
         IntPtr listingUserData = IntPtr.Zero;
@@ -403,7 +407,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     private static Captured CaptureOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> request, ListOffsetsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         IntPtr toRelease = IntPtr.Zero;
@@ -445,7 +450,8 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     private static Captured CaptureReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         IntPtr toRelease = IntPtr.Zero;

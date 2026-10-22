@@ -85,6 +85,13 @@ internal sealed class CompletionThread : IDisposable
         RunGuarded(action, "a posted action");
     }
 
+    internal void PostAfterDrain(Action action) =>
+        Post(() =>
+        {
+            Drain();
+            action();
+        });
+
     internal void RequestTeardown(Action teardown)
     {
         lock (_gate)

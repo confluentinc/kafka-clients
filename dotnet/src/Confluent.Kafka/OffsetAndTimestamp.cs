@@ -17,30 +17,11 @@ using System.Globalization;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// An offset with the timestamp it was resolved from and its optional leader epoch —
-/// the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.OffsetAndTimestamp</c>. A dictionary
-/// <em>value</em> in the result of <c>IAsyncConsumer.OffsetsForTimes(...)</c>; the
-/// fields are owned copies read out of a borrowed (Category-4) ABI element of an owned
-/// <c>OffsetAndTimestampMap_t</c>, which is destroyed after the copy-out
-/// (ffi-marshalling.md §B2/§B3).
+/// An offset with the timestamp it was found for and its leader epoch, Java's
+/// <c>org.apache.kafka.clients.consumer.OffsetAndTimestamp</c>, as <c>OffsetsForTimes</c> returns it. Immutable.
 /// </summary>
-/// <remarks>
-/// A <c>sealed class</c> (not a <c>readonly struct</c>), matching
-/// <see cref="OffsetAndMetadata"/> and the <see cref="ConsumerGroupMetadata"/>
-/// precedent — a result payload read once and placed into a dictionary, never a
-/// hot-path map key. Immutable.
-/// </remarks>
 public sealed class OffsetAndTimestamp
 {
-    /// <summary>
-    /// Initializes a new instance from the values copied out of the ABI element.
-    /// </summary>
-    /// <param name="offset">The resolved offset.</param>
-    /// <param name="timestamp">The timestamp (milliseconds since the Unix epoch).</param>
-    /// <param name="leaderEpoch">
-    /// The leader epoch, or <see langword="null"/> when absent.
-    /// </param>
     internal OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
     {
         Offset = offset;

@@ -87,7 +87,8 @@ public sealed class AdminKeyedResultMarshalTests
     [Fact]
     public async Task PerKeyPayload_IsOwned_AndConsumedExactlyOnce()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // One topic the 1-broker mock can create, one it must reject (replication factor
         // 5 > 1 broker) — so the same submit carries both outcomes.
@@ -120,7 +121,8 @@ public sealed class AdminKeyedResultMarshalTests
     [Fact]
     public async Task PerKeyValue_IsCopiedOut_AndOutlivesTheNativePayload()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         NewTopic topic = new NewTopic(GoodTopic, 3, 1)
         {
@@ -155,7 +157,8 @@ public sealed class AdminKeyedResultMarshalTests
     {
         const string Topic = "témas-日本語-🎉";
 
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // First call creates it; the second must fail with TOPIC_ALREADY_EXISTS, whose
         // message quotes the topic name back at us.

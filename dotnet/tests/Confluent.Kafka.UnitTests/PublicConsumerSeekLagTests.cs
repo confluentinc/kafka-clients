@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Xunit;
@@ -20,25 +21,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M5/P7 — the two <b>synchronous</b> <see cref="IConsumerCommon.Seek(TopicPartition, long)"/>
-/// / <see cref="IConsumerCommon.Seek(TopicPartition, OffsetAndMetadata)"/> overloads and the
-/// synchronous <see cref="IConsumerCommon.CurrentLag(TopicPartition)"/>, exercised through the
-/// <b>public</b> <see cref="AsyncMockConsumer"/> / <see cref="IConsumerCommon"/> surface (no
-/// broker): the <c>Seek(tp, long)</c> offset round-trip (via <see cref="IAsyncConsumer.Position"/>),
-/// the <c>Seek(tp, OffsetAndMetadata)</c> offset round-trip + metadata / leader-epoch
-/// <b>marshalling</b> coverage, the real <c>CurrentLag</c> value + the empty → <see langword="null"/>
-/// case, the deterministic preconditions / error messages / lifecycle, the unassigned-partition
-/// synchronous <see cref="KafkaException"/>, and a per-op allocation sanity bound.
+/// <c>Seek</c>, both forms, and <c>CurrentLag</c> on the mocks and the real consumers: the sought offset seen through
+/// <c>Position</c>, the lag, the unassigned-partition faults, the preconditions and the lifecycle.
 /// </summary>
 /// <remarks>
-/// <b>Mock reachability limit (verified).</b> The mock's <c>seek_with_metadata</c>
-/// (<c>rust/src/consumer/mock_consumer.rs:746-755</c>) uses <b>only</b> <c>.offset()</c> and
-/// <b>discards</b> the metadata + leader epoch, so their <em>values</em> are not observable
-/// broker-free (the M5/P4 <c>Committed</c> value read-back precedent). For
-/// <c>Seek(tp, OffsetAndMetadata)</c> this asserts the OFFSET round-trips and the
-/// metadata / leader-epoch <b>marshalling</b> succeeds (the call-scoped pins, the <c>-1</c>
-/// epoch sentinel for a null leader epoch, non-ASCII / empty metadata) — a strict value
-/// read-back is a documented mock limit, not asserted.
+/// The mock's seek keeps only the offset, so the metadata and leader epoch of <c>Seek(tp, OffsetAndMetadata)</c> are
+/// passed to it but not read back.
 /// </remarks>
 public sealed class PublicConsumerSeekLagTests
 {
@@ -47,8 +35,6 @@ public sealed class PublicConsumerSeekLagTests
     private const string Topic = "seeklag-topic";
     private const int Partition = 0;
 
-    // Assign the partition so a subsequent Seek / CurrentLag operates on an assigned TP
-    // (unassigned seek fails; unassigned CurrentLag returns null — both covered below).
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyAssigned(string topic = Topic, int partition = Partition)
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -57,20 +43,17 @@ public sealed class PublicConsumerSeekLagTests
         return consumer;
     }
 
-    // ---- Seek(tp, long): offset observable via Position (DoD §3) ----
-
     [Fact]
     public async Task Seek_ToOffset_ObservableViaPosition()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
-        consumer.Seek(tp, 42L); // sync (M5/P7)
+        await TestTimeout.Run(() => consumer.Seek(tp, 42L), s_deadline);
 
         Assert.Equal(42L, await PositionOf(consumer, tp));
     }
-
-    // ---- Seek(tp, OffsetAndMetadata): offset round-trips; metadata/epoch marshalling ----
 
     [Theory]
     [InlineData(42, "meta", 7)]       // leader epoch present
@@ -80,15 +63,11 @@ public sealed class PublicConsumerSeekLagTests
     public async Task Seek_WithMetadata_OffsetRoundTrips_MarshallingSucceeds(
         long offset, string metadata, int? leaderEpoch)
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
-        // The mock discards metadata + leader_epoch (see the type remarks), so their VALUES are
-        // not observable broker-free. This asserts the OFFSET round-trips and the metadata /
-        // leader-epoch MARSHALLING succeeds — the call completing WITHOUT error on an assigned
-        // partition is the marshalling proof (call-scoped pins, the -1 epoch sentinel for a
-        // null leader epoch, non-ASCII + empty metadata).
-        consumer.Seek(tp, new OffsetAndMetadata(offset, metadata, leaderEpoch));
+        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(offset, metadata, leaderEpoch)), s_deadline);
 
         Assert.Equal(offset, await PositionOf(consumer, tp));
     }
@@ -96,26 +75,96 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_WithMetadata_DefaultMetadata_RoundTripsOffset()
     {
-        // The 1-arg OffsetAndMetadata(offset) coerces metadata → "" (never-null) and leaves the
-        // leader epoch null (→ -1) — the "no metadata / no epoch" marshalling path (a valid ""
-        // pointer + the -1 sentinel) works.
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
-        consumer.Seek(tp, new OffsetAndMetadata(99));
+        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(99)), s_deadline);
 
         Assert.Equal(99L, await PositionOf(consumer, tp));
     }
 
-    // ---- CurrentLag ----
-
     [Fact]
     public async Task CurrentLag_AssignedWithEndOffset_ReturnsEndMinusPosition()
     {
-        // Assign → UpdateEndOffset(100) → Seek(10) → lag == 90 (mock: Some(end - position),
-        // mock_consumer.rs:438-457), also exercising the new sync Seek in the setup.
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
+        consumer.UpdateEndOffset(Topic, Partition, 100);
+        await TestTimeout.Run(() => consumer.Seek(tp, 10L), s_deadline);
+
+        Assert.Equal(90L, await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
+    }
+
+    [Fact]
+    public async Task CurrentLag_AssignedNoEndOffset_ReturnsZero()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition tp = new TopicPartition(Topic, Partition);
+
+        Assert.Equal(0L, await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
+    }
+
+    [Fact]
+    public async Task CurrentLag_UnassignedPartition_ReturnsZeroOnTheMock()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        Assert.Equal(0L, await TestTimeout.Run(() => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)), s_deadline));
+    }
+
+    [Fact]
+    public async Task CurrentLag_WaitsForTheBackgroundTask_OnTheAsyncKafkaConsumer()
+    {
+        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
+            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        try
+        {
+            TopicPartition tp = new TopicPartition(Topic, Partition);
+            TopicPartition unassigned = new TopicPartition(Topic, 7);
+            await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
+
+            Assert.Null(await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
+            InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TestTimeout.Run(() => consumer.CurrentLag(unassigned), s_deadline));
+            Assert.Equal($"No current assignment for partition {unassigned}", ex.Message);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public void CurrentLag_WaitsForTheBackgroundTask_OnTheKafkaConsumer()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+        try
+        {
+            TopicPartition tp = new TopicPartition(Topic, Partition);
+            TopicPartition unassigned = new TopicPartition(Topic, 7);
+            consumer.Assign(new[] { tp });
+
+            Assert.Null(consumer.CurrentLag(tp));
+            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.CurrentLag(unassigned));
+            Assert.Equal($"No current assignment for partition {unassigned}", ex.Message);
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    [Fact]
+    public void CurrentLag_AssignedWithEndOffset_ReturnsEndMinusPosition_OnTheSyncMock()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition tp = new TopicPartition(Topic, Partition);
+        consumer.Assign(new[] { tp });
         consumer.UpdateEndOffset(Topic, Partition, 100);
         consumer.Seek(tp, 10L);
 
@@ -123,57 +172,48 @@ public sealed class PublicConsumerSeekLagTests
     }
 
     [Fact]
-    public async Task CurrentLag_AssignedNoEndOffset_ReturnsZero()
+    public void Seek_WithMetadata_ObservableViaPosition_OnTheSyncMock()
     {
-        // Assigned but no end offset → the mock's "caught-up" model returns 0 (Some(0)), NOT
-        // null (null is reserved for the unknown / unassigned case).
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
+        consumer.Assign(new[] { tp });
 
-        Assert.Equal(0L, consumer.CurrentLag(tp));
+        consumer.Seek(tp, new OffsetAndMetadata(42, "meta", 7));
+
+        Assert.Equal(42L, consumer.Position(tp));
     }
 
     [Fact]
-    public async Task CurrentLag_UnassignedPartition_ReturnsNull()
+    public async Task Seek_UnassignedPartition_ThrowsInvalidOperationException()
     {
-        // An unassigned partition → the mock returns None → null (Java OptionalLong.empty).
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Null(consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)));
-    }
-
-    // ---- Unassigned-partition seek → synchronous KafkaException (both overloads) ----
-
-    [Fact]
-    public void Seek_UnassignedPartition_ThrowsKafkaException()
-    {
-        // Seek is sync (M5/P7): an unassigned partition surfaces as a SYNCHRONOUS KafkaException
-        // (the sync ABI's returned error handle), not a faulted Task.
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-
-        Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
+        Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
 
     [Fact]
-    public void SeekWithMetadata_UnassignedPartition_ThrowsKafkaException()
+    public async Task SeekWithMetadata_UnassignedPartition_ThrowsInvalidOperationException()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Throws<KafkaException>(
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), new OffsetAndMetadata(0)));
+        Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
-
-    // ---- Preconditions + exact error messages (before any native call) ----
 
     [Fact]
     public void Seek_NegativeOffset_ThrowsExactJavaMessage()
     {
-        // Q1 = KEEP: the Java-fidelity negative-offset guard — the ONE place .NET is
-        // deliberately stricter than Python (whose sync seek does no offset validation).
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
+            () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -1); });
 
         Assert.Equal("offset", ex.ParamName);
         Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
@@ -182,41 +222,37 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
     {
-        // The offset precondition precedes the disposed check (Q1) — a closed consumer still
-        // throws ArgumentOutOfRangeException, not ObjectDisposedException.
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.Seek(new TopicPartition("t", 0), offset: -2));
+            () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -2); });
         Assert.Equal("offset", ex.ParamName);
     }
 
     [Fact]
     public void Seek_NullTopic_ThrowsArgumentNull()
     {
-        // default(TopicPartition) has a null Topic (readonly struct) — one of the two ways to
-        // present a null topic (the ctor stores a null topic too, as Java's does).
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Throws<ArgumentNullException>(() => consumer.Seek(default, 0L));
+        Assert.Throws<ArgumentNullException>(() => { _ = consumer.Seek(default, 0L); });
     }
 
     [Fact]
     public void SeekWithMetadata_NullOffsetAndMetadata_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
-            () => consumer.Seek(new TopicPartition("t", 0), (OffsetAndMetadata)null!));
+            () => { _ = consumer.Seek(new TopicPartition("t", 0), (OffsetAndMetadata)null!); });
         Assert.Equal("offsetAndMetadata", ex.ParamName);
     }
 
     [Fact]
     public void OffsetAndMetadata_NegativeOffset_ThrowsAtConstruction()
     {
-        // Seek(tp, OffsetAndMetadata) needs no offset guard — the OffsetAndMetadata ctor is the
-        // upstream gate (rejects offset < 0 with "Invalid negative offset").
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => new OffsetAndMetadata(-1));
         Assert.Equal("offset", ex.ParamName);
@@ -227,50 +263,52 @@ public sealed class PublicConsumerSeekLagTests
     public async Task Seek_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
+        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
     }
 
     [Fact]
     public async Task SeekWithMetadata_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<ObjectDisposedException>(
-            () => consumer.Seek(new TopicPartition("t", 0), new OffsetAndMetadata(0)));
+            () => { _ = consumer.Seek(new TopicPartition("t", 0), new OffsetAndMetadata(0)); });
     }
 
     [Fact]
     public async Task CurrentLag_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.CurrentLag(new TopicPartition("t", 0)));
+        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.CurrentLag(new TopicPartition("t", 0)); });
     }
 
-    // ---- Interface placement: reachable through an IConsumerCommon reference ----
-
     [Fact]
-    public async Task SeekAndCurrentLag_ViaIConsumerCommon_Work()
+    public async Task SeekAndCurrentLag_ViaIAsyncConsumer_Work()
     {
-        // Both Seek overloads + CurrentLag live on IConsumerCommon (M5/P7), reachable through
-        // an IAsyncConsumer / IConsumerCommon reference.
-        using AsyncMockConsumer<byte[], byte[]> mock = await ReadyAssigned();
-        IConsumerCommon consumer = mock;
+        AsyncMockConsumer<byte[], byte[]> mock = await ReadyAssigned();
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
-        consumer.Seek(tp, 5L);
-        consumer.Seek(tp, new OffsetAndMetadata(6, "m", 2));
-        long? lag = consumer.CurrentLag(tp);
+        await TestTimeout.Run(() => consumer.Seek(tp, 5L), s_deadline);
+        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(6, "m", 2)), s_deadline);
+        long? lag = await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline);
 
+        Assert.Equal(6L, await PositionOf(consumer, tp));
         Assert.NotNull(lag);
     }
 
-    // Every awaited Position routes through the TestTimeout hang guard so a future stall in the
-    // scalar bridge or the mock fails the run fast instead of hanging it.
+    private static Dictionary<string, string> RealConfig() => new Dictionary<string, string>
+    {
+        ["bootstrap.servers"] = "127.0.0.1:1",
+        ["group.protocol"] = "consumer",
+    };
+
     private static async Task<long> PositionOf(IAsyncConsumer<byte[], byte[]> consumer, TopicPartition partition)
     {
         long result = 0;

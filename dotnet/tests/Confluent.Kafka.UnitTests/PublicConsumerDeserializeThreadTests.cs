@@ -16,18 +16,14 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Internal;
+
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M6/P1b — which thread the deserialize runs on (PLAN §5). The <b>sync</b> typed poll
-/// deserializes on the <b>caller's</b> thread (the copy-out is inline in
-/// <c>Consumer_poll</c>'s return path); the <b>async</b> typed poll deserializes on the
-/// core's <b>foreign dispatcher thread</b>, inside the poll completion callback, before the
-/// awaiter's continuation resumes (which itself runs off-thread via
-/// <c>RunContinuationsAsynchronously</c>). This is the documented headline consequence of
-/// the zero-copy deserialize-before-destroy design.
+/// Where a typed poll deserializes: the sync Poll on the calling thread, the async Poll off the drain thread.
 /// </summary>
 public sealed class PublicConsumerDeserializeThreadTests
 {
@@ -41,23 +37,22 @@ public sealed class PublicConsumerDeserializeThreadTests
     public void SyncPoll_DeserializesOnTheCallerThread()
     {
         RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray);
-        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll(valueDeserializer);
+        MockConsumer<byte[], byte[]> consumer = ReadyToPoll(valueDeserializer);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 1, key: new byte[] { 1 }, value: new byte[] { 2 });
 
         int callerThreadId = Environment.CurrentManagedThreadId;
 
-        // The mock poll + sync copy-out run synchronously on THIS thread (the mock poll never
-        // blocks with a record queued), so no TestTimeout wrapper — and crucially the poll must
-        // run on the caller thread for this assertion, which Task.Run would defeat.
+        // Not wrapped in TestTimeout: the poll must run on this thread.
         ConsumerRecord<byte[], byte[]> record = Assert.Single(consumer.Poll(s_pollTimeout));
 
         Assert.Equal(new byte[] { 2 }, record.Value);
         Assert.Equal(1, valueDeserializer.InvocationCount);
-        Assert.Equal(callerThreadId, valueDeserializer.LastThreadId); // caller thread (sync)
+        Assert.Equal(callerThreadId, valueDeserializer.LastThreadId);
     }
 
     [Fact]
-    public async Task AsyncPoll_DeserializesOnTheDispatcherThread_NotTheCaller()
+    public async Task AsyncPoll_DeserializesOffThePumpThread()
     {
         RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray);
         AsyncMockConsumer<byte[], byte[]> consumer =
@@ -66,24 +61,25 @@ public sealed class PublicConsumerDeserializeThreadTests
         {
             await TestTimeout.Run(
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
-            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
+            await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
             consumer.AddRecord(Topic, Partition, offset: 2, key: new byte[] { 1 }, value: new byte[] { 2 });
 
-            int callerThreadId = Environment.CurrentManagedThreadId;
+            Task<ConsumerRecords<byte[], byte[]>> poll;
+            using (new ConsumerPumpStall(consumer))
+            {
+                poll = consumer.Poll(s_pollTimeout);
+            }
 
             ConsumerRecords<byte[], byte[]> records = default!;
-            await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
+            await TestTimeout.Run(async () => records = await poll, s_deadline);
 
             Assert.Single(records);
             Assert.Equal(1, valueDeserializer.InvocationCount);
-            // The deserialize ran inside the poll callback on the core's foreign dispatcher
-            // thread — NOT the caller's thread (PLAN §5). The await barrier publishes the
-            // dispatcher-thread write of LastThreadId.
-            Assert.NotEqual(callerThreadId, valueDeserializer.LastThreadId);
+            Assert.NotEqual(NativeConsumer.PumpThreadName, valueDeserializer.LastThreadName);
         }
         finally
         {
-            await consumer.DisposeAsync();
+            await TestTimeout.DisposeAsync(consumer);
         }
     }
 

@@ -195,8 +195,9 @@ public sealed class PublicProducerUnfinishedSendTests
         string topic = Topic("then-apply-success");
         if (flavor == SyncFlavor)
         {
-            using MockProducer<byte[], byte[]> producer =
+            MockProducer<byte[], byte[]> producer =
                 new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset);
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
             Assert.False(appliedOn.Task.IsCompleted);
@@ -207,8 +208,9 @@ public sealed class PublicProducerUnfinishedSendTests
         }
         else
         {
-            await using AsyncMockProducer<byte[], byte[]> producer =
+            AsyncMockProducer<byte[], byte[]> producer =
                 new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future =
                 await TestTimeout.Run(() => producer.Send(UnreachableProducers.Record(topic)).AsTask(), Deadline);
             AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
@@ -267,8 +269,9 @@ public sealed class PublicProducerUnfinishedSendTests
         Func<AsyncMockProducer<byte[], byte[]>, AsyncKafkaFuture<RecordMetadata>, ProbeCallback, Task> test,
         Action? inCallback = null)
     {
-        await using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback?.Invoke());
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
             () => producer.Send(UnreachableProducers.Record(Topic("unfinished-async-send")), callback).AsTask(), Deadline);
@@ -281,7 +284,8 @@ public sealed class PublicProducerUnfinishedSendTests
         Action<KafkaFuture<RecordMetadata>, ProbeCallback, Action> test,
         Action? inCallback = null)
     {
-        using KafkaProducer<byte[], byte[]> producer = Sync(MaxBlockMs);
+        KafkaProducer<byte[], byte[]> producer = Sync(MaxBlockMs);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         HoldingCallback hold = new HoldingCallback();
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback?.Invoke());
         try

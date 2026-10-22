@@ -20,49 +20,10 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The real (KIP-848) <b>synchronous</b> Kafka consumer — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.KafkaConsumer</c>. A thin, Java-shaped forwarder over
-/// the internal <see cref="NativeConsumer"/> lifecycle wrapper (the same wrapper the async
-/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> composes — the two client families are siblings over one
-/// native consumer, not one wrapping the other). All Kafka logic lives in the Rust core; this
-/// type only restores the Java (blocking) shape.
+/// The Kafka consumer with a synchronous surface, Java's <c>org.apache.kafka.clients.consumer.KafkaConsumer</c>
+/// under the KIP-848 group protocol. <see cref="IConsumer{TKey, TValue}"/> describes its threads and disposal;
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> is its asynchronous sibling.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Blocking, direct sync C ABI (inherited from <see cref="NativeConsumer"/>).</b> Every
-/// operation calls the synchronous C ABI directly; the core's blocking call parks the caller
-/// thread inside the Rust multi-thread runtime (deadlock-free) — not sync-over-async, and never
-/// routed through the async binding API.
-/// </para>
-/// <para>
-/// <b>Single-owner / not thread-safe.</b> At most one operation in flight; concurrency is
-/// serialized by the Rust core. <see cref="Wakeup"/> is the one deliberately cross-thread
-/// member; the canonical pattern (thread A blocked in <see cref="Poll"/>, thread B wakes it) is
-/// safe. Do not share one instance across threads without external synchronization.
-/// </para>
-/// <para>
-/// <b>Disposal.</b> <see cref="Close()"/> is the explicit graceful close that <em>surfaces</em>
-/// a close failure; <see cref="Dispose"/> is the blocking teardown that swallows it. They are
-/// idempotent and gated by a single atomic closed flag. There is no <c>DisposeAsync</c> — this
-/// is the synchronous surface. Both close through the same core call, bounded by the core's
-/// default close timeout of 30 seconds (Java's <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>,
-/// the bound Java's <c>close()</c> applies). ⚠ <b>Behavior change (M17/P2):</b>
-/// <see cref="Dispose"/> used to bound its graceful close at a fixed 5 seconds; it now uses the
-/// same 30-second default, so a <see cref="Dispose"/> whose graceful close cannot complete can
-/// block up to 30 seconds instead of 5.
-/// <b>Deterministic native release requires that no operation is in flight — let your
-/// operations return before disposing</b> (use <see cref="IConsumerCommon.Wakeup"/> from
-/// another thread to interrupt a blocked <see cref="Poll"/> first). Tearing down while a
-/// call is still inside the core defers the native release until it returns; it is
-/// accepted and documented, not a leak (M9/P4 decision Q1).
-/// </para>
-/// <para>
-/// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's
-/// <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>. The key/value
-/// deserializers decode each polled record's raw bytes (the typed zero-copy poll path,
-/// ffi §B4). Bytes users pass <see cref="Serdes.ByteArray"/> for both.
-/// </para>
-/// </remarks>
 /// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
 /// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
 public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
@@ -93,7 +54,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     {
         _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
         _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
-        _native = NativeConsumer.Create(config);
+        _native = NativeConsumer.Create(config, withPump: false);
     }
 
     /// <inheritdoc/>
@@ -129,37 +90,75 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public long Position(TopicPartition partition) => _native.Position(partition);
 
     /// <inheritdoc/>
+    public long Position(TopicPartition partition, TimeSpan timeout) => _native.Position(partition, timeout);
+
+    /// <inheritdoc/>
     public void Commit() => _native.CommitSync();
+
+    /// <inheritdoc/>
+    public void Commit(TimeSpan timeout) => _native.CommitSync(timeout);
 
     /// <inheritdoc/>
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
         _native.CommitSyncOffsets(offsets);
 
     /// <inheritdoc/>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(
+    public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout) =>
+        _native.CommitSyncOffsets(offsets, timeout);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
         IReadOnlyCollection<TopicPartition> partitions) => _native.Committed(partitions);
 
     /// <inheritdoc/>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _native.Committed(partitions, timeout);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) =>
         _native.OffsetsForTimes(timestampsToSearch);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout) =>
+        _native.OffsetsForTimes(timestampsToSearch, timeout);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions) => _native.BeginningOffsets(partitions);
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _native.BeginningOffsets(partitions, timeout);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions) => _native.EndOffsets(partitions);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _native.EndOffsets(partitions, timeout);
 
     /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsFor(topic);
 
     /// <inheritdoc/>
+    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout) =>
+        _native.PartitionsFor(topic, timeout);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() => _native.ListTopics();
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout) =>
+        _native.ListTopics(timeout);
+
+    /// <inheritdoc/>
     public void Close() => _native.CloseSync();
+
+    /// <inheritdoc/>
+    public void Close(CloseOptions option) => _native.CloseSync(option);
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>
@@ -205,9 +204,6 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
-
-    /// <inheritdoc/>
-    public string ClientId() => _native.ClientId();
 
     /// <inheritdoc/>
     public ConsumerHandle Handle() => _native.CreateReentrancyHandle();

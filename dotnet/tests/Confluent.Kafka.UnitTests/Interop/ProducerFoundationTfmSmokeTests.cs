@@ -56,7 +56,7 @@ public sealed class ProducerFoundationTfmSmokeTests
     {
         NativeProducer producer = NativeProducer.CreateMock();
         Assert.False(producer.Handle.IsInvalid);
-        await producer.DisposeAsync();
+        await TestTimeout.DisposeAsync(producer);
 
         Assert.Throws<ObjectDisposedException>(() => producer.Handle);
     }

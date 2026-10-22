@@ -21,19 +21,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Unit tests for the two new public value types <see cref="Node"/> /
-/// <see cref="PartitionInfo"/> (M5/P5, PLAN §4). Their <c>internal</c> constructors are
-/// reachable from the test project via <c>InternalsVisibleTo</c> — this proves the field
-/// storage, the nullable <see cref="Node.Rack"/> / <see cref="PartitionInfo.Leader"/>
-/// mapping (present vs absent — the mock always populates a leader and never a rack, so the
-/// absent cases are proven here at the value level), and the Java-mirroring <c>ToString</c>
-/// forms. The native-driven field values are asserted end to end in
-/// <see cref="PublicConsumerPartitionMetadataTests"/>.
+/// <see cref="Node"/> and <see cref="PartitionInfo"/>: their fields, the null rack and leader the mock never
+/// produces, <see cref="Node.IsFenced"/>, and Java's <c>ToString</c> forms.
 /// </summary>
 public sealed class PublicConsumerPartitionMetadataValueTypeTests
 {
-    // ---- Node ----
-
     [Fact]
     public void Node_StoresFields_WithRack()
     {
@@ -48,9 +40,6 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_AbsentRack_IsNull()
     {
-        // The absent rack maps to null (Java's nullable rack()). The mock always produces this
-        // shape (3-arg Node::new → rack None), so this is the value-level proof of the null case
-        // the end-to-end tests observe on Node.Rack.
         Node node = new Node(2, "host-b", 9093, null);
 
         Assert.Null(node.Rack);
@@ -59,8 +48,6 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_ToString_MirrorsJavaFormat_WithRack()
     {
-        // Java (Node.java:158): host + ":" + port + " (id: " + idString + " rack: " + rack
-        // + " isFenced: " + isFenced + ")".
         Node node = new Node(5, "kafka-1", 9092, "us-east-1a");
 
         Assert.Equal("kafka-1:9092 (id: 5 rack: us-east-1a isFenced: false)", node.ToString());
@@ -69,7 +56,6 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_ToString_AbsentRack_RendersNullLiteral()
     {
-        // Java renders an absent rack as the literal "null" (rack is interpolated directly).
         Node node = new Node(5, "kafka-1", 9092, null);
 
         Assert.Equal("kafka-1:9092 (id: 5 rack: null isFenced: false)", node.ToString());
@@ -78,17 +64,11 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_ToString_FencedNode_RendersLowercaseTrue()
     {
-        // Java concatenates the boolean, so it renders "true" — never .NET's "True".
         Node node = new Node(5, "kafka-1", 9092, "us-east-1a", isFenced: true);
 
         Assert.Equal("kafka-1:9092 (id: 5 rack: us-east-1a isFenced: true)", node.ToString());
     }
 
-    /// <summary>
-    /// M15/P13.3 D12 — Java's <c>public boolean isFenced()</c> (<c>Node.java:122</c>) is a
-    /// get-only <see cref="bool"/> property, and adding it published no constructor: both
-    /// forms stay <see langword="internal"/>, as the other members' did.
-    /// </summary>
     [Fact]
     public void Node_IsFenced_IsAGetOnlyPublicBool_AndNoConstructorIsPublic()
     {
@@ -105,14 +85,10 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_FourArgumentConstructor_IsUnfenced()
     {
-        // Java's Node(id, host, port, rack) sets isFenced = false (Node.java:42-49); the
-        // five-argument form stores what it is given (Node.java:51-58), both polarities.
         Assert.False(new Node(5, "kafka-1", 9092, "r").IsFenced);
         Assert.False(new Node(5, "kafka-1", 9092, "r", isFenced: false).IsFenced);
         Assert.True(new Node(5, "kafka-1", 9092, "r", isFenced: true).IsFenced);
     }
-
-    // ---- PartitionInfo ----
 
     [Fact]
     public void PartitionInfo_StoresFields()
@@ -135,9 +111,6 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void PartitionInfo_NullLeader_IsNull()
     {
-        // The ABI _leader may be null (a partition with no leader); the type must not assume a
-        // leader. The mock always populates one, so this null case is proven here at the value
-        // level (NodeMarshal.CopyOut(Zero) → null → PartitionInfo.Leader null).
         PartitionInfo info = new PartitionInfo(
             "t", 0, leader: null, Array.Empty<Node>(), Array.Empty<Node>(), Array.Empty<Node>());
 
@@ -147,8 +120,6 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void PartitionInfo_ToString_MirrorsJavaFormat()
     {
-        // Java: Partition(topic = %s, partition = %d, leader = %s, replicas = %s, isr = %s,
-        // offlineReplicas = %s) — nodes render as their id lists, the leader as its id.
         Node n0 = new Node(0, "h0", 9092, null);
         Node n1 = new Node(1, "h1", 9092, null);
         PartitionInfo info = new PartitionInfo(

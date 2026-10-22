@@ -18,43 +18,28 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
-// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
-// TFM smoke leg compiling.
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, so the class is net8.0 and later only.
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// M5/P8b — per-op allocation budget for the <b>synchronous</b> query family through the public
-/// <see cref="MockConsumer{TKey, TValue}"/> surface (PLAN §8; DoD §10). These are per-RPC top-level
-/// surfaces, not a hot path (CLAUDE.md §11), so a per-call owned result dictionary/list + entries is
-/// amortized and fine. A LIGHT sanity bound (not zero-alloc): the marginal per-op cost does NOT
-/// scale beyond the fixed one-entry result — an unbounded or per-something copy (e.g. a stored
-/// native-backed view or a second copy pass) would show here. The sync query copy-out runs the
-/// shared query marshallers (<c>OffsetMapMarshal.CopyOut</c> / <c>PartitionInfoListMarshal.CopyOutPartitionInfoList</c>)
-/// on the caller's thread, so measuring them on-thread fully covers the async per-op query budget
-/// too (M7/P1).
+/// The per-call allocation of the sync BeginningOffsets and PartitionsFor on <see cref="MockConsumer{TKey, TValue}"/>:
+/// the marginal cost of a call stays under a ceiling for a one-entry result.
 /// </summary>
 /// <remarks>
-/// Uses the <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> counter (M7/P1),
-/// not the process-wide <see cref="GC.GetTotalAllocatedBytes(bool)"/>: the sync copy-out runs on
-/// the caller's (this) thread, so a per-thread count captures exactly these ops' allocation and is
-/// <b>immune to allocations by concurrently-running tests on other threads</b> — robust under
-/// parallel execution, with no assembly-wide serialization needed. The marginal (large − small)
-/// subtraction still cancels the fixed per-call cost, and the op is warmed up first.
+/// The copy-out runs on the calling thread, so the per-thread counter sees only these calls, whatever other tests run.
 /// </remarks>
 public sealed class PublicSyncConsumerQueryAllocationBudgetTests
 {
     private const string Topic = "sync-query-alloc-topic";
 
-    // A per-RPC (NOT per-record) sanity ceiling — a Task-free sync path allocates only the owned
-    // result map + one entry + a couple of delegate closures per call. Generous enough not to be
-    // brittle, tight enough to catch an unbounded / per-something copy.
+    // A sanity ceiling, not a zero-allocation bound: a query is per call, not per record.
     private const long PerOpBudgetBytes = 4096;
 
     [Fact]
     public void BeginningOffsets_PerOpAllocation_IsBounded()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         TopicPartition[] request = { new TopicPartition(Topic, 0) };
 
@@ -78,7 +63,8 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     [Fact]
     public void PartitionsFor_PerOpAllocation_IsBounded()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
 
         for (int i = 0; i < 10; i++)

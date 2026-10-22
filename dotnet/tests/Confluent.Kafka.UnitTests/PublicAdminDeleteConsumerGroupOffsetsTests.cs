@@ -66,7 +66,8 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
     [Fact]
     public async Task DeleteConsumerGroupOffsets_SurfacesTheMocksDocumentedRefusal()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         TopicPartition tp = new TopicPartition("p5-dcgo", 0);
         AsyncDeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
@@ -89,7 +90,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
     public async Task DeleteConsumerGroupOffsets_ThrowsAfterDispose()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroupOffsets(
             "p5-group",

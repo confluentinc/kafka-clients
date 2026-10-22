@@ -233,7 +233,8 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(false)]
     public void UndefinedEnumValue_IsRejectedBeforeAnythingIsSubmitted(bool onTheStateAxis)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         ListGroupsOptions options = onTheStateAxis
@@ -303,7 +304,8 @@ public sealed class AdminP5SubmitArgumentTests
     /// <param name="options">The options under test, or <see langword="null"/>.</param>
     private static Captured Capture(ListGroupsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncListGroupsResult result = AsyncListGroupsResult.From(admin.ListGroups(
@@ -503,7 +505,8 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void Describe_BadGroupIds_AreRejectedBeforeAnythingIsSubmitted()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         NativeAdminClient.NativeDescribeConsumerGroupsSubmit submit =
@@ -531,7 +534,8 @@ public sealed class AdminP5SubmitArgumentTests
         IReadOnlyCollection<string> groupIds,
         DescribeConsumerGroupsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DescribeCaptured captured = new DescribeCaptured();
         AsyncDescribeConsumerGroupsResult result = AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(
@@ -661,7 +665,8 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void DescribeClassic_BadArguments_AreRejectedBeforeAnythingIsSubmitted()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         NativeAdminClient.NativeDescribeClassicGroupsSubmit submit =
@@ -689,7 +694,8 @@ public sealed class AdminP5SubmitArgumentTests
         IReadOnlyCollection<string> groupIds,
         DescribeClassicGroupsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DescribeCaptured captured = new DescribeCaptured();
         AsyncDescribeClassicGroupsResult result = AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(
@@ -896,7 +902,8 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void Offsets_BadArguments_AreRejectedBeforeAnythingIsSubmitted()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         NativeAdminClient.NativeListConsumerGroupOffsetsSubmit submit =
@@ -979,7 +986,8 @@ public sealed class AdminP5SubmitArgumentTests
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         OffsetsCaptured captured = new OffsetsCaptured();
         AsyncListConsumerGroupOffsetsResult result = AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(

@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,39 +24,20 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The M9/P6 rebalance-listener surface through the <b>public</b> API, broker-free: the
-/// <c>Subscribe(topics, listener)</c> overload on all four consumer types and the mock-only
-/// <c>Rebalance(...)</c> and <c>LosePartitions(...)</c> (Kafka 4.4) drivers that fire it. Pins
-/// every semantic the core defines for <c>MockConsumer.rebalance</c> and
-/// <c>MockConsumer.losePartitions</c>, the throwing-listener contract, and
-/// <c>consumer-threading.md</c> §31's "the rebalance does not advance until the listener
-/// returns" regression.
+/// The rebalance listener through the public API: the <c>Subscribe(topics, listener)</c> overloads on the four
+/// consumers, the mocks' <c>Rebalance</c> and <c>LosePartitions</c>, a throwing listener, the async listener, and a
+/// rebalance that does not advance until the listener returns.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>§31 test #1 ("commitSync() from inside onPartitionsRevoked succeeds") is NOT here —
-/// it is deferred to the ConsumerHandle phase</b>, with the rationale recorded in the phase
-/// record. The consumer's own <c>Commit()</c> is rejected with ConcurrentModification by the
-/// core's access guard <em>by design</em> while the application thread drives the rebalance;
-/// the sanctioned reentrancy path is <c>ConsumerHandle</c>, which this binding does not yet
-/// expose. §31 test #2 is satisfied below.
-/// </para>
-/// <para>
-/// The complementary interop-level coverage (each trampoline driven directly, the
-/// returned-error-handle contract, GC survival, free-exactly-once, and the
-/// registration-release rules) lives in
-/// <c>Interop/ConsumerRebalanceListenerBridgeTests</c>.
-/// </para>
-/// </remarks>
 public sealed class PublicConsumerRebalanceListenerTests
 {
     private const string Topic = "rebalance-listener-topic";
 
+    private const string MockHandleUnsupported =
+        "ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer directly.";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    // Long enough that a genuinely-unblocked rebalance would finish inside it, short enough
-    // to keep the suite fast. Only ever used for a "must NOT have completed" wait that is
-    // already gated on the callback having fired.
+    // Used only for a "has not completed" wait taken after the callback has fired.
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
@@ -64,15 +46,10 @@ public sealed class PublicConsumerRebalanceListenerTests
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
         new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-    // ---- The Java default carried by ConsumerRebalanceListenerBase ----
-
     [Fact]
     public void ConsumerRebalanceListenerBase_OnPartitionsLost_DelegatesToRevoked()
     {
-        // Java's ConsumerRebalanceListener.onPartitionsLost is a DEFAULT METHOD delegating to
-        // onPartitionsRevoked. C# default interface methods need .NET Standard 2.1 / C# 8,
-        // above this binding's netstandard2.0 floor, so the default lives here instead
-        // (P6-D1 option (b)). This is the plain managed proof that it behaves as Java does.
+        // Java's onPartitionsLost default lives on the base class, as netstandard2.0 has no default interface methods.
         RecordingListenerBase listener = new RecordingListenerBase();
         TopicPartition[] partitions = { new TopicPartition(Topic, 1) };
 
@@ -82,12 +59,11 @@ public sealed class PublicConsumerRebalanceListenerTests
         Assert.Empty(listener.Assigned);
     }
 
-    // ---- Subscribe(topics, listener) on all four consumer types ----
-
     [Fact]
     public void SyncMock_SubscribeWithListener_ThenRebalance_FiresAssignedWithAddedPartitions()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -104,11 +80,12 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public async Task AsyncMock_SubscribeWithListener_ThenRebalance_FiresAssignedWithAddedPartitions()
     {
-        await using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         RecordingListener listener = new RecordingListener();
         await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
 
-        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline);
 
         Assert.Equal(new[] { new TopicPartition(Topic, 0) }, Assert.Single(listener.Assigned));
     }
@@ -116,9 +93,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void SyncKafkaConsumer_ExposesTheListenerOverload()
     {
-        // The real client cannot be driven broker-free, so this pins the SHAPE: the overload
-        // exists on the interface and on KafkaConsumer<K,V>, and is reachable through
-        // IConsumer<K,V>. Behaviour is covered against the mocks.
+        // The real client needs a broker, so this test checks only the overload's shape.
         Assert.NotNull(
             typeof(IConsumer<byte[], byte[]>).GetMethod(
                 nameof(IConsumer<byte[], byte[]>.Subscribe),
@@ -152,19 +127,17 @@ public sealed class PublicConsumerRebalanceListenerTests
                 }));
     }
 
-    // ---- MockConsumer.rebalance semantics, one test per rule ----
-
     [Fact]
     public void Rebalance_FiresRevokedOnlyWhenSomethingWasRemoved()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 1) });
         Assert.Empty(listener.Revoked);
 
-        // Drop partition 1 — now something IS removed.
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
 
         Assert.Equal(new[] { new TopicPartition(Topic, 1) }, Assert.Single(listener.Revoked));
@@ -173,13 +146,12 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_FiresAssignedUnconditionally_WithTheAddedListWhichMayBeEmpty()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
-        // Same assignment again: nothing added, nothing removed — assigned STILL fires, with
-        // an EMPTY collection (the added list, not the full assignment).
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
 
         Assert.Equal(2, listener.Assigned.Count);
@@ -190,8 +162,9 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_NeverFiresLost()
     {
-        // Matching Java's MockConsumer: losing partitions is LosePartitions' job (below).
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        // As in Java's MockConsumer, only LosePartitions fires the lost callback.
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -204,7 +177,8 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_WithoutAListener_IsANoOpSuccess()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic });
 
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
@@ -215,12 +189,11 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_OnAManuallyAssignedConsumer_ThrowsWithTheJavaMessage()
     {
-        // Java throws IllegalArgumentException; the core's message is asserted verbatim
-        // (definition-of-done.md §3 — error message content is part of the contract).
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, 0) });
 
-        KafkaException exception = Assert.Throws<KafkaException>(
+        ArgumentException exception = Assert.Throws<ArgumentException>(
             () => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }));
 
         Assert.Equal(
@@ -228,15 +201,14 @@ public sealed class PublicConsumerRebalanceListenerTests
             exception.Message);
     }
 
-    // ---- MockConsumer.losePartitions (Kafka 4.4) — Java's MockConsumerTest, translated ----
-
     [Fact]
     public void LosePartitions_CallsOnPartitionsLost()
     {
         // Java testLosePartitionsCallsOnPartitionsLost.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -253,7 +225,8 @@ public sealed class PublicConsumerRebalanceListenerTests
         // Java testLosePartitionsRemovesFromAssignment.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic });
 
         consumer.Rebalance(new[] { tp0, tp1 });
@@ -266,16 +239,14 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void LosePartitions_ThrowsIfNotAssigned_WithTheJavaMessage()
     {
-        // Java testLosePartitionsThrowsIfNotAssigned. Java throws IllegalStateException; the
-        // core's error arrives as the flat KafkaException (ffi §B5) and its message, Java's
-        // List.toString() included, is asserted verbatim (definition-of-done.md §3).
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic });
         consumer.Rebalance(new[] { tp0 });
 
-        KafkaException exception = Assert.Throws<KafkaException>(
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
             () => consumer.LosePartitions(new[] { tp1 }));
 
         Assert.Equal(
@@ -290,7 +261,8 @@ public sealed class PublicConsumerRebalanceListenerTests
         // Java testLosePartitionsClearsOnlyLostRecords.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic });
         consumer.Rebalance(new[] { tp0, tp1 });
         consumer.UpdateBeginningOffset(Topic, 0, 0);
@@ -311,13 +283,12 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void LosePartitions_ThenRebalance()
     {
-        // Java testLosePartitionsThenRebalance. Java's listener overrides only revoked and
-        // assigned, so it is a ConsumerRebalanceListenerBase here (the netstandard2.0 home of
-        // Java's onPartitionsLost default).
+        // Java testLosePartitionsThenRebalance.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
         TopicPartition tp2 = new TopicPartition(Topic, 2);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListenerBase listener = new RecordingListenerBase();
         consumer.Subscribe(new[] { Topic }, listener);
 
@@ -334,10 +305,9 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void LosePartitions_WithAListenerBase_FallsBackToRevoked_JavasDefault()
     {
-        // End to end through the lost trampoline: a ConsumerRebalanceListenerBase that does not
-        // override OnPartitionsLost gets OnPartitionsRevoked, as Java's default method does.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListenerBase listener = new RecordingListenerBase();
         consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { tp0, new TopicPartition(Topic, 1) });
@@ -352,7 +322,8 @@ public sealed class PublicConsumerRebalanceListenerTests
     {
         // Java collects the argument into a HashSet before calling onPartitionsLost.
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { tp0 });
@@ -368,12 +339,13 @@ public sealed class PublicConsumerRebalanceListenerTests
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        await using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         RecordingListener listener = new RecordingListener();
         await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
-        consumer.Rebalance(new[] { tp0, tp1 });
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0, tp1 }), s_deadline);
 
-        consumer.LosePartitions(new[] { tp1 });
+        await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp1 }), s_deadline);
 
         Assert.Equal(new[] { tp1 }, Assert.Single(listener.Lost));
         Assert.Empty(listener.Revoked);
@@ -381,26 +353,28 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     [Fact]
-    public void LosePartitions_WhenTheListenerThrows_SurfacesTheMessage_AndKeepsTheAssignment()
+    public void LosePartitions_WhenTheListenerThrows_ThrowsTheSameInstance_AndKeepsTheAssignment()
     {
-        // The header: the callback's error is returned and the assignment is left unchanged.
-        const string Message = "lost handler failed — 失敗";
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Subscribe(new[] { Topic }, new ThrowingOnLostListener(Message));
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        ThrowingOnLostListener listener = new ThrowingOnLostListener("lost handler failed — 失敗");
+        consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { tp0 });
 
-        KafkaException exception = Assert.Throws<KafkaException>(
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
             () => consumer.LosePartitions(new[] { tp0 }));
 
-        Assert.Equal(Message, exception.Message);
+        Assert.Same(listener.Thrown, exception);
+        Assert.Equal("lost handler failed — 失敗", exception.Message);
         Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
     }
 
     [Fact]
     public void LosePartitions_NullPartitions_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.LosePartitions(null!));
@@ -408,32 +382,29 @@ public sealed class PublicConsumerRebalanceListenerTests
         Assert.Equal("partitions", exception.ParamName);
     }
 
-    // ---- The throwing-listener contract, end to end ----
-
     [Fact]
-    public void Rebalance_WhenTheListenerThrows_SurfacesTheMessageVerbatim()
+    public void Rebalance_WhenTheListenerThrows_ThrowsTheSameInstance()
     {
-        // The exception is caught at the interop boundary (never unwound into native),
-        // converted into the error the core sees, and propagated out of the operation that
-        // triggered the rebalance — here, Rebalance itself.
-        const string Message = "revoke handler failed — 失敗";
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Subscribe(new[] { Topic }, new ThrowingOnAssignedListener(Message));
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        ThrowingOnAssignedListener listener = new ThrowingOnAssignedListener("revoke handler failed — 失敗");
+        consumer.Subscribe(new[] { Topic }, listener);
 
-        KafkaException exception = Assert.Throws<KafkaException>(
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
             () => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }));
 
-        Assert.Equal(Message, exception.Message);
+        Assert.Same(listener.Thrown, exception);
+        Assert.Equal("revoke handler failed — 失敗", exception.Message);
     }
 
     [Fact]
     public void Rebalance_AfterAThrowingListener_TheConsumerStaysUsable()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new ThrowingOnAssignedListener("boom"));
-        Assert.Throws<KafkaException>(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }));
+        Assert.Throws<InvalidOperationException>(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }));
 
-        // Replace the registration with a well-behaved listener and carry on.
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { new TopicPartition(Topic, 2) });
@@ -441,31 +412,20 @@ public sealed class PublicConsumerRebalanceListenerTests
         Assert.Single(listener.Assigned);
     }
 
-    // ---- consumer-threading.md §31 test #2 ----
-
     [Fact]
     public async Task Rebalance_DoesNotAdvanceUntilTheListenerReturns()
     {
-        // §31 #2: the rebalance must not complete before the listener does.
-        // MockConsumer_rebalance is synchronous all the way through, so this is directly
-        // observable: block the listener, drive Rebalance from a worker, and check.
-        //
-        // MUTATION CHECK (phase-5 notes item 3): a bare "has NOT completed yet" assertion
-        // passes vacuously if the callback never fired at all. The `entered` gate is what
-        // makes it non-vacuous — we only assert "not completed" AFTER proving the listener is
-        // inside the callback. Removing `_release.Wait()` from the fixture makes
-        // `rebalance.IsCompleted` true at that point and the test fails; that mutation was
-        // run and its failure recorded in the phase record.
+        // The listener is known to be inside the callback before the check, so the check cannot pass vacuously.
         using ManualResetEventSlim entered = new ManualResetEventSlim(false);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new BlockingListener(entered, release));
 
         Task rebalance = Task.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }));
 
         Assert.True(entered.Wait(s_deadline), "the listener callback never fired");
 
-        // The listener is inside OnPartitionsAssigned and has not returned.
         await Task.WhenAny(rebalance, Task.Delay(s_notYetWindow));
         Assert.False(
             rebalance.IsCompleted,
@@ -476,12 +436,405 @@ public sealed class PublicConsumerRebalanceListenerTests
         await TestTimeout.Run(() => rebalance, s_deadline);
     }
 
-    // ---- Preconditions (validated before any pin / P-Invoke, ffi §B5) ----
+    [Fact]
+    public void SyncMock_AListener_CallsBackIntoTheMock()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        try
+        {
+            List<string> seen = new List<string>();
+            consumer.Subscribe(new[] { Topic }, new DelegateListener(assigned: _ =>
+            {
+                seen.Add("Assignment: " + Outcome(() => Format(consumer.Assignment())));
+                seen.Add("Seek: " + Outcome(() =>
+                {
+                    consumer.Seek(tp0, 4);
+                    return null;
+                }));
+                seen.Add("Commit: " + Outcome(() =>
+                {
+                    consumer.Commit(Offsets(tp0, 4));
+                    return null;
+                }));
+                seen.Add("Position: " + Outcome(() => consumer.Position(tp0).ToString(CultureInfo.InvariantCulture)));
+            }));
+
+            consumer.Rebalance(new[] { tp0 });
+
+            Assert.Equal(
+                new[]
+                {
+                    "Assignment: ok [" + Topic + "-0]",
+                    "Seek: KafkaException 35: " + MockHandleUnsupported,
+                    "Commit: ok",
+                    "Position: KafkaException 35: " + MockHandleUnsupported,
+                },
+                seen);
+            Assert.Equal(new OffsetAndMetadata(4), consumer.Committed(new[] { tp0 })[tp0]);
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    [Fact]
+    public void SyncMock_ACommitInsideOnPartitionsRevoked_Succeeds()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        try
+        {
+            consumer.Subscribe(new[] { Topic }, new DelegateListener(revoked: _ => consumer.Commit(Offsets(tp0, 7))));
+
+            consumer.Rebalance(new[] { tp0 });
+            consumer.Rebalance(Array.Empty<TopicPartition>());
+            consumer.Rebalance(new[] { tp0 });
+
+            Assert.Equal(new OffsetAndMetadata(7), consumer.Committed(new[] { tp0 })[tp0]);
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_FiresEachMethod()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        AsyncRecordingListener listener = new AsyncRecordingListener();
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0, tp1 }), s_deadline);
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+        await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }), s_deadline);
+
+        Assert.Equal(new[] { tp0, tp1 }, listener.Assigned[0].OrderBy(tp => tp.Partition).ToArray());
+        Assert.Empty(listener.Assigned[1]);
+        Assert.Equal(new[] { tp1 }, Assert.Single(listener.Revoked));
+        Assert.Equal(new[] { tp0 }, Assert.Single(listener.Lost));
+        Assert.Empty(consumer.Assignment());
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_RebalanceDoesNotAdvanceUntilItsTaskEnds()
+    {
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, new PendingAsyncListener(entered, release.Task)), s_deadline);
+
+        Task rebalance = consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+
+        Assert.True(entered.Wait(s_deadline), "the listener callback never fired");
+        await Task.WhenAny(rebalance, Task.Delay(s_notYetWindow));
+        Assert.False(
+            rebalance.IsCompleted,
+            "Rebalance completed while the listener's Task was still pending — the rebalance advanced early.");
+
+        release.SetResult(true);
+
+        await TestTimeout.Run(() => rebalance, s_deadline);
+        Assert.Equal(new[] { new TopicPartition(Topic, 0) }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_DoesNotBlockTheDrainThreadWhileItsTaskRuns()
+    {
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, new PendingAsyncListener(entered, release.Task)), s_deadline);
+        Task rebalance = consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+        try
+        {
+            Assert.True(entered.Wait(s_deadline), "the listener callback never fired");
+
+            Exception? other = await Record.ExceptionAsync(
+                () => TestTimeout.Run(() => consumer.Pause(new[] { new TopicPartition(Topic, 0) }), s_deadline));
+
+            Assert.False(rebalance.IsCompleted, "the rebalance ended before the listener's Task did");
+            InvalidOperationException rejected = Assert.IsType<InvalidOperationException>(other);
+            Assert.Equal("KafkaConsumer is not safe for multi-threaded access.", rejected.Message);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+
+        await TestTimeout.Run(() => rebalance, s_deadline);
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_RefusesOtherCallsWhileItRuns_ButNotWakeup()
+    {
+        const string concurrent = "KafkaConsumer is not safe for multi-threaded access.";
+        TopicPartition partition = new TopicPartition(Topic, 0);
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        IReadOnlyCollection<TopicPartition>? inside = null;
+        PendingAsyncListener listener = new PendingAsyncListener(entered, release.Task, async () =>
+        {
+            await consumer.Commit(Offsets(partition, 3));
+            inside = consumer.Assignment();
+        });
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        Task rebalance = consumer.Rebalance(new[] { partition });
+        try
+        {
+            Assert.True(entered.Wait(s_deadline), "the listener callback never fired");
+
+            InvalidOperationException close = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TestTimeout.RunOffThisThread(() => consumer.Close(), s_deadline));
+            Assert.Equal(concurrent, close.Message);
+            InvalidOperationException poll = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TestTimeout.RunOffThisThread(() => consumer.Poll(TimeSpan.Zero), s_deadline));
+            Assert.Equal(concurrent, poll.Message);
+            InvalidOperationException assignment = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TestTimeout.RunOffThisThread(
+                    () =>
+                    {
+                        consumer.Assignment();
+                        return Task.CompletedTask;
+                    },
+                    s_deadline));
+            Assert.Equal(concurrent, assignment.Message);
+            InvalidOperationException nested = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TestTimeout.RunOffThisThread(() => consumer.Rebalance(Array.Empty<TopicPartition>()), s_deadline));
+            Assert.Equal(concurrent, nested.Message);
+            consumer.Wakeup();
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+
+        await TestTimeout.Run(() => rebalance, s_deadline);
+        Assert.Equal(new[] { partition }, inside);
+        Assert.Equal(new[] { partition }, consumer.Assignment());
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
+            await TestTimeout.Run(() => consumer.Committed(new[] { partition }), s_deadline);
+        Assert.Equal(new OffsetAndMetadata(3), committed[partition]);
+        KafkaException woken = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
+        Assert.Equal(-18, woken.Code);
+        await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+    }
+
+    [Fact]
+    public async Task AsyncMock_ACommitInsideAnAsyncOnPartitionsRevoked_Succeeds()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        AsyncMockConsumer<byte[], byte[]> consumer =
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        try
+        {
+            await TestTimeout.Run(
+                () => consumer.Subscribe(new[] { Topic }, new AsyncDelegateListener(revoked: async _ =>
+                {
+                    await Task.Yield();
+                    await consumer.Commit(Offsets(tp0, 7));
+                })),
+                s_deadline);
+
+            await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+            await TestTimeout.Run(() => consumer.Rebalance(Array.Empty<TopicPartition>()), s_deadline);
+            await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+
+            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
+                await TestTimeout.Run(() => consumer.Committed(new[] { tp0 }), s_deadline);
+            Assert.Equal(new OffsetAndMetadata(7), committed[tp0]);
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.RunOffThisThread(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public async Task AsyncMock_LosePartitions_AwaitsAnAsyncListener_ThatReadsTheAssignment()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        AsyncMockConsumer<byte[], byte[]> consumer =
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        try
+        {
+            List<TopicPartition[]> lost = new List<TopicPartition[]>();
+            IReadOnlyCollection<TopicPartition>? inside = null;
+            await TestTimeout.Run(
+                () => consumer.Subscribe(new[] { Topic }, new AsyncDelegateListener(lost: async partitions =>
+                {
+                    await Task.Yield();
+                    lost.Add(partitions.ToArray());
+                    inside = consumer.Assignment();
+                })),
+                s_deadline);
+            await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0, tp1 }), s_deadline);
+
+            await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }), s_deadline);
+
+            Assert.Equal(new[] { tp0 }, Assert.Single(lost));
+            Assert.Equal(new[] { tp0, tp1 }, inside!.OrderBy(tp => tp.Partition).ToArray());
+            Assert.Equal(new[] { tp1 }, consumer.Assignment().ToArray());
+        }
+        finally
+        {
+            await TestTimeout.RunOffThisThread(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_FaultedTask_FaultsTheRebalanceWithTheSameInstance()
+    {
+        InvalidOperationException thrown = new InvalidOperationException("async assigned failed — 失敗");
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, new AsyncThrowingListener(thrown)), s_deadline);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline));
+
+        Assert.Same(thrown, exception);
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListener_CanceledTask_FaultsTheRebalanceWithTheCancellation()
+    {
+        OperationCanceledException thrown = new OperationCanceledException("async assigned canceled");
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, new AsyncThrowingListener(thrown)), s_deadline);
+
+        OperationCanceledException exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline));
+
+        Assert.Same(thrown, exception);
+    }
+
+    [Fact]
+    public async Task AsyncMock_AsyncListenerBase_LosePartitions_FallsBackToRevoked_JavasDefault()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        AsyncRecordingListenerBase listener = new AsyncRecordingListenerBase();
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0, new TopicPartition(Topic, 1) }), s_deadline);
+
+        await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }), s_deadline);
+
+        Assert.Equal(new[] { tp0 }, Assert.Single(listener.Revoked));
+    }
+
+    [Fact]
+    public async Task AsyncMock_Rebalance_OnAManuallyAssignedConsumer_FaultsWithTheJavaMessage()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+
+        ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+            () => TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline));
+
+        Assert.Equal(
+            "Attempt to dynamically assign partitions while manual assignment in use",
+            exception.Message);
+    }
+
+    [Fact]
+    public async Task AsyncMock_LosePartitions_ThrowsIfNotAssigned_WithTheJavaMessage()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }), s_deadline);
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TestTimeout.Run(() => consumer.LosePartitions(new[] { new TopicPartition(Topic, 1) }), s_deadline));
+
+        Assert.Equal(
+            "Cannot lose partitions that are not currently assigned: [rebalance-listener-topic-1]",
+            exception.Message);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public async Task AsyncConsumerRebalanceListenerBase_OnPartitionsLost_DelegatesToRevoked()
+    {
+        AsyncRecordingListenerBase listener = new AsyncRecordingListenerBase();
+        TopicPartition[] partitions = { new TopicPartition(Topic, 1) };
+
+        await listener.OnPartitionsLost(partitions);
+
+        Assert.Equal(partitions, Assert.Single(listener.Revoked));
+        Assert.Empty(listener.Assigned);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AsyncMock_Listener_RunsOnTheDrainThread(bool asyncListener)
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        ThreadRecordingListener listener = new ThreadRecordingListener();
+        await TestTimeout.Run(
+            () => asyncListener
+                ? consumer.Subscribe(new[] { Topic }, (IAsyncConsumerRebalanceListener)listener)
+                : consumer.Subscribe(new[] { Topic }, (IConsumerRebalanceListener)listener),
+            s_deadline);
+
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+
+        Assert.Equal("confluent-kafka-consumer-pump", Assert.Single(listener.ThreadNames));
+    }
+
+    [Fact]
+    public void SyncMock_Listener_RunsOnTheCallersThread()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        ThreadRecordingListener listener = new ThreadRecordingListener();
+        consumer.Subscribe(new[] { Topic }, listener);
+
+        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+
+        Assert.Equal(Environment.CurrentManagedThreadId, Assert.Single(listener.ThreadIds));
+    }
+
+    [Fact]
+    public void AsyncKafkaConsumer_ExposesTheAsyncListenerOverload()
+    {
+        Type[] parameters =
+        {
+            typeof(IReadOnlyCollection<string>),
+            typeof(IAsyncConsumerRebalanceListener),
+            typeof(CancellationToken),
+        };
+
+        Assert.NotNull(typeof(IAsyncConsumer<byte[], byte[]>).GetMethod(nameof(IAsyncConsumer<byte[], byte[]>.Subscribe), parameters));
+        Assert.NotNull(typeof(AsyncKafkaConsumer<byte[], byte[]>).GetMethod(nameof(AsyncKafkaConsumer<byte[], byte[]>.Subscribe), parameters));
+        Assert.NotNull(typeof(AsyncMockConsumer<byte[], byte[]>).GetMethod(nameof(AsyncMockConsumer<byte[], byte[]>.Subscribe), parameters));
+    }
 
     [Fact]
     public void Subscribe_NullTopics_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.Subscribe(null!, new RecordingListener()));
@@ -492,7 +845,8 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Subscribe_NullListener_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.Subscribe(new[] { Topic }, null!));
@@ -503,7 +857,8 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Subscribe_NullTopicName_ThrowsArgumentException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentException exception = Assert.Throws<ArgumentException>(
             () => consumer.Subscribe(new string?[] { null }!, new RecordingListener()));
@@ -516,7 +871,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     public void Subscribe_WithListener_AfterDispose_ThrowsObjectDisposedException()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(
             () => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
@@ -525,10 +880,23 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public async Task AsyncSubscribe_NullListener_ThrowsArgumentNullException()
     {
-        await using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
 
         ArgumentNullException exception = await Assert.ThrowsAsync<ArgumentNullException>(
-            () => consumer.Subscribe(new[] { Topic }, null!));
+            () => consumer.Subscribe(new[] { Topic }, (IConsumerRebalanceListener)null!));
+
+        Assert.Equal("listener", exception.ParamName);
+    }
+
+    [Fact]
+    public async Task AsyncSubscribe_NullAsyncListener_ThrowsArgumentNullException()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+
+        ArgumentNullException exception = await Assert.ThrowsAsync<ArgumentNullException>(
+            () => consumer.Subscribe(new[] { Topic }, (IAsyncConsumerRebalanceListener)null!));
 
         Assert.Equal("listener", exception.ParamName);
     }
@@ -536,7 +904,8 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_NullPartitions_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.Rebalance(null!));
@@ -544,8 +913,76 @@ public sealed class PublicConsumerRebalanceListenerTests
         Assert.Equal("partitions", exception.ParamName);
     }
 
-    // ---- Fixtures ----
+    private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(TopicPartition partition, long offset) =>
+        new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(offset) };
 
+    private static string Outcome(Func<string?> call)
+    {
+        try
+        {
+            string? result = call();
+            return result is null ? "ok" : "ok " + result;
+        }
+        catch (KafkaException e)
+        {
+            return "KafkaException " + e.Code + ": " + e.Message;
+        }
+        catch (Exception e)
+        {
+            return e.GetType().Name + ": " + e.Message;
+        }
+    }
+
+    private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
+        "[" + string.Join(", ", partitions.Select(tp => tp.Topic + "-" + tp.Partition)) + "]";
+
+    /// <summary>A listener that runs the actions it is given for revoked and assigned partitions.</summary>
+    private sealed class DelegateListener : IConsumerRebalanceListener
+    {
+        private readonly Action<IReadOnlyCollection<TopicPartition>>? _revoked;
+        private readonly Action<IReadOnlyCollection<TopicPartition>>? _assigned;
+
+        internal DelegateListener(
+            Action<IReadOnlyCollection<TopicPartition>>? revoked = null,
+            Action<IReadOnlyCollection<TopicPartition>>? assigned = null)
+        {
+            _revoked = revoked;
+            _assigned = assigned;
+        }
+
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => _revoked?.Invoke(partitions);
+
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _assigned?.Invoke(partitions);
+
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+    }
+
+    /// <summary>An async listener that runs the functions it is given for revoked and lost partitions.</summary>
+    private sealed class AsyncDelegateListener : IAsyncConsumerRebalanceListener
+    {
+        private readonly Func<IReadOnlyCollection<TopicPartition>, Task>? _revoked;
+        private readonly Func<IReadOnlyCollection<TopicPartition>, Task>? _lost;
+
+        internal AsyncDelegateListener(
+            Func<IReadOnlyCollection<TopicPartition>, Task>? revoked = null,
+            Func<IReadOnlyCollection<TopicPartition>, Task>? lost = null)
+        {
+            _revoked = revoked;
+            _lost = lost;
+        }
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
+            _revoked?.Invoke(partitions) ?? Task.CompletedTask;
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+            _lost?.Invoke(partitions) ?? Task.CompletedTask;
+    }
+
+    /// <summary>Records the partitions each listener method receives.</summary>
     private sealed class RecordingListener : IConsumerRebalanceListener
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
@@ -564,6 +1001,7 @@ public sealed class PublicConsumerRebalanceListenerTests
             Lost.Add(partitions.ToArray());
     }
 
+    /// <summary>Records the partitions each method receives, with the base's default for lost partitions.</summary>
     private sealed class RecordingListenerBase : ConsumerRebalanceListenerBase
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
@@ -577,35 +1015,37 @@ public sealed class PublicConsumerRebalanceListenerTests
             Assigned.Add(partitions.ToArray());
     }
 
+    /// <summary>A listener whose assigned method throws an InvalidOperationException.</summary>
     private sealed class ThrowingOnAssignedListener : IConsumerRebalanceListener
     {
-        private readonly string _message;
-
         internal ThrowingOnAssignedListener(string message)
         {
-            _message = message;
+            Thrown = new InvalidOperationException(message);
         }
+
+        internal InvalidOperationException Thrown { get; }
 
         public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
-            throw new InvalidOperationException(_message);
+            throw Thrown;
 
         public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
     }
 
+    /// <summary>A listener whose lost method throws an InvalidOperationException.</summary>
     private sealed class ThrowingOnLostListener : IConsumerRebalanceListener
     {
-        private readonly string _message;
-
         internal ThrowingOnLostListener(string message)
         {
-            _message = message;
+            Thrown = new InvalidOperationException(message);
         }
+
+        internal InvalidOperationException Thrown { get; }
 
         public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
@@ -616,15 +1056,146 @@ public sealed class PublicConsumerRebalanceListenerTests
         }
 
         public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
-            throw new InvalidOperationException(_message);
+            throw Thrown;
     }
 
-    /// <summary>
-    /// Signals that the callback was entered, then blocks inside it until released — the
-    /// fixture §31 #2 needs. It uses the same primitive production does (a plain synchronous
-    /// listener method invoked by the trampoline); nothing about the callback path is
-    /// substituted (DoD #12).
-    /// </summary>
+    /// <summary>An async listener that records, after a yield, the partitions each method receives.</summary>
+    private sealed class AsyncRecordingListener : IAsyncConsumerRebalanceListener
+    {
+        internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
+
+        internal List<TopicPartition[]> Assigned { get; } = new List<TopicPartition[]>();
+
+        internal List<TopicPartition[]> Lost { get; } = new List<TopicPartition[]>();
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Record(Revoked, partitions);
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Record(Assigned, partitions);
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Record(Lost, partitions);
+
+        private static async Task Record(List<TopicPartition[]> calls, IReadOnlyCollection<TopicPartition> partitions)
+        {
+            TopicPartition[] copied = partitions.ToArray();
+            await Task.Yield();
+            lock (calls)
+            {
+                calls.Add(copied);
+            }
+        }
+    }
+
+    /// <summary>An async listener with the base's default for lost partitions, recording after a yield.</summary>
+    private sealed class AsyncRecordingListenerBase : AsyncConsumerRebalanceListenerBase
+    {
+        internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
+
+        internal List<TopicPartition[]> Assigned { get; } = new List<TopicPartition[]>();
+
+        public override async Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            TopicPartition[] copied = partitions.ToArray();
+            await Task.Yield();
+            Revoked.Add(copied);
+        }
+
+        public override async Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            TopicPartition[] copied = partitions.ToArray();
+            await Task.Yield();
+            Assigned.Add(copied);
+        }
+    }
+
+    /// <summary>An async listener whose assigned method signals, then stays pending until released.</summary>
+    private sealed class PendingAsyncListener : IAsyncConsumerRebalanceListener
+    {
+        private readonly ManualResetEventSlim _entered;
+        private readonly Task _release;
+        private readonly Func<Task>? _afterRelease;
+
+        internal PendingAsyncListener(ManualResetEventSlim entered, Task release, Func<Task>? afterRelease = null)
+        {
+            _entered = entered;
+            _release = release;
+            _afterRelease = afterRelease;
+        }
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            _entered.Set();
+            return _afterRelease is null ? _release : ReleasedThenAfter();
+        }
+
+        private async Task ReleasedThenAfter()
+        {
+            await _release;
+            await _afterRelease!();
+        }
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+    }
+
+    /// <summary>An async listener whose assigned method throws, after a yield, the exception it is given.</summary>
+    private sealed class AsyncThrowingListener : IAsyncConsumerRebalanceListener
+    {
+        private readonly Exception _thrown;
+
+        internal AsyncThrowingListener(Exception thrown)
+        {
+            _thrown = thrown;
+        }
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public async Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            await Task.Yield();
+            throw _thrown;
+        }
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+    }
+
+    /// <summary>Records the name and id of the thread each assigned call runs on.</summary>
+    private sealed class ThreadRecordingListener : IConsumerRebalanceListener, IAsyncConsumerRebalanceListener
+    {
+        internal List<string?> ThreadNames { get; } = new List<string?>();
+
+        internal List<int> ThreadIds { get; } = new List<int>();
+
+        void IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+
+        void IConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Record();
+
+        void IConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+
+        Task IAsyncConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
+            Task.CompletedTask;
+
+        Task IAsyncConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            Record();
+            return Task.CompletedTask;
+        }
+
+        Task IAsyncConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+            Task.CompletedTask;
+
+        private void Record()
+        {
+            ThreadNames.Add(Thread.CurrentThread.Name);
+            ThreadIds.Add(Environment.CurrentManagedThreadId);
+        }
+    }
+
+    /// <summary>Signals that the callback was entered, then blocks inside it until released.</summary>
     private sealed class BlockingListener : IConsumerRebalanceListener
     {
         private readonly ManualResetEventSlim _entered;

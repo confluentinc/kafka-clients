@@ -85,7 +85,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public void AuthorizedOperations_TheGateDecidesNullVersusEmpty_NotTheCount()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         IntPtr result = SubmitAndCaptureCluster(admin);
 
         try
@@ -125,7 +126,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public void EveryValue_IsCopiedOut_AndSurvivesTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         IntPtr result = SubmitAndCaptureCluster(admin);
 
         DescribeClusterSnapshot snapshot;
@@ -254,7 +256,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public async Task ListConfigResources_WalksToACollection_CopiedOutBeforeTheRootDies()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         IntPtr result = SubmitAndCaptureConfigResources(admin, Array.Empty<int>());
 
         SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
@@ -291,7 +294,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public async Task ListConfigResources_PreservesTheAbisDeliveryOrder()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(3);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         IntPtr result = SubmitAndCaptureConfigResources(admin, Array.Empty<int>());
 
         List<ConfigResource> asDelivered = new List<ConfigResource>();
@@ -341,7 +345,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public void ListConfigResources_TheTypeFilterReachesTheAbi()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         List<ConfigResource> unfiltered = ReadAll(admin, Array.Empty<int>());
         List<ConfigResource> brokersOnly = ReadAll(admin, new[] { (int)ConfigResourceType.Broker });
@@ -370,7 +375,8 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public void ConfigResourceValue_RejectsTheOutOfRangeSentinel()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr empty = SubmitAndCaptureConfigResources(admin, new[] { (int)ConfigResourceType.Group });
         try

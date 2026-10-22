@@ -72,7 +72,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task CreateAcls_EveryBindingFaultsUnderItsOwnOwnedKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding[] bindings = { Binding("cp6-alpha"), Binding("cp6-beta"), Binding("cp6-gamma") };
 
@@ -95,7 +96,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterClientQuotas_EveryEntityFaultsUnderItsOwnOwnedKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity alpha = Entity("cp6-quota-alpha");
         ClientQuotaEntity beta = Entity("cp6-quota-beta");
@@ -172,7 +174,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task DeleteTopicsByIds_EachIdFaultsUnderItsOwnParsedKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Uuid first = new Uuid(11L, 22L);
         Uuid second = new Uuid(33L, 44L);
@@ -201,7 +204,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterReplicaLogDirs_EachReplicaFaultsUnderItsOwnThreeScalarKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -239,7 +243,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterPartitionReassignments_OnePartitionSucceeds_WhileAnotherFaults()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -272,7 +277,8 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task CreatePartitionsAndDeleteConsumerGroups_EachStringKeyFaultsIndependently()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreatePartitionsResult partitions = AsyncCreatePartitionsResult.From(admin.CreatePartitions(
             new Dictionary<string, NewPartitions>

@@ -13,16 +13,12 @@
 // limitations under the License.
 
 using System;
+using System.Threading;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Test-only <see cref="IDeserializer{T}"/> instruments for the M6/P1b typed-poll tests:
-/// they record whether / how the marshaller invoked them (invocation count, the span length
-/// they were handed, the thread they ran on) so the three-state null model, the
-/// <see cref="SerializationException"/> wrap, and the deserialize-thread can be asserted.
-/// Reads happen after an <c>await</c> (or on the same thread for the sync path), so plain
-/// fields suffice — the completion barrier publishes the dispatcher-thread writes.
+/// Wraps a deserializer and records its calls: how many, the length of the last span, and the thread of the last one.
 /// </summary>
 internal sealed class RecordingDeserializer<T> : IDeserializer<T>
 {
@@ -30,29 +26,25 @@ internal sealed class RecordingDeserializer<T> : IDeserializer<T>
 
     internal RecordingDeserializer(IDeserializer<T> inner) => _inner = inner;
 
-    /// <summary>How many times <see cref="Deserialize"/> was invoked (0 proves "not called").</summary>
     internal int InvocationCount { get; private set; }
 
-    /// <summary>The length of the last span handed in (0 = present-but-empty), or -1 if never called.</summary>
     internal int LastSpanLength { get; private set; } = -1;
 
-    /// <summary>The managed thread id of the last invocation (caller thread sync; dispatcher async).</summary>
     internal int LastThreadId { get; private set; }
+
+    internal string? LastThreadName { get; private set; }
 
     public T Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         InvocationCount++;
         LastSpanLength = data.Length;
         LastThreadId = Environment.CurrentManagedThreadId;
+        LastThreadName = Thread.CurrentThread.Name;
         return _inner.Deserialize(topic, data);
     }
 }
 
-/// <summary>
-/// A deserializer that always throws (after counting) — proves an absent field does NOT
-/// invoke the deserializer (PLAN decision C) and drives the mandatory
-/// <see cref="SerializationException"/> wrap (PLAN §6).
-/// </summary>
+/// <summary>A deserializer that counts its calls and always throws a <see cref="BoomException"/>.</summary>
 internal sealed class ThrowingDeserializer<T> : IDeserializer<T>
 {
     /// <summary>The distinctive exception this deserializer throws, asserted as the inner exception.</summary>
@@ -64,7 +56,6 @@ internal sealed class ThrowingDeserializer<T> : IDeserializer<T>
         }
     }
 
-    /// <summary>How many times <see cref="Deserialize"/> was invoked (0 proves "not called").</summary>
     internal int InvocationCount { get; private set; }
 
     public T Deserialize(string topic, ReadOnlySpan<byte> data)
@@ -75,17 +66,12 @@ internal sealed class ThrowingDeserializer<T> : IDeserializer<T>
 }
 
 /// <summary>
-/// An <see cref="IDeserializer{T}"/> of <see cref="int"/> that returns the span length and
-/// allocates nothing — used to prove the receive path is zero-copy (a large value decodes to
-/// a tiny <c>int</c> with no value-sized intermediate <c>byte[]</c>) and to observe the
-/// present-vs-empty span length.
+/// Returns the span's length without allocating, and records its calls and the last span's length.
 /// </summary>
 internal sealed class SpanLengthDeserializer : IDeserializer<int>
 {
-    /// <summary>How many times <see cref="Deserialize"/> was invoked.</summary>
     internal int InvocationCount { get; private set; }
 
-    /// <summary>The length of the last span handed in, or -1 if never called.</summary>
     internal int LastSpanLength { get; private set; } = -1;
 
     public int Deserialize(string topic, ReadOnlySpan<byte> data)
@@ -97,13 +83,11 @@ internal sealed class SpanLengthDeserializer : IDeserializer<int>
 }
 
 /// <summary>
-/// An <see cref="IDeserializer{T}"/> of <see cref="long"/>? over <see cref="Serdes.Int64"/>
-/// — makes a tombstone (absent value → <see langword="null"/>, deserializer not invoked)
-/// distinguishable from a present <c>0L</c> (PLAN decision C, the value-type guidance).
+/// Counts its calls over <see cref="Serdes.Int64"/>, so that a tombstone, <see langword="null"/>, differs from a
+/// present <c>0</c>.
 /// </summary>
 internal sealed class NullableInt64Deserializer : IDeserializer<long?>
 {
-    /// <summary>How many times <see cref="Deserialize"/> was invoked (0 for an absent value).</summary>
     internal int InvocationCount { get; private set; }
 
     public long? Deserialize(string topic, ReadOnlySpan<byte> data)

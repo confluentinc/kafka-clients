@@ -57,7 +57,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     [Fact]
     public async Task DeleteConsumerGroups_SurfacesTheMocksDocumentedRefusal_PerGroup()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b" });
 
@@ -82,7 +83,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     public async Task DeleteConsumerGroups_ThrowsAfterDispose()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroups(new[] { "p5-disposed" }));
     }
@@ -91,7 +92,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     [Fact]
     public void DeleteConsumerGroups_NullGroupIds_ThrowsArgumentNullException()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DeleteConsumerGroups(null!));
     }

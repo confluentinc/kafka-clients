@@ -14,6 +14,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -23,150 +27,368 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Category-1 owned-handle lifecycle over <c>SafeConsumerHandle</c> (ffi §B2):
-/// create → assert valid → graceful <c>Dispose</c> (close → destroy)
-/// → no crash. Double-dispose is safe; use-after-dispose throws
-/// <see cref="ObjectDisposedException"/>. A broker-less close that blocks fails
-/// fast via <see cref="TestTimeout"/> rather than hanging the run.
-///
-/// Also pins the M2/P2 SafeHandle-return failure path: a null native return from
-/// <c>KafkaConsumer_new</c> yields an <b>IsInvalid</b> <see cref="SafeConsumerHandle"/>
-/// whose <c>Dispose</c> skips <c>ReleaseHandle</c> (no spurious <c>Consumer_destroy</c>),
-/// while the accompanying <c>out_error</c> still round-trips through
-/// <c>KafkaException.FromHandle</c>.
+/// Tests the consumer handle's lifetime: create and dispose, the teardown order (refuse new calls, wait for the calls
+/// in flight, close, destroy on the closing thread), the failed construction, and the leak warning of a consumer never
+/// closed.
 /// </summary>
 public sealed class SafeConsumerHandleTests
 {
-    // A blocked broker-less close must surface as a test failure quickly, not hang.
-    // ⚠ Since D2 (M17/P2) the sync Dispose closes through Consumer_close, bounded by the
-    // core's 30 s default (was 5 s), so this deadline now EQUALS that bound — kept, not
-    // raised: these consumers (mocks, and one real consumer that never joins a group) have
-    // nothing for the graceful close to wait on and return in milliseconds. A close that
-    // ran to its 30 s bound is itself the regression here, and it lands at or past this
-    // deadline rather than safely inside it.
-    private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
-
-    // The Kafka protocol code for UNSUPPORTED_VERSION (org.apache.kafka Errors),
-    // which the core's classic-group-protocol rejection carries (PLAN D1).
     private const int UnsupportedVersionCode = 35;
 
-    private static Dictionary<string, string> ValidConsumerConfig() => new()
-    {
-        ["bootstrap.servers"] = "localhost:9092",
-        ["group.protocol"] = "consumer",
-    };
+    private const int HandleRaceRounds = 200;
+
+    private const int HandleRaceCreators = 4;
+
+    private const string ClassicProtocolMessage =
+        "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848).";
+
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public void MockConsumer_CreateThenDispose_HandleValidThenReleased()
+    public void MockConsumer_Create_ThenDispose_DestroysOnTheClosingThread()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+        Assert.IsType<SafeMockConsumerHandle>(handle);
+        Assert.False(handle.IsInvalid);
+        DestroyProbe probe = DestroyProbe.Attach(handle);
 
-        Assert.False(consumer.Handle.IsInvalid);
+        Thread closer = RunOnThread(consumer.Dispose);
 
-        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+        Assert.True(handle.IsClosed);
+        Assert.Equal(1, probe.Count);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
     }
 
     [Fact]
-    public void KafkaConsumer_CreateThenDispose_HandleValidThenReleased()
+    public void KafkaConsumer_Create_ThenDispose_DestroysOnTheClosingThread()
     {
-        // A real KIP-848 consumer is constructed broker-free; the graceful close
-        // (close → destroy) must return without a broker present.
-        NativeConsumer consumer = NativeConsumer.Create(ValidConsumerConfig());
+        NativeConsumer consumer = NativeConsumer.Create(Config());
+        SafeConsumerHandle handle = consumer.Handle;
+        Assert.IsType<SafeKafkaConsumerHandle>(handle);
+        Assert.False(handle.IsInvalid);
+        DestroyProbe probe = DestroyProbe.Attach(handle);
 
-        Assert.False(consumer.Handle.IsInvalid);
+        Thread closer = RunOnThread(consumer.Dispose);
 
-        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+        Assert.True(handle.IsClosed);
+        Assert.Equal(1, probe.Count);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
     }
 
     [Fact]
-    public void Dispose_CalledTwice_IsSafe()
+    public void KafkaConsumer_Close_DestroysOnTheClosingThread_ThenDisposeIsSafe()
     {
-        NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.Create(Config());
+        SafeConsumerHandle handle = consumer.Handle;
+        DestroyProbe probe = DestroyProbe.Attach(handle);
 
-        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+        Thread closer = RunOnThread(consumer.CloseSync);
+        Assert.True(handle.IsClosed);
+        Assert.Equal(1, probe.Count);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
 
-        // The second dispose is a no-op (guarded by the disposed flag) — no double
-        // close, no double destroy, no throw.
-        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+        TestTimeout.Run(consumer.CloseSync, s_deadline);
+        Assert.Equal(1, probe.Count);
     }
 
     [Fact]
-    public void Handle_AccessedAfterDispose_ThrowsObjectDisposedException()
+    public void Dispose_CalledTwice_DestroysOnce()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
-        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+        DestroyProbe probe = DestroyProbe.Attach(consumer.Handle);
 
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+
+        Assert.Equal(1, probe.Count);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ThenDispose_DestroysOnce()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        DestroyProbe probe = DestroyProbe.Attach(consumer.Handle);
+
+        await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+
+        Assert.Equal(1, probe.Count);
         Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+    }
+
+    [Fact]
+    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+
+        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Equal(nameof(NativeConsumer), failure.ObjectName);
+    }
+
+    [Fact]
+    public void Getters_AfterDispose_ThrowObjectDisposedException_AndWakeupIsANoOp()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+
+        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+        Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
+        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        consumer.Wakeup();
     }
 
     [Fact]
     public void CreateAndDisposeMany_MockConsumers_NoLeakOrCrash()
     {
-        // Baseline churn: repeated create/dispose must not crash or leak handles.
         for (int i = 0; i < 100; i++)
         {
             NativeConsumer consumer = NativeConsumer.CreateMock();
             Assert.False(consumer.Handle.IsInvalid);
-            consumer.Dispose();
+            TestTimeout.Run(consumer.Dispose, s_deadline);
         }
     }
 
     [Fact]
-    public void KafkaConsumerNew_ClassicProtocol_ReturnsInvalidHandleAndError_DisposeSkipsRelease()
+    public void Create_WithTheClassicProtocol_ThrowsTheCoreError()
     {
-        // M2/P2 KEY REGRESSION. The classic group protocol is unsupported (PLAN D1),
-        // so kafka_consumer_KafkaConsumer_new returns a null native pointer. The
-        // SafeHandle-return marshaller then hands back an IsInvalid SafeConsumerHandle
-        // AND writes a non-null out_error — the fallible contract is preserved.
-        //
-        // Disposing an IsInvalid SafeHandle must SKIP ReleaseHandle (so no spurious
-        // Consumer_destroy is called on a null pointer), and the out_error must still
-        // round-trip through the flat KafkaException. Driven in a loop so a double
-        // free / leak / crash on this path would corrupt the allocator and fail.
-        var config = new Dictionary<string, string>
-        {
-            ["bootstrap.servers"] = "localhost:9092",
-            ["group.protocol"] = "classic",
-        };
+        Dictionary<string, string> config = Config();
+        config["group.protocol"] = "classic";
 
         for (int i = 0; i < 50; i++)
         {
-            SafeConsumerHandle handle;
-            IntPtr outError;
-
-            SafeConsumerPropertiesHandle props = SafeConsumerPropertiesHandle.Create();
-            try
-            {
-                foreach (KeyValuePair<string, string> entry in config)
-                {
-                    using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                    using Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                    NativeMethods.ConsumerPropertiesPut(props.DangerousGetHandle(), key.Pointer, value.Pointer);
-                }
-
-                // Return type is SafeConsumerHandle: the marshaller created-and-set it
-                // atomically, so a null native return arrives as an IsInvalid handle.
-                handle = NativeMethods.KafkaConsumerNew(props, out outError);
-            }
-            finally
-            {
-                props.Dispose();
-            }
-
-            Assert.True(handle.IsInvalid);
-            Assert.NotEqual(IntPtr.Zero, outError);
-
-            // Disposing an IsInvalid handle is a no-op for ReleaseHandle → no
-            // Consumer_destroy on a null pointer. No crash, no double-free.
-            handle.Dispose();
-
-            // The fallible contract's error still round-trips (classic-protocol
-            // message / retriable flag), freed exactly once by FromHandle.
-            KafkaException? failure = KafkaException.FromHandle(outError);
-            Assert.NotNull(failure);
-            Assert.Equal(UnsupportedVersionCode, failure!.Code);
+            KafkaException failure = Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
+            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.False(failure.IsRetriable);
-            Assert.Contains("Classic group protocol", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(ClassicProtocolMessage, failure.Message);
+        }
+    }
+
+    [Fact]
+    public void CreateMock_WithAnUnknownResetStrategy_ThrowsTheCoreError()
+    {
+        ArgumentException failure = Assert.Throws<ArgumentException>(() => NativeConsumer.CreateMock("nowhere"));
+        Assert.Equal("Unknown auto offset reset strategy: nowhere", failure.Message);
+    }
+
+    [Fact]
+    public void Dispose_WaitsForACallInFlight_ThenDestroysOnTheClosingThread()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+        DestroyProbe probe = DestroyProbe.Attach(handle);
+        int owner = EnterUse(consumer);
+
+        Exception? closeFailure = null;
+        Thread closer = new Thread(() => closeFailure = Record(consumer.Dispose));
+        closer.Start();
+        Assert.True(SpinWait.SpinUntil(() => (closer.ThreadState & ThreadState.WaitSleepJoin) != 0, s_deadline));
+
+        Assert.False(closer.Join(TimeSpan.FromMilliseconds(200)));
+        Assert.False(handle.IsClosed);
+        Assert.Equal(0, probe.Count);
+        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+
+        ExitUse(consumer, owner);
+
+        Assert.True(closer.Join(s_deadline));
+        Assert.Null(closeFailure);
+        Assert.True(handle.IsClosed);
+        Assert.Equal(1, probe.Count);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
+    }
+
+    [Fact]
+    public void Close_WaitsForACallInFlight_ThenDestroysOnTheClosingThread()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+        DestroyProbe probe = DestroyProbe.Attach(handle);
+        int owner = EnterUse(consumer);
+
+        Exception? closeFailure = null;
+        Thread closer = new Thread(() => closeFailure = Record(consumer.CloseSync));
+        closer.Start();
+        Assert.True(SpinWait.SpinUntil(() => (closer.ThreadState & ThreadState.WaitSleepJoin) != 0, s_deadline));
+
+        Assert.False(closer.Join(TimeSpan.FromMilliseconds(200)));
+        Assert.False(handle.IsClosed);
+        Assert.Equal(0, probe.Count);
+        Assert.Empty(consumer.Subscription());
+
+        ExitUse(consumer, owner);
+
+        Assert.True(closer.Join(s_deadline));
+        Assert.Null(closeFailure);
+        Assert.True(handle.IsClosed);
+        Assert.Equal(1, probe.Count);
+        Assert.Equal(closer.ManagedThreadId, probe.ThreadId);
+    }
+
+    [Fact]
+    public void Dispose_WhileOtherThreadsCreateReentrancyHandles_DestroysOnTheClosingThreadBeforeItReturns()
+    {
+        for (int round = 0; round < HandleRaceRounds; round++)
+        {
+            NativeConsumer consumer = NativeConsumer.CreateMock(withPump: false);
+            DestroyProbe probe = DestroyProbe.Attach(consumer.Handle);
+            int started = 0;
+            Exception? creatorFailure = null;
+            Thread[] creators = new Thread[HandleRaceCreators];
+            for (int i = 0; i < creators.Length; i++)
+            {
+                creators[i] = new Thread(() =>
+                {
+                    Interlocked.Increment(ref started);
+                    try
+                    {
+                        while (true)
+                        {
+                            consumer.CreateReentrancyHandle().Dispose();
+                        }
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                    catch (Exception e)
+                    {
+                        Interlocked.CompareExchange(ref creatorFailure, e, null);
+                    }
+                });
+                creators[i].IsBackground = true;
+                creators[i].Start();
+            }
+
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref started) == creators.Length, s_deadline));
+            Thread.SpinWait(500 + ((round % 7) * 300));
+
+            consumer.Dispose();
+            int destroysWhenDisposeReturned = probe.Count;
+            int destroyThread = probe.ThreadId;
+
+            foreach (Thread creator in creators)
+            {
+                Assert.True(creator.Join(s_deadline));
+            }
+
+            Assert.Null(creatorFailure);
+            Assert.Equal(1, destroysWhenDisposeReturned);
+            Assert.Equal(Environment.CurrentManagedThreadId, destroyThread);
+        }
+    }
+
+    [Fact]
+    public void Finalization_LeaksWithOneWarning()
+    {
+        using TraceCapture trace = TraceCapture.Start();
+
+        (WeakReference handle, DestroyProbe probe, string marker) = Abandon();
+        for (int attempt = 0; attempt < 10 && trace.LinesContaining(marker).Count == 0; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(handle.IsAlive);
+        string line = Assert.Single(trace.LinesContaining(marker));
+        Assert.Contains(
+            "Confluent.Kafka: " + marker + " was released without Close or Dispose; the native client is leaked.",
+            line,
+            StringComparison.Ordinal);
+        Assert.Equal(0, probe.Count);
+    }
+
+    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    {
+        ["bootstrap.servers"] = "localhost:9092",
+        ["group.protocol"] = "consumer",
+    };
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Handle, DestroyProbe Probe, string Marker) Abandon()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+        DestroyProbe probe = DestroyProbe.Attach(handle);
+        bool added = false;
+        IntPtr classPointer = handle.DangerousAddRefClass(ref added);
+        handle.DangerousRelease();
+        string marker = nameof(SafeMockConsumerHandle) + " 0x" + classPointer.ToInt64().ToString("X");
+        return (new WeakReference(handle), probe, marker);
+    }
+
+    private static Thread RunOnThread(Action action)
+    {
+        Exception? failure = null;
+        Thread thread = new Thread(() => failure = Record(action));
+        thread.Start();
+        Assert.True(thread.Join(s_deadline));
+        Assert.Null(failure);
+        return thread;
+    }
+
+    private static Exception? Record(Action action)
+    {
+        try
+        {
+            action();
+            return null;
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+    }
+
+    private static int EnterUse(NativeConsumer consumer)
+    {
+        Type kind = typeof(NativeConsumer).GetNestedType("UseKind", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(nameof(NativeConsumer) + " has no UseKind.");
+        return (int)Method("EnterUse").Invoke(consumer, new[] { Enum.Parse(kind, "Owned"), (object)0 })!;
+    }
+
+    private static void ExitUse(NativeConsumer consumer, int owner) =>
+        Method("ExitUse").Invoke(consumer, new object[] { owner });
+
+    private static MethodInfo Method(string name) =>
+        typeof(NativeConsumer).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException(nameof(NativeConsumer) + " has no method " + name + ".");
+
+    /// <summary>
+    /// Records how often, and on which thread, the handle ran the action it runs after its destroy. Only the
+    /// handle holds that action, so a test holding the probe does not keep the consumer alive.
+    /// </summary>
+    private sealed class DestroyProbe
+    {
+        private int _count;
+
+        internal int Count => Volatile.Read(ref _count);
+
+        internal int ThreadId { get; private set; }
+
+        internal static DestroyProbe Attach(SafeConsumerHandle handle)
+        {
+            FieldInfo field = typeof(SafeConsumerHandle).GetField("_afterDestroy", BindingFlags.NonPublic | BindingFlags.Instance)
+                ?? throw new InvalidOperationException(nameof(SafeConsumerHandle) + " has no field _afterDestroy.");
+            Action? release = (Action?)field.GetValue(handle);
+            DestroyProbe probe = new DestroyProbe();
+            handle.ReleaseAfterDestroy(() =>
+            {
+                probe.Record();
+                release?.Invoke();
+            });
+            return probe;
+        }
+
+        private void Record()
+        {
+            ThreadId = Environment.CurrentManagedThreadId;
+            Interlocked.Increment(ref _count);
         }
     }
 }

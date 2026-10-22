@@ -18,55 +18,27 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The <b>synchronous</b> Kafka consumer surface — the blocking mirror of
-/// <see cref="IAsyncConsumer{TKey, TValue}"/> and the most Java-faithful shape (Java's
-/// <c>org.apache.kafka.clients.consumer.Consumer</c> is synchronous). Implemented by
-/// <see cref="KafkaConsumer{TKey, TValue}"/> (the real KIP-848 client) and <see cref="MockConsumer{TKey, TValue}"/>
-/// (a broker-free test helper). The blocking-in-Java operations return their result
-/// directly (or <see langword="void"/>) instead of a <see cref="System.Threading.Tasks.Task"/>;
-/// the genuinely non-blocking members stay on the shared <see cref="IConsumerCommon"/>.
+/// The synchronous Kafka consumer, Java's <c>org.apache.kafka.clients.consumer.Consumer&lt;K, V&gt;</c>, implemented
+/// by <see cref="KafkaConsumer{TKey, TValue}"/> and the broker-free <see cref="MockConsumer{TKey, TValue}"/>.
+/// <see cref="IAsyncConsumer{TKey, TValue}"/> is its asynchronous sibling over the same native consumer, not a
+/// wrapper. A method that blocks in Java blocks here; the non-blocking members are on <see cref="IConsumerCommon"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Sibling of the async surface, not a wrapper.</b> Each method calls the synchronous
-/// C ABI <b>directly</b>; the core's blocking call parks the caller's thread inside the
-/// Rust multi-thread runtime (deadlock-free), so this is not sync-over-async and does not
-/// route through <see cref="IAsyncConsumer{TKey, TValue}"/>. The two families are siblings over the same
-/// native consumer. This is the shape Java users expect (a blocking <c>poll</c> /
-/// <c>commitSync</c>), reconstructed in C#.
+/// There is no cancellation token, as in Java: <see cref="IConsumerCommon.Wakeup"/> from another thread makes a
+/// blocked <see cref="Poll"/>, <c>Commit</c>, <c>Position</c>, <c>Committed</c>, <c>PartitionsFor</c> or
+/// <c>ListTopics</c> throw a <see cref="KafkaException"/> with the Wakeup code, once.
 /// </para>
 /// <para>
-/// <b>No <see cref="System.Threading.CancellationToken"/>.</b> Interruption is via
-/// <see cref="IConsumerCommon.Wakeup"/> only (Java-faithful): a <see cref="IConsumerCommon.Wakeup"/> from
-/// another thread makes a blocked <see cref="Poll"/> throw a <see cref="KafkaException"/>
-/// (Wakeup, one-shot — thrown once, then the consumer is reusable). <see cref="IConsumerCommon.Wakeup"/> is
-/// the one member deliberately callable from another thread.
+/// The consumer has one owner at a time, as Java's does. A call from another thread while a call is in progress
+/// throws <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for multi-threaded access.");
+/// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> and
+/// <see cref="IConsumerCommon.Handle"/> may be called from any thread, and a <see cref="IDisposable.Dispose"/> from
+/// another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
-/// <b>Single-owner / not thread-safe.</b> At most one operation in flight; concurrency is
-/// serialized by the Rust core (a concurrent op surfaces a <see cref="KafkaException"/>
-/// with a ConcurrentModification code, a concurrent sync state read on
-/// <see cref="IConsumerCommon"/> throws <see cref="InvalidOperationException"/>). Do not
-/// share one instance across threads without external synchronization — except the
-/// canonical <see cref="IConsumerCommon.Wakeup"/> pattern (thread A blocked in <see cref="Poll"/>, thread B
-/// wakes it).
-/// </para>
-/// <para>
-/// <b>Additive-growth surface.</b> Grown across two sub-phases: the core loop (subscribe /
-/// assign / poll / seek / pause / resume / position / commit / close) shipped in M5/P8a, and
-/// the query family (<see cref="Committed"/> / <see cref="OffsetsForTimes"/> /
-/// <see cref="BeginningOffsets"/> / <see cref="EndOffsets"/> / <see cref="PartitionsFor"/> /
-/// <see cref="ListTopics"/>) added <b>additively</b> in M5/P8b. Both mirror Java's
-/// synchronous <c>Consumer</c>. The binding is pre-publish with no external implementers, so
-/// the interface can grow additively without a breaking change.
-/// </para>
-/// <para>
-/// <b>Generic-only (PLAN M6/P1b, decision B).</b> Java has a single generic
-/// <c>Consumer&lt;K, V&gt;</c>; this binding matches — there is no non-generic
-/// <c>IConsumer</c>. Bytes users write <c>IConsumer&lt;byte[], byte[]&gt;</c> (paired with
-/// <see cref="Serdes.ByteArray"/>). Only <see cref="Poll"/> is <typeparamref name="TKey"/> /
-/// <typeparamref name="TValue"/>-typed; every other member is K/V-free and inherited
-/// unchanged from the non-generic <see cref="IConsumerCommon"/> or restated here verbatim.
+/// Rebalance listeners and commit callbacks run on the calling thread, inside the blocking call that delivers
+/// them. What a callback may call on its own consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
@@ -74,23 +46,24 @@ namespace Confluent.Kafka;
 public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
 {
     /// <summary>
-    /// Polls for records (Java <c>poll(Duration)</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="ConsumerRecords{TKey, TValue}"/> (a non-null result with <see cref="ConsumerRecords{TKey, TValue}.Count"/>
-    /// <c>== 0</c> for an empty poll), or throws a <see cref="KafkaException"/> on failure. The
-    /// record bytes are owned copies (ffi-marshalling.md §6.4); nothing native-backed escapes.
-    /// A <see cref="IConsumerCommon.Wakeup"/> from another thread interrupts a blocked poll
-    /// (throws a Wakeup <see cref="KafkaException"/> once, then the consumer is reusable).
+    /// Polls for records (Java <c>poll(Duration)</c>). An empty poll returns an empty
+    /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The records own copies of their
+    /// bytes.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a poll failure (or a <see cref="IConsumerCommon.Wakeup"/> interrupted it).</exception>
+    /// <exception cref="RecordDeserializationException">
+    /// The first record of the batch failed to deserialize. A record that fails after others is not thrown: the
+    /// records before it are returned. Either way the partitions are sought back to their first record not
+    /// returned.
+    /// </exception>
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);
 
     /// <summary>
-    /// Subscribes to <paramref name="topics"/> (Java <c>subscribe(Collection)</c>) — blocks
-    /// until the subscription is applied.
+    /// Subscribes to <paramref name="topics"/> (Java <c>subscribe(Collection)</c>).
     /// </summary>
     /// <param name="topics">The topics to subscribe to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
@@ -100,27 +73,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
 
     /// <summary>
     /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
-    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — blocks until the
-    /// subscription is applied. The listener then fires on every subsequent rebalance until
-    /// the registration is replaced.
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). The listener fires on every later rebalance
+    /// until a subscribe that succeeds replaces it.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Java has two <c>subscribe</c> overloads and C#'s idiom is overloads, so this is an
-    /// overload rather than an optional parameter (declared divergence D2; Python's
-    /// <c>listener=None</c> is a Python idiom, not the Java shape).
-    /// </para>
-    /// <para>
-    /// <b>Registration lifetime.</b> A <b>replacing</b> subscribe releases the previous
-    /// listener — including the listener-less
-    /// <see cref="Subscribe(IReadOnlyCollection{string})"/>, which is how you deregister —
-    /// as does disposing the consumer. <see cref="Unsubscribe"/> and <c>Close</c> deliberately
-    /// keep it, matching Java's <c>SubscriptionState.unsubscribe()</c>.
-    /// </para>
-    /// <para>
-    /// See <see cref="IConsumerRebalanceListener"/> for the threading contract, the
-    /// consequence of throwing, and why a listener must not call back into its own consumer.
-    /// </para>
+    /// A replacing subscribe releases the previous listener, a listener-less
+    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does disposing the consumer.
+    /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
+    /// may call on its own consumer.
     /// </remarks>
     /// <param name="topics">The topics to subscribe to.</param>
     /// <param name="listener">The rebalance listener to register.</param>
@@ -131,19 +92,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener);
 
     /// <summary>
-    /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>) — blocks until
-    /// applied.
+    /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>).
     /// </summary>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     void Unsubscribe();
 
     /// <summary>
-    /// Manually assigns <paramref name="partitions"/> to this consumer (Java
-    /// <c>assign(Collection)</c>) — blocks until applied.
+    /// Manually assigns <paramref name="partitions"/> to this consumer (Java <c>assign(Collection)</c>).
     /// </summary>
     /// <remarks>
-    /// An <b>empty</b> collection <b>clears</b> the assignment (Java parity); a
-    /// <see langword="null"/> collection is rejected (null ≠ empty).
+    /// An empty collection clears the assignment, as Java's <c>assign</c> does; a <see langword="null"/> one is
+    /// rejected.
     /// </remarks>
     /// <param name="partitions">The topic-partitions to assign (an empty collection clears the assignment).</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
@@ -154,37 +113,38 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
-    /// Suspends fetching for <paramref name="partitions"/> (Java <c>pause(Collection)</c>) —
-    /// blocks until applied. The paused set is observable via <see cref="IConsumerCommon.Paused"/>.
+    /// Suspends fetching for <paramref name="partitions"/> (Java <c>pause(Collection)</c>); the paused set is
+    /// read with <see cref="IConsumerCommon.Paused"/>.
     /// </summary>
-    /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
+    /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to pause.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a pause failure (e.g. an unassigned partition).</exception>
+    /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
+    /// <exception cref="KafkaException">The core reported a pause failure.</exception>
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
     /// Resumes fetching for <paramref name="partitions"/> paused by <see cref="Pause"/> (Java
-    /// <c>resume(Collection)</c>) — blocks until applied.
+    /// <c>resume(Collection)</c>).
     /// </summary>
-    /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
+    /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to resume.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a resume failure (e.g. an unassigned partition).</exception>
+    /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
+    /// <exception cref="KafkaException">The core reported a resume failure.</exception>
     void Resume(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
     /// Seeks <paramref name="partitions"/> to their first available offset (Java
-    /// <c>seekToBeginning(Collection)</c>) — blocks until applied. Under KIP-848 this requests
-    /// an <c>earliest</c> offset reset resolved lazily on the next <see cref="Poll"/>.
+    /// <c>seekToBeginning(Collection)</c>). The offset is resolved on the next <see cref="Poll"/>.
     /// </summary>
-    /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
+    /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to seek to the beginning.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
@@ -194,11 +154,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
-    /// Seeks <paramref name="partitions"/> to their last offset (Java <c>seekToEnd(Collection)</c>)
-    /// — blocks until applied. Under KIP-848 this requests a <c>latest</c> offset reset resolved
-    /// lazily on the next <see cref="Poll"/>.
+    /// Seeks <paramref name="partitions"/> to their last offset (Java <c>seekToEnd(Collection)</c>). The offset
+    /// is resolved on the next <see cref="Poll"/>.
     /// </summary>
-    /// <remarks>An <b>empty</b> collection is a no-op success.</remarks>
+    /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to seek to the end.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
@@ -208,47 +167,66 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
-    /// Returns the current offset position of <paramref name="partition"/> (Java
-    /// <c>position(TopicPartition)</c>) — blocks and returns the offset, or throws a
-    /// <see cref="KafkaException"/> on failure (the canonical broker-free failure is a query
-    /// for an <b>unassigned</b> partition).
+    /// Returns the offset of the next record that will be fetched from <paramref name="partition"/> (Java
+    /// <c>position(TopicPartition)</c>).
     /// </summary>
-    /// <remarks>
-    /// No <c>TimeSpan</c> overload this phase — Java's timed <c>position(TopicPartition, Duration)</c>
-    /// is deferred until the C ABI exposes a timed variant (the <see cref="Close()"/> precedent).
-    /// </remarks>
     /// <param name="partition">The topic-partition whose position to read.</param>
     /// <returns>The current offset position of <paramref name="partition"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
+    /// <exception cref="ArgumentException"><paramref name="partition"/> is not assigned to the consumer.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a position failure (e.g. an unassigned partition).</exception>
+    /// <exception cref="KafkaException">The core reported a position failure.</exception>
     long Position(TopicPartition partition);
 
     /// <summary>
-    /// Commits the current fetch positions for all assigned partitions (Java <c>commitSync()</c>)
-    /// — the <b>confirming</b> commit; blocks until the commit lands, or throws a
-    /// <see cref="KafkaException"/> on failure.
+    /// Returns the current offset position of <paramref name="partition"/>, blocking at most
+    /// <paramref name="timeout"/> (Java <c>position(TopicPartition, Duration)</c>).
     /// </summary>
-    /// <remarks>
-    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync()"/> (Java
-    /// <c>commitAsync()</c>): this one confirms. No <c>TimeSpan</c> overload this phase
-    /// (Python-parity scope); Java's timed <c>commitSync(Duration)</c> is deferred.
-    /// </remarks>
+    /// <param name="partition">The topic-partition whose position to read.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The current offset position of <paramref name="partition"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="partition"/>'s partition is negative, or <paramref name="timeout"/> is negative
+    /// ("Invalid negative timeout &lt;ms&gt;").
+    /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="partition"/> is not assigned to the consumer.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The position could not be determined within <paramref name="timeout"/> (code 7), or the core reported another
+    /// position failure.
+    /// </exception>
+    long Position(TopicPartition partition, TimeSpan timeout);
+
+    /// <summary>
+    /// Commits the current fetch positions for all assigned partitions and waits for the commit (Java
+    /// <c>commitSync()</c>). <see cref="CommitAsync()"/> is Java's <c>commitAsync()</c>, which does not wait.
+    /// </summary>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit();
 
     /// <summary>
-    /// Commits the specific <paramref name="offsets"/> (Java
-    /// <c>commitSync(Map&lt;TopicPartition, OffsetAndMetadata&gt;)</c>) — the <b>confirming</b>
-    /// commit with explicit offsets; blocks until the commit lands, or throws a
-    /// <see cref="KafkaException"/> on failure.
+    /// Commits the current fetch positions for all assigned partitions, blocking at most
+    /// <paramref name="timeout"/> (Java <c>commitSync(Duration)</c>).
     /// </summary>
-    /// <remarks>
-    /// Construct each <see cref="OffsetAndMetadata"/> via its public constructor. An
-    /// <b>empty</b> map commits nothing (a valid no-op, not a fault).
-    /// </remarks>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
+    /// failure.
+    /// </exception>
+    void Commit(TimeSpan timeout);
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/> (Java
+    /// <c>commitSync(Map&lt;TopicPartition, OffsetAndMetadata&gt;)</c>) and waits for the commit. An empty map
+    /// commits nothing.
+    /// </summary>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
@@ -258,48 +236,176 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
 
     /// <summary>
-    /// Returns the last committed offset for each of <paramref name="partitions"/> (Java
-    /// <c>committed(Set&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}"/>, or throws a
-    /// <see cref="KafkaException"/> on failure. Partitions with no committed offset are
-    /// <b>omitted</b> from the result (an empty dictionary if none are committed).
+    /// Commits the specific <paramref name="offsets"/>, blocking at most <paramref name="timeout"/>
+    /// (Java <c>commitSync(Map&lt;TopicPartition, OffsetAndMetadata&gt;, Duration)</c>).
+    /// </summary>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// A key partition is negative, or <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
+    /// failure.
+    /// </exception>
+    void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout);
+
+    /// <summary>
+    /// Commits the current fetch positions without waiting for the commit (Java <c>commitAsync()</c>):
+    /// returns once the commit is started.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="KafkaException">The core could not start the commit.</exception>
+    void CommitAsync();
+
+    /// <summary>
+    /// Commits the current fetch positions without waiting for the commit, and runs <paramref name="callback"/>
+    /// with its outcome (Java <c>commitAsync(OffsetCommitCallback)</c>): returns once the commit is started.
     /// </summary>
     /// <remarks>
-    /// No <c>TimeSpan</c> overload this phase — Java's timed
-    /// <c>committed(Set, Duration)</c> is deferred until the C ABI exposes a timed variant.
+    /// The callback runs on the calling thread, inside a later call that delivers it (<c>Poll</c>, <c>Commit</c>,
+    /// <c>CommitAsync</c>, <c>Close</c>, …). An exception this method throws means the commit never started; the
+    /// commit's own outcome reaches <paramref name="callback"/>. A <see langword="null"/> callback, which Java
+    /// accepts, is rejected: <see cref="CommitAsync()"/> commits without one.
     /// </remarks>
+    /// <param name="callback">The callback that receives the commit's outcome.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="callback"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="KafkaException">The core could not start the commit.</exception>
+    void CommitAsync(IOffsetCommitCallback callback);
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/> without waiting for the commit, and runs
+    /// <paramref name="callback"/>, if any, with its outcome (Java
+    /// <c>commitAsync(Map&lt;TopicPartition, OffsetAndMetadata&gt;, OffsetCommitCallback)</c>): returns once the
+    /// commit is started.
+    /// </summary>
+    /// <remarks>
+    /// The callback runs as for <see cref="CommitAsync(IOffsetCommitCallback)"/>. An empty
+    /// <paramref name="offsets"/> commits nothing; the callback then receives <see langword="null"/> offsets, or the
+    /// empty map on <see cref="MockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it.
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="KafkaException">The core could not start the commit.</exception>
+    void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null);
+
+    /// <summary>
+    /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java <c>seek(TopicPartition, long)</c>);
+    /// blocks until the seek is applied.
+    /// </summary>
+    /// <param name="partition">The topic-partition to seek.</param>
+    /// <param name="offset">The offset to seek to.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="offset"/> is negative ("seek offset must not be a negative number").
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
+    void Seek(TopicPartition partition, long offset);
+
+    /// <summary>
+    /// Seeks <paramref name="partition"/> to the offset, leader epoch and metadata of
+    /// <paramref name="offsetAndMetadata"/> (Java <c>seek(TopicPartition, OffsetAndMetadata)</c>); blocks until
+    /// the seek is applied.
+    /// </summary>
+    /// <param name="partition">The topic-partition to seek.</param>
+    /// <param name="offsetAndMetadata">The offset to seek to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
+    void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
+
+    /// <summary>
+    /// Returns the consumer's lag for <paramref name="partition"/> (Java <c>currentLag(TopicPartition)</c>), or
+    /// <see langword="null"/> when it is not known.
+    /// </summary>
+    /// <param name="partition">The topic-partition whose lag to read.</param>
+    /// <returns>The current lag, or <see langword="null"/> when it is not known.</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    long? CurrentLag(TopicPartition partition);
+
+    /// <summary>
+    /// Returns the last committed offset for each of <paramref name="partitions"/> (Java
+    /// <c>committed(Set&lt;TopicPartition&gt;)</c>). Every requested partition is in the result,
+    /// <see langword="null"/> where it has no committed offset; <see cref="MockConsumer{TKey, TValue}"/>,
+    /// like Java's <c>MockConsumer</c>, leaves such a partition out.
+    /// </summary>
     /// <param name="partitions">The topic-partitions whose committed offsets to read.</param>
-    /// <returns>The committed offset (and metadata) for each partition that has one.</returns>
+    /// <returns>The committed offset (and metadata) of each partition, <see langword="null"/> where it has none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a committed-query failure.</exception>
-    IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions);
+    IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions);
+
+    /// <summary>
+    /// Returns the last committed offset for each of <paramref name="partitions"/>, blocking at most <paramref name="timeout"/>
+    /// (Java <c>committed(Set&lt;TopicPartition&gt;, Duration)</c>).
+    /// </summary>
+    /// <param name="partitions">The topic-partitions to read.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The committed offset (and metadata) of each partition, <see langword="null"/> where it has none.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// </exception>
+    IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
 
     /// <summary>
     /// Looks up the offset of the first record at or after each timestamp in
     /// <paramref name="timestampsToSearch"/> (Java
-    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>) — <b>blocks</b> and returns an
-    /// owned <see cref="IReadOnlyDictionary{TopicPartition, OffsetAndTimestamp}"/>, or throws a
-    /// <see cref="KafkaException"/> on failure. A <b>negative</b> timestamp is a Kafka-valid
-    /// sentinel (EARLIEST/LATEST) and is passed through, not rejected.
+    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>). A negative timestamp is passed through, not
+    /// rejected: Kafka uses negative special timestamps (earliest, latest). Every requested partition
+    /// is in the result, <see langword="null"/> where no offset was found for its timestamp.
     /// </summary>
     /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
-    /// <returns>The first offset at or after each timestamp, per partition.</returns>
+    /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
-    IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+    IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
 
     /// <summary>
+    /// Looks up the offset of the first record at or after each timestamp in
+    /// <paramref name="timestampsToSearch"/>, blocking at most <paramref name="timeout"/> (Java
+    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;, Duration)</c>).
+    /// </summary>
+    /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative, or <paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// </exception>
+    IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout);
+
+    /// <summary>
     /// Returns the earliest available offset for each of <paramref name="partitions"/> (Java
-    /// <c>beginningOffsets(Collection&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an
-    /// owned <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/>, or throws a
-    /// <see cref="KafkaException"/> on failure.
+    /// <c>beginningOffsets(Collection&lt;TopicPartition&gt;)</c>).
     /// </summary>
     /// <param name="partitions">The topic-partitions whose beginning offsets to read.</param>
     /// <returns>The earliest available offset for each partition.</returns>
@@ -311,10 +417,24 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
+    /// Returns the earliest available offset for each of <paramref name="partitions"/>, blocking at most <paramref name="timeout"/>
+    /// (Java <c>beginningOffsets(Collection&lt;TopicPartition&gt;, Duration)</c>).
+    /// </summary>
+    /// <param name="partitions">The topic-partitions to read.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The earliest available offset for each partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// </exception>
+    IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
+
+    /// <summary>
     /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/> (Java
-    /// <c>endOffsets(Collection&lt;TopicPartition&gt;)</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="IReadOnlyDictionary{TopicPartition, Int64}"/>, or throws a
-    /// <see cref="KafkaException"/> on failure.
+    /// <c>endOffsets(Collection&lt;TopicPartition&gt;)</c>).
     /// </summary>
     /// <param name="partitions">The topic-partitions whose end offsets to read.</param>
     /// <returns>The latest offset for each partition.</returns>
@@ -326,12 +446,29 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
-    /// Returns the partition metadata for <paramref name="topic"/> (Java
-    /// <c>partitionsFor(String)</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="IReadOnlyList{PartitionInfo}"/> (an empty list for a topic with no known
-    /// partitions), or throws a <see cref="KafkaException"/> on failure.
+    /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/>, blocking at most <paramref name="timeout"/>
+    /// (Java <c>endOffsets(Collection&lt;TopicPartition&gt;, Duration)</c>).
     /// </summary>
-    /// <remarks>An <b>empty</b> topic is forwarded to the core (Java/Python-faithful), not rejected.</remarks>
+    /// <param name="partitions">The topic-partitions to read.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The latest offset for each partition.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// </exception>
+    IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (Java
+    /// <c>partitionsFor(String)</c>), an empty list for a topic with no known partitions.
+    /// </summary>
+    /// <remarks>
+    /// An empty <paramref name="topic"/> is passed to the core, not rejected, as in Java; only a
+    /// <see langword="null"/> one throws.
+    /// </remarks>
     /// <param name="topic">The topic whose partition metadata to read.</param>
     /// <returns>The partition metadata for the topic.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
@@ -340,11 +477,24 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
     /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/>, blocking at most
+    /// <paramref name="timeout"/> (Java <c>partitionsFor(String, Duration)</c>).
+    /// </summary>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The partition metadata for the topic.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
+    /// failure.
+    /// </exception>
+    IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout);
+
+    /// <summary>
     /// Returns metadata for all topics the consumer is authorized to view (Java
-    /// <c>listTopics()</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="IReadOnlyDictionary{String, IReadOnlyList}"/> of topic →
-    /// <see cref="PartitionInfo"/> list (an empty dictionary when none), or throws a
-    /// <see cref="KafkaException"/> on failure.
+    /// <c>listTopics()</c>), keyed by topic name; an empty dictionary when no topic is known.
     /// </summary>
     /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
@@ -352,18 +502,50 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
 
     /// <summary>
-    /// Closes the consumer gracefully (Java <c>close()</c>), joining the background task, then
-    /// releases native resources. Unlike <see cref="IDisposable.Dispose"/>, this <b>surfaces</b>
-    /// a close failure. Idempotent with disposal — a subsequent
-    /// <see cref="IDisposable.Dispose"/> is a no-op.
+    /// Returns metadata for all topics the consumer is authorized to view, blocking at most
+    /// <paramref name="timeout"/> (Java <c>listTopics(Duration)</c>).
+    /// </summary>
+    /// <param name="timeout">The maximum time to block.</param>
+    /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
+    /// failure.
+    /// </exception>
+    IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout);
+
+    /// <summary>
+    /// Closes the consumer (Java <c>close()</c>), then frees it. Unlike <see cref="IDisposable.Dispose"/>, it
+    /// reports a close failure. A later <see cref="IDisposable.Dispose"/> does nothing.
     /// </summary>
     /// <remarks>
-    /// The graceful close is bounded by the core's default close timeout, 30 seconds — Java's
-    /// <c>ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS</c>, the bound Java's <c>close()</c> applies.
-    /// Java's deprecated <c>close(Duration)</c> is not translated (the C ABI no longer exports a
-    /// timed close), and its replacement <c>close(CloseOptions)</c> is not exposed by the C ABI,
-    /// so the bound is not configurable here.
+    /// The close waits at most 30 seconds, the bound of Java's <c>close()</c>. Java's deprecated
+    /// <c>close(Duration)</c> is not translated; <see cref="Close(CloseOptions)"/> sets the bound. Inside a callback
+    /// of this consumer (a rebalance listener or a commit callback), <see cref="IDisposable.Dispose"/> throws
+    /// <see cref="InvalidOperationException"/> as this method does, and both return without effect once a close has
+    /// begun.
     /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// Another thread is inside a call on this consumer, or the call is made inside a callback of this consumer;
+    /// the consumer stays open.
+    /// </exception>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     void Close();
+
+    /// <summary>
+    /// Closes the consumer with the timeout and group membership operation of
+    /// <paramref name="option"/> (Java <c>close(CloseOptions)</c>), then releases native resources.
+    /// </summary>
+    /// <param name="option">The close options.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="option"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The timeout of <paramref name="option"/> is negative ("The timeout cannot be negative.").
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Another thread is inside a call on this consumer, or the call is made inside a callback of this consumer;
+    /// the consumer stays open.
+    /// </exception>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    void Close(CloseOptions option);
 }

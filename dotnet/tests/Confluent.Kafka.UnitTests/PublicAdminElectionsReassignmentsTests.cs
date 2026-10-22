@@ -81,7 +81,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task ElectLeaders_SurfacesTheMocksDocumentedRefusal_ForEverySelectionShape()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         IReadOnlyCollection<TopicPartition>?[] selections =
         {
@@ -117,7 +118,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [InlineData(ElectionType.Unclean)]
     public async Task ElectLeaders_AcceptsBothElectionTypes(ElectionType type)
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
@@ -138,7 +140,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task ElectLeadersResult_PartitionsReturnsTheSameTaskInstance()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, null);
 
         Assert.Same(result.Partitions().Get(), result.Partitions().Get());
@@ -205,7 +208,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_FaultsOnlyTheFailingPartition()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic("p4-apr", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition zero = new TopicPartition("p4-apr", 0);
@@ -249,7 +253,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_CancelSucceeds_AlongsideAReassignment()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4-apr-cancel", 2, 1) }).All().Get(), s_deadline);
 
@@ -281,7 +286,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [InlineData(false)]
     public async Task AlterPartitionReassignments_AcceptsBothReplicationFactorSettings(bool allow)
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4-apr-rf", 1, 1) }).All().Get(), s_deadline);
 
@@ -302,7 +308,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_AnEmptyMapCompletes()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>());
@@ -319,7 +326,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
     public void BothRpcs_ThrowObjectDisposedAfterClose()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ElectLeaders(ElectionType.Preferred, null));
         Assert.Throws<ObjectDisposedException>(() => admin.AlterPartitionReassignments(
@@ -339,7 +346,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task BothRpcs_AreReachableThroughTheInterface()
     {
-        await using AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable mockDisposal = TestTimeout.AsyncDisposal(mock);
         IAsyncAdmin admin = mock;
 
         await TestTimeout.Run(

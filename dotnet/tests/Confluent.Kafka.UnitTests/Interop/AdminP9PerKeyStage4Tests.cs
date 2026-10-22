@@ -61,7 +61,8 @@ public sealed class AdminP9PerKeyStage4Tests
     [Fact]
     public async Task DeleteAcls_EveryFilterFaultsIndependently_WithJavasOwnMessage()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter[] filters =
         {
@@ -91,7 +92,8 @@ public sealed class AdminP9PerKeyStage4Tests
     [Fact]
     public async Task DeleteAcls_AnAllAnyFilter_RoundTripsItsNullsAsNulls()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter any = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Any, null, PatternType.Any),

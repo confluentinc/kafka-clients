@@ -53,7 +53,8 @@ public sealed class AdminP9PerKeyStage3Tests
     [Fact]
     public async Task DeleteRecords_ResolvesEveryHalfOfThePairIndependently()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TopicPartition[] keys =
         {
@@ -89,7 +90,8 @@ public sealed class AdminP9PerKeyStage3Tests
     [Fact]
     public async Task ListOffsets_PerKeyOutcomes_AreIndependent()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp4-offsets", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -126,7 +128,8 @@ public sealed class AdminP9PerKeyStage3Tests
     [Fact]
     public async Task DescribeReplicaLogDirs_ResolvesTheThreePartKey()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp4-replicas", 2, 2) }, options: null, AdminFlavour.Async)).All().Get(),
@@ -159,7 +162,8 @@ public sealed class AdminP9PerKeyStage3Tests
     [Fact]
     public async Task DescribeProducers_FaultsEveryPartitionIndependently()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TopicPartition[] keys =
         {

@@ -110,7 +110,8 @@ public sealed class AdminP4ResultMarshalTests
     [Fact]
     public async Task ThePerPartitionError_IsAFaultOrAValue_DependingOnlyOnTheWalkerChosen()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition present = SeedTopic(admin, "p4-marshal-present");
         TopicPartition missing = new TopicPartition("p4-marshal-missing", 0);
 
@@ -188,7 +189,8 @@ public sealed class AdminP4ResultMarshalTests
     [Fact]
     public async Task TheKeyAndTheError_AreCopiedOut_AndSurviveTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition present = SeedTopic(admin, "p4-copyout-present");
         TopicPartition missing = new TopicPartition("p4-copyout-missing", 0);
 
@@ -236,7 +238,8 @@ public sealed class AdminP4ResultMarshalTests
     [Fact]
     public void TheBorrowedError_IsReadNeverDestroyed()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition present = SeedTopic(admin, "p4-borrow-present");
         TopicPartition missing = new TopicPartition("p4-borrow-missing", 0);
 
@@ -302,7 +305,8 @@ public sealed class AdminP4ResultMarshalTests
     [Fact]
     public void TheCancelFlag_ReachesTheCore_AndSeparatesCancelFromAnEmptyReplicaList()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition first = SeedTopic(admin, "p4-cancel-abi", partitions: 2);
         TopicPartition second = new TopicPartition(first.Topic, 1);
 

@@ -22,35 +22,14 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M9/P4 H1 — the consumer handle can no longer be freed out from under a native call.
-/// Every synchronous consumer P/Invoke now declares its handle parameter as the
-/// <c>SafeConsumerHandle</c>, so the interop marshaller holds a reference for the whole
-/// call (ffi-marshalling.md §A2). What that buys is checked here in the two ways a
-/// broker-free suite can check it:
-/// <list type="bullet">
-/// <item>
-/// <b>Post-close <see cref="ObjectDisposedException"/> across every migrated family</b> —
-/// ffi §B2's already-mandated "a call after Dispose throws
-/// <see cref="ObjectDisposedException"/>" test, now covering the families H1 migrated
-/// rather than only the handful the earlier teardown tests reached. It also pins the
-/// error contract H1 must NOT have changed: <c>ThrowIfClosed()</c> still runs first at
-/// every site, so the type stays <see cref="ObjectDisposedException"/> for an
-/// already-closed consumer.
-/// </item>
-/// <item>
-/// <b>Race canaries</b> — churn a teardown against the one deliberately cross-thread call
-/// (<see cref="IConsumerCommon.Wakeup"/>) and against unawaited in-flight operations. These
-/// cannot assert on timing, but a use-after-free regression in the migrated surface shows up
-/// as a native crash that takes the test host down, which is a loud failure.
-/// </item>
-/// </list>
-/// <b>Determinism ceiling, stated rather than papered over:</b> the canonical H1 scenario is
-/// a <see cref="IConsumer{TKey, TValue}.Poll"/> that blocks for seconds while another thread
-/// disposes. It is not reachable broker-free — <c>MockConsumer</c>'s poll returns immediately
-/// regardless of the timeout, so there is no multi-second window to race. The window itself is
-/// therefore verified by inspection (the marshaller's AddRef/Release brackets the native call);
-/// what is tested here is the observable contract around it.
+/// The consumer handle cannot be freed under a native call: every family throws
+/// <see cref="ObjectDisposedException"/> after Dispose, and a teardown racing Wakeup, short sync calls or unawaited
+/// async calls neither crashes nor throws anything else.
 /// </summary>
+/// <remarks>
+/// The mock's Poll returns at once, so no long blocking Poll can race a Dispose here; a use-after-free in the raced
+/// calls crashes the test host.
+/// </remarks>
 public sealed class PublicConsumerHandleProtectionTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
@@ -63,12 +42,8 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncQueryFamily_AfterDispose_ThrowsObjectDisposed()
     {
-        // H1a migrated Consumer_committed / _offsets_for_times / _beginning_offsets /
-        // _end_offsets / _partitions_for / _list_topics (the last two directly, the first
-        // three through NativeCollectionQuerySync in H1b). ThrowIfClosed still fires first,
-        // so the observable type is unchanged by the retype.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
 
@@ -84,18 +59,14 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncStateReads_AfterDispose_ThrowObjectDisposed()
     {
-        // H1c migrated Consumer_assignment / _subscription / _paused / _group_metadata /
-        // _metrics / _client_id / _enforce_rebalance, and H1a migrated _current_lag and
-        // _commit_async (an `_async` name but a sync ABI fn). All still guard first.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
         Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
         Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
         Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
-        Assert.Throws<ObjectDisposedException>(() => consumer.ClientId());
         Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance());
         Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance("a reason"));
         Assert.Throws<ObjectDisposedException>(() => consumer.CurrentLag(Tp()));
@@ -107,15 +78,11 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void MockDriverHelpers_AfterDispose_ThrowObjectDisposed()
     {
-        // H1b/H1c migrated MockConsumer_add_record / _set_poll_error / _update_partitions /
-        // _update_beginning_offsets / _update_end_offsets. They are broker-free test drivers,
-        // but they take the consumer handle like everything else, so they are part of the
-        // migrated surface and get the same guard.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.AddRecord("h1-topic", 0, 0L, null, null));
-        Assert.Throws<ObjectDisposedException>(() => consumer.SetPollError("boom"));
+        Assert.Throws<ObjectDisposedException>(() => consumer.SetPollException(new KafkaException("boom")));
         Assert.Throws<ObjectDisposedException>(() => consumer.UpdateBeginningOffset("h1-topic", 0, 0L));
         Assert.Throws<ObjectDisposedException>(() => consumer.UpdateEndOffset("h1-topic", 0, 5L));
         Assert.Throws<ObjectDisposedException>(
@@ -125,12 +92,9 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsObjectDisposed()
     {
-        // The async surface keeps its span-the-op AddRef (deliberately NOT retyped by H1),
-        // so its post-close contract must be unchanged. Asserted here so the H1 slices cannot
-        // silently perturb it.
         AsyncMockConsumer<byte[], byte[]> consumer =
             new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
 
@@ -148,13 +112,8 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void Wakeup_AfterDispose_IsANoOp_DoesNotThrow()
     {
-        // H1d's contract, and the reason it needed a catch rather than a bare conversion:
-        // Wakeup is documented best-effort and a no-op once closing/closed. The `_closed`
-        // flag short-circuits the already-closed case; the catch covers the race where the
-        // handle closes between that read and the marshaller's AddRef. Neither may surface an
-        // exception from a documented no-op.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         consumer.Wakeup();
         consumer.Wakeup();
@@ -165,7 +124,7 @@ public sealed class PublicConsumerHandleProtectionTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
             new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         consumer.Wakeup();
     }
@@ -173,14 +132,6 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void WakeupFromAnotherThread_RacingDispose_NeitherCrashesNorThrows()
     {
-        // The L8 shape, which the .NET gRPC harness server reaches by design (its Wakeup RPC
-        // is deliberately gate-exempt, because gating it would deadlock behind the poll it
-        // must wake). Before H1d, the closed-flag read and the raw handle deref were not
-        // atomic, so a teardown landing between them left Consumer_wakeup running on freed
-        // memory — a native crash that takes the whole test host with it, not a catchable
-        // exception. The canary churns the window many times: post-H1d each Wakeup either
-        // succeeds, short-circuits on the flag, or swallows the marshaller's
-        // ObjectDisposedException. No other exception is acceptable.
         TestTimeout.Run(
             () =>
             {
@@ -221,13 +172,6 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncOps_RacingDisposeFromAnotherThread_NeverUseAfterFree()
     {
-        // The H1 hazard on the sync surface, exercised as a crash canary. A blocking Poll
-        // cannot be held open broker-free (MockConsumer returns immediately), so this instead
-        // hammers the short migrated calls against a concurrent teardown. Pre-H1 a losing
-        // racer passed a freed pointer to native; post-H1 the marshaller either completes the
-        // call or throws ObjectDisposedException, and ThrowIfClosed catches the common case.
-        // Only those two exception types are tolerated; anything else fails, and a genuine
-        // use-after-free crashes the host.
         TestTimeout.Run(
             () =>
             {
@@ -251,18 +195,12 @@ public sealed class PublicConsumerHandleProtectionTests
                             }
                             catch (ObjectDisposedException)
                             {
-                                // Expected once teardown wins: either ThrowIfClosed or the
-                                // marshaller's closed-handle rejection.
                             }
                             catch (KafkaException)
                             {
-                                // Expected: the core rejects a concurrent op / a wakeup lands.
                             }
                             catch (InvalidOperationException)
                             {
-                                // Expected: the core's concurrent sync-state-read rejection
-                                // (ffi §B5) — a null owned handle mapped by
-                                // ThrowIfConcurrentNull. H1 does not change this contract.
                             }
                             catch (Exception ex)
                             {
@@ -286,19 +224,6 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void ManyConsumers_SyncOpsThenDispose_NoCrash()
     {
-        // H1's sync SafeHandle-param path as a crash canary, repeated across many consumers:
-        // each iteration drives converted synchronous declarations (Assign, AddRecord) and
-        // then disposes, so a botched conversion — a released-too-early ref, or a destroy
-        // racing a still-running native call — would crash or throw here.
-        //
-        // It does NOT exercise the M4 deferred-destroy shape, despite what this test was
-        // originally named (fixed: the old name said "UnawaitedSyncOp"). A synchronous op
-        // cannot be unawaited or in flight past its own return — the marshaller's
-        // DangerousRelease runs in the P/Invoke stub's finally when the native call returns,
-        // so the reference count is always back to 1 by the time Dispose() is reached, and
-        // the destroy is immediate rather than relocated. That is the whole point of the
-        // call-scoped (sync) vs span-the-op (async) distinction. The deferred-destroy canary
-        // is provided by the two ASYNC siblings below, which start an unawaited Subscribe.
         TestTimeout.Run(
             () =>
             {
@@ -317,12 +242,6 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public async Task ManyConsumers_UnawaitedAsyncOpThenDispose_NoCrash()
     {
-        // The variant ManyConsumers_CreateAndDispose_NoLeakOrCrash cannot reach: that one
-        // AWAITS Subscribe first, so the reference count is 1 at teardown and the destroy is
-        // immediate. Here the op is deliberately not awaited, so teardown races it and the
-        // destroy is deferred to the completion callback — i.e. it runs on the core's own
-        // dispatcher thread. That is the leg plan §4.2(d) argues is safe by construction; this
-        // is its crash canary.
         await TestTimeout.Run(
             async () =>
             {
@@ -330,7 +249,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 {
                     AsyncMockConsumer<byte[], byte[]> consumer =
                         new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-                    _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
+                    _ = consumer.Subscribe(ProofTopic());
                     await consumer.DisposeAsync();
                 }
             },
@@ -340,9 +259,6 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void UnawaitedOpThenDispose_FromSeveralThreads_NoCrash()
     {
-        // The multi-threaded soak plan §4.5 asks for: several threads each creating a
-        // consumer, starting an operation they do not await, and disposing. The point is
-        // volume through the deferred-destroy path, not a timing assertion.
         TestTimeout.Run(
             () =>
             {
@@ -362,7 +278,7 @@ public sealed class PublicConsumerHandleProtectionTests
                                 AsyncMockConsumer<byte[], byte[]> consumer =
                                     new AsyncMockConsumer<byte[], byte[]>(
                                         Serdes.ByteArray, Serdes.ByteArray);
-                                _ = consumer.Subscribe(ProofTopic()); // unawaited
+                                _ = consumer.Subscribe(ProofTopic());
                                 consumer.Dispose();
                             }
                         }

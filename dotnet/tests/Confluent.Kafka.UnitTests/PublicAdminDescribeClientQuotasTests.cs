@@ -78,7 +78,8 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
@@ -95,7 +96,8 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [Fact]
     public async Task Entities_IsTheSameTaskEveryCall()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
         Assert.Same(result.Entities().Get(), result.Entities().Get());
@@ -114,7 +116,8 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [InlineData(ClientQuotaMatchType.Specified)]
     public async Task EveryMatchType_ReachesTheCore(ClientQuotaMatchType matchType)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaFilterComponent component = matchType switch
         {
@@ -140,7 +143,8 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "filter",
@@ -158,7 +162,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
     public void AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.DescribeClientQuotas(ClientQuotaFilter.All()));

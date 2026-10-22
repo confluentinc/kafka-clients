@@ -20,32 +20,14 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The consumer's own "Partition must not be negative." preconditions, one test per guard
-/// family — reachable through the public API only since M15/P13.2 G3-4 made
-/// <see cref="TopicPartition"/>'s constructor store a negative partition as Java's does
-/// (<c>TopicPartition.java:32-35</c>). Until then the constructor threw first, so these guards
-/// had no public-surface test at all.
+/// The consumer's "Partition must not be negative." preconditions, one test per guard family, each asserting the
+/// type, <see cref="ArgumentException.ParamName"/>, <see cref="ArgumentOutOfRangeException.ActualValue"/> and the
+/// message.
 /// </summary>
 /// <remarks>
-/// <para>
-/// The guards are kept deliberately, stricter than Java (M15/P13.2 D11: Java's <c>assign</c>
-/// accepts a negative partition, and the consumer ABI passes one straight to the core). Each
-/// test asserts the exception type, <see cref="ArgumentException.ParamName"/>,
-/// <see cref="ArgumentOutOfRangeException.ActualValue"/> and the exact message (DoD §3).
-/// </para>
-/// <para>
-/// <b>"No native call" is witnessed, not assumed.</b> Each guard exercised here on a
-/// <em>disposed</em> consumer runs before <c>ThrowIfClosed</c>, the closed-consumer gate those
-/// operations pass before their native call, so a negative partition still surfaces as
-/// <see cref="ArgumentOutOfRangeException"/>: had the check run later — or not at all — the
-/// result would be <see cref="ObjectDisposedException"/>. On a live consumer the witnesses are
-/// the native outcomes the guard pre-empts: <c>Assign</c> would assign the partition (the core
-/// accepts a negative one, as Java does), and the <see cref="ConsumerHandle"/> ops would reach
-/// the core, which answers them on a <c>MockConsumer</c>-derived handle with an
-/// <c>UnsupportedVersion</c> <see cref="KafkaException"/> whatever the partition (core
-/// behaviour, <c>ffi-marshalling.md</c> §B5). So an <see cref="ArgumentOutOfRangeException"/>
-/// from a handle op proves the guard ran first.
-/// </para>
+/// The guards are stricter than Java, whose assign accepts a negative partition. A guard tried on a disposed consumer
+/// runs before the closed check, which proves it runs before the native call; on a live consumer the witness is the
+/// outcome the guard pre-empts.
 /// </remarks>
 public sealed class ConsumerNegativePartitionGuardTests
 {
@@ -58,7 +40,8 @@ public sealed class ConsumerNegativePartitionGuardTests
     [Fact]
     public void SnapshotPartitions_Assign_RejectsANegativePartition_AndAssignsNothing()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(
@@ -68,7 +51,6 @@ public sealed class ConsumerNegativePartitionGuardTests
         // Without the guard the core would have assigned both partitions.
         Assert.Empty(consumer.Assignment());
 
-        // The same shared guard backs the collection-input queries.
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Committed(new[] { s_negative })),
             "partitions");
@@ -84,9 +66,8 @@ public sealed class ConsumerNegativePartitionGuardTests
     {
         AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>(
             Serdes.ByteArray, Serdes.ByteArray);
-        disposed.Dispose();
+        TestTimeout.Dispose(disposed);
 
-        // Thrown synchronously from the call, before any operation is submitted.
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => { _ = disposed.Assign(new[] { s_negative }); }),
             "partitions");
@@ -98,7 +79,8 @@ public sealed class ConsumerNegativePartitionGuardTests
         Dictionary<TopicPartition, OffsetAndMetadata> offsets =
             new Dictionary<TopicPartition, OffsetAndMetadata> { [s_negative] = new OffsetAndMetadata(1) };
 
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Commit(offsets)), "offsets");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
@@ -110,7 +92,8 @@ public sealed class ConsumerNegativePartitionGuardTests
     {
         Dictionary<TopicPartition, long> timestamps = new Dictionary<TopicPartition, long> { [s_negative] = 0 };
 
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => consumer.OffsetsForTimes(timestamps)),
             "timestampsToSearch");
@@ -124,7 +107,8 @@ public sealed class ConsumerNegativePartitionGuardTests
     [Fact]
     public void Seek_SeekWithMetadata_CurrentLag_RejectANegativePartition_BeforeAnyNativeCall()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Seek(s_negative, 0)), "partition");
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Seek(s_negative, new OffsetAndMetadata(0))),
@@ -147,23 +131,21 @@ public sealed class ConsumerNegativePartitionGuardTests
 
         AsyncMockConsumer<byte[], byte[]> disposedAsync = new AsyncMockConsumer<byte[], byte[]>(
             Serdes.ByteArray, Serdes.ByteArray);
-        disposedAsync.Dispose();
+        TestTimeout.Dispose(disposedAsync);
 
-        // Thrown synchronously from the call, before any operation is submitted.
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => { _ = disposedAsync.Position(s_negative); }),
             "partition");
     }
 
     [Fact]
-    public void ConsumerHandle_SeekAndPosition_RejectANegativePartition_BeforeAnyNativeCall()
+    public void ConsumerHandle_SeekPositionAndCurrentLag_RejectANegativePartition_BeforeAnyNativeCall()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
-        // Without the guard each of these would reach the core, which answers them on a
-        // MockConsumer-derived handle with an UnsupportedVersion KafkaException whatever the
-        // partition (ffi §B5) — so ArgumentOutOfRangeException proves the guard ran first.
+        // Without the guard the core would answer each of these on a mock handle, whatever the partition.
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => handle.Seek(s_negative, 0)), "partition");
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => handle.Seek(s_negative, new OffsetAndMetadata(0))),
@@ -172,6 +154,7 @@ public sealed class ConsumerNegativePartitionGuardTests
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => handle.Position(s_negative, TimeSpan.FromSeconds(1))),
             "partition");
+        AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => handle.CurrentLag(s_negative)), "partition");
     }
 
     private static void AssertGuard(ArgumentOutOfRangeException error, string paramName)
@@ -187,7 +170,7 @@ public sealed class ConsumerNegativePartitionGuardTests
     private static MockConsumer<byte[], byte[]> NewDisposedMock()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
         return consumer;
     }
 }

@@ -37,7 +37,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task TimeoutNextRequest_TimesOutExactlyThatManyOperations()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // Baseline: the same call succeeds when nothing is seeded.
         await TestTimeout.Run(
@@ -59,7 +60,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateBeginningOffsets_ChangesWhatListOffsetsEarliestReports()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition seeded = new TopicPartition("seed-begin", 0);
         TopicPartition unseeded = new TopicPartition("seed-begin", 1);
 
@@ -79,7 +81,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateEndOffsets_ChangesWhatListOffsetsLatestReports()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = new TopicPartition("seed-end", 0);
 
         Assert.Equal(Unseeded, await LatestOffset(admin, partition));
@@ -95,7 +98,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateConsumerGroupOffsets_ChangesWhatListConsumerGroupOffsetsReports()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = new TopicPartition("seed-committed", 3);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> before = await TestTimeout.Run(
@@ -114,7 +118,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task SetFeatureLevels_ChangesWhatDescribeFeaturesReports()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         FeatureMetadata before = await TestTimeout.Run(
             () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
@@ -155,7 +160,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public void SeedingRejectsANullMapBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.UpdateBeginningOffsets(null!));
         Assert.Throws<ArgumentNullException>(() => admin.UpdateEndOffsets(null!));
@@ -170,7 +176,8 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public void SeedingRejectsANullTopicBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Dictionary<TopicPartition, long> withNullTopic =
             new Dictionary<TopicPartition, long> { [default] = 1 };
 
@@ -189,7 +196,8 @@ public class PublicAdminMockSeedingTests
     public async Task SeedingRejectsAConstructedNullTopic_AndSeedsNothing()
     {
         const string Message = "The offsets map must not contain a topic partition with a null topic.";
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition valid = new TopicPartition("seed-null-topic", 0);
         Dictionary<TopicPartition, long> withNullTopic = new Dictionary<TopicPartition, long>
         {
@@ -217,7 +225,7 @@ public class PublicAdminMockSeedingTests
     public void SeedingAfterDisposeThrowsObjectDisposed()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.TimeoutNextRequest(1));
         Assert.Throws<ObjectDisposedException>(

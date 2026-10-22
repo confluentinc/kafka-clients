@@ -14,6 +14,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -23,470 +27,118 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The <b>offset-commit callback registration</b> bridge (ffi-marshalling.md §B6) — a
-/// one-shot completion whose <c>GCHandle</c> is freed by a <b>release hook</b>, not by the
-/// callback. Covers what the public surface cannot reach: the free site on the path where the
-/// callback never fires at all, the delivered-error channel, the discard trampoline, the
-/// no-throw boundary, and free-exactly-once.
+/// The offset-commit callback registration: <c>onComplete</c> driven through the core's invoker, its report, and
+/// when the registration's <c>self_</c> is released.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>DoD #10 (hot-path allocation audit) is N/A for this phase</b> and is stated rather than
-/// skipped: a commit callback fires per <em>commit</em>, not per record, so there is no
-/// per-message hot path to budget.
-/// </para>
-/// <para>
-/// <b>Why some tests invoke a trampoline directly.</b> On a <c>MockConsumer</c> the core always
-/// delivers a <b>null</b> error (header,
-/// <c>kafka_consumer_Consumer_commit_async_with_callback</c>), so a broker-originated commit
-/// failure has no broker-free vehicle. The only way to exercise the delivered-error channel and the
-/// no-throw boundary is to call the trampoline the way the core would, with a genuine owned
-/// <c>OffsetMap_t</c> (obtained from <c>Consumer_committed</c>) and a genuine owned <c>Error_t</c>
-/// (from <c>Error_new</c>) — so the callback-owns-both-handles contract is exercised for real
-/// rather than simulated. P6's listener bridge tests do the same, as does the Rust side in its own
-/// <c>#[cfg(test)]</c> coverage.
-/// </para>
-/// <para>
-/// <b>What this suite provably catches, and what it cannot (measured, not asserted).</b> Each
-/// claim below was checked by injecting the corresponding defect and re-running:
-/// </para>
-/// <list type="bullet">
-/// <item><description>
-/// <b>Caught</b> — the free site moved to the trampoline
-/// (<c>CommitTrampoline_*_DoesNotReleaseTheRegistration</c> go red), and production dropping
-/// the release hook (4 tests go red, including the marshal-failure one, because it takes its
-/// ABI triple from <c>NativeConsumer.CommitRegistrationArguments</c> rather than naming the
-/// hook itself — DoD #12).
-/// </description></item>
-/// <item><description>
-/// <b>Caught</b> — a <b>double</b> destroy of the delivered <c>OffsetMap_t</c>: the test host
-/// aborts on a Rust allocator panic.
-/// </description></item>
-/// <item><description>
-/// <b>NOT caught</b> — <b>omitting</b> the delivered <c>OffsetMap_t</c> destroy (the
-/// <c>OffsetMapMarshal.CopyOut</c>-does-not-destroy trap). Removing it leaves all 37 tests
-/// green: a native leak is not observable from managed code, exactly as P6 recorded for the
-/// delivered <c>TopicPartitionList_t</c>. The guard is correct; this suite cannot tell it from
-/// a broken one, so it is stated rather than implied.
-/// </description></item>
-/// </list>
-/// </remarks>
 public sealed class ConsumerCommitCallbackBridgeTests
 {
     private const string Topic = "commit-callback-bridge-topic";
 
+    private const string ConcurrentMessage = "KafkaConsumer is not safe for multi-threaded access.";
+
+    private const int InvalidGroupIdCode = 24;
+
+    private const string NoGroupId =
+        "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer "
+        + "configuration.";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Drives a mock to a known committed offset and hands back the owned
-    /// <c>OffsetMap_t</c> the core would deliver to a commit callback. Ownership transfers to
-    /// the caller, exactly as it does to a real callback.
-    /// </summary>
-    private static IntPtr OwnedCommittedMap(NativeConsumer consumer, TopicPartition partition, long offset)
-    {
-        consumer.Assign(new[] { partition });
-        consumer.CommitSyncOffsets(new Dictionary<TopicPartition, OffsetAndMetadata>
-        {
-            [partition] = new OffsetAndMetadata(offset, "bridge-meta", 3),
-        });
+    private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
-        using Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(partition.Topic);
-        IntPtr error = NativeMethods.ConsumerCommitted(
-            consumer.Handle, new[] { pin.Pointer }, new[] { partition.Partition }, 1, out IntPtr map);
-        Assert.Equal(IntPtr.Zero, error);
-        Assert.NotEqual(IntPtr.Zero, map);
-        return map;
-    }
-
-    // ---- THE free-site test: the path where the callback never fires ----
+    private static readonly TopicPartition s_tp0 = new TopicPartition(Topic, 0);
 
     [Fact]
-    public void MarshalFailure_CallbackNeverFires_ButTheRegistrationIsStillReleasedExactlyOnce()
+    public void OnComplete_ATimeoutError_DeliversSystemTimeoutException_AndNullOffsets()
     {
-        // THE test that discriminates the correct free site from the (wrong) one-shot default.
-        //
-        // rust/src/ffi/consumer.rs:4001-4009 builds the callback adapter — which takes ownership of
-        // `user_data` — at :4004, BEFORE the fallible read_offset_map at :4005, so the early
-        // return at :4007 drops the adapter and fires the release hook WITHOUT ever invoking
-        // the callback. A negative offset is exactly that failure
-        // (OffsetAndMetadata::with_leader_epoch → "Invalid negative offset").
-        //
-        // If the GCHandle were freed in the trampoline (the shipped one-shot rule), this path
-        // would leak it: IsReleased would stay false. VERIFIED by mutation — dropping the
-        // destroy hook from the submit and freeing in ConsumerCallbacks.OnCommit instead turns
-        // this test red (and only this one, plus the success-path hook test below).
-        //
-        // The call is driven directly rather than through NativeConsumer.CommitAsync(offsets,
-        // callback), because the managed OffsetAndMetadata constructor rejects a negative
-        // offset before it can ever reach the wire — so this ABI path is unreachable from the
-        // public surface by construction.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
+        RecordingCallback callback = new RecordingCallback();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback, false, Reporter());
 
-        // The ABI triple comes from PRODUCTION's own builder, never re-decided here (DoD #12):
-        // if NativeConsumer stopped passing the release hook, this test would go red instead of
-        // passing on a hook only the test supplied.
-        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
-            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
-            NativeConsumer.CommitRegistrationArguments(registration);
+        Exception? reported = Invoke(registration, Offsets(7), TimeoutError("commit timed out"));
 
-        IntPtr error;
-        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(Topic))
-        using (Utf8Marshal.PinnedUtf8String metadataPin = Utf8Marshal.Pin(string.Empty))
-        {
-            error = NativeMethods.ConsumerCommitAsyncOffsetsWithCallback(
-                consumer.Handle,
-                new[] { topicPin.Pointer },
-                new[] { 0 },
-                new[] { -1L },                       // the marshal failure
-                new[] { -1 },
-                new[] { metadataPin.Pointer },
-                1,
-                trampoline,
-                userData,
-                destroy);
-        }
-
-        // 1. The call reports the initiation failure (error channel #1).
-        Assert.NotEqual(IntPtr.Zero, error);
-        KafkaException failure = Assert.IsType<KafkaException>(KafkaException.FromHandle(error));
-        Assert.Contains("Invalid negative offset", failure.Message, StringComparison.Ordinal);
-
-        // 2. The callback NEVER fired.
-        Assert.Empty(callback.Completions);
-
-        // 3. ...and the registration was still released — by the hook, the only site that runs
-        //    on this path.
-        Assert.True(registration.IsReleased);
-
-        // 4. Exactly once: a second Release() frees nothing and does not throw (GCHandle.Free
-        //    on an already-freed handle is a hard InvalidOperationException).
-        registration.Release();
+        Assert.Null(reported);
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
+        Assert.Null(offsets);
+        TimeoutException timeout = Assert.IsType<TimeoutException>(exception);
+        Assert.Equal("commit timed out", timeout.Message);
         Assert.True(registration.IsReleased);
     }
 
     [Fact]
-    public void SuccessfulCommit_FiresTheCallbackAndThenReleasesTheRegistrationViaTheHook()
+    public void OnComplete_Success_DeliversACopyOfTheOffsets_AndANullException()
     {
-        // The other half of the free-site proof: on the success path the hook ALSO fires (the
-        // core drops the registration once the commit completed and the callback returned),
-        // so a trampoline that freed as well would be freeing a GCHandle the core is still
-        // about to hand to the hook. Driven directly so the registration is observable —
-        // NativeConsumer.CommitAsync owns its own and does not expose it.
-        //
-        // On a mock the callback runs INLINE during the call and the registration is dropped
-        // before it returns, so this is fully deterministic: no polling, no wait
-        // (header, kafka_consumer_Consumer_commit_async_with_callback).
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
+        RecordingCallback callback = new RecordingCallback();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback, false, Reporter());
 
-        // Production's own builder again (DoD #12) — see the marshal-failure test.
-        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
-            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
-            NativeConsumer.CommitRegistrationArguments(registration);
+        Exception? reported = Invoke(registration, Offsets(42, "meta"), IntPtr.Zero);
 
-        IntPtr error = NativeMethods.ConsumerCommitAsyncWithCallback(
-            consumer.Handle, trampoline, userData, destroy);
-
-        Assert.Equal(IntPtr.Zero, error);
-        Assert.Single(callback.Completions);
-        Assert.Null(Assert.Single(callback.Completions).Exception);
+        Assert.Null(reported);
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
+        Assert.Null(exception);
+        Assert.NotNull(offsets);
+        KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(offsets!);
+        Assert.Equal(s_tp0, entry.Key);
+        Assert.Equal(42, entry.Value.Offset);
+        Assert.Equal("meta", entry.Value.Metadata);
         Assert.True(registration.IsReleased);
     }
 
-    // ---- The PRODUCTION wiring of the free site (DoD #12) ----
-
     [Fact]
-    public void ProductionCommitAsync_WithCallback_RegistersTheHook_WhichReleasesTheRegistration()
+    public void OnComplete_AnExplicitEmptyOffsetsCommit_DeliversNullOffsets()
     {
-        // The tests above drive the P/Invoke directly and therefore pass the release hook
-        // themselves — which would keep passing if NativeConsumer silently stopped passing
-        // one. This is the test that pins the PRODUCTION wiring: go through
-        // NativeConsumer.CommitAsync and observe that the registration it created was released
-        // by the hook. VERIFIED by mutation — passing `null` for the hook in either production
-        // overload turns this test (and its offsets twin below) red.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
+        RecordingCallback callback = new RecordingCallback();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback, true, Reporter());
 
-        consumer.CommitAsync(callback);
+        Exception? reported = Invoke(registration, new Dictionary<TopicPartition, OffsetAndMetadata>(), IntPtr.Zero);
 
-        Assert.Single(callback.Completions);
-        Assert.True(consumer.CurrentCommitCallbackRegistration!.IsReleased);
+        Assert.Null(reported);
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
+        Assert.Null(offsets);
+        Assert.Null(exception);
     }
 
     [Fact]
-    public void ProductionCommitAsync_WithOffsetsAndCallback_RegistersTheHook()
+    public void OnComplete_WithNoUserCallback_ReportsSuccessOnce_AndReleases()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        TopicPartition partition = new TopicPartition(Topic, 8);
-        consumer.Assign(new[] { partition });
-        RecordingCommitCallback callback = new RecordingCommitCallback();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root((IOffsetCommitCallback?)null, false, Reporter());
 
-        consumer.CommitAsync(
-            new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(2) },
-            callback);
+        Exception? reported = Invoke(registration, Offsets(3), TimeoutError("ignored"));
 
-        Assert.Single(callback.Completions);
-        Assert.True(consumer.CurrentCommitCallbackRegistration!.IsReleased);
+        Assert.Null(reported);
+        Assert.True(registration.IsReleased);
     }
 
     [Fact]
-    public void ProductionCommitAsync_WithOffsetsAndNoCallback_AllocatesNoRegistration()
+    public void OnComplete_AThrowingCallback_ReportsTheSameInstance()
     {
-        // The discard path has nothing managed to root, so it must allocate no GCHandle and
-        // register no hook — the one place C's `user_data_destroy = nullptr` is right for .NET
-        // too. A registration here would be a leak with no releaser.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        TopicPartition partition = new TopicPartition(Topic, 9);
-        consumer.Assign(new[] { partition });
+        InvalidCastException thrown = new InvalidCastException("callback boom");
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new ThrowingCallback(thrown), false, Reporter());
 
-        consumer.CommitAsync(
-            new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(1) },
-            null);
+        Exception? reported = Invoke(registration, Offsets(1), IntPtr.Zero);
 
-        Assert.Null(consumer.CurrentCommitCallbackRegistration);
-    }
-
-    // ---- The delivered-error channel (no broker-free vehicle; driven directly) ----
-
-    [Fact]
-    public void CommitTrampoline_NonNullError_DeliversCodeAndVerbatimMessage_AndFreesTheHandle()
-    {
-        // Error channel #2: the COMMIT'S OWN outcome, distinct from the initiation failure
-        // above. Unreachable on a mock (the core always delivers a null error there), so the
-        // trampoline is driven the way the core would drive it, with a genuine owned
-        // Error_t. Asserting the code AND the exact message is definition-of-done.md §3.
-        const int Code = 27;                       // REBALANCE_IN_PROGRESS
-        const string Message = "commit failed — 例外";
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
-        try
-        {
-            IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 0), 11);
-            IntPtr error;
-            using (Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(Message))
-            {
-                error = NativeMethods.KafkaErrorNew(Code, pin.Pointer);
-            }
-
-            ConsumerCallbacks.Commit(map, error, registration.UserData);
-
-            (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-                Assert.Single(callback.Completions);
-            KafkaException delivered = Assert.IsType<KafkaException>(completion.Exception);
-            Assert.Equal(Code, delivered.Code);
-            Assert.Equal(Message, delivered.Message);
-
-            // The offsets are delivered alongside the error, exactly as Java's onComplete does.
-            Assert.Equal(11, completion.Offsets[new TopicPartition(Topic, 0)].Offset);
-
-            // The trampoline did NOT free the registration (unlike the one-shot completions):
-            // that is the hook's job, and here no hook ran.
-            Assert.False(registration.IsReleased);
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.Same(thrown, reported);
+        Assert.True(registration.IsReleased);
     }
 
     [Fact]
-    public void CommitTrampoline_NullError_DeliversNullException()
+    public void OnComplete_RunsInsideTheReportersCallbackFlag()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
-        try
-        {
-            IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 4), 77);
+        ConsumerCallbackReporter reporter = Reporter();
+        bool? inside = null;
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new DelegateCallback((_, _) => inside = reporter.InCallback), false, reporter);
 
-            ConsumerCallbacks.Commit(map, IntPtr.Zero, registration.UserData);
+        Assert.Null(Invoke(registration, Offsets(1), IntPtr.Zero));
 
-            (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-                Assert.Single(callback.Completions);
-            Assert.Null(completion.Exception);
-            OffsetAndMetadata value = completion.Offsets[new TopicPartition(Topic, 4)];
-            Assert.Equal(77, value.Offset);
-            Assert.Equal("bridge-meta", value.Metadata);
-            Assert.Equal(3, value.LeaderEpoch);
-        }
-        finally
-        {
-            registration.Release();
-        }
-    }
-
-    // ---- The no-throw boundary (there is no Task and no error return to surface through) ----
-
-    [Fact]
-    public void CommitTrampoline_ThrowingCallback_IsSwallowed_AndDoesNotReleaseTheRegistration()
-    {
-        // A managed exception must never unwind into native (there is no caller frame — it
-        // would be UB). Unlike the rebalance listener there is NO error return channel here
-        // (the ABI typedef returns void), so it is swallowed + traced. "Does not throw" is the
-        // observable proof; the trace is asserted in the public-surface tests.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        ThrowingCommitCallback callback = new ThrowingCommitCallback("commit callback blew up");
-        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
-        try
-        {
-            IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 1), 5);
-
-            ConsumerCallbacks.Commit(map, IntPtr.Zero, registration.UserData);
-
-            Assert.True(callback.WasInvoked);
-            // Still not the free site, even on the throwing path.
-            Assert.False(registration.IsReleased);
-        }
-        finally
-        {
-            registration.Release();
-        }
+        Assert.True(inside);
+        Assert.False(reporter.InCallback);
     }
 
     [Fact]
-    public void CommitTrampoline_WithUnexpectedContext_DoesNotUnwindIntoNative()
+    public void Release_Twice_IsHarmless()
     {
-        // Mirrors ConsumerCompletionBridgeTests.Callback_WithUnexpectedContext_DoesNotUnwind:
-        // a user_data pointing at the wrong managed type makes the cast throw INSIDE the
-        // trampoline. It must still be swallowed, and the delivered map must still be
-        // destroyed (the finally runs regardless).
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        System.Runtime.InteropServices.GCHandle wrong =
-            System.Runtime.InteropServices.GCHandle.Alloc(new object());
-        CapturingTraceListener listener = new CapturingTraceListener();
-        System.Diagnostics.Trace.Listeners.Add(listener);
-        try
-        {
-            IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 2), 9);
-
-            ConsumerCallbacks.Commit(map, IntPtr.Zero, System.Runtime.InteropServices.GCHandle.ToIntPtr(wrong));
-        }
-        finally
-        {
-            System.Diagnostics.Trace.Listeners.Remove(listener);
-            wrong.Free();
-        }
-
-        // M9/P7 review, finding 2: this is a TRAMPOLINE fault (an InvalidCastException out of
-        // the GCHandle recovery), not a user-callback fault. Before the fix it was logged as
-        // "an IOffsetCommitCallback threw" — false, and it points a debugger at user code that
-        // never ran.
-        string line = Assert.Single(
-            listener.Lines, l => l.Contains("InvalidCastException", StringComparison.Ordinal));
-        Assert.Contains("before reaching the callback", line, StringComparison.Ordinal);
-        Assert.DoesNotContain("IOffsetCommitCallback (OnComplete) threw", line, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Captures what the binding writes to <see cref="System.Diagnostics.Trace"/>. Registered
-    /// only for one test and matched on content unique to that test, so assembly-wide parallel
-    /// execution cannot make it observe another test's output.
-    /// </summary>
-    private sealed class CapturingTraceListener : System.Diagnostics.TraceListener
-    {
-        private readonly System.Text.StringBuilder _pending = new System.Text.StringBuilder();
-
-        internal List<string> Lines { get; } = new List<string>();
-
-        public override void Write(string? message) => _pending.Append(message);
-
-        public override void WriteLine(string? message)
-        {
-            _pending.Append(message);
-            lock (Lines)
-            {
-                Lines.Add(_pending.ToString());
-            }
-
-            _pending.Clear();
-        }
-    }
-
-    // ---- The discard trampoline (Java's commitAsync(Map, null)) ----
-
-    [Fact]
-    public void CommitDiscard_FreesBothDeliveredHandles_AndInvokesNothing()
-    {
-        // The .NET equivalent of C's discard_commit_complete (server.cc:376-380). It exists
-        // because the ABI's `callback` parameter is NOT nullable and there is no plain
-        // Consumer_commit_async_offsets, so Java's legal commitAsync(Map, null) can only be
-        // expressed with a no-op that still frees what it is given.
-        //
-        // Honest limit (the P6 churn-test precedent): managed code cannot observe a native
-        // LEAK, so this asserts what it can — the call completes, dereferences no user_data
-        // (IntPtr.Zero is what the production path passes), and does not double-free (a second
-        // destroy of either handle would abort the test runner). The end-to-end coverage of
-        // this path is PublicConsumerCommitCallbackTests' callback-less commit + churn loop.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 3), 21);
-        IntPtr error;
-        using (Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin("discarded"))
-        {
-            error = NativeMethods.KafkaErrorNew(42, pin.Pointer);
-        }
-
-        // Production's builder decides the discard triple too, so this cannot drift from it.
-        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
-            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
-            NativeConsumer.CommitRegistrationArguments(null);
-        Assert.Equal(IntPtr.Zero, userData);
-        Assert.Null(destroy);
-
-        trampoline(map, error, userData);
-    }
-
-    [Fact]
-    public void CommitDiscard_NullError_IsANoOpBeyondDestroyingTheMap()
-    {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        IntPtr map = OwnedCommittedMap(consumer, new TopicPartition(Topic, 5), 1);
-
-        ConsumerCallbacks.CommitDiscard(map, IntPtr.Zero, IntPtr.Zero);
-    }
-
-    // ---- The delivered map's copy-out-and-destroy helper (M9/P7 review, finding 4) ----
-
-    [Fact]
-    public void OffsetMapCopyOutAndDestroy_CopiesEveryEntry_AndReleasesTheRootOnce()
-    {
-        // The twin added so "copy the listener trampoline's shape" stops being a leak on the
-        // commit path. Exercised directly: the copy is complete and owned (nothing
-        // native-backed escapes), and the root is destroyed exactly once — a second destroy
-        // would abort the host, which is what makes "exactly once" observable here at all.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        TopicPartition partition = new TopicPartition(Topic, 10);
-        IntPtr map = OwnedCommittedMap(consumer, partition, 64);
-
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> copied =
-            OffsetMapMarshal.CopyOutAndDestroy(map);
-
-        OffsetAndMetadata value = Assert.Single(copied).Value;
-        Assert.Equal(64, value.Offset);
-        Assert.Equal("bridge-meta", value.Metadata);
-        Assert.Equal(3, value.LeaderEpoch);
-    }
-
-    // NOTE: there is deliberately no "releases the root even when the copy throws" test.
-    // Making CopyOut throw needs an invalid map pointer, and the OffsetMap_t container
-    // accessors are NOT null-safe — such a test would segfault the host rather than assert
-    // anything. That property is structural (the destroy is in a `finally`) and is shared
-    // verbatim with the shipped TopicPartitionListMarshal twin.
-
-    // ---- Free exactly once ----
-
-    [Fact]
-    public void CommitCallbackRegistration_ReleasedTwice_FreesExactlyOnce()
-    {
-        // GCHandle.Free() on an already-freed handle throws InvalidOperationException, so
-        // "does not throw" is the observable proof that the single free site is
-        // idempotent-safe. It has to be: the release hook and the "native never ran" abandon
-        // path can both reach it.
-        CommitCallbackRegistration registration =
-            CommitCallbackRegistration.Root(new RecordingCommitCallback());
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(new RecordingCallback(), false, Reporter());
 
         registration.Release();
         registration.Release();
@@ -494,111 +146,477 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.True(registration.IsReleased);
     }
 
-    // ---- Keep-alive under GC + churn ----
-
     [Fact]
-    public void CommitCallbacks_ChurnedUnderAggressiveGc_StayLive()
+    public async Task AsyncOnComplete_IsReportedWhenItsTaskEnds_NotWhenItReturns()
     {
-        // The trampolines and the release hook are static readonly (process-rooted) and each
-        // registration is rooted by its own GCHandle until the hook fires, so aggressive GC
-        // across a submit→fire window must not collect either. Each iteration allocates a
-        // fresh registration, so a missing free site would also show up here as growth.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-
-        for (int i = 0; i < 50; i++)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            consumer.CommitAsync(callback);
-        }
-
-        Assert.Equal(50, callback.Completions.Count);
-    }
-
-    [Fact]
-    public void CommitAsyncWithOffsets_Churned_NoCorruption()
-    {
-        // Exercises BOTH offsets branches (with and without a callback) repeatedly. A per-fire
-        // GCHandle mistake, a missing map destroy, or a double free would surface here as a
-        // crash rather than a silent pass.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
-        TopicPartition partition = new TopicPartition(Topic, 6);
-        consumer.Assign(new[] { partition });
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-
-        for (int i = 0; i < 200; i++)
-        {
-            Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
+        TaskCompletionSource<bool> release = NewSignal();
+        ManualResetEventSlim entered = new ManualResetEventSlim();
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? delivered = null;
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback(async (offsets, _) =>
             {
-                [partition] = new OffsetAndMetadata(i),
-            };
-            consumer.CommitAsync(offsets, i % 2 == 0 ? callback : null);
+                delivered = offsets;
+                entered.Set();
+                await release.Task;
+            }),
+            false,
+            Reporter());
+
+        Task<Exception?> invoked = Task.Run(() => Invoke(registration, Offsets(9, "async"), IntPtr.Zero));
+
+        Assert.True(entered.Wait(s_deadline), "the callback was not called");
+        await Task.WhenAny(invoked, Task.Delay(s_notYetWindow));
+        Assert.False(invoked.IsCompleted, "the invoker returned before the callback's Task ended");
+        Assert.False(registration.IsReleased, "the registration was released before the callback's Task ended");
+
+        release.SetResult(true);
+        Assert.Null(await TestTimeout.Run(() => invoked, s_deadline));
+        Assert.True(registration.IsReleased);
+        KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(delivered!);
+        Assert.Equal(s_tp0, entry.Key);
+        Assert.Equal(9, entry.Value.Offset);
+        Assert.Equal("async", entry.Value.Metadata);
+    }
+
+    [Fact]
+    public async Task AsyncOnComplete_AFaultedTask_ReportsTheSameInstance()
+    {
+        InvalidCastException thrown = new InvalidCastException("async callback boom");
+        TaskCompletionSource<bool> outcome = NewSignal();
+        (CommitCallbackRegistration registration, Task<Exception?> invoked) = InvokeOnAPendingTask(outcome);
+
+        outcome.SetException(thrown);
+
+        Assert.Same(thrown, await TestTimeout.Run(() => invoked, s_deadline));
+        Assert.True(registration.IsReleased);
+    }
+
+    [Fact]
+    public async Task AsyncOnComplete_ACanceledTask_ReportsTheCancellation()
+    {
+        TaskCompletionSource<bool> outcome = NewSignal();
+        (CommitCallbackRegistration registration, Task<Exception?> invoked) = InvokeOnAPendingTask(outcome);
+
+        outcome.SetCanceled();
+
+        Assert.IsAssignableFrom<OperationCanceledException>(await TestTimeout.Run(() => invoked, s_deadline));
+        Assert.True(registration.IsReleased);
+    }
+
+    [Fact]
+    public void AsyncOnComplete_ThrowingBeforeItReturnsATask_ReportsTheSameInstance()
+    {
+        InvalidCastException thrown = new InvalidCastException("thrown before the Task");
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((_, _) => throw thrown), false, Reporter());
+
+        Exception? reported = Invoke(registration, Offsets(1), IntPtr.Zero);
+
+        Assert.Same(thrown, reported);
+        Assert.True(registration.IsReleased);
+    }
+
+    [Fact]
+    public void AsyncOnComplete_ReturningANullTask_IsReportedAsSuccess()
+    {
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((_, _) => null!), false, Reporter());
+
+        Exception? reported = Invoke(registration, Offsets(1), IntPtr.Zero);
+
+        Assert.Null(reported);
+        Assert.True(registration.IsReleased);
+    }
+
+    [Fact]
+    public void AsyncOnComplete_ATimeoutError_DeliversSystemTimeoutException_AndNullOffsets()
+    {
+        List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> calls =
+            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((offsets, exception) =>
+            {
+                calls.Add((offsets, exception));
+                return Task.CompletedTask;
+            }),
+            false,
+            Reporter());
+
+        Exception? reported = Invoke(registration, Offsets(7), TimeoutError("async commit timed out"));
+
+        Assert.Null(reported);
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(calls);
+        Assert.Null(offsets);
+        Assert.Equal("async commit timed out", Assert.IsType<TimeoutException>(exception).Message);
+        Assert.True(registration.IsReleased);
+    }
+
+    [Fact]
+    public void AsyncOnComplete_AnExplicitEmptyOffsetsCommit_DeliversNullOffsets()
+    {
+        List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> calls =
+            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((offsets, exception) =>
+            {
+                calls.Add((offsets, exception));
+                return Task.CompletedTask;
+            }),
+            true,
+            Reporter());
+
+        Exception? reported = Invoke(registration, new Dictionary<TopicPartition, OffsetAndMetadata>(), IntPtr.Zero);
+
+        Assert.Null(reported);
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(calls);
+        Assert.Null(offsets);
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AsyncOnComplete_RunsItsSynchronousPartInsideTheReportersCallbackFlag()
+    {
+        ConsumerCallbackReporter reporter = Reporter();
+        bool? inside = null;
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((_, _) =>
+            {
+                inside = reporter.InCallback;
+                return Task.CompletedTask;
+            }),
+            false,
+            reporter);
+
+        Assert.Null(Invoke(registration, Offsets(1), IntPtr.Zero));
+
+        Assert.True(inside);
+        Assert.False(reporter.InCallback);
+    }
+
+    [Fact]
+    public void Reporter_ALateReportAfterDestroy_IsSkipped_AndFreesItsError()
+    {
+        ConsumerCallbackReporter reporter = Reporter();
+        reporter.MarkDestroyed();
+        using ManualResetEventSlim reported = new ManualResetEventSlim();
+
+        WeakReference failure = ReportAFailureLate(reporter, reported);
+
+        Assert.True(reported.IsSet, "the late report did not run");
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.False(failure.IsAlive, "the skipped report kept the error that carries the exception");
+    }
+
+    [Fact]
+    public void SyncMock_ASucceededCommit_ReleasesItsRegistrationOnceItReported()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        try
+        {
+            RecordingCallback callback = new RecordingCallback();
+            consumer.CommitAsync(Offsets(5), callback);
+
+            Assert.Single(callback.Calls);
+            CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+            Assert.True(registration.IsReleased);
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    [Fact]
+    public void SyncMock_CommitAsyncWithOffsetsAndNoCallback_PassesARegistrationThatReportsOnce()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        try
+        {
+            consumer.Assign(new[] { s_tp0 });
+            consumer.CommitAsync(Offsets(5));
+
+            CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+            Assert.True(registration.IsReleased);
+            Assert.Equal(5, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset);
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    [Fact]
+    public void KafkaConsumer_ACommitTheCoreRefused_KeepsItsRegistrationUntilTheConsumerIsDestroyed()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["group.protocol"] = "consumer" },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
+        RecordingCallback callback = new RecordingCallback();
+
+        KafkaException refused = Assert.Throws<KafkaException>(() => consumer.CommitAsync(Offsets(1), callback));
+
+        Assert.Equal(InvalidGroupIdCode, refused.Code);
+        Assert.Equal(NoGroupId, refused.Message);
+        CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+        Assert.False(registration.IsReleased, "the registration of a refused commit was released before destroy");
+
+        TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
+
+        Assert.True(registration.IsReleased, "destroy did not release the refused commit's registration");
+        Assert.Empty(callback.Calls);
+    }
+
+    [Fact]
+    public async Task AsyncMock_ACommitTheCoreRefused_KeepsItsRegistrationUntilTheConsumerIsDestroyed()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        RecordingCallback callback = new RecordingCallback();
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+        await consumer.Subscribe(
+            new[] { Topic },
+            new SyncListener(() =>
+            {
+                entered.Set();
+                _ = release.Wait(s_deadline);
+            }));
+
+        Task rebalance = consumer.Rebalance(new[] { s_tp0 });
+        Task refusedCommit;
+        try
+        {
+            Assert.True(entered.Wait(s_deadline), "the listener never ran");
+            refusedCommit = consumer.CommitAsync(callback);
+        }
+        finally
+        {
+            release.Set();
         }
 
-        Assert.Equal(100, callback.Completions.Count);
-    }
-
-    // ---- Teardown ----
-
-    [Fact]
-    public void Dispose_AfterACommitCallback_ReturnsWithoutHanging()
-    {
-        // On a mock the callback fires inline and the core drops the registration before the
-        // call returns, so by teardown there is nothing outstanding — but the teardown-returns
-        // regression is asserted anyway (ffi §B6 "Tests required").
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        consumer.CommitAsync(callback);
-
-        TestTimeout.Run(() => consumer.Dispose(), s_deadline);
-
-        Assert.Single(callback.Completions);
-    }
-
-    [Fact]
-    public async System.Threading.Tasks.Task DisposeAsync_AfterACommitCallback_ReturnsWithoutHanging()
-    {
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-        consumer.CommitAsync(callback);
+        await TestTimeout.Run(() => rebalance, s_deadline);
+        InvalidOperationException concurrent = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TestTimeout.Run(() => refusedCommit, s_deadline));
+        Assert.Equal(ConcurrentMessage, concurrent.Message);
+        CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+        Assert.False(registration.IsReleased, "the registration of a refused commit was released before destroy");
 
         await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
 
-        Assert.Single(callback.Completions);
+        Assert.True(registration.IsReleased, "destroy did not release the refused commit's registration");
+        Assert.Empty(callback.Calls);
     }
 
-    // ---- Fixtures ----
-
-    private sealed class RecordingCommitCallback : IOffsetCommitCallback
+    [Fact]
+    public async Task AsyncMock_AnAsyncCallbackCommit_KeepsItsRegistrationUntilItsTaskEnded()
     {
-        internal List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception)>
-            Completions
-        { get; } =
-            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>, KafkaException?)>();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        try
+        {
+            TaskCompletionSource<bool> release = NewSignal();
+            ManualResetEventSlim entered = new ManualResetEventSlim();
+            Task commit = consumer.CommitAsync(
+                Offsets(4),
+                new AsyncDelegateCallback(async (_, _) =>
+                {
+                    entered.Set();
+                    await release.Task;
+                }));
 
-        public void OnComplete(
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception) =>
-            Completions.Add((offsets, exception));
+            Assert.True(entered.Wait(s_deadline), "the callback was not called");
+            CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+            await Task.WhenAny(commit, Task.Delay(s_notYetWindow));
+            Assert.False(commit.IsCompleted, "CommitAsync returned before the callback's Task ended");
+            Assert.False(registration.IsReleased, "the registration was released before the callback's Task ended");
+
+            release.SetResult(true);
+            await TestTimeout.Run(() => commit, s_deadline);
+            Assert.True(registration.IsReleased);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
     }
 
-    private sealed class ThrowingCommitCallback : IOffsetCommitCallback
+    [Fact]
+    public void SyncMock_CommitCallbacksChurnedUnderAggressiveGc_EachFireOnce()
     {
-        private readonly string _message;
-
-        internal ThrowingCommitCallback(string message)
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        try
         {
-            _message = message;
+            RecordingCallback callback = new RecordingCallback();
+            for (int i = 0; i < 200; i++)
+            {
+                consumer.CommitAsync(Offsets(i), callback);
+                if (i % 20 == 0)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+            }
+
+            Assert.Equal(200, callback.Calls.Count);
+            for (int i = 0; i < 200; i++)
+            {
+                Assert.Equal(i, callback.Calls[i].Offsets![s_tp0].Offset);
+            }
+        }
+        finally
+        {
+            TestTimeout.Run(consumer.Dispose, s_deadline);
+        }
+    }
+
+    private static Exception? Invoke(
+        CommitCallbackRegistration registration,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IntPtr error)
+    {
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
+            IntPtr map = arguments.OffsetMap(NativeConsumer.SnapshotCommitOffsets(offsets));
+            IntPtr handle = registration.NewHandle();
+            IntPtr outErr = IntPtr.Zero;
+            try
+            {
+                NativeMethods.OffsetCommitCallbackInvokeOnComplete(handle, map, error, ref outErr);
+            }
+            finally
+            {
+                CommitCallbackRegistration.DestroyHandle(handle);
+            }
+
+            return KafkaException.FromFfiError(outErr, owned: true);
+        }
+        finally
+        {
+            if (error != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(error);
+            }
+        }
+    }
+
+    private static IntPtr TimeoutError(string message)
+    {
+        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr error = NativeMethods.ErrorLocalTimeout(pinned.Pointer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return error;
+    }
+
+    private static ConsumerCallbackReporter Reporter() => new ConsumerCallbackReporter(IntPtr.Zero);
+
+    private static (CommitCallbackRegistration Registration, Task<Exception?> Invoked) InvokeOnAPendingTask(
+        TaskCompletionSource<bool> outcome)
+    {
+        ManualResetEventSlim entered = new ManualResetEventSlim();
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(
+            new AsyncDelegateCallback((_, _) =>
+            {
+                entered.Set();
+                return outcome.Task;
+            }),
+            false,
+            Reporter());
+
+        Task<Exception?> invoked = Task.Run(() => Invoke(registration, Offsets(1), IntPtr.Zero));
+        Assert.True(entered.Wait(s_deadline), "the callback was not called");
+        Assert.False(invoked.Wait(s_notYetWindow), "the invoker returned before the callback's Task ended");
+        Assert.False(registration.IsReleased, "the registration was released before the callback's Task ended");
+        return (registration, invoked);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ReportAFailureLate(ConsumerCallbackReporter reporter, ManualResetEventSlim reported)
+    {
+        TaskCompletionSource<bool> outcome = new TaskCompletionSource<bool>();
+        reporter.Exit(reporter.Enter(asyncCallback: true));
+        reporter.ReportWhenEnded(1, outcome.Task, null, reported.Set);
+        InvalidCastException failure = new InvalidCastException("reported after destroy");
+        outcome.SetException(failure);
+        return new WeakReference(failure);
+    }
+
+    private static TaskCompletionSource<bool> NewSignal() =>
+        new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(long offset, string metadata = "") =>
+        new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset, metadata) };
+
+    private static MockConsumer<byte[], byte[]> NewMock() =>
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static CommitCallbackRegistration? Registration(object consumer) =>
+        ((NativeConsumer)consumer.GetType()
+            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(consumer)!).CurrentCommitCallbackRegistration;
+
+    /// <summary>Records each completion's offsets and exception.</summary>
+    private sealed class RecordingCallback : IOffsetCommitCallback
+    {
+        internal List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> Calls { get; } =
+            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            Calls.Add((offsets, exception));
+    }
+
+    /// <summary>A commit callback that throws the exception it is given.</summary>
+    private sealed class ThrowingCallback : IOffsetCommitCallback
+    {
+        private readonly Exception _exception;
+
+        internal ThrowingCallback(Exception exception) => _exception = exception;
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            throw _exception;
+    }
+
+    /// <summary>A commit callback that runs the action it is given.</summary>
+    private sealed class DelegateCallback : IOffsetCommitCallback
+    {
+        private readonly Action<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?> _onComplete;
+
+        internal DelegateCallback(Action<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?> onComplete) =>
+            _onComplete = onComplete;
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            _onComplete(offsets, exception);
+    }
+
+    /// <summary>An async commit callback that runs the function it is given.</summary>
+    private sealed class AsyncDelegateCallback : IAsyncOffsetCommitCallback
+    {
+        private readonly Func<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?, Task> _onComplete;
+
+        internal AsyncDelegateCallback(
+            Func<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?, Task> onComplete) =>
+            _onComplete = onComplete;
+
+        public Task OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            _onComplete(offsets, exception);
+    }
+
+    /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
+    private sealed class SyncListener : ConsumerRebalanceListenerBase
+    {
+        private readonly Action _onAssigned;
+
+        internal SyncListener(Action onAssigned) => _onAssigned = onAssigned;
+
+        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
         }
 
-        internal bool WasInvoked { get; private set; }
-
-        public void OnComplete(
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception)
-        {
-            WasInvoked = true;
-            throw new InvalidOperationException(_message);
-        }
+        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 }

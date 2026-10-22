@@ -20,19 +20,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M5/P8a — synchronous-consumer teardown (PLAN §8): <see cref="IConsumer.Close()"/> /
-/// <see cref="IDisposable.Dispose"/> return without hanging, are idempotent under double /
-/// mixed calls (the shared <c>TryBeginClose</c> latch), and every public op throws
-/// <see cref="ObjectDisposedException"/> after teardown. Every close / dispose runs under a
-/// <see cref="TestTimeout"/> hang guard (the teardown-returns regression). There is no
-/// <c>DisposeAsync</c> — this is the synchronous surface.
+/// Teardown of the sync consumers: Close and Dispose return, are idempotent under double and mixed calls, and every
+/// operation throws <see cref="ObjectDisposedException"/> after them.
 /// </summary>
 public sealed class PublicSyncConsumerTeardownTests
 {
-    // A hang guard. It equals the real consumer's sync-close bound since D2 (M17/P2:
-    // Consumer_close, the core's 30 s default, was 5 s), but that bound is not in play:
-    // every consumer here is a MockConsumer, whose close has no broker or coordinator to
-    // wait on and returns in milliseconds.
+    // A hang guard only: a mock's close returns in milliseconds.
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
 
@@ -56,36 +49,29 @@ public sealed class PublicSyncConsumerTeardownTests
     public void DoubleDispose_IsSafe()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
+        TestTimeout.Dispose(consumer);
     }
 
     [Fact]
     public void Close_ThenDispose_IsIdempotent()
     {
-        // Close takes the one-shot latch and destroys; a subsequent Dispose loses the latch and
-        // no-ops (closed-flag idempotence) — no double-close / double-destroy.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Close();
-        consumer.Dispose();
+        TestTimeout.Teardown(consumer, () => consumer.Close());
+        TestTimeout.Dispose(consumer);
     }
 
     [Fact]
     public void Dispose_ThenClose_IsIdempotent()
     {
-        // Dispose wins the latch; a subsequent Close loses it and no-ops (no throw).
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
-        consumer.Close();
+        TestTimeout.Dispose(consumer);
+        TestTimeout.Teardown(consumer, () => consumer.Close());
     }
 
     [Fact]
     public void Close_OnMock_DoesNotHang_AfterSubscribe()
     {
-        // Close surfaces a close KafkaException (unlike Dispose, which swallows it). Broker-free
-        // a mock close succeeds — the error-surfacing path (throw) is by inspection (CloseSync
-        // rethrows FromHandle's exception; Dispose swallows). Here the reachable assertion is a
-        // broker-free Close completes without faulting.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Subscribe(ProofTopic());
 
@@ -96,7 +82,7 @@ public sealed class PublicSyncConsumerTeardownTests
     public void UseAfterDispose_ThrowsObjectDisposed()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
         Assert.Throws<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
@@ -110,7 +96,6 @@ public sealed class PublicSyncConsumerTeardownTests
         Assert.Throws<ObjectDisposedException>(() => consumer.Commit());
         Assert.Throws<ObjectDisposedException>(
             () => consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>()));
-        // IConsumerCommon members after dispose.
         Assert.Throws<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
     }
@@ -119,7 +104,7 @@ public sealed class PublicSyncConsumerTeardownTests
     public void UseAfterClose_ThrowsObjectDisposed()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.Close();
+        TestTimeout.Teardown(consumer, () => consumer.Close());
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
         Assert.Throws<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
@@ -128,14 +113,6 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void ManyConsumers_CreateAndDispose_NoLeakOrCrash()
     {
-        // Create/dispose many sync consumers — the handle-leak / double-free detector at the
-        // public surface (SafeHandle ReleaseHandle → Consumer_destroy). Wrapped in the
-        // TestTimeout hang guard like the rest of this class, so a teardown that stopped
-        // returning fails the run instead of hanging it.
-        //
-        // Every call in the loop is synchronous, so it returns before Dispose and the
-        // reference count is 1 at teardown — the destroy is immediate. The deferred-destroy
-        // path is covered by PublicConsumerHandleProtectionTests.
         TestTimeout.Run(
             () =>
             {

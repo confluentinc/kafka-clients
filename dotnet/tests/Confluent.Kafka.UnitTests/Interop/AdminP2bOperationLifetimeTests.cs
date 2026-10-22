@@ -195,7 +195,8 @@ public sealed class AdminP2bOperationLifetimeTests
     [InlineData(Rpc.DeleteRecords)]
     public void TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce(Rpc rpc)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         for (int i = 0; i < 50; i++)
         {

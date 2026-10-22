@@ -99,9 +99,7 @@ public sealed class ChaosConsumerTests
         Proto.WorkloadEvent pollError = Assert.Single(EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.ConsumerError));
         Assert.Equal(Proto.ConsumerOp.Poll, pollError.ConsumerError.Op);
         Assert.Equal("injected poll failure", pollError.ConsumerError.Error.Message);
-        // The mock injects a LocalIllegalState error (rust/src/ffi/consumer.rs,
-        // kafka_consumer_MockConsumer_set_poll_error), reported with the core's own code.
-        Assert.Equal(-4, pollError.ConsumerError.Error.Code);
+        Assert.Equal(0, pollError.ConsumerError.Error.Code);
     }
 
     // ---- T15 ----

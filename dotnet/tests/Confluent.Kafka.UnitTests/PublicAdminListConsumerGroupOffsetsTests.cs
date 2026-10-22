@@ -78,7 +78,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_SingleGroupCompletesWithItsOffsets()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets("p5-lcgo-one");
 
@@ -106,7 +107,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_FansOutOneFuturePerGroupId()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
@@ -147,7 +149,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AllFaultsWhenAKeyFails()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
@@ -171,7 +174,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AnEmptyRequestCompletesEmpty()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal));
@@ -195,7 +199,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AcceptsNullAndEmptyPartitionSelections()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         // The convenience form's own spec: TopicPartitions left null.
         Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions);
@@ -244,7 +249,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_IsReachableThroughTheInterface()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         IAsyncAdmin api = admin;
 
         AsyncListConsumerGroupOffsetsResult single = api.ListConsumerGroupOffsets("p5-lcgo-iface");
@@ -267,7 +273,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_RejectsAMalformedRequest()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentNullException missingId = Assert.Throws<ArgumentNullException>(
             () => { admin.ListConsumerGroupOffsets((string)null!); });
@@ -325,7 +332,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         Assert.Null(Record.Exception(
             () =>
@@ -356,8 +364,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_TheSingleGroupForm_ForwardsItsOptions()
     {
-        using AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
+        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+        using IDisposable realDisposal = TestTimeout.Disposal(real);
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
 
         KafkaException batched = await TestTimeout.Run(
@@ -388,7 +397,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     public async Task ListConsumerGroupOffsets_AfterDispose_Throws()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => { admin.ListConsumerGroupOffsets("p5-lcgo-disposed"); });

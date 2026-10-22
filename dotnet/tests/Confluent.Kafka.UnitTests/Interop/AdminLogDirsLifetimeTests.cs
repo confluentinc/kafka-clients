@@ -133,7 +133,8 @@ public sealed class AdminLogDirsLifetimeTests
     [InlineData(Rpc.DescribeReplicaLogDirs)]
     public async Task TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce(Rpc rpc)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         for (int i = 0; i < 50; i++)
         {
@@ -211,7 +212,8 @@ public sealed class AdminLogDirsLifetimeTests
     [Fact]
     public async Task AReplicaTheMockOmits_FaultsThatKeyWithTheAbsentKeyError()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
@@ -266,7 +268,8 @@ public sealed class AdminLogDirsLifetimeTests
     [Fact]
     public async Task AlterReplicaLogDirs_FaultsOnlyTheRejectedReplica()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);

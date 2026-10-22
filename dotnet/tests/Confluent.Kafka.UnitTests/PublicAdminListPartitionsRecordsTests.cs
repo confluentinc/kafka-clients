@@ -61,7 +61,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task ListTopics_ReturnsTheCreatedTopics_AndTheThreeProjectionsAgree()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(
@@ -121,8 +122,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [InlineData(false)]
     public void ListTopics_ListInternalCrossesTheBoundary(bool listInternal)
     {
-        using Confluent.Kafka.Internal.NativeAdminClient admin =
+        Confluent.Kafka.Internal.NativeAdminClient admin =
             Confluent.Kafka.Internal.NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool? captured = null;
         int capturedTimeout = int.MinValue;
@@ -162,7 +164,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task CreatePartitions_AgainstTheMock_FailsPerTopicWithJavasExactMessage()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p2b-grow", 1, 1) }).All().Get(), s_deadline);
@@ -190,7 +193,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task DeleteRecords_WithAnEmptyRequest_SucceedsWithAnEmptyResult()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDeleteRecordsResult result = admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete>());
@@ -209,7 +213,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task DeleteRecords_AgainstTheMock_FailsPerPartitionWithJavasExactMessage()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         TopicPartition partition = new TopicPartition("p2b-delete", 0);
         AsyncDeleteRecordsResult result = admin.DeleteRecords(
@@ -298,7 +303,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public void Preconditions_AreRejectedBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.CreatePartitions(null!));
         Assert.Throws<ArgumentNullException>(() => admin.DeleteRecords(null!));
@@ -346,7 +352,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
     public void AfterClose_EveryNewRpcThrowsObjectDisposed()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
         Assert.Throws<ObjectDisposedException>(
@@ -365,7 +371,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     {
         const string Topic = "témas-日本語-🎉";
 
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -384,7 +391,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task TfmSmoke_TheThreeNewRpcsWorkOnThisFramework()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p2b-smoke", 1, 1) }).All().Get(), s_deadline);

@@ -237,7 +237,8 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void IncrementalAlterConfigs_AResourceWithNoOps_ContributesOneSentinelRow()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
@@ -352,7 +353,8 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void IncrementalAlterConfigs_ZeroOpsWithValidateOnly_IsSentAndAnswered()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
@@ -451,7 +453,8 @@ public sealed class AdminConfigsSubmitArgumentTests
 
     private static Captured CaptureDescribe(DescribeConfigsOptions? options, params ConfigResource[] resources)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(
@@ -481,7 +484,8 @@ public sealed class AdminConfigsSubmitArgumentTests
         AlterConfigsOptions? options,
         params (ConfigResource Resource, AlterConfigOp[] Ops)[] rows)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs =
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>();

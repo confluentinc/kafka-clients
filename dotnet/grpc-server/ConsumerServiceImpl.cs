@@ -293,10 +293,13 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             Proto.OffsetMap map = new Proto.OffsetMap();
             lock (entry.Gate)
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = entry.Consumer.Committed(ToTopicPartitions(request.Partitions));
-                foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> pair in result)
+                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = entry.Consumer.Committed(ToTopicPartitions(request.Partitions));
+                foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> pair in result)
                 {
-                    map.Entries.Add(new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OamToProto(pair.Value) });
+                    if (pair.Value is not null)
+                    {
+                        map.Entries.Add(new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OamToProto(pair.Value) });
+                    }
                 }
             }
 
@@ -395,10 +398,13 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             Proto.OffsetAndTimestampMap map = new Proto.OffsetAndTimestampMap();
             lock (entry.Gate)
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> result = entry.Consumer.OffsetsForTimes(spec);
-                foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp> pair in result)
+                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> result = entry.Consumer.OffsetsForTimes(spec);
+                foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp?> pair in result)
                 {
-                    map.Entries.Add(new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OatToProto(pair.Value) });
+                    if (pair.Value is not null)
+                    {
+                        map.Entries.Add(new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OatToProto(pair.Value) });
+                    }
                 }
             }
 

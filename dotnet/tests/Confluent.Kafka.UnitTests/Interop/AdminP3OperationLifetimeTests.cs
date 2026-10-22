@@ -197,7 +197,8 @@ public sealed class AdminP3OperationLifetimeTests
     [InlineData(Rpc.ListConfigResources)]
     public async Task TheCallbacksErrorParameter_IsOwned_AndConsumedExactlyOnce(Rpc rpc)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         for (int i = 0; i < 50; i++)
         {

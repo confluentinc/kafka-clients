@@ -1047,120 +1047,351 @@ from stalling every later completion.
 
 # Part B · Consumer
 
-> **⚠ Standing note — "sole owner" is about the *per-operation* `GCHandle`, and
-> there are THREE families, not two.**
-> Most of Part B describes the **one-shot per-operation completion**: submit an
-> async op, one callback fires, that callback frees the per-op `GCHandle`. Two
-> other families do **not** work that way and have their **own** owner — the ABI's
-> `user_data_destroy` hook:
+> **⚠ Standing note — who frees what (M19/P1).** The pre-`0035d9ff` ABI freed a
+> registration's `GCHandle` from a `user_data_destroy` release hook. The header has
+> no such hook at `3f8a5bc6`, so the binding decides every `GCHandle` free itself, by
+> the lifetime rule of the callback's family (§B6):
 >
->   1. a **multi-shot registration** (the rebalance listener, M9/P6), registered
->      once and fired N times; and
->   2. a **one-shot completion *with a release hook*** (the offset-commit callback,
->      M9/P7) — it fires at most once, so it *looks* like the first family, but it
->      is **not invoked at all when the call fails**, while the hook still fires.
+>   1. a **`_cb` completion**: one-shot; its `cb` frees its `opaque`;
+>   2. a **multi-shot registration** (the rebalance listener): `self_` lives across N
+>      fires, until the next `subscribe_*`, `unsubscribe` or the consumer's destroy
+>      releases it (BH:32328-32332 at `3f8a5bc6`), and decision 23 says when the
+>      binding frees it;
+>   3. a **one-shot registration** (the offset-commit callback, including the no-op
+>      one a `ConsumerHandle` commit passes, ledger 104): `self_` lives until
+>      `onComplete` fired, or until the consumer's destroy (BH:33693-33696 at
+>      `3f8a5bc6`). A commit that returned an error may never fire it, so its
+>      `GCHandle` is kept until destroy has returned, as Python parks it
+>      (`python/_confluentkafka.c:3881-3885` at `3f8a5bc6`).
 >
-> Before applying a §B6/§B7 "sole owner" sentence, check which of the three you are
-> in. The one-shot invariant does not generalize: applying it to a registration is
-> a use-after-free on fire 2..N, and applying it to a commit callback **leaks** the
-> `GCHandle` on the failure path. All three families are written out in §B6.
+> Before applying a "the callback frees it" sentence, check the family: applied to a
+> registration it is a use-after-free on fire 2..N, and applied to a commit callback
+> it leaks the `GCHandle` when the commit failed and `onComplete` never fires.
 
 ## B1 Thread model (consumer)
 
-**Decision:** Per real `KafkaConsumer`, the core owns a background task
-(`ConsumerNetworkThread`) over a single async Selector **plus a dedicated
-callback-dispatcher thread** — both native. The .NET side adds **no pump**; it
-uses the ABI's push surface (§B7), and completions arrive on the core's **foreign**
-dispatcher thread.
+**Decision (M19/P1, decision 27):** Per real `KafkaConsumer`, the core owns its
+background task (`ConsumerNetworkThread`) over a single async Selector, on the
+consumer's own tokio runtime. There is no native callback-dispatcher thread any
+more. A blocking form runs the listener and commit callbacks it triggers inline on
+the calling thread; a `_cb` form queues them, and its own completion, for
+`Consumer__execute_callbacks` (`rust/src/ffi/consumer/mod.rs:48-62` at
+`3f8a5bc6`).
+
+  - **`KafkaConsumer` and `MockConsumer` (sync): no .NET thread.** Each method calls
+    the blocking form, so its listener and commit callbacks run on the caller's
+    thread inside the call, as Java does (BH:29215-29218 at `3f8a5bc6`). Each
+    blocking call first drains `__execute_callbacks` once, to run anything an
+    earlier `_cb` left queued. This is a recorded deviation from Python's
+    mechanism, the `_cb` form plus a drain in 100 ms slices
+    (`python/confluent_kafka/consumer/_base.py:970-976` at `3f8a5bc6`): Python's
+    reasons (Ctrl+C between bytecodes, its interpreter lock) do not apply to .NET,
+    where `Wakeup()` interrupts a wait.
+  - **`AsyncKafkaConsumer` and `AsyncMockConsumer`: one drain thread,
+    `confluent-kafka-consumer-pump`**, woken by the notify hook. It runs every `_cb`
+    completion and every listener and commit callback. Continuations run with
+    `RunContinuationsAsynchronously`, never on it.
 
 ```
-   .NET (managed)                    │ C ABI │       Rust core (native, per consumer)
-   ─────────────                     │       │       ─────────────────────────────────
-   caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     PollWithCallback → *_async(…, cb) ─│──────►│     consumer bg task (ConsumerNetworkThread):
-       returns Task (core guards)    │       │       NetworkClient + ONE async Selector
-   (NO .NET pump, NO managed guard)  │       │       ↕ multiplexes ALL brokers (event-driven)
-     ◄── cb fires here (→ TCS) ──────│◄──────│     callback-dispatcher thread (1, native):
-         on the dispatcher thread    │       │       fires completion callbacks
-   Dispose: close_(w/timeout|async)  │       │   (created in KafkaConsumer_new, dropped on _destroy)
-            → destroy (no drain)      │       │
+   .NET (managed)                               │ C ABI │  Rust core (native, per consumer)
+   ─────────────                                │       │  ─────────────────────────────────
+   KafkaConsumer caller:                        │       │  tokio multi-thread runtime
+     __execute_callbacks (drain once) ──────────│──────►│
+     Consumer_poll(view, timeout, &err) ────────│──────►│    ConsumerNetworkThread:
+       listener / commit callback, inline ◄─────│◄──────│      NetworkClient + ONE async Selector
+   AsyncKafkaConsumer caller:                   │       │
+     Consumer_poll_cb(view, timeout, cb, op) ───│──────►│    callback queue
+     return tcs.Task                            │       │      empty → non-empty: notify hook
+   confluent-kafka-consumer-pump:               │       │
+     wait for the signal; __execute_callbacks ──│──────►│    runs cb / listener / commit callback
+       cb → tcs.Set* (RunContinuations-         │       │
+         Asynchronously)                        │       │
+   Close/Dispose: see §B2's path list           │       │
 ```
 
 **Rule:**
 
   - Native side (per real `KafkaConsumer`): the core runs the consumer's
     **background task** (single `ConsumerNetworkThread`, consumer-threading §10)
-    over ONE async Selector (all brokers multiplexed — NOT thread-per-broker),
-    **plus a dedicated callback-dispatcher thread** — both created in
-    `KafkaConsumer_new`, torn down by `Consumer_destroy`.
-  - .NET side: caller thread(s) **only — no pump** (the ABI pushes completions,
-    §B7). **No poll loop** — the core self-drives.
-  - **One operation in flight** per consumer, **single-owner / not thread-safe**
-    (M3/P2, Python-parity). The **Rust core's own access guard** serializes ops —
-    there is **no managed mirror**. ⚠ **One sanctioned exception: `ConsumerHandle`**
-    (§B2 Category 6, M9/P8) — see the bullet below. A concurrent **async op** is rejected by the
-    core inline (it fires the callback on the caller thread with a
-    `ConcurrentModification` error) and surfaces as a **faulted `Task`** carrying a
-    `KafkaException` (§B5) — not a managed synchronous pre-check throw. A concurrent
-    **sync state read** surfaces as `InvalidOperationException` from the core's
-    null-handle rejection path (§B5). The completion callback runs on the
-    **dispatcher thread (foreign)**, not the caller → `RunContinuationsAsynchronously`
-    + no-throw (§B6/§B7). `Consumer_wakeup` is the one cross-thread call (§B5 /
-    consumer-threading §11).
-  - **`ConsumerHandle` deliberately bypasses the access guard** — that is the whole
-    reason the type exists: *"Nothing in this module acquires the single-owner access
-    guard … A handle operation therefore succeeds while another consumer operation is
-    in flight, whereas the equivalent `kafka_consumer_Consumer_*` call would be
-    rejected with `ConcurrentModificationError`"*
-    (`src/ffi/consumer_handle.rs:29-38`). So the "one operation in flight" rule above
-    describes the `Consumer_*` surface only; a handle op runs **concurrently** with
-    one, by design, and that is what makes in-callback reentrancy possible at all
-    (Java gets it free — `acquire()` is reentrant on the polling thread).
-  - **Handle ops are synchronous and `block_on` the *calling* thread**, not a worker:
-    *"Every operation that is `async` in the core is exposed here as a **synchronous**
-    C function that drives the future to completion on the *calling* thread"*
-    (`:41-43`). Consequently they are **safe** from the core's callback-dispatcher
-    thread — which is where every listener / commit callback runs, so this is the
-    reentrancy path working as intended — and from any embedder-owned OS thread, but
-    **must not** be called from inside a tokio runtime, where `Handle::block_on`
-    would panic. Rather than let a panic cross the FFI boundary, every entry point
-    detects that and returns `IllegalStateError` (§B5). This is the **core's**
-    `block_on`, inside the sync ABI — the shipped `Seek` / `CurrentLag` precedent —
-    **not** a managed sync-over-async façade (CLAUDE.md §4).
+    over ONE async Selector (all brokers multiplexed, NOT thread-per-broker),
+    created in `KafkaConsumer_new` and torn down by `KafkaConsumer_destroy_err`.
+  - .NET side: the sync consumers add no thread; the async consumers add the one
+    drain thread. **No poll loop**: the core self-drives, and the drain thread sleeps
+    until the notify hook signals. The hook only signals (BH:3387-3391 at
+    `3f8a5bc6`).
+  - **One operation at a time** per consumer, **single-owner / not thread-safe**, checked
+    twice (ledger 136): first the **binding's owner check**, below; behind it the
+    **core's single-owner flag**. The blocking form holds the flag while it runs; the
+    `_cb` form holds it until its op ends and releases it just before it queues the
+    completion; the getters Java guards with `acquire()` (`assignment`, `subscription`,
+    `paused`, `currentLag`, `groupMetadata`) hold it for the call
+    (`rust/src/ffi/consumer/mod.rs:28-46`, `:316-325`, `:678-714` at `3f8a5bc6`).
+    The flag is not reentrant: a call that reaches the core while it is held (an
+    overlapping call of the thread that holds the use, or a call from a callback the
+    holding op runs) fails at once with `LOCAL_CONCURRENT_MODIFICATION` (-2) and the
+    message "KafkaConsumer is not safe for multi-threaded access.": a blocking form or a
+    getter through `out_err`, a `_cb` form through its `cb`, queued like any completion.
+    Both surface as `InvalidOperationException` with the core's message, sync and async,
+    state reads included (decisions 14 and 17, §B5). ⚠ **The one way back into a
+    consumer from its own callback is `ConsumerHandle`**, below; inside a callback the
+    consumer's own methods route to it (ledger 114).
+  - **The owner check** (ledger 136), as Java's `acquire()`
+    (`AsyncKafkaConsumer.java:2219-2228`) and Python's use table
+    (`python/confluent_kafka/consumer/_base.py:397-416`, `:441-458` at `3f8a5bc6`). On
+    `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`, `Handle()` and
+    `Dispose` / `DisposeAsync` is one **use** of the thread that makes it, `Metrics()`,
+    `Close` and the state reads included. A call while another thread holds a use throws
+    `InvalidOperationException` with the core's message before anything reaches the core,
+    as Python's `_use()` raises `ConcurrentModificationError` with it (`_base.py:123`,
+    `:410-412`); the same thread nests. A call made inside a callback (ledger 113's flag) is
+    not checked, wherever ledger 114 sends it: on the async consumers a callback runs on the
+    drain thread while the call that delivers it still holds its use for its caller's thread,
+    where Python's callbacks run on that thread and nest (`_base.py:1505-1508`). The check
+    comes after the closed check, as in Python (`_base.py:401-402`):
+    `ObjectDisposedException` once the consumer is closed or while a `Dispose` tears it
+    down. An explicit `Close` is checked like any call; once it passes, its thread is the
+    closing thread until the close ends, as Java's `close()` holds `acquire()`
+    (`AsyncKafkaConsumer.java:1566`), and a call from another thread meanwhile throws
+    `InvalidOperationException`, as Python's does (`_base.py:403-405`). A `Dispose` is not
+    checked and never throws (§B2).
+  - **A use** is also what teardown waits for (§B2). It records the thread that made the
+    call and ends when the call ends: a blocking call when it returns, an async call once
+    its `_cb` completion has run and **before** its `Task` completes. So awaited calls in
+    sequence never overlap, whichever thread each resumes on, and only overlapping calls
+    are compared, as Python keys its table on the thread for the async consumer too
+    (`threading.get_ident()`, `_base.py:399`). Whichever thread ends a use releases it for
+    the thread it recorded. A step that calls the core again for the same call runs
+    inside its use (a resubmit after the consumer's own wakeup, ledger 126) or after it,
+    as a use of its own for the same thread (a seek-back, as Python's `_rewind_sync` /
+    `_rewind_async` run after its `with self._use()`, `_base.py:1033-1037`,
+    `:1123-1131`).
+  - **The mocks** (`MockConsumer`, `AsyncMockConsumer`) wait instead, as Java's
+    `synchronized` and Python's mock monitor do
+    (`python/confluent_kafka/consumer/_mock_core.py:30-32`, `:125-150` at `3f8a5bc6`): a
+    call while another thread's call holds a use waits until that use ends; the same
+    thread nests. A call made inside a callback does not wait, as Python's holding task
+    passes (`_mock_core.py:44-45`): `AsyncMockConsumer`'s callbacks run on the drain
+    thread while the call that delivers them holds its use, so a wait there would never
+    end. A call from another thread throws `InvalidOperationException` with the same
+    message instead for the whole of `AsyncMockConsumer.Rebalance` and `LosePartitions`,
+    whether the listener is sync or async, and while an async commit callback it
+    delivers runs, from its start, its synchronous part included, as Python's mock sets
+    its monitor's owner before the listener or the callback's body runs
+    (`_mock_core.py:35-45`, `:212-232`, `:263-279`, `:616-635` at `3f8a5bc6`; ledger 142);
+    the commit's own body and a sync commit callback still make it wait, as Python's
+    `RLock` does. Every mock call waits but `Wakeup()`, `Handle()`,
+    `Dispose` / `DisposeAsync` and the three Java's mock leaves unsynchronized:
+    `GroupMetadata()`, `EnforceRebalance()` and `CurrentLag()` pass, as Java's mock and
+    Python's do (`MockConsumer.java:764-787`, `_mock_core.py:45-47`, `:519-528` at
+    `3f8a5bc6`; ledger 140). Each goes through the core mock, whose flag refuses an
+    overlapping call with -2 (`rust/src/ffi/consumer/mock_consumer.rs:1207-1228`,
+    `mod.rs:3554-3565`, `:667-675` at `3f8a5bc6`), so one that overlaps another thread's
+    mock op throws `InvalidOperationException` *(deviation: Java's and Python's answer;
+    and Python's `current_lag()` with an end offset waits inside `position()`, where the
+    .NET mock reads the lag from the core mock in one call)*.
+  - **Callable from any thread, at any time:** `Consumer_wakeup_err`
+    (BH:30624-30625), `Consumer__set_callback_result` (BH:29189-29192) and
+    `Consumer_metrics_err`, which reads through the consumer's handle, not the flag
+    (BH:30594-30596, all at `3f8a5bc6`). Of the public calls over them, only `Wakeup()`
+    skips the owner check: `Metrics()` is a use like any call, as Python's `metrics()` is
+    (`_base.py:593-596`, `:1511-1515` at `3f8a5bc6`), although Java's takes no
+    `acquire()`. `Wakeup()` is how another thread interrupts a wait, and the first step
+    of a cross-thread `Dispose` (§B2's path list).
+  - **Listeners on the async consumers** (decision 27, ledger 35): a sync listener
+    runs inline on the drain thread and reports when it returns. An async
+    (Task-returning) listener is called on the drain thread, which does not wait for
+    its `Task`; the `Task`'s continuation reports through
+    `Consumer__set_callback_result`, callable from any thread. The rebalance does not
+    advance until the report (consumer-threading §31). The listener's interface and
+    the reporting rules are in `dotnet/CLAUDE.md` §4 (the rebalance-listener note).
+  - **`ConsumerHandle` is outside the flag but has its own guard** (since #262,
+    ledger 104). On a `KafkaConsumer`, its async operations are admitted only while
+    the consumer runs a listener method or a commit callback: Java's rule that the
+    thread inside the consumer may call back in and no other thread may. Outside a
+    callback they fail with -2 and the message "KafkaConsumer is not safe for
+    multi-threaded access. ConsumerHandle operations are allowed only from inside a
+    callback the consumer is running (ConsumerRebalanceListener,
+    OffsetCommitCallback); from another thread call wakeup()." `Wakeup` and the sync
+    reads (`Assignment`, `Paused`) work from any thread at any time. A
+    `MockConsumer` handle is not gated (BH:30643-30649;
+    `rust/src/consumer/internals/async_kafka_consumer.rs:304-309`, `:896-909`, all
+    at `3f8a5bc6`). So a handle op inside a callback succeeds while the op that runs
+    the callback holds the flag: that success **is** the contract.
+  - **Handle ops always block the calling thread.** The core runs each one as a
+    task of the consumer and waits for it on a channel, not through a nested
+    `block_on`, so it is safe from the drain thread and from a sync listener on the
+    caller's thread; the commit callbacks a handle commit triggers run on the
+    waiting thread (BH:30974-30975; `rust/src/ffi/consumer/consumer_handle.rs:37-51`,
+    `:125-177`, all at `3f8a5bc6`). The binding uses only these blocking forms,
+    never the handle's `_cb` twins: those queue their `cb` for
+    `__execute_callbacks`, and a nested drain from inside a callback runs nothing
+    (BH:30989-30990, BH:30662-30664 at `3f8a5bc6`; decision 27). This is the
+    **core's** wait, inside the ABI, not a managed sync-over-async façade
+    (CLAUDE.md §4).
+  - **A `MockConsumer` handle** supports `Wakeup`, the sync reads, `CurrentLag` and
+    the commits. Its other operations fail with `UNSUPPORTED_VERSION` (35) and the
+    message "ConsumerHandle async operations are not supported on a MockConsumer
+    handle; drive the MockConsumer directly."
+    (`rust/src/consumer/internals/async_kafka_consumer.rs:316-327`, `:822-825` at
+    `3f8a5bc6`), a `KafkaException` (decision 14, §B5).
+  - After the consumer's destroy, every handle op fails with `LOCAL_ILLEGAL_STATE`
+    (-4): §B2 Category 6.
+  - **Inside a callback** (ledgers 113, 127) means on the thread that runs a sync listener
+    method or a sync commit callback, while it runs, and inside an async one, after an
+    `await` too, through an `AsyncLocal<bool>` set around it and reset when it returns, as
+    the producer's in-callback flag (§A7). A thread or `Task.Run` that a sync callback
+    starts is not inside, as Python's `ContextVar` does not flow into a `threading.Thread`
+    (`python/confluent_kafka/consumer/_base.py:191-196`, `:702-712` at `3f8a5bc6`). Work an
+    async callback starts (`Task.Run`, a task it does not await, a `new Thread`) inherits
+    the `AsyncLocal` and stays inside for its whole life, after the callback returns too,
+    as a task (`asyncio.create_task`) or an `asyncio.to_thread` call inherits Python's
+    `ContextVar` (ledger 143) *(deviation for `new Thread`: Python's `threading.Thread`
+    does not inherit it)*.
+  - **A consumer call made inside a callback is routed** (ledger 114), as Python's
+    binding routes it (`_base.py:1491-1509`, `:1597-1619`, `:1645-1725`;
+    `python/confluent_kafka/consumer/consumer.py:490-604`, `async_consumer.py:316-434` at
+    `3f8a5bc6`), on all four consumer classes:
+      - **To the consumer's own `ConsumerHandle`** where the handle has the form:
+        `Assignment`, `Paused`, `Pause`, `Resume`, `SeekToBeginning`, `SeekToEnd`, both
+        `Seek`s, both `Position`s, `CurrentLag`, `Committed`, `BeginningOffsets`,
+        `EndOffsets` and `OffsetsForTimes` without a timeout, `Commit()` and
+        `Commit(offsets)`, and every `CommitAsync` form. An `IAsyncOffsetCommitCallback`
+        goes through the same `OffsetCommitCallback_t` registration as outside a
+        callback (BH:31789-31791 at `3f8a5bc6`). The consumer makes the handle on first
+        use, as Python's `_handle()` does (`_base.py:714-719`), and destroys it after the
+        consumer (safe, §B2 Category 6). A routed call blocks the calling thread (above).
+        On the async consumers its `Task` comes back completed, or faulted with the
+        handle's error. A routed `Commit`, `Position` or `Committed` that the consumer's
+        own wakeup ends (ledger 126) is made again, as Python's `_own_wake_raised` does
+        (`_base.py:1307-1315`, `:1660-1663`, `:1684-1688`, `:1699-1701`). Its
+        `CancellationToken` is checked before the call, as every async op checks it, and
+        not after: nothing can interrupt a handle op, as nothing cancels Python's
+        in-callback call, which has no `await`.
+      - **Refused at once** with `InvalidOperationException` and the core's message
+        "KafkaConsumer is not safe for multi-threaded access.", before anything is
+        submitted, as Python's `_refuse_inside_callback` and `_timeout_ms` raise
+        (`_base.py:960-968`, `:1545-1550`): every other waiting call. These are `Poll`,
+        `Subscribe`, `Unsubscribe`, `Assign`, `PartitionsFor` and `ListTopics`, and the
+        timed `Commit`, `Committed`, `BeginningOffsets`, `EndOffsets` and
+        `OffsetsForTimes`, whose handle forms have no timeout. On the async consumers a
+        `_cb` submission's -2 would be queued behind the running callback (Python's
+        reason, `_base.py:961-964`); on the sync consumers the blocking form would fail
+        the same way.
+      - **To the core, as outside a callback:** `Subscription`, `GroupMetadata` (after
+        ledger 105's `group.id` check) and `EnforceRebalance`, which the core refuses
+        with -2 while the op that delivers the callback holds its flag, as Python leaves
+        `subscription()` to it (`_base.py:1497-1503`); and `Metrics()`, which it
+        answers. `Wakeup()` and `Handle()` are unchanged, and `Close` and `Dispose`
+        follow ledgers 113 and 120 (`dotnet/CLAUDE.md` §4).
+      - **Order:** the in-callback rule comes first, before the closed check, and the
+        owner check skips a call made inside a callback (above). While the consumer
+        closes, a call inside a callback is not refused as closed, so a listener the
+        close runs can call back in, as Java sets `closed` only once its close has run
+        (`AsyncKafkaConsumer.java:1566-1576`) and Python lets the closing thread's own
+        calls through (`_base.py:401-405`). Once the close has ended, the call throws
+        `ObjectDisposedException`, as Python's closed check raises
+        (`_base.py:605-609`). A routed call is still an in-flight use (§B2), so teardown
+        waits for it before the destroy.
+      - **On the mocks** the routing is the same. A `MockConsumer` handle commits and
+        answers `CurrentLag` and the sync reads, and fails its other ops with the
+        `KafkaException` above. Java's and Python's mocks instead let a callback call
+        every method, through their reentrant monitor (`MockConsumer.java`'s
+        `synchronized` methods; `_mock_core.py:30-32` at `3f8a5bc6`) *(deviation: the
+        core mock's handle lacks those ops; goes when it has them)*.
 
-**Why:** Java's single-Selector NIO model on tokio (§0.3) — a fixed native thread
-count, no poll loop. The completion callback fires on the core's foreign
-dispatcher thread, so the TCS must use `RunContinuationsAsynchronously` (§B7) or
-the awaiter's continuation would run on — and stall — that thread. Serialization is
-the core's job (single-owner); a managed guard mirroring it was an extra .NET-only
-layer, removed in M3/P2 to match the in-repo Python sibling.
+**Why:** Java's single-Selector NIO model on tokio (§0.3): a fixed native thread
+count, no poll loop. Java runs listeners and commit callbacks on the caller's thread
+(consumer-threading §31); the blocking forms give exactly that on the sync consumers,
+with no drain loop and no slice timer. The async consumers have no event loop to
+drain on, so one named, FIFO, serialized drain thread is the closest analogue of
+Python's loop (decision 27), and its TCSs use `RunContinuationsAsynchronously` so no
+awaiter's continuation runs on, and stalls, that thread. Single ownership is checked twice, as in
+Python's binding: the owner check refuses another thread at once, at every call and in the gaps
+the core's flag leaves (before and after the native call, and while an async result is handed
+back, `rust/src/ffi/consumer/mod.rs:705-714` at `3f8a5bc6`), and the core's flag refuses an
+overlapping op of the owning thread. M3/P2 removed .NET's first managed guard to match the
+Python binding of the time (`dotnet/design/history/M3/P2-single-owner-alignment/PLAN.md:20`);
+Python's binding now keeps a per-thread use table, so ledger 136 restores one. The handle's gate
+is the core's, so the binding adds none there.
 
 **Anti-patterns:**
 
-  - A binding-side lock **or a managed access guard** to serialize concurrent ops
-    — the consumer is single-owner, so the **core** rejects a concurrent op (§B5),
-    not a managed layer.
-  - Reading the single-owner rule as applying to `ConsumerHandle` — adding a managed
-    guard around handle ops, or "fixing" a handle call that succeeds during a
-    consumer op. That success **is** the contract (§B2 Category 6).
-  - Wrapping a handle op in `Task.Run` to "make it async" — sync-over-async (§B7);
-    the op is synchronous by design and blocks the caller deliberately.
-  - A TCS **without** `RunContinuationsAsynchronously` → the continuation runs
-    **inline on the dispatcher thread** (stalls it / deadlocks, §B6/§B7).
-  - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
-    (shared, §0.3).
+  - A binding-side lock that makes a second thread **wait** on a `KafkaConsumer` (the owner
+    check refuses it at once, as Java's `acquire()` and Python's table do; only the mocks
+    wait, as Java's `synchronized`), or an owner check that skips a call Java guards, keys
+    on anything but the thread that makes the call, or still counts an async call as a use
+    after its `Task` completed (ledger 136).
+  - From inside a callback the consumer is running: calling a `Consumer_*` operation
+    that the handle has (it fails with -2; route it to `ConsumerHandle`, ledger 114);
+    submitting any `_cb` operation (refuse it at once: its -2 would be queued behind the
+    running callback); routing a call the handle lacks, timed overloads included; or
+    treating a thread that a sync callback started as inside the callback (ledger
+    127).
+  - The owner check, or any managed guard, around handle ops, or a managed copy of the
+    handle's gate. Using the handle from another thread outside a callback, as a
+    cross-thread path into the consumer: on a `KafkaConsumer` it fails with -2; call
+    `Wakeup()` instead.
+  - Calling a handle's `_cb` twin from the binding (its `cb` waits for a drain that
+    a nested `__execute_callbacks` will not run), or wrapping a handle op or a
+    blocking form in `Task.Run` (sync-over-async, §B7).
+  - A sync consumer that uses the `_cb` forms plus a managed wait, or that has a
+    thread of its own (decision 27 chose the blocking forms).
+  - An async consumer that drains on the thread pool from the hook, or in the
+    awaiting call (decision 27's options (ii) and (iii)).
+  - A TCS **without** `RunContinuationsAsynchronously`: the continuation runs inline
+    on the drain thread and stalls every later callback.
+  - The drain thread waiting on a user `Task` (an async listener or callback).
+  - A notify hook that does more than signal; a poll-loop thread; thread-per-broker
+    assumptions (§0.3).
 
 **Tests required:**
 
-  - A concurrent async op → a faulted `Task` (`KafkaException` /
-    ConcurrentModification), a concurrent sync state read →
-    `InvalidOperationException`, not corruption (§B5); the completion callback
-    doesn't run its continuation inline on the dispatcher.
-  - `Dispose` / `DisposeAsync` return without hanging even with an (unawaited) op in
-    flight, and with a live `ConsumerHandle` outstanding — with **no separate-op
-    drain** (the awaiter is the disposer, §B7). ⚠ The teardown route is **not**
-    restated here: see §B2's authoritative `Consumer_destroy` path list (five paths,
-    three of them deferred).
+  - A call from another thread while one holds a use → `InvalidOperationException` with
+    the core's message, from the owner check before the native call, for a blocking op, a
+    `_cb` op and a guarded state read alike (decision 17), and in the gaps the core's flag
+    leaves: just before and just after another thread's native call, and while an async
+    result is handed back (ledger 136); no corruption. The same thread nests; an
+    overlapping call of the owning thread gets the core's -2, as the same exception.
+    Awaited async calls in sequence pass whichever thread each resumes on. `Wakeup()` and
+    `Handle()` from another thread succeed meanwhile; `Metrics()` is refused like any
+    call. A call made inside a callback on the drain thread passes the owner check, and on
+    `AsyncMockConsumer` does not wait (no deadlock). On a mock, another thread's call waits
+    for the running one, and is refused for the whole of `AsyncMockConsumer.Rebalance` and
+    `LosePartitions`, a sync listener included, and from the start of an async commit
+    callback, its synchronous part included (ledger 142); `GroupMetadata()`,
+    `EnforceRebalance()` and `CurrentLag()` do not wait.
+  - Sync consumer: a listener and a commit callback run on the caller's thread,
+    inside the call that triggered them; each blocking call drains
+    `__execute_callbacks` once first.
+  - Async consumer: the `cb`s, listeners and commit callbacks run on
+    `confluent-kafka-consumer-pump`; no continuation runs inline on it; an async
+    listener whose `Task` completes later reports once, and the rebalance waits for
+    it.
+  - `Wakeup()` from another thread ends a blocking `Poll` promptly (ledger 34).
+  - **The handle's gate:** a `KafkaConsumer` handle op outside a callback throws
+    `InvalidOperationException` with the core's handle message. Inside a listener,
+    on the sync and the async consumer, a handle op (`Seek`, `Position`, `Commit`,
+    `CurrentLag`) succeeds while the op that runs the listener holds the flag, and
+    `CommitAsync(offsets)` commits. The handle's `Wakeup` and sync reads work from
+    another thread. On a `MockConsumer` handle a commit and `CurrentLag` succeed
+    outside a callback, and an unwired op (`Seek`) throws `KafkaException` with the
+    core's message.
+  - **Routing inside a callback** (ledger 114), on the sync and the async consumer,
+    inside a listener and a commit callback, and after an `await` too:
+      - `Commit()`, `Seek`, `Position`, `Committed`, `CurrentLag`, `Assignment` and
+        `CommitAsync(offsets)` succeed through the handle. This is
+        `consumer-threading.md` §31's first test, on the public API.
+      - `Poll`, `Subscribe`, `Assign` and a timed `Commit` throw
+        `InvalidOperationException` at once; on the async consumer nothing is submitted.
+      - `Subscription` and `GroupMetadata` throw the core's -2, and `Metrics()` answers.
+      - A thread that a sync listener starts is not inside: its `Commit()` is a call
+        from another thread.
+      - A listener that the close runs commits through the routing.
+      - On a mock, a commit and `CurrentLag` succeed and `Seek` throws the handle's
+        `KafkaException`.
+  - `Dispose` / `DisposeAsync` return without hanging, with an op in flight and with
+    a live `ConsumerHandle`. ⚠ The teardown routes are **not** restated here: see
+    §B2's path list.
 
 ---
 
@@ -1168,297 +1399,247 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 
 **Decision:** Six ownership categories:
 
-1. **Client / config** (consumer, properties) → a `SafeHandle` freed exactly once
-   (teardown routes through `Consumer_close` first — see the Rule).
-2. **Flat transient** (error) → read-and-free promptly, **not** wrapped (a
-   finalizable object per op is waste).
-3. **Owned result / container** (the poll batch + every query-result list/map) →
-   the caller frees once after reading; a container is a *borrow-root* whose
-   `_destroy` invalidates the elements/bytes borrowed from it.
-4. **Borrowed view** (`ConsumerRecord`, `Node`, every `_get` element) → **never
-   freed** by the binding.
-5. **Consumed by callee** (`ConsumerRebalanceListener_t`) → the binding owns it
-   only between `_new` and the call it is handed to; that call **takes ownership
-   unconditionally — including when it fails**, so `_destroy` after it is a double
-   free. Freed by the binding **only** when the call never reached native.
-6. **Caller-owned, independently destroyed, ref-counting its parent**
-   (`ConsumerHandle_t`, M9/P8) → the binding owns it for an **arbitrary** lifetime of
-   its choosing, and its `SafeHandle` holds a **reference count on the consumer's**
-   `SafeConsumerHandle` for exactly that lifetime. Distinct from Category 3 (owned by
-   a callback, freed in-call) and Category 5 (ownership transfers away on the call):
-   nothing else here outlives the call that produced it *and* keeps a different
-   handle alive.
+1. **Client / config** (the consumer class and its view, the config) → a
+   `SafeHandle`, or a short-lived handle, freed exactly once (teardown closes first:
+   see the Rule).
+2. **Flat transient** (an error: any `out_err`, or a `_cb` completion's `error`) →
+   read-and-free promptly, **not** wrapped (a finalizable object per op is waste).
+3. **Owned result / container** (the poll batch and every query-result list or map,
+   whether a blocking form returns it or a `_cb` completion delivers it as its
+   `value`) → the caller frees once after reading; a container is a *borrow-root*
+   whose `_destroy` invalidates the elements and bytes borrowed from it.
+4. **Borrowed view** (a `ConsumerRecord_t` in a batch, `Node_t`, every list or map
+   element, borrowed strings, and everything a listener or `onComplete` receives) →
+   **never freed** by the binding.
+5. **Registration copied by the callee** (`ConsumerRebalanceListener_t`,
+   `OffsetCommitCallback_t`) → the binding owns the handle and destroys it after the
+   call that reads it, on every path, and also when no call was made. The core
+   copies the registration during the call (BH:29284-29287, BH:33743-33744 at
+   `3f8a5bc6`); only the user object (`self_`) lives on, under §B6's rules.
+6. **Caller-owned, independently destroyed, weak to its parent**
+   (`ConsumerHandle_t`) → the binding owns it for a lifetime of its choosing. The
+   core's handle holds the consumer weakly: after the consumer's destroy a handle op
+   fails with -4, and the handle is still safe to destroy (BH:30638-30641 at
+   `3f8a5bc6`). It does not keep the consumer alive (ledger 34 (i)).
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is not a graceful close — it does **not** join the bg task (since master #233 it does wake and wait for an in-flight `_async` op). ⚠ The destroy is **ref-counted**, so it is immediate only when no op holds a count — see Rule; §B7 + Rule |
-| `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
-| `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
-| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
-| `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
-| `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
-| `ConsumerRebalanceListener_t` | 5 — consumed by callee | the **callee**: `Consumer_subscribe_with_listener[_async]` consumes it on **every** path, success or failure. `ConsumerRebalanceListener_destroy` is for a listener that was **never** passed to a subscribe call — so the binding's only sanctioned call site is the `catch` around the submit P/Invoke itself (native never ran) |
-| `ConsumerHandle_t` | 6 — caller-owned, ref-counts its parent | the **binding**, whenever it chooses: `SafeConsumerReentrancyHandle.ReleaseHandle` → `ConsumerHandle_destroy`, **then** `DangerousRelease` on the consumer's `SafeConsumerHandle` (in that order). Null-safe destroy; "never affects the owning consumer or any other handle" |
+| `KafkaConsumer_t` / `MockConsumer_t` (class) and its `Consumer_t` view | 1 — client (`SafeConsumerHandle` over the view, the class pointer in a field; decision 6) | `Close` / `Dispose`: see the path list below. `KafkaConsumer_destroy_err` / `MockConsumer_destroy_err` with the class pointer, on the closing thread (BH:33170, BH:33218 at `3f8a5bc6`). The view is never destroyed (BH:33131-33134 at `3f8a5bc6`) |
+| `ConsumerConfig_t`, and the `kafka_Map_t` built for it | 1 — config (short-lived) | the binding: the map after `ConsumerConfig_new`, which leaves it the caller's; the config after `KafkaConsumer_new`, which copies it (BH:30835-30838, BH:33114 at `3f8a5bc6`) |
+| `kafka_common_Error_t` (any `out_err`, a `_cb` completion's `error`) | 2 — flat transient | reader: read the accessors, then `Error_destroy_err` |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred; `ConsumerRecords_destroy_err` |
+| a `kafka_List_t` / `kafka_Map_t` a query returns (`assignment`, `committed`, `partitions_for`, `list_topics`, `offsets_for_times`, `beginning_offsets`, …), `ConsumerGroupMetadata_t`, any other owned value type | 3 — owned result | caller: read and marshal into managed types, then `kafka_List_destroy_err` / `kafka_Map_destroy_err` / the type's `_destroy`. A container's destroy frees the elements it owns too (BH:40285-40295, BH:40401-40412 at `3f8a5bc6`); the list `ConsumerRecords_records_with_partition_err` returns is owned, its records borrowed (BH:32964-32966 at `3f8a5bc6`) |
+| a `ConsumerRecord_t` from a records handle, `Node_t`, every `kafka_List_get_err` / `kafka_Map_key_err` / `kafka_Map_value_err` / `kafka_Map_get_err` element, a borrowed `const char*`, and the partitions, offsets and error a listener or `onComplete` receives | 4 — borrowed view | **nobody**: it dies with its owner, or when the callback returns; never `_destroy` |
+| `ConsumerRebalanceListener_t` | 5 — registration copied by the callee | the **binding**, right after the `subscribe_*` call returns (success or error), or when no call was made (`ConsumerRebalanceListener_destroy_err`); `self_` follows §B6 (decision 23) |
+| `OffsetCommitCallback_t` (including the no-op one a `ConsumerHandle` commit passes, ledger 104) | 5 — registration copied by the callee | the **binding**, right after the `commit_async*` call that took it returns, or when no call was made (`OffsetCommitCallback_destroy_err`); `self_` follows §B6 |
+| `ConsumerHandle_t` | 6 — caller-owned, weak to its parent | the **binding**, whenever it chooses: `ReleaseHandle` → `ConsumerHandle_destroy_err`, never during one of its own ops (BH:31940-31945 at `3f8a5bc6`). No reference on the consumer (ledger 34 (i)) |
 
-⚠ **A `TopicPartitionList_t` delivered *to* a listener callback is Category 3, not
-4** — the header states the callback **owns** the handle and must
-`TopicPartitionList_destroy` it ("callbacks own the handles delivered to them"). It
-is the same type that is a borrowed value elsewhere; classify it by the accessor,
-per the note below.
-
-⚠ **The same applies to the `OffsetMap_t` delivered to an offset-commit callback
-(M9/P7) — Category 3, owned by the callback**, under the same "callbacks own the
-handles delivered to them" convention, alongside the `KafkaError_t` delivered with
-it.
-
-**Use the `CopyOutAndDestroy` twin, and prefer adding one over documenting its
-absence.** `OffsetMapMarshal` originally exposed only `CopyOut` (which copies and
-does **not** destroy) while `TopicPartitionListMarshal` had both — an asymmetry that
-made "copy the listener trampoline's shape" a leak on **every** commit. The M9/P7
-review round **removed the trap instead of warning about it**: `OffsetMapMarshal`
-now has `CopyOutAndDestroy` too, so both delivered-to-a-callback containers are
-released by the same shape, in one place. Keep it that way — a marshaller for a
-callback-owned container should ship the destroying variant, because nothing
-enforces the destroy: a *missing* one is a native leak, invisible to every managed
-assertion (verified by injection), while a *double* destroy aborts the process. Use
-plain `CopyOut` only where the **caller** owns the root (the query paths).
-
-⚠ **A commit-callback registration is NOT Category 5.** Category 5 is about a
-**handle** whose ownership transfers on a call (`ConsumerRebalanceListener_t`). What
-transfers to `Consumer_commit_async*_with_callback` is a `void* user_data` — an
-opaque `GCHandle`, not an ABI handle — so none of Category 5's `_destroy`
-reasoning applies. Its lifetime is governed by the ABI's `user_data_destroy` hook
-(§B6, third Rule), which is a *release notification*, not a handle destructor.
+⚠ **What a listener or `onComplete` receives is borrowed for the call** (M19/P1).
+The partitions handed to a listener method (BH:3668-3678 at `3f8a5bc6`) and the
+offsets and error handed to `onComplete` (BH:3778-3792 at `3f8a5bc6`) are borrowed:
+copy what you need inside the call and **never destroy them**. The pre-`0035d9ff`
+rule "callbacks own the handles delivered to them" is gone, and destroying a
+delivered handle is now a double free. So a marshaller for a container delivered to
+a listener or commit callback uses plain `CopyOut`; `CopyOutAndDestroy` is for owned
+roots only. A `_cb` completion is the other way round: its `value` and `error` are
+owned (`Consumer_poll_cb_t`, BH:3104-3108 at `3f8a5bc6`, and its siblings), so the
+`cb` frees them (Categories 2 and 3).
 
 **Note — classify by the accessor, not the type.** The returning function's
-const-ness decides, not the type name:
+const-ness and its header text decide, not the type name:
 
   - `const *` return (or a type with no `_destroy` of its own) → **borrowed**;
-    never free it (Category 4).
+    never free it (Category 4). So is every element read through
+    `kafka_List_get_err`, `kafka_Map_key_err`, `kafka_Map_value_err` or
+    `kafka_Map_get_err`, whatever its type: "The element stays owned by whoever owns
+    it" (BH:40272 at `3f8a5bc6`). So is a callback argument the header calls
+    "borrowed for the call".
   - non-`const` return with a `_destroy` → **owned**; free it once after use
     (Category 1/3).
-  - a handle **passed in** to a call the header documents as taking ownership →
-    **consumed** (Category 5); the binding must not free it afterwards.
-  - the same type can be owned in one call and borrowed in another — e.g.
-    `PartitionInfoList_t` is owned from `partitions_for` but borrowed as a
-    `TopicPartitionInfoMap` value; `OffsetAndMetadata_t` is a borrowed `OffsetMap`
-    element; `TopicPartitionList_t` is owned from `Consumer_assignment` **and**
-    owned when delivered to a listener callback, but borrowed as a `_get` element.
+  - a handle **passed in** to a call the header says consumes it → **consumed**;
+    the binding must not free it afterwards. On the consumer that is the
+    deserializer handles of `KafkaConsumer_new` (BH:33114-33116 at `3f8a5bc6`). A
+    registration the header says is copied (Category 5) is the opposite: the binding
+    frees it.
+  - the same type can be owned in one call and borrowed in another: the
+    `kafka_List_t` of `PartitionInfo_t` that `partitions_for` returns is owned, but
+    the one inside a `list_topics` map is borrowed; the list `Consumer_assignment`
+    returns is owned, while the partitions a listener receives are borrowed for the
+    call.
 
 **Rule:**
 
-  - ⚠ **THE AUTHORITATIVE `Consumer_destroy` PATH LIST LIVES HERE.** There are
-    **five** managed paths that can reach `Consumer_destroy`, three of them
-    deferred. Every other section that mentions teardown **cross-references this
-    list and must not restate it** — three separate enumerations drifted out of
-    date during M9, each true when written and stale within two phases. If you are
-    about to write "teardown is X → Y" anywhere else in this file, write "see §B2's
-    path list" instead.
+  - ⚠ **THE AUTHORITATIVE `KafkaConsumer_destroy` PATH LIST LIVES HERE.** Every
+    other section that mentions consumer teardown **cross-references this list and
+    must not restate it**: three separate enumerations drifted out of date during
+    M9. If you are about to write "teardown is X → Y" anywhere else in this file,
+    write "see §B2's path list" instead. Since M19/P1 (decision 7, ledger 34) there
+    are **two** paths, and the destroy always runs on the closing thread. The M9/P4
+    ref-count paths and the M9/P8 `ConsumerHandle` path are gone. "Destroy" here is
+    `KafkaConsumer_destroy_err`, or `MockConsumer_destroy_err` for a mock.
 
-    | # | Trigger | Route | Thread | Immediate? |
-    |---|---|---|---|---|
-    | 1 | `Dispose`, count == 1 | `Consumer_close_with_timeout` → `Consumer_destroy` | caller's | ✅ |
-    | 2 | `DisposeAsync`, count == 1 | `Consumer_close_async` (joins the bg task via `await_join`) → `Consumer_destroy` | caller's | ✅ |
-    | 3 | last **async** op's `FreeGcHandle` drops the count to 0 | `ReleaseHandle` → `Consumer_destroy`, **bare** (no preceding close) | core's **dispatcher** | deferred |
-    | 4 | last **sync** call's marshaller AddRef released, dropping the count to 0 | `ReleaseHandle` → `Consumer_destroy`, **bare** | the **calling** thread | deferred |
-    | 5 | last `ConsumerHandle`'s `ReleaseHandle` drops the count to 0 (M9/P8, Category 6) | `ConsumerHandle_destroy`, **then** parent release → `Consumer_destroy`, **bare** | **whatever thread disposed the handle** | deferred |
+    | # | Trigger | Route | Thread |
+    |---|---|---|---|
+    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`ObjectDisposedException`; during an explicit `Close`, another thread's call throws `InvalidOperationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy | the closing thread |
+    | 2 | `Dispose` / `DisposeAsync` from inside a callback on the drain thread (async consumers; a `Close` there throws `InvalidOperationException`, ledger 113) | the teardown is scheduled and the call returns; path 1's steps run once the drain's in-flight use has ended, never inside `__execute_callbacks`, and the drain thread is joined from the pool thread, never from itself | a pool thread, after the drain (as Python's runs in an executor off the loop, `python/confluent_kafka/consumer/async_consumer.py:604-608` at `3f8a5bc6`) |
 
-    Paths 1–2 are the clean, deterministic ones. Paths 3–5 are the accepted
-    deferred-destroy residuals — 3 and 4 are M9/P4 misuse-path residuals (Q1/Q3),
-    **5 is normal operation of a shipped public type**, not misuse. Path 4 exists
-    because M9/P4 H1 extended ref-counting to the synchronous surface; path 5
-    because M9/P8's `ConsumerHandle` ref-counts its parent.
+    The cases, all on these two paths:
+      - **`Dispose` from another thread while an op runs:** `Consumer_wakeup_err`
+        first, then wait for the in-flight uses, then path 1's close, join and
+        destroy. The wakeup ends the op, so the in-flight uses drain. `Dispose` does
+        not throw (ledger 34 (ii); a recorded deviation, `dotnet/CLAUDE.md` §4). A call a
+        callback of that op makes, routed to the handle (ledger 114), may take the wakeup
+        first: it then throws the wakeup's `KafkaException` (-18) into the callback, as
+        Python's routed call raises `WakeupError` for its own wake aimed at the running
+        call and retries only a wake left over from an ended call
+        (`_base.py:1267-1315` at `3f8a5bc6`), and `Dispose` sends the wakeup again, so the
+        op that delivered the callback still ends (ledger 144). On
+        the async consumers an op's in-flight use lasts until its `cb` has run on the
+        drain thread, which is still running then: a `_cb` op releases the core's
+        flag only just before it queues its completion
+        (`rust/src/ffi/consumer/mod.rs:705-714` at `3f8a5bc6`), so a close sent
+        before that `cb` ran could still fail with -2. Python counts a waiting call
+        the same way, "covering its submission, its wait and its callbacks"
+        (`python/confluent_kafka/consumer/_base.py:445-456` at `3f8a5bc6`).
+      - **An explicit `Close` from another thread while an op runs:** the owner check
+        refuses it at once → `InvalidOperationException`, before any state changes, so
+        nothing is torn down and the consumer stays usable (ledgers 34 (ii), 136), as
+        Java's `close()` fails in `acquire()` (`AsyncKafkaConsumer.java:1566`) and
+        Python's raises (`_base.py:449-454` at `3f8a5bc6`). Call `Wakeup()` first. A
+        `Close` from the thread that holds the op's use passes the check and, while the
+        op is in the core, is refused by the core's flag (-2) with the same exception;
+        the consumer stays open there too, as Python's does when its FFI close fails.
+      - **A `Close` or `Dispose` from inside a listener or commit callback on the
+        sync consumers:** the op that runs the callback holds the single-owner flag,
+        and the blocking close takes it too, so the core rejects the close with -2 →
+        `InvalidOperationException`, and nothing is torn down (ledger 34 (iii);
+        `rust/src/ffi/consumer/mod.rs:316-325`, `:660-676`, `:3700-3706` at
+        `3f8a5bc6`). Python's `close()` raises `ConcurrentModificationError` there
+        and leaves the consumer open
+        (`python/confluent_kafka/consumer/consumer.py:622-628`, `_base.py:960-968` at
+        `3f8a5bc6`). Teardown never waits there for the op it is called from.
+      - **Finalization** (the `SafeHandle` reached without the explicit-teardown
+        flag): no destroy. `ReleaseHandle` writes one `Trace.TraceWarning` and leaks
+        the consumer, as Java (no client finalizer) and Python (no `__del__`) do. In
+        practice this is the sync consumers: a running drain thread roots its
+        consumer.
+      - **A live `ConsumerHandle`** does not defer the destroy (Category 6).
 
-    On path 3, since master #233, `Consumer_destroy` sees that it is on its own
-    dispatcher thread and moves its wait and its free to a new
-    `kafka-consumer-destroy` thread, returning at once
-    (`rust/src/ffi/consumer.rs:736-744`). If that thread cannot be started, the core
-    leaks the handle and logs an error.
+    Destroy first wakes the op still waiting (it fails with `WAKEUP`), awaits the
+    `_cb` ops in flight, runs every pending callback on the destroying thread so each
+    fires once, drops the consumer, which closes it if it was never closed, and
+    shuts its runtime down (BH:33146-33153 at `3f8a5bc6`). So the closing thread can
+    run user callbacks, which may use the view only to report. No other call may use
+    the consumer while destroy runs (BH:33160-33162 at `3f8a5bc6`): that is what
+    waiting for the in-flight uses guarantees.
 
-    ⚠ **Paths 4 and 5 can run the destroy on a thread that is neither the caller's
-    nor the dispatcher's.** The safety argument for the deferred paths therefore
-    rests on §B6's **first** clause — the ref-counted `SafeConsumerHandle`, which
-    makes it impossible for a destroy to run *concurrently with* an operation —
-    and **not** on the second clause about the dispatcher being serialised. A
-    thread-identity argument covers path 3 only. See §B6.
-
-  - `SafeConsumerHandle : SafeHandle` — `ownsHandle: true`, `IsInvalid => handle
-    == IntPtr.Zero`. The release path is **not** a bare destroy: `Consumer_destroy`
-    is not a graceful close, and it does **not** join the bg task (the graceful
-    join is `Consumer_close` / `await_join`, not destroy). Since master #233 it wakes
-    any in-flight `_async` op and waits for its task, so that op's callback still
-    fires once, typically with a `WAKEUP` error, possibly after destroy returns
-    (`rust/src/ffi/consumer.rs:788-801`; before #233, `shutdown_background`
-    cancelled such ops and their callbacks never fired). It does **not** wait for a
-    synchronous call still running on another thread. The binding relies on neither
-    behaviour: the ref-count (below) means no op is in flight when it runs. So
-    teardown routes through the graceful **close before destroy**: `Dispose` =
-    **`Consumer_close_with_timeout` → `Consumer_destroy`**, `DisposeAsync` =
-    **`Consumer_close_async` → `Consumer_destroy`** — no separate-op drain (§B7).
-    Under single-owner the awaiter of an op *is* its disposer, so there is nothing
-    to drain. Guard use-after-dispose with `ObjectDisposedException`.
-  - **Release is ref-counted, so teardown is not always immediate** (M9/P4 H1).
-    Every operation holds a count on the `SafeHandle` while it touches the consumer:
-    an **async** op for its whole duration (the span-the-op `DangerousAddRef`,
-    released in `FreeGcHandle`), and a **sync** call for the duration of the native
-    call (the `SafeHandle`-as-parameter marshaller AddRef, §A2). `ReleaseHandle` →
-    `Consumer_destroy` therefore runs only when the count reaches **zero**. On the
-    clean path — await (or return from) the op, *then* dispose — the count is 1 at
-    `Dispose` and the native release is immediate. **But "on the disposing thread" is
-    NOT guaranteed** (M11/P8): the awaiter's continuation is
-    `RunContinuationsAsynchronously`, so it can resume and drop its count *before* the
-    dispatcher's own `DangerousRelease`, leaving the dispatcher thread to take the count
-    to zero and run the destroy. That is **safe by construction in both clients** and is
-    **not** a defect: each core explicitly *detaches* its dispatcher rather than joining it
-    (a join would hang — its own comment says so), and the producer's completion channel is
-    unbounded, so an in-flight callback cannot block the destroy either. Do not file it.
-  - **Deferred destroy — the accepted single-owner residual** (M9/P4 Q1/Q3).
-    Disposing with an **unawaited** op still in flight does **NOT** strand the `Task`
-    and does **NOT** leak the `GCHandle`. (It did before M9/P4; that older
-    description is **obsolete** — do not reason from it.) What happens now: the op
-    runs to completion, and the destroy fires later from `FreeGcHandle` on the core's
-    **dispatcher thread**, so native resources are retained until the op finishes
-    (bounded by that op's own timeout) instead of being released at `Dispose`.
-    Because the core's access guard rejects the graceful close while the in-flight op
-    holds it, that deferred destroy is **bare** — no preceding `Consumer_close`. Both
-    consequences are **accepted permanently** for this misuse case (Python parity);
-    `DisposeAsync` on the awaiting task remains the clean, immediate path. See the
-    carve-out in **Anti-patterns** below before filing either as a defect.
+  - `SafeConsumerHandle : SafeHandle`, one per consumer class, following §A2's
+    `SafeClientHandle` (decision 6): the view in `handle`, the class pointer in a
+    field. `ReleaseHandle` destroys only when the explicit-teardown flag is set
+    (path 1); reached any other way it traces once and leaks. It passes the class
+    pointer with no `AddRef`, because the handle is already being released. Close
+    always comes before destroy. Guard use-after-close with
+    `ObjectDisposedException`, checked before any P/Invoke.
+  - **Every operation P/Invoke takes the `SafeHandle`** (decision 6), so the
+    marshaller's call-scoped `AddRef` is a blocking form's in-flight use, for its
+    whole run. A `_cb` form's P/Invoke returns at once, so its in-flight use is
+    counted from the submission until its `cb` has run (path 1's cross-thread case).
+    There is no span-the-op `DangerousAddRef` and no destroy from the last release
+    any more: decision 7 replaces the M9/P4 H1 and M9/P8 paths.
   - **Transient error handle:** read the accessors (message before free), then
     `_destroy` in a `finally`; the managed `KafkaException` holds copied values,
     never the handle (§B5). `_destroy` is null-safe.
-  - **Category 3 — owned result / container.** On the **caller's** thread (not the
-    dispatcher), after a query or poll: read/iterate, then `_destroy` the root
-    exactly once. A **container is a borrow-root** — its elements and any
-    key/value/topic/string bytes borrow into it (§B3, §B4, CLAUDE.md §6.4), so it
-    must outlive every borrow taken from it. **Default: copy-out** — copy each
-    element/byte into an owned managed type, then `_destroy`. Metadata collections
-    are always copy-out (small), and typed deserialization reads a transient span →
-    owned `T` (copy-out too). **Keep-alive** (hold the root, expose zero-copy views,
-    `_destroy` at `Dispose`) is a **deferred** option for the raw-byte surface only
-    — see CLAUDE.md §6.4.
-  - **Category 4 — borrowed view.** `ConsumerRecord_t`, `Node_t`, `_get` elements,
-    borrowed strings have **no `_destroy`** — never free them, and never use them
-    after their owning container (3) is destroyed. Represent as a transient cursor
-    over the parent; don't let it escape the parent's lifetime.
-  - **Category 5 — consumed by callee** (`ConsumerRebalanceListener_t`, M9/P6).
-    Build it, hand it to `Consumer_subscribe_with_listener[_async]`, and **never
-    touch it again** — ownership transfers on **every** path, including the call's
-    own error return. `ConsumerRebalanceListener_destroy` exists only for a listener
-    that never reached a subscribe call, so the binding's single sanctioned call
-    site is a `catch` around the submit P/Invoke itself (the `SafeHandle` marshaller
-    can throw `ObjectDisposedException` against a concurrent teardown, in which case
-    native never ran). **Do not infer release from the return code**: the header is
-    explicit that a subscribe rejected *after* the core registered the listener
-    keeps the registration, and that an empty-topic-list subscribe releases it while
-    returning **success**. The authoritative signal is the `user_data_destroy` hook
-    (§B6), not the error handle.
-  - **Category 6 — caller-owned, ref-counting its parent** (`ConsumerHandle_t`,
-    M9/P8). The ABI says *"A handle is usable only while its consumer is alive.
-    Destroy every handle **before** destroying the consumer"*
-    (`src/ffi/consumer_handle.rs:67-70`) and .NET cannot force user ordering, so the
-    binding **enforces** it instead of documenting it: the handle's `SafeHandle`
-    takes **exactly one** `DangerousAddRef` on the consumer's `SafeConsumerHandle`
-    and releases it in its own `ReleaseHandle`, **after** `ConsumerHandle_destroy`.
-    That ordering is load-bearing twice over. It makes the ABI's
-    destroy-before-destroy ordering true by construction; and because every handle
-    op passes the handle's `SafeHandle` as a parameter, the marshaller holds a
-    call-scoped ref for the whole native call, so the parent count cannot drop while
-    an op is still blocked inside the core. Releasing the parent from the public
-    wrapper's `Dispose` instead would break both — `SafeHandle.Dispose` only
-    *requests* release.
-    **One reference, not two.** The `AddRef` is taken once, at creation, *before* the
-    native call (so the consumer cannot be destroyed across handle creation) and then
-    **adopted** by the `SafeHandle` rather than re-taken. Taking a second one leaves
-    the count permanently above zero: `Consumer_destroy` never runs and **every**
-    consumer that ever produced a handle leaks its native resources for the process
-    lifetime, with no managed symptom whatsoever. That bug was real (M9/P8) and was
-    caught only by the differential deferred-release test below.
-  - **Category 6's consequence — a third deferred-destroy path, accepted.** A live
-    reentrancy handle **defers** the consumer's native destroy past its `Dispose`
-    (the handle stays usable; teardown does not hang and does not throw), and a
-    handle the user never disposes defers it **indefinitely**. This joins M9/P4's two
-    accepted residuals rather than contradicting them, and is the same trade for the
-    same reason: a deferred destroy is a leak, a raw pointer outliving its consumer
-    is corruption, and M9/P4 closed the latter class deliberately. Unlike M9/P4's
-    residuals this one is **not** confined to a misuse path — it is the type's normal
-    operation — so it is documented on the public type, not only here.
+  - **Category 3 — owned result / container.** Read it where it arrives: on the
+    caller's thread for a blocking form; for a `_cb` form, in its `cb` on the drain
+    thread, except the poll batch, which the `cb` hands to the awaiting continuation
+    (decision 11). Then `_destroy` the root exactly once. A **container is a
+    borrow-root**: its elements and any key/value/topic/string bytes borrow into it
+    (§B3, §B4, CLAUDE.md §6.4), so it must outlive every borrow taken from it.
+    **Default: copy-out**: copy each element or byte into an owned managed type,
+    then `_destroy`. Metadata collections are always copy-out (small), and typed
+    deserialization reads a transient span → owned `T` (copy-out too).
+    **Keep-alive** (hold the root, expose zero-copy views, `_destroy` at `Dispose`)
+    is a **deferred** option for the raw-byte surface only; see CLAUDE.md §6.4.
+  - **Category 4 — borrowed view.** A `ConsumerRecord_t` in a batch, `Node_t`, list
+    and map elements, borrowed strings and what a callback receives are never passed
+    to a `_destroy`, even where their type has one ("a record borrowed from a records
+    handle is never passed here", BH:32666-32667 at `3f8a5bc6`). Never use them
+    after their owner (3) is destroyed, or after the callback that received them
+    returns. Represent them as a transient cursor over the parent; don't let one
+    escape the parent's lifetime.
+  - **Category 5 — registration copied by the callee**
+    (`ConsumerRebalanceListener_t`, `OffsetCommitCallback_t`). Build the handle, pass
+    it to the call, and destroy it right after the call returns, success or error,
+    and also when the call never ran (the `SafeHandle` marshaller threw
+    `ObjectDisposedException` against a concurrent teardown). The core copied what it
+    needs during the call: "the listener registration is copied during the call (its
+    handle may be destroyed afterwards)" (BH:29284-29285), and a consumer a commit
+    callback was passed to "keeps its own copy of the registration" (BH:33743-33744,
+    both at `3f8a5bc6`). Destroying the handle says nothing about whether the user
+    object is still registered: that is §B6's `self_` rule (decision 23 for the
+    listener; until `onComplete` fired, or destroy, for the commit callback,
+    BH:33693-33696 at `3f8a5bc6`).
+  - **Category 6 — caller-owned, weak to its parent** (`ConsumerHandle_t`, ledger 34
+    (i)). The core's handle holds the consumer weakly
+    (`rust/src/ffi/consumer/consumer_handle.rs:93-96` at `3f8a5bc6`), so the handle's
+    `SafeHandle` takes **no** reference on the consumer's `SafeConsumerHandle`.
+    Destroy the handle whenever the binding chooses, before or after the consumer,
+    but never while one of its own ops runs (BH:31940-31945 at `3f8a5bc6`): every
+    handle op takes the handle's `SafeHandle`, whose call-scoped `AddRef` covers
+    that. After the consumer's destroy, every handle op fails with
+    `LOCAL_ILLEGAL_STATE` (-4, "consumer destroyed",
+    `rust/src/ffi/consumer/consumer_handle.rs:121-123` at `3f8a5bc6`) →
+    `InvalidOperationException` (decision 14), and the handle is still safe to
+    destroy (BH:30638-30641, BH:30974-30975 at `3f8a5bc6`). This replaces M9/P8's
+    P8-D1 reference and the deferred destroy it caused: a live handle no longer
+    defers the consumer's destroy.
 
 **Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
 through exceptions; `IsInvalid == zero` matches our null-safe destroy (this is
 confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern). A per-message
 `SafeHandle` would allocate a finalizable object per record, so transient handles
-and borrowed views are not wrapped. The borrow-root discipline (Category 3
-outlives its Category 4 borrows) is what makes the receive-path zero-copy contract
-(§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` not being a graceful close is why
-teardown routes through the graceful `Consumer_close` (`_with_timeout` / `_async`)
-first — a bare destroy skips the bg-task join. There is no separate-op drain:
-under single-owner the awaiter of an op is its disposer, so there is no concurrent
-submitter for close to drain.
+and borrowed views are not wrapped. The borrow-root discipline (Category 3 outlives
+its Category 4 borrows) is what makes the receive-path zero-copy contract (§B4,
+CLAUDE.md §6.4) safe. Teardown closes explicitly before it destroys: destroy closes a
+consumer never closed, but has no way to report that close's error (BH:33148-33149
+at `3f8a5bc6`), so the explicit close runs first, where its error can surface.
 
-The ref-counted release (M9/P4 H1) is what closes the use-after-free that the
-pre-M9/P4 shape had: a sync call could hold a raw `DangerousGetHandle()` pointer
-across a multi-second blocking native call (`Poll` with a caller-supplied timeout)
-while a concurrent `Dispose` freed the consumer underneath it. Holding a count for
-the duration of the native call removes that window by construction. The cost is
-that teardown racing an *unawaited* op no longer releases at `Dispose` — the
-deliberate trade, since the alternative (forcing cancellation at teardown) **is**
-the use-after-free being fixed, and a safe version of it would need a core-side
-cancel-then-join that this layer cannot provide. (Since master #233 the core's
-`Consumer_destroy` does wake and join in-flight `_async` ops, but it still does not
-wait for a synchronous call in progress — the window M9/P4 H1 closed — so the
-ref-count is still what keeps teardown safe.)
+Teardown waits for the in-flight uses, so no P/Invoke is running when destroy runs,
+which the header requires (BH:33160-33162 at `3f8a5bc6`). Destroy runs on the closing
+thread and never inside `__execute_callbacks` (decision 7): a callback may use the
+view only to report (BH:33162-33164 at `3f8a5bc6`), and destroy awaits the `_cb` ops
+in flight, one of which may be waiting on that very callback.
 
 **Anti-patterns:**
 
-  - Freeing a **borrowed** view (Category 4: `ConsumerRecord`, `Node`, a `_get`
-    element, a borrowed string) — double-free / UAF; only the owning container is
+  - Freeing a **borrowed** view (Category 4: a `ConsumerRecord_t` in a batch,
+    `Node_t`, a list or map element, a borrowed string, anything a callback
+    receives): a double free or a use-after-free; only the owning container is
     freed.
-  - Destroying a **borrow-root** (`ConsumerRecords_t`, a list/map) while a borrowed
-    element or byte slice from it is still in use (CLAUDE.md §6.4) — use-after-free.
-  - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
-    map/list), or freeing it twice.
-  - `ConsumerRebalanceListener_destroy` on a listener a subscribe call already
-    consumed (Category 5) — a double free, and it fires the release hook a second
-    time. Equally wrong: skipping the destroy on the one path where it *is* correct
-    (the submit P/Invoke threw, so native never ran) — that leaks the listener and
-    its `user_data`.
-  - A bare `Consumer_destroy` without routing through `Consumer_close`
-    (`_with_timeout` / `_async`) first — skips the graceful bg-task join. Do not
-    re-add a `Dispose`-side separate-op drain (there is no concurrent submitter to
-    drain under single-owner).
-  - Passing a **raw `DangerousGetHandle()`** to a *synchronous* consumer
-    `[DllImport]`. Sync calls take the **`SafeHandle` as the parameter** so the
-    marshaller holds a call-scoped ref (§A2); a raw pointer is a use-after-free
-    against a concurrent `Consumer_destroy`. The only sanctioned raw-pointer sites
-    are the **async submit helpers** (which hold a manual span-the-op ref instead),
-    the **close family**, exempt because the one-shot `TryBeginClose` latch
-    already orders close-before-destroy on the same thread in program order, and the
-    two **`*_destroy` entry points themselves** (`Consumer_destroy`,
-    `ConsumerHandle_destroy`), which are structurally exempt: each is called from its
-    own `SafeHandle`'s `ReleaseHandle`, where passing `this` would make the
-    marshaller `DangerousAddRef` a handle that is already mid-release. Every
-    **other** synchronous consumer or handle `[DllImport]` takes its `SafeHandle` as
-    the parameter — all 21 of M9/P8's non-destroy handle declarations included.
+  - Destroying a **borrow-root** (`ConsumerRecords_t`, a list or map) while a
+    borrowed element or byte slice from it is still in use (CLAUDE.md §6.4): a
+    use-after-free.
+  - Leaking an **owned** result (forgetting `_destroy` after marshalling a query map
+    or list, or a `_cb` completion's `value` or `error`), or freeing it twice.
+  - Not destroying a `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` after
+    its call (a leak), or freeing its `self_` when the handle is destroyed (a
+    use-after-free: the registration lives on in the core).
+  - Destroying without an explicit close first, or re-adding a `Dispose`-side
+    separate-op drain.
+  - Passing a **raw `DangerousGetHandle()`** to any consumer or handle operation
+    `[DllImport]`. Every op takes its `SafeHandle` (decision 6). The exemptions: a
+    class-only call (`MockConsumer_*`), which takes `DangerousAddRefClass` and passes
+    the stored class pointer (§A2), and destroy, called from `ReleaseHandle` with the
+    stored class pointer and no `AddRef`.
+  - Calling `KafkaConsumer_destroy_err` inside `__execute_callbacks`, from a
+    finalizer, or from a `ReleaseHandle` without the explicit-teardown flag.
+  - Taking a reference on the consumer from a `ConsumerHandle` (the P8-D1 shape):
+    the core's handle is weak, and a reference would defer the consumer's destroy
+    again.
 
-> **⚠ CARVE-OUT — do NOT file these two as defects** (M9/P4 Q1/Q3, decided by the
-> maintainer; the full five-point argument is in
-> `design/history/M9/P4/PLAN.md` §4.3):
->
-> 1. **`Dispose` returning without releasing native resources** when an unawaited op
->    is in flight (deferred destroy), and
-> 2. that deferred destroy being **bare** — no preceding `Consumer_close`, because
->    the core's guard rejected the close while the op held it.
->
-> Both are accepted **permanently**, not deferred pending a fix, and there is
-> deliberately **no tracked follow-up item** for either. They are reachable only on
-> the documented-misuse path (dispose without awaiting your own op). The
-> close-before-destroy rule above is **not** violated by them. A core-side
-> cancel-then-join would be the theoretical clean fix; it is explicitly **not
-> pursued and not tracked**. Since master #233 the core's `Consumer_destroy` wakes
-> and joins in-flight `_async` ops, but not a synchronous call in progress. That
-> changes neither residual — the ref-count still defers the destroy past `Dispose`,
-> and the deferred destroy is still bare — and the binding does not rely on it.
+> **Retired (M19/P1).** The M9/P4 Q1/Q3 carve-out (a deferred, bare destroy when
+> disposing with an unawaited op) no longer applies: decision 7's teardown waits for
+> the in-flight uses and always closes before destroy.
 
 **Tests required:**
 
@@ -1466,15 +1647,23 @@ ref-count is still what keeps teardown safe.)
     used after the batch is gone is prevented (copy-out) or kept valid by the
     wrapper (keep-alive), per CLAUDE.md §6.4.
   - Each query API (`committed`/`assignment`/`partitions_for`/…) frees its owned
-    result exactly once after marshalling; borrowed elements are never freed.
-  - Create/close many consumers — no leak; `Dispose` joins the bg task
-    (`Consumer_close`) before `Consumer_destroy`.
-  - **Category 6:** the parent ref-count is asserted as a **differential**, because
-    only the contrast is meaningful — with **no** handle outstanding the consumer's
-    `Dispose` releases immediately, with one outstanding it does **not**, and the
-    handle's own `Dispose` completes the release. A single-case assertion cannot tell
-    a working ref-count from a permanently-unbalanced one (both read "not released").
-    Add the reverse order and a many-handle balance loop.
+    result exactly once after marshalling, on the blocking and the `_cb` form;
+    borrowed elements are never freed. A listener's partitions and `onComplete`'s
+    offsets and error are copied, never destroyed.
+  - Create and close many consumers — no leak; teardown closes before it destroys.
+  - **Category 5:** a listener handle and a commit-callback handle are destroyed
+    after a successful call, after a failed one and when the call never ran; after a
+    call that ran, the callback still fires with its `self_` alive.
+  - **Category 6:** a handle op after the consumer's destroy throws
+    `InvalidOperationException` (-4); destroying the handle after the consumer is
+    safe; the consumer's `Dispose` destroys at once with a handle outstanding.
+  - **The path list:** a `Dispose` from another thread during a blocking `Poll`, and
+    during an async `Poll`, returns and does not throw; an explicit cross-thread
+    `Close` throws `InvalidOperationException` and leaves the consumer usable; a
+    `Close` or `Dispose` inside a sync listener throws `InvalidOperationException`;
+    a `Close` inside a callback on the async consumers throws `InvalidOperationException`
+    and leaves the consumer open, while a `Dispose` there is deferred and the destroy runs
+    after the drain; a finalized consumer writes one trace and does not destroy.
   - Double-`Dispose` is safe; a call after `Dispose` throws
     `ObjectDisposedException`.
 
@@ -1484,21 +1673,31 @@ ref-count is still what keeps teardown safe.)
 
 **Decision:** Every boundary string is UTF-8, marshalled by hand (the floor lacks
 `LPUTF8Str` / `Marshal.PtrToStringUTF8`, §0.1): input via `Utf8Marshal.Pin` (encode + NUL
-+ pin); output via `Utf8Marshal.PtrToString` in **two forms** — a NUL-terminated
-callee-owned `const char*` (NUL-scan + `GetString`), or a **length-delimited**
-`const char* + int32_t out_len` that **borrows into the fetch batch** (use the
-length, **never** NUL-scan).
++ pin); output via `Utf8Marshal.PtrToString(ptr)` over a NUL-terminated `const char*`
+borrowed from a handle (NUL-scan + `GetString`). Since M19/P1 no string crosses
+length-delimited (no `out_len` anywhere in BH at `3f8a5bc6`): every function that returns a
+`kafka_Bytes_t` returns bytes, not text (salts, passwords, record buffers, header values, an
+HMAC, user data; §B4).
 
 | Direction | Sites | Helper |
 |---|---|---|
 | In | topic, config key/value, `subscribe`/`seek` args | `Utf8Marshal.Pin` |
-| Out — NUL-terminated, valid until the value's own `_destroy` | `KafkaError_message`, `ConsumerGroupMetadata_group_id` / `_member_id`, other getters | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
-| Out — length-delimited, borrowed from the batch, valid until `ConsumerRecords_destroy` | `ConsumerRecord_topic` / `_header_key`, `Node_host` / `_rack` | `Utf8Marshal.PtrToString(ptr, len)` — use `out_len`, **no scan** |
+| Out — borrowed from the value, valid until its own `_destroy` | `Error_message`, `ConsumerGroupMetadata_group_id` / `_member_id`, `Node_host` / `_rack`, other getters | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
+| Out — borrowed from a record, valid until `ConsumerRecords_destroy` | `ConsumerRecord_topic`, a header's `Header_key` | `Utf8Marshal.PtrToString(ptr)` — NUL-scan |
 
 **All output pointers are borrowed** — .NET copies (`GetString`) before the owning
-handle is freed; it never owns the raw pointer. The two output rows differ only in
-(1) termination (NUL-scan vs `out_len`) and (2) which handle bounds the lifetime
-(the value's own `_destroy` vs `ConsumerRecords_destroy`).
+handle is freed; it never owns the raw pointer. The two output rows differ only in which
+handle bounds the lifetime:
+
+  - the value's own: an error's message lives until the error is destroyed, or, for a
+    borrowed error, until its owner is (BH:17801-17827 at `3f8a5bc6`); a node's host and
+    rack until the node is, the rack `NULL` when the node has none (BH:25898-25910,
+    BH:25938-25950 at `3f8a5bc6`);
+  - the record's: `ConsumerRecord_topic` points into the record's own NUL-terminated copy
+    (BH:32483-32494; `rust/src/ffi/consumer/consumer_record.rs:225-233` at `3f8a5bc6`), and a
+    header key is borrowed from its header (BH:21781-21792), itself borrowed from the record
+    (BH:32602-32614 at `3f8a5bc6`). The records a `ConsumerRecords_t` hands out are borrowed
+    from it, valid until `ConsumerRecords_destroy` (BH:32963-32995 at `3f8a5bc6`).
 
 **Rule:**
 
@@ -1506,57 +1705,50 @@ handle is freed; it never owns the raw pointer. The two output rows differ only 
     pin → pass `AddrOfPinnedObject`; unpin in `finally`. Marshalling copies (an
     encoding conversion) — fine for small topic/config, and **not** the zero-copy
     path (§B4).
-  - Output — two forms, both copy into a managed `string` (needs `unsafe`; a
-    `#if NET6_0_OR_GREATER` span fast path is an internal optimization):
-    - **NUL-terminated** callee-owned `const char*` (no `out_len`) →
-      `Utf8Marshal.PtrToString(ptr)`, scan to NUL. Valid until the value's `_destroy`.
-    - **Length-delimited** `const char* + int32_t out_len` (the receive path) →
-      `Utf8Marshal.PtrToString(ptr, out_len)` using the length — **never NUL-scan**: the
-      slice borrows into the batch with no terminator, so a scan over-reads into
-      the next field. Valid until `ConsumerRecords_destroy` (CLAUDE.md §6.4).
-    In both cases **copy before free** — the pointer dies with the handle; never
+  - Output: `Utf8Marshal.PtrToString(ptr)`, scanning to NUL and copying into a managed
+    `string` (needs `unsafe`; a `#if NET6_0_OR_GREATER` span fast path is an internal
+    optimization); `IntPtr.Zero` → `null` (Java's `null`, as a node without a rack).
+    **Copy before free** — the pointer dies with the handle it is borrowed from; never
     store the raw pointer.
   - Never `[MarshalAs(LPStr)]` (ANSI) or `LPWStr` (UTF-16); never `LPUTF8Str` /
     `Marshal.PtrToStringUTF8` (absent on the floor).
 
 **Why:** UTF-8 is the contract both ways, and the core reads input with
-`to_string_lossy` — invalid bytes are silently *replaced*, not rejected, so an
-`LPStr` mistake corrupts non-ASCII topics quietly (and hides in ASCII-only
-tests). Hand-rolled helpers are the same reason confluent-kafka-dotnet ships
-`StringAsPinnedUTF8` + `PtrToStringUTF8`. The receive-path strings
-(`ConsumerRecord_topic`, header keys, `Node` host/rack) return a `&str` **slice
-into the fetch batch** (`str::as_ptr` + `out_len`, no terminator) and so take the
-length form and must be copied out before `ConsumerRecords_destroy` (CLAUDE.md
-§5.4 / consumer-threading §27); the other getters cache an owned `CString`, so
-they take the NUL-terminated form.
+`to_string_lossy` (`rust/src/ffi/util.rs:98-107` at `3f8a5bc6`) — invalid bytes are
+silently *replaced*, not rejected, so an `LPStr` mistake corrupts non-ASCII topics quietly
+(and hides in ASCII-only tests). Hand-rolled helpers are the same reason
+confluent-kafka-dotnet ships `StringAsPinnedUTF8` + `PtrToStringUTF8`. The receive-path
+strings are borrowed from the record, so they must be copied out before
+`ConsumerRecords_destroy` (CLAUDE.md §6.4 / consumer-threading §27); since M19/P1 the
+record keeps its own NUL-terminated topic, so no string is a slice into the fetch batch.
 
 **Anti-patterns:**
 
   - `LPStr` / `LPWStr` for any string; a `const char*` return marshalled as
     `string`.
-  - **NUL-scanning a length-delimited slice** (`ConsumerRecord_topic` etc.) —
-    over-reads past the batch slice (garbage / AV); use `out_len`.
-  - Reading an output pointer after its handle (or the batch) is gone.
+  - Reading an output pointer after its handle (or the records handle) is gone.
   - Assuming ASCII (works until a non-ASCII topic corrupts silently).
 
 **Tests required:**
 
-  - A non-ASCII value round-trips through a config key/value and an error message
-    (NUL-terminated form).
-  - A `ConsumerRecord.topic` / header key with a non-ASCII, non-NUL-terminated
-    value round-trips via `out_len` (not a scan); a multi-byte char at the slice
-    boundary marshals correctly.
+  - A non-ASCII value round-trips through a config key/value and an error message.
+  - A `ConsumerRecord` topic and a header key with a non-ASCII value round-trip, copied
+    before `ConsumerRecords_destroy`; a multi-byte char at the end of the string marshals
+    correctly.
   - `Utf8Marshal.PtrToString(IntPtr.Zero)` → `null`.
 
 ---
 
 ## B4 Zero-copy & buffer lifetime — receive path
 
-**Decision:** The consumer's key/value/topic bytes originate in the **native**
-batch buffer (owned by `ConsumerRecords_t`), and `ConsumerRecord_key` / `_value` /
-`_topic` hand back `(ptr, len)` **borrowing** into it (consumer-threading §27,
-§B3). **No pinning** — native memory isn't GC-managed. Raw bytes are **copy-out by
-default**.
+**Decision:** The consumer's key/value bytes originate in the **native** batch buffer,
+kept alive by `ConsumerRecords_t`. .NET deserializes on the managed side (decision 11), so it
+passes `NULL` deserializers to `KafkaConsumer_new`, and `ConsumerRecord_key` / `_value` then
+return a `kafka_Bytes_t *` borrowed from the record, pointing into the fetch buffer or, for a
+compressed batch, the record's own buffer, `NULL` for Java's `null` (BH:33109-33116,
+BH:32574-32600; `rust/src/ffi/consumer/consumer_record.rs:21-30` at `3f8a5bc6`). The topic is
+the record's NUL-terminated string (§B3). **No pinning** — native memory isn't GC-managed. Raw
+bytes are **copy-out by default**.
 
 **Rule:**
 
@@ -1615,69 +1807,121 @@ shapes: **wakeup** and **concurrent use**.
     accessors (message **before** free), then `_destroy` in a `finally` — freed
     exactly once even if construction throws (§B2, §B3); the exception holds copied
     values, not the handle. Sync failures `throw`; async op failures fault the
-    `Task` (§B7) — same `FromHandle`. Keep it **one flat `KafkaException` for now**
-    (the ABI exposes only code/retriable/fatal); typed subclasses can be added
-    under it later, non-breakingly.
+    `Task` (§B7) — same `FromHandle`. Keep it **one flat `KafkaException` for now** for
+    every code the error table gives no .NET type (decision 14): it carries `Code`
+    (`kafka_common_Error__enum_err`) and `IsRetriable`
+    (`kafka_common_Error_is_retriable_error_err`) (BH:17798, BH:33877 at `3f8a5bc6`); the
+    header has no fatal predicate. Typed subclasses can be added under it later,
+    non-breakingly.
   - **Two error channels on the commit-callback family, and they must not be
-    conflated** (M9/P7). `Consumer_commit_async*_with_callback` are **sync** calls
-    that *also* deliver an error later:
-      - the **returned** `KafkaError*` is a commit-**initiation** failure — the
-        commit never started, and the callback will never fire. It becomes a
-        `KafkaException` thrown synchronously from `CommitAsync`, the ordinary
-        sync-op shape above.
-      - the error **delivered to the callback** is the **commit's own outcome**
-        (`null` = success, mirroring Java's "exception == null means success"). It
-        is freed by `FromHandle` inside the trampoline and handed to the user as a
-        `KafkaException?` parameter. There is **no `Task` to fault** here — this
-        family is fire-and-forget (§B6 third Rule, §B7) — so "async op failures
-        fault the `Task`" does **not** apply to it.
-    A commit can initiate cleanly and fail later, so both channels need their own
-    coverage. Note the delivered channel has **no broker-free vehicle**: against a
-    `MockConsumer` the core always delivers a null error, so testing it means
-    driving the trampoline the way the core would.
+    conflated** (M9/P7; M19/P1 forms). For `Consumer_commit_async_with_callback` /
+    `_commit_async_with_offsets_callback` and their `_cb` twins:
+      - the error **of the call** (`out_err`, or the `_cb`'s `error`) is an initiation
+        failure: the commit never started. It throws from `IConsumer.CommitAsync`, or
+        faults the `Task` of `IAsyncConsumer.CommitAsync` (decision 13). How long `self_`
+        then lives is §B6's commit-callback rule.
+      - the error **delivered to `on_complete`** is the commit's own outcome (`NULL` =
+        success, Java's "exception == null means success"). It is borrowed for the call
+        (BH:3777-3792 at `3f8a5bc6`): read it without freeing it, and hand it to the user
+        as an `Exception?` parameter, of the type the error table gives (decision 33).
+        `offsets` is `null` where Java passes `null`: on a failed commit, and for an
+        explicit empty `offsets`, whose Java `commit()` returns `completedFuture(null)`
+        (decision 22; `AsyncKafkaConsumer.java:1112-1144`), as Python does
+        (`python/confluent_kafka/consumer/_base.py:900-948` at `3f8a5bc6`). The core always
+        delivers a map, empty or not
+        (`rust/src/ffi/consumer/offset_commit_callback.rs:97-114` at `3f8a5bc6`), so the
+        binding decides the `null`. An exception the user callback throws propagates out
+        of the consumer call that ran it (decision 12).
+    A commit can start cleanly and fail later, so both channels need their own coverage. A
+    `MockConsumer` always delivers success, so testing the delivered channel means driving
+    the trampoline as the core would.
   - **Precondition:** validate before any pin/marshal/P/Invoke and throw
     `ArgumentNullException` (null topic/partition/config),
     `ArgumentOutOfRangeException` (a negative timeout), or `ObjectDisposedException`
     / `InvalidOperationException` (closed consumer). **Mandatory**, not optional:
-    the ABI doesn't validate preconditions (CLAUDE.md §3) and some functions
-    `assert!`/panic on violation — a panic across FFI is UB.
-  - **`wakeup()`** → the interrupted `poll` / `commit` / … surfaces a flat
-    `KafkaException` with a **Wakeup** code (Java `WakeupException` semantics —
-    raised **once**, then the flag clears and the op works again;
-    consumer-threading §11). **Not** a subclass: the Python sibling keeps it flat
-    (`pytest.raises(KafkaError)`, message `"woke"`), so do we. Distinct from
-    **`CancellationToken`** cancellation → **`OperationCanceledException`** (the
-    .NET-native cancel, CLAUDE.md §3 — the analog of Python re-raising
-    `CancelledError`).
-  - **Concurrent use** (the consumer is single-owner / one-operation-in-flight;
-    serialized by the **Rust core's** guard, not a managed one — M3/P2) splits by
-    method, and the split is enforced **core-side**, not by a managed pre-check: a
-    concurrent **async op** (`PollWithCallback` / `CommitWithCallback` /
-    `SubscribeWithCallback` / `SeekWithCallback`) is rejected by the core **inline**
-    (it fires the completion callback
-    on the caller thread with a `ConcurrentModification` error), which the bridge
-    surfaces as a **faulted `Task`** carrying a **`KafkaException`** — *not* a
-    managed synchronous throw. A concurrent sync **state read** (`Assignment` /
-    `Subscription` / `Paused` / `GroupMetadata` / `GroupId`) → the core returns a
-    **null** handle, which the getter maps to **`InvalidOperationException`** ("not
-    safe for multi-threaded access"). Mirrors Python exactly (`RuntimeError` from
-    `_concurrent_error()` for state reads, `KafkaError`/ConcurrentModification for
-    ops).
-  - **`ConsumerHandle` errors (M9/P8) take the ordinary flat `KafkaException` route —
-    including the in-runtime `IllegalStateError`.** Two conditions are handle-specific
-    and both are core behavior surfaced verbatim:
-      - **`UnsupportedVersionError`.** On a handle obtained from a `MockConsumer`,
-        *"`wakeup` works and the sync getters return empty lists, but every async
-        operation fails with `UnsupportedVersionError` — the mock has no event pipeline
-        … **This is core behavior, not an FFI limitation**"* (`:82-86`). **Assert it,
-        do not work around it**, and assert the exact message (DoD §3), since the code
-        alone does not distinguish it from any other `UnsupportedVersion`.
-      - **`IllegalStateError` when called from inside a tokio runtime.** A handle op
-        cannot `block_on` there; rather than let a panic cross the FFI boundary, every
-        entry point *"detects that situation and fails with an `IllegalStateError`"*
-        (`src/ffi/consumer_handle.rs:49-57`). It is delivered as an ordinary error
-        **handle** and surfaces as a flat `KafkaException`, like every other
-        operational error.
+    the ABI doesn't validate preconditions (CLAUDE.md §3), and a `NULL` where the
+    header asks for a live handle is undefined behavior. A panic in the core does not
+    cross the boundary: the `_err` twin stores it as -4 with a message beginning "Rust
+    panic caught at the FFI boundary in <function>" (`rust/ffi-macros/src/lib.rs:87-88`
+    at `3f8a5bc6`), which the error table maps to `InvalidOperationException`, not to
+    Java's error; so a check the binding skips surfaces as that panic. The core's getters
+    panic on a closed consumer
+    (`rust/src/consumer/internals/async_kafka_consumer.rs:3928-3931` at `3f8a5bc6`),
+    which the closed check keeps from reaching C.
+  - **`GroupMetadata()` without `group.id` (ledger 105).** The core panics there too
+    (`rust/src/consumer/internals/async_kafka_consumer.rs:4026-4032` at `3f8a5bc6`), so
+    .NET makes Java's check itself: after its closed check and before calling C, it
+    throws the `INVALID_GROUP_ID` (24) `KafkaException` with Java's message, "To use the
+    group management or offset commit APIs, you must provide a valid group.id in the
+    consumer configuration." (`AsyncKafkaConsumer.java:1293-1298`, `:1528-1537`), as
+    Python does (`python/confluent_kafka/consumer/_base.py:1571-1577` at `3f8a5bc6`). It
+    is not a precondition in the sense above: it stands in for a core check, so it throws
+    the type Java's `InvalidGroupIdException` maps to, not a .NET built-in.
+  - **`wakeup()`** → the interrupted op surfaces a flat `KafkaException` with the
+    **Wakeup** code (-18, BH:355 at `3f8a5bc6`) (Java `WakeupException` semantics —
+    raised **once**, then the flag clears and the op works again; consumer-threading
+    §11). Java's `wakeup()` interrupts only the ops whose future registers with the
+    `WakeupTrigger`: `poll`, `commitSync`, `position`, `committed`, `partitionsFor`,
+    `listTopics` (`python/confluent_kafka/consumer/_base.py:1343-1352`;
+    `rust/src/consumer/internals/async_kafka_consumer.rs:11120-11126` at `3f8a5bc6`).
+    Any other op (`CommitAsync`, `Subscribe`, `Seek`, `Pause`, `OffsetsForTimes`,
+    `Close`, `CurrentLag`, …) does not consume it, so a wakeup sent during one stays
+    armed for the next wakeable call (`CurrentLag`:
+    `python/confluent_kafka/consumer/_base.py:1425-1429` at `3f8a5bc6`). **Not** a
+    subclass (decision 14), although Java and Python use one (`WakeupException`;
+    Python's `WakeupError(KafkaError)`,
+    `python/confluent_kafka/common/errors/wakeup_error.py:32` at `3f8a5bc6`): a
+    `WakeupException : KafkaException` can be added later without a break (the Note
+    below). Distinct from **`CancellationToken`** cancellation →
+    **`OperationCanceledException`** (the .NET-native cancel, CLAUDE.md §3 — the analog
+    of Python re-raising `CancelledError`); which ops a cancel wakes is §B7.
+  - **Concurrent use** (single-owner, one op in flight; the binding's owner check, then the
+    core's flag, ledger 136, §B1). A call from another thread while one holds a use throws
+    `InvalidOperationException` with Java's `acquire()` message, "KafkaConsumer is not safe
+    for multi-threaded access.", from the owner check before the native call. A call that
+    passes the check but meets an op still in the core (an overlapping call of the owning
+    thread) fails at once with `LOCAL_CONCURRENT_MODIFICATION` (-2) and the same message
+    (`rust/src/ffi/consumer/mod.rs:318-325` at `3f8a5bc6`): a blocking form through
+    `out_err`; a `_cb` form through its `cb`, queued for `__execute_callbacks` like any
+    completion (`rust/src/ffi/consumer/mod.rs:700-702`, `:721-734` at `3f8a5bc6`); a state
+    read (`Assignment` / `Subscription` / `Paused` / `GroupMetadata`) through `out_err`
+    with a `NULL` return (BH:30513-30552, BH:30609-30621 at `3f8a5bc6`). Every one
+    surfaces as `InvalidOperationException` with that message, sync and async (decisions
+    14 and 17), as Java's
+    `ConcurrentModificationException` and Python's `ConcurrentModificationError`
+    (`python/confluent_kafka/concurrent_modification_error.py:31` at `3f8a5bc6`) are one
+    type. This replaces M3/P2's split (a faulted `Task` carrying `KafkaException` for an
+    async op).
+  - **`ConsumerHandle` errors take the error table like every other call (decision 14).**
+    Three conditions are handle-specific, all core behavior surfaced verbatim:
+      - **The callback gate (ledger 104).** On a `KafkaConsumer` handle an async op
+        (`Seek`, `Pause`, `Position`, `Commit`, `CurrentLag`, …) is admitted only while
+        the consumer is running a callback (a `ConsumerRebalanceListener` method or an
+        `OffsetCommitCallback`). Outside one it fails with -2 before anything is
+        submitted, with the message "KafkaConsumer is not safe for multi-threaded access.
+        ConsumerHandle operations are allowed only from inside a callback the consumer is
+        running (ConsumerRebalanceListener, OffsetCommitCallback); from another thread call
+        wakeup()." → `InvalidOperationException` (BH:30642-30648;
+        `rust/src/consumer/internals/async_kafka_consumer.rs:307-309`, `:904-909` at
+        `3f8a5bc6`). `Wakeup` and the sync reads (`Assignment`, `Paused`) work from any
+        thread at any time. Java has no handle (a listener captures the consumer, and
+        `acquire()` refuses other threads), and Python has no public one.
+      - **A `MockConsumer` handle is not gated**, as Java's `MockConsumer` has no
+        `acquire()`. `Wakeup`, the sync reads, `CurrentLag` and every commit work against
+        the mock; every other async op fails with `UnsupportedVersion` (35) and the
+        message "ConsumerHandle async operations are not supported on a MockConsumer
+        handle; drive the MockConsumer directly." → `KafkaException`
+        (`rust/src/consumer/internals/async_kafka_consumer.rs:316-327`, `:816-826` at
+        `3f8a5bc6`). **Assert it, do not work around it**, and assert the exact message
+        (DoD §3), since the code alone does not distinguish it from any other
+        `UnsupportedVersion`.
+      - **After the consumer is destroyed** every handle op fails with -4 →
+        `InvalidOperationException`, and a `_cb` handle op fires its `cb` inline (ledger
+        34 (i); `rust/src/ffi/consumer/consumer_handle.rs:48-51` at `3f8a5bc6`).
+    A blocking handle op runs as a task of the consumer and waits on a channel, whichever
+    thread calls it, so it works from inside a listener that a blocking consumer op runs;
+    the M9/P8 in-runtime `IllegalStateError` is gone
+    (`rust/src/ffi/consumer/consumer_handle.rs:37-46` at `3f8a5bc6`).
   - **The core's local codes map by the error table (decision 14, M19/P1).** -2 and -4 →
     `InvalidOperationException`, -3 → `ArgumentException`, -5 → `System.TimeoutException`,
     each with the core's message; a `local_callback` error → the carried instance; every
@@ -1687,26 +1931,30 @@ shapes: **wakeup** and **concurrent use**.
     replaces the M9/P8 rule that kept `illegal_state` a `KafkaException`.
   - **The guard-bypass contrast is itself a contract, and it is testable.** The same
     logical call has two different surfaces depending on which handle it goes
-    through, and the header states both: `Consumer_assignment` returns **null** *"on
-    a concurrent-access rejection (the guard could not be acquired)"* →
-    `InvalidOperationException`, while `ConsumerHandle_assignment` *"Returns … a
-    **non-null** …"* because it takes no guard (§B1). Inside a callback that holds
-    the guard the first is rejected and the second succeeds — the reason
-    `ConsumerHandle` exists, and the mock-testable form of `consumer-threading.md`
-    §31's first mandatory regression test (no broker, no threads, no sleeps).
+    through, and the header states both: `Consumer_assignment` fails with -2 through
+    `out_err` and returns `NULL` while another call holds the consumer (BH:30513-30524 at
+    `3f8a5bc6`) → `InvalidOperationException`, while `ConsumerHandle_assignment` takes no
+    guard and returns the owned list from any thread (BH:31850-31862, BH:30642-30648 at
+    `3f8a5bc6`). Inside a callback that holds the guard the first is rejected and the
+    second succeeds — the reason `ConsumerHandle` exists, and the mock-testable form of
+    `consumer-threading.md` §31's first mandatory regression test (no broker, no threads,
+    no sleeps). On the public surface the consumer's own `Assignment()` inside a callback
+    is routed to the handle (ledger 114) and succeeds too; the contrast shows on a call
+    sent to the core as outside, `Subscription()`, which throws `InvalidOperationException`
+    (-2) in the same listener.
 
-**Why:** a flat `KafkaException` matches what the ABI exposes and the Python
-sibling. Preconditions are a separate surface because they are programmer errors,
-not Kafka outcomes — Java raises `IllegalArgument`/`IllegalState`, Python
-`ValueError`/`TypeError`, all before the native call; ours must too, *and must*
-because the ABI would otherwise panic. The wakeup and concurrent shapes mirror the
-Python sibling exactly (flat `KafkaError` "woke"; the `RuntimeError`/`KafkaError`
-concurrent split). The concurrent split is **delivered by the core**, not a managed
-guard: the async-op `KafkaException` arrives through the faulted `Task` (the core
-fires the callback inline with `ConcurrentModification`), and the state-read
-`InvalidOperationException` is thrown from the getter's null-handle path — there is
-no managed access guard to reject anything (M3/P2 removed it; the observable
-contract is unchanged, only its mechanism is now the core's).
+**Why:** the flat `KafkaException` with `Code` and `IsRetriable` matches what the ABI
+exposes (decision 14), and the codes that stand for Java built-ins get their .NET type now,
+so typed subclasses can come later without a break. Preconditions are a separate surface
+because they are programmer errors, not Kafka outcomes — Java raises
+`IllegalArgument`/`IllegalState`, Python its Java-named errors (`NullPointerError`,
+`IllegalArgumentError`; root `CLAUDE.md:431` at `3f8a5bc6`), all before the native call;
+ours must too, *and must* because the ABI would otherwise reach undefined behavior or a
+core panic. The wakeup shape keeps Java's once-only semantics on the flat type (Java's
+`WakeupException` and Python's `WakeupError` become a subclass later, the Note below).
+Concurrent use is refused by the binding's owner check, as Java's `acquire()` and Python's use
+table refuse it, and behind it by the core (ledger 136); since M19/P1 every rejection is the
+same `InvalidOperationException`, sync or async (decision 17).
 
 **Note — flat now, typed later.** The flat `KafkaException` is the *current*
 choice; a Java-style typed hierarchy can be added later **non-breakingly**
@@ -1720,62 +1968,72 @@ the precondition exceptions are unchanged.
 
   - Not checking the out-param / return value; leaking the error handle or reading
     `_message` after `_destroy`; a `FromHandle` that can throw before its `_destroy`.
-  - A per-code hierarchy now (over-engineering vs the Python sibling); throwing
-    `KafkaException` for a programmer error; validating after the P/Invoke.
-  - Making `wakeup()` a distinct exception subclass now (the ABI + Python keep it
-    flat); conflating a `wakeup()` (`KafkaException`/Wakeup) with a
-    `CancellationToken` cancel (`OperationCanceledException`).
+  - A per-code hierarchy now (decision 14 keeps one flat `KafkaException`); throwing
+    `KafkaException` for a programmer error (the `GroupMetadata()` check of ledger 105 is
+    not one: Java throws `InvalidGroupIdException` there); validating after the P/Invoke.
+  - Making `wakeup()` a distinct exception subclass now (decision 14 keeps it flat; the
+    Note above says how it is added later); conflating a `wakeup()`
+    (`KafkaException`/Wakeup) with a `CancellationToken` cancel
+    (`OperationCanceledException`).
   - Any type other than `InvalidOperationException` for a concurrent call (-2), a state
     read or an op, sync or async (decision 17).
-  - Treating `UnsupportedVersionError` on a mock-derived `ConsumerHandle` as a bug to
-    route around (a managed pre-check, a silent no-op, an invented "mock
-    unsupported" exception) — it is documented core behavior, and the binding's job
-    is to surface it unchanged.
+  - Treating `UnsupportedVersionError` on a mock-derived `ConsumerHandle`, or the -2 a
+    `KafkaConsumer` handle op gets outside a callback (ledger 104), as a bug to route
+    around (a managed pre-check, a silent no-op, an invented "mock unsupported"
+    exception) — it is documented core behavior, and the binding's job is to surface it
+    unchanged.
   - Branching on an error code outside the one error-table helper, or mapping a code the
     table does not list.
-  - Adding an `InvalidOperationException` concurrent-rejection mapping to a
-    **handle** getter. It has none to map: the ABI documents the return as non-null
-    precisely because no guard is taken.
+  - Adding an `InvalidOperationException` concurrent-rejection mapping to a **handle**
+    sync read (`Assignment`, `Paused`). It has none to map: it takes no guard
+    (BH:30642-30648 at `3f8a5bc6`).
 
 **Tests required:**
 
-  - A sync failure throws `KafkaException` with the right code/message/flags; an
-    async failure faults the `Task` (via mock `set_poll_error`); the handle is
-    freed exactly once; a non-ASCII message round-trips.
+  - A sync failure throws `KafkaException` with the right code/message/`IsRetriable`; an
+    async failure faults the `Task` (via `MockConsumer.SetPollException`, decision 15); the
+    handle is freed exactly once; a non-ASCII message round-trips.
   - Null topic/partition → `ArgumentNullException`; post-`Dispose` →
     `ObjectDisposedException`; each before any native call.
+  - `GroupMetadata()` without `group.id` throws `KafkaException` with code 24 and Java's
+    exact message; after `Dispose` it still throws `ObjectDisposedException` (ledger 105).
   - `wakeup()` → the next `poll`/`commit` throws `KafkaException` (Wakeup)
     **once**, then the consumer works again; a `CancellationToken` cancel →
     `OperationCanceledException`.
-  - A concurrent sync state read → `InvalidOperationException`; a concurrent async
-    op → `KafkaException`.
-  - **`ConsumerHandle` (M9/P8):** every async op on a mock-derived handle throws
-    `KafkaException` with the `UnsupportedVersion` code **and the exact message**;
-    `wakeup` and the three getters succeed and return **empty, not null**; and the
-    guard-bypass contrast — inside a listener fired by `MockConsumer.Rebalance`,
-    `handle.Assignment()` **succeeds** while the same listener's
-    `consumer.Assignment()` throws `InvalidOperationException`. ⚠ That last one needs
-    a **mutation check** (swap the handle call for a second consumer call and confirm
-    it fails), or a both-succeed regression passes it silently.
+  - A concurrent sync state read → `InvalidOperationException`; a concurrent op, blocking
+    or `_cb` → `InvalidOperationException` too (decision 17).
+  - **`ConsumerHandle`:** on a `KafkaConsumer` handle an op outside a callback throws
+    `InvalidOperationException` with the exact gate message (ledger 104); on a
+    mock-derived handle `Wakeup`, the sync reads, `CurrentLag` and the commits succeed
+    (`CommitAsync(offsets)` from a listener commits into the mock), and every other async
+    op throws `KafkaException` with the `UnsupportedVersion` code **and the exact
+    message**; after the consumer's destroy every handle op throws
+    `InvalidOperationException`. And the guard-bypass contrast — inside a listener fired
+    by `MockConsumer.Rebalance`, `handle.Assignment()` **succeeds**, the same listener's
+    `consumer.Assignment()` is routed to the handle (ledger 114) and returns the same
+    assignment, and its `consumer.Subscription()` throws `InvalidOperationException`.
+    ⚠ That last one needs a **mutation check** (turn the routing off and confirm the
+    consumer's `Assignment()` fails), or a regression that stops routing passes it
+    silently.
 
 ---
 
 ## B6 Callback & delegate marshalling — completion callbacks
 
-**Decision:** Four callback *families* cross this boundary, and they have
-**different lifetimes**. All marshal as a kept-alive
-`[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
-floor) with a no-throw body and context passed via a `GCHandle` in `user_data`;
-everything after that differs.
+**Decision:** Four callback *families* cross this boundary, with **different lifetimes**.
+All marshal as a rooted `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic, no function
+pointers on the floor) with a no-throw body. Since M19/P1 no consumer callback fires on a
+native thread of its own: each runs inside `Consumer__execute_callbacks` (on the async
+consumer's drain thread, §B1, or on the closing thread during destroy) or, on the sync
+consumer, inline in the blocking call, on its caller's thread.
 
-  - **One-shot per-operation completions, *without* a release hook** — the
-    consumer's **~8** (`Consumer_poll` / `op` / `position` / `committed` /
-    `offsets_for_times` / `long_offsets` / `partitions_for` / `list_topics`), the
-    **primary** mechanism for every async op. Fires **once** per submit; **none of
-    these entry points takes a `user_data_destroy`**, and the callback *is* invoked
-    on every path including the core's inline guard rejection — which is what makes
-    "the callback is the sole owner of the per-op `GCHandle` free" *total* for them,
-    and only for this family.
+  - **One-shot `_cb` completions** — the consumer's `_cb` twins (`poll_cb`,
+    `commit_sync*_cb`, `commit_async*_cb`, `position*_cb`, `committed*_cb`,
+    `current_lag_cb`, …), the **primary** mechanism for every async op. Each fires
+    **once** per call with an owned `value` and/or an owned `error` and the `opaque` the
+    binding passed, also when the core rejects the call as concurrent (the -2 is queued
+    like any completion, §B5). No registration handle, no release hook: the `cb` is the
+    sole owner of the per-op `GCHandle` free.
     **Admin's single-callback group RPCs belong here too (M15/P13.1)** —
     `alterConsumerGroupOffsets` / `deleteConsumerGroupOffsets` /
     `removeMembersFromConsumerGroup`. Each fires **exactly once** per submit — also for
@@ -1786,17 +2044,19 @@ everything after that differs.
     **owned** (`FromHandle`); the root is destroyed once, after every read, and the
     callback's `finally` is the **sole** `GCHandle` free — no countdown and no submit
     token. The hookless Rule below, written for the consumer's eight, holds for them.
-  - **Multi-shot registrations** — the **rebalance listener** (M9/P6:
-    `on_partitions_revoked` / `_assigned` / `_lost`, registered once by
-    `Consumer_subscribe_with_listener[_async]`). Registered once, fires **N** times,
-    bound to a *subscription* rather than an operation; the `GCHandle` is freed by
-    a **separate release hook**, never by a callback.
-  - **One-shot completions *with* a release hook** — the **offset-commit callback**
-    (M9/P7: `Consumer_commit_async_with_callback` /
-    `_commit_async_offsets_with_callback`). Fires **at most once**, bound to an
-    *operation*, so by shape it belongs with the first family — but those entry
-    points **do** take a `user_data_destroy`, and the callback is **not** invoked
-    when the call fails. The `GCHandle` is freed by the hook, never by the callback.
+  - **Multi-shot registrations** — the **rebalance listener**
+    (`ConsumerRebalanceListener_new_err(self_, revoked, assigned, lost)`, passed to
+    `subscribe_*`). Registered once, fires **N** times, bound to a *subscription* rather
+    than an operation. Each listener method reports through `Consumer__set_callback_result`
+    (BH:3667-3695 at `3f8a5bc6`). The `subscribe_*` call copies the registration, so its
+    handle may be destroyed right after (BH:29283-29287 at `3f8a5bc6`); `self_` is a
+    `GCHandle` freed by decision 23's rule (BH:32327-32341 at `3f8a5bc6`).
+  - **One-shot registrations** — the **offset-commit callback**
+    (`OffsetCommitCallback_new_err(self_, on_complete)`, passed to
+    `commit_async*_with_callback` and their `_cb` twins). Fires **at most once**, bound to
+    an *operation*. The call copies the registration (BH:29628-29646 at `3f8a5bc6`);
+    `self_` stays alive until `onComplete` fired, or until the consumer was destroyed
+    (BH:33692-33703 at `3f8a5bc6`).
   - **N-shot per-operation fan-out — admin's per-key ABI ("shape 4", M15/P9).** One
     submit, **N independent callbacks** that can run concurrently on different threads,
     each carrying one key's **owned** value and **owned** error — there is no result
@@ -1820,246 +2080,172 @@ everything after that differs.
     has one ABI shape here — one callback over a result root — not a countdown over
     per-key callbacks.
 
-⚠ **The one-shot "sole owner is the callback" invariant does NOT generalize.**
-Everything §B6/§B7 says about freeing the per-op `GCHandle` is scoped to the
-**hookless** per-operation family. Applying it to a registration is a
-use-after-free on fire 2..N; applying it to a commit callback **leaks** the
-`GCHandle` on the marshal-failure path, where the callback never runs. Each
-family's rule is stated separately below; the Anti-patterns and Tests-required
-blocks are shared.
+⚠ **There is no `user_data_destroy` hook any more** (M19/P1). The earlier ABI freed a
+registration's `GCHandle` from a release hook; BH has none for a registration (no
+`user_data_destroy` anywhere in BH at `3f8a5bc6`), so the binding decides each `self_` free
+itself, by the header's rule quoted in each Rule below. The one release hook left is a
+`local_callback` error's `release(opaque)`, which the core calls exactly once, on any
+thread, when the last copy of the error is dropped (BH:2030-2036, BH:17703-17733 at
+`3f8a5bc6`; ledger 12). The one-shot "the callback frees it" invariant holds for the `_cb`
+completions only: applied to a listener it is a use-after-free on fire 2..N.
 
-**The one question that decides the free site:** *does this entry point take a
-`user_data_destroy`?* If it does, the hook is the sole owner — because the hook is
-then the only thing guaranteed to run on **every** path. If it does not, the
-callback is, because it is.
+The `_cb` shape is `(value, error, opaque)`: an owned `value` (a handle or a scalar; none for
+a void op) on success, `NULL` (`-1` for a scalar) beside an owned `error` otherwise
+(`kafka_consumer_Consumer_poll_cb_t`, `kafka_consumer_Consumer_position_cb_t` and their
+siblings, BH:3103-3109, BH:3203-3209 at `3f8a5bc6`).
 
-The **one-shot** shape is **not uniform** — always `(…, KafkaError*, void* user_data)`
-with a non-null `KafkaError*` = failure, but the *result* slot varies: an **owned
-handle** for `poll` / `committed` / `offsets_for_times` / `long_offsets` /
-`partitions_for` / `list_topics` (`(handle*, error*, ud)`); a **scalar** for
-`position` (`(int64_t, error*, ud)`); and **none** for `op`, the void-in-Java ops
-(`(error*, ud)`).
+The listener shape is one function per Java method, `(self_, partitions, callback_id)`, the
+partitions borrowed for the call; a `NULL` `on_partitions_lost` is Java's default
+(BH:3667-3695 at `3f8a5bc6`). The commit shape is `on_complete(self_, offsets, error,
+callback_id)`, both borrowed (BH:3777-3792 at `3f8a5bc6`). Both report their end with
+`Consumer__set_callback_result(consumer, callback_id, NULL, error)`, where `error` is `NULL`
+or an owned error the core takes over: from any thread, once per id (a second report is
+ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
+`3f8a5bc6`).
 
-The **multi-shot** shape is uniform and *returns a value*:
-`kafka_common_KafkaError_t* (*)(TopicPartitionList_t* partitions, void* user_data)`
-for all three listener callbacks, plus a release hook `void (*)(void* user_data)`.
+**Rule (one-shot `_cb` completion):**
 
-**Rule (one-shot per-operation completion, hookless — the ~8 async ops):**
+  - A named Cdecl delegate per `cb` shape, blittable parameters, rooted in a
+    `static readonly` field so the GC can't collect it while native holds the thunk.
+  - **No-throw is mandatory**: the frame below is Rust. `try/catch` all, and surface a
+    failure through the TCS.
+  - **Per-op keep-alive:** the `opaque` `GCHandle` over the op's state lives from the call
+    to the `cb`. The `cb` frees it, exactly once, on every path, the queued -2 rejection
+    included; the only other free site is a `catch` around the P/Invoke when it threw
+    before native ran.
+  - **The `cb` owns what it gets:** marshal the owned `value` (copy-out, CLAUDE.md §6.4)
+    and destroy it (§B2 Category 3), or build the exception from the owned `error` (§B5),
+    which frees it; a scalar `value` needs no free. Then complete the TCS.
 
-  - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
-    blittable params. Keep the delegate rooted (a `static readonly` field or the
-    per-op `GCHandle`) so the GC can't collect it while native holds the thunk.
-  - **Foreign thread → no-throw is mandatory.** The callback fires on the native
-    callback-dispatcher thread (§B7), not the caller — no caller frame to catch, so
-    an escaping exception is a crash/UB. `try/catch` all, surface via the TCS.
-  - **Per-op keep-alive.** The delegate + the `GCHandle` (over the
-    `TaskCompletionSource`) must stay alive from **submit until the callback
-    fires** (the whole op, not a synchronous call), freed **exactly once** by the
-    callback — including the inline guard-rejection error path. ⚠ This sentence is
-    **scoped to these eight hookless entry points** and does not carry to a
-    hook-bearing one; see the third Rule below.
-  - **The callback owns any handle it gets.** For the **owned-handle** forms it
-    consumes the result — marshal it (copy-out CLAUDE.md §6.4) then `_destroy`
-    (§B2 Category 3); `position`'s scalar needs no free; `op` has no result. On
-    failure it builds the exception (`FromHandle`, §B5) and frees the `KafkaError`.
-    Then it completes the TCS.
+**Rule (multi-shot registration — the rebalance listener):**
 
-**Rule (multi-shot registration — the rebalance listener, M9/P6):**
+  - One named Cdecl delegate per listener method, rooted in a `static readonly` field (a
+    registration has no per-op handle to root it).
+  - **No-throw is mandatory.** A listener exception is reported, not thrown: build a
+    `local_callback` error carrying it (`kafka_common_Error_local_callback_err`, `opaque`
+    a `GCHandle` over the exception, `release` a no-throw delegate that frees that
+    `GCHandle`; ledger 12) and pass it to `Consumer__set_callback_result`. The core takes
+    it over, and it propagates out of the consumer call that ran the listener as the same
+    instance.
+  - **The partitions are borrowed** for the call: copy them out; never destroy them.
+  - **Report exactly once per call**, on every path, including a method that throws
+    before it returns a `Task` (the async listener, §B1). The async listener reports from
+    its `Task`'s continuation, so the drain thread never waits on user code (decision 27).
+  - **`self_` lifetime** (decision 23): free the old listener's `GCHandle` when a
+    replacing `subscribe_*` succeeds, the new one when the `subscribe_*` fails, and the
+    current one after the consumer's destroy has returned. Keep it across `unsubscribe`:
+    the header says `unsubscribe` releases the listener (BH:29392-29394 at `3f8a5bc6`), but
+    Java's `unsubscribe()` leaves it registered (`SubscriptionState.java:347-355`), and
+    Python keeps its context across it (`python/_confluentkafka.c:3870-3879`, `:3947-3954`
+    at `3f8a5bc6`).
+  - Destroy the `ConsumerRebalanceListener_t` handle right after the `subscribe_*` call:
+    the call copied the registration (BH:29283-29287 at `3f8a5bc6`).
 
-  - Same marshalling floor: a named Cdecl delegate per callback, **rooted in a
-    `static readonly` field**. Per-subscribe delegate instances or inline lambdas
-    are wrong here for a stronger reason than in the one-shot case — a registration
-    outlives its subscribe call by definition, so there is no per-op `GCHandle` to
-    root the thunk either.
-  - **Foreign thread → no-throw is still mandatory**, and here the `catch` has
-    somewhere to go: a managed exception is converted into an **owned
-    `kafka_common_KafkaError_t*` built with `kafka_common_KafkaError_new` and
-    *returned***. Ownership of that handle **transfers to the core — do not destroy
-    it.** (This is the inverse of the one-shot rule, which *frees* the `KafkaError`
-    it is handed.) Returning `NULL` means success. The conversion path must itself
-    be no-throw.
-  - **The callback owns the delivered `TopicPartitionList_t`** (§B2 Category 3, per
-    the header's "callbacks own the handles delivered to them"): copy every element
-    out, then `_destroy` the root exactly once — in a `finally`, so the handle is
-    released even when the copy-out throws.
-  - **The registration `GCHandle` is freed by the ABI's `user_data_destroy` hook,
-    and by nothing else.** Not by a listener callback (that is a use-after-free on
-    fire 2..N), not at binding teardown. Make the free idempotent-safe
-    (`Interlocked` + `IsAllocated`) because the "native never ran" abandon path can
-    reach the same site. The hook fires **exactly once**, on **any thread**, on
-    every release trigger the header enumerates — including two the binding could
-    not infer from a return code (a subscribe rejected *after* registration keeps
-    the registration; an empty-topic-list subscribe releases it while returning
-    success). Treat the hook, not the error handle, as the authoritative signal.
-  - **Where the safety of freeing from the hook actually comes from** (M9/P6
-    P6-D3, recorded so it is not re-derived): the hook is reachable concurrently
-    with a queued listener job in principle — the dispatched job carries a **raw**
-    `user_data` copy, not a reference that keeps the registration alive. What closes
-    the window is the **ref-counted `SafeConsumerHandle`** (§B2) plus the **single
-    serialised dispatcher**: a listener callback only ever runs inside an operation
-    that holds a count, so `Consumer_destroy` cannot run concurrently with one, and
-    **M9/P4's** deferred-destroy path fires from `FreeGcHandle` **on the dispatcher
-    thread** — the same thread that would run a queued job. If either of those two
-    properties is ever weakened, this rule must be re-derived.
-    ⚠ **The dispatcher-thread clause is no longer universal (M9/P8).** §B2's Category-6
-    reentrancy handle added a **third** deferred-destroy path that fires from
-    `SafeConsumerReentrancyHandle.ReleaseHandle` on **whatever thread disposed the
-    handle**. It is safe on the **first** clause alone, but the argument differs by
-    callback family and **must not be stated as one blanket sentence**:
-      - **Rebalance listener** — destroy runs only at count zero, a listener callback
-        only ever runs inside an operation that holds a count, and its dispatched job
-        is enqueued and drained inside the very operation that produced it, before that
-        operation's completion releases its count. So at that destroy no listener
-        callback is running and none is queued, on any thread.
-      - **Offset-commit callback** — ⚠ **the clause above does NOT apply to it.**
-        `CommitAsync(callback)` reaches the ABI as a *synchronous* call, so its
-        marshaller AddRef is call-scoped and released before the callback fires;
-        `CommitCallbackRegistration` takes no `DangerousAddRef`. That family is
-        fire-and-forget (§B7) and holds **no managed count** — which is exactly what
-        the M9/P7 Rule below means by "no `Task` or flow of its own". Its safety
-        against the M9/P8 path rests on a different and simpler ground: that destroy is
-        structurally the **same shape as §B2 path 1** (`Dispose` at count 1, destroy on
-        the disposing thread), which has shipped since M9/P1 and was never
-        dispatcher-covered either — as is §B2 path 4. Whatever makes a queued commit
-        callback safe against a path-1 destroy makes it safe against a path-5 one; P8
-        adds no exposure, only a later moment.
-    **Both re-derivations this trip-wire asks for are therefore done** — including the
-    one the M9/P7 Rule below inherits, which would otherwise be left armed and
-    unserviced by the "no longer universal" statement above. Do not extend the
-    dispatcher-thread clause to cover the M9/P8 path, do not read it as still
-    universal, and do not re-merge these two families into one sentence.
+**Rule (one-shot registration — the offset-commit callback):**
 
-**Rule (one-shot completion with a release hook — the offset-commit callback, M9/P7):**
+  - A named Cdecl delegate, rooted in a `static readonly` field; no-throw.
+  - **`offsets` and `error` are borrowed** for the call (BH:3777-3792 at `3f8a5bc6`):
+    copy out, never destroy; the core frees both after the call
+    (`rust/src/ffi/consumer/offset_commit_callback.rs:97-114` at `3f8a5bc6`).
+  - **A throwing user callback is reported**, not swallowed (decision 12): a
+    `local_callback` error, built as the listener's, through
+    `Consumer__set_callback_result`, which propagates out of the consumer call that ran the
+    callback (`Poll`, `Commit*`, `Close`).
+  - **`self_` lifetime:** free it after `on_complete` has reported. When the call fails (an
+    initiation error, a -2 included), keep it until the consumer's destroy has returned,
+    then free it: the header keeps `self_` alive "until `onComplete` fired (or the consumer
+    was destroyed)" (BH:33692-33703 at `3f8a5bc6`). Python does the same: it parks the
+    context of a failed commit on the consumer and frees it after destroy
+    (`python/_confluentkafka.c:3881-3892`, `:5246-5262`, `:4312-4316` at `3f8a5bc6`).
+  - Destroy the `OffsetCommitCallback_t` handle right after the call: the call copied the
+    registration (BH:29628-29646 at `3f8a5bc6`).
+  - **Java's `commitAsync(Map, null)`:** `callback` must be a live handle; `NULL` is
+    undefined behavior (`rust/src/ffi/consumer/offset_commit_callback.rs:155-185` at
+    `3f8a5bc6`). Pass a registration with no user callback, built by the same helper over
+    the same per-call state, whose `on_complete` only reports `NULL` through
+    `__set_callback_result` on the consumer that state names, since the report needs the
+    consumer (BH:29168-29209 at `3f8a5bc6`). Python does the same, with a `NULL` adapter
+    in the same context (`python/_confluentkafka.c:3887-3888`, `:5246` at `3f8a5bc6`).
+  - **Build each registration in one place:** a single named helper that production and
+    the tests both call (`definition-of-done.md` §12).
 
-  - Same marshalling floor: a named Cdecl delegate, **rooted in a `static readonly`
-    field**. A per-call delegate instance or an inline lambda is wrong for the same
-    reason as in the multi-shot case — against a real consumer the registration
-    outlives the submitting call, so there is no synchronous frame keeping the thunk
-    alive.
-  - **Foreign thread → no-throw is mandatory, and here there is nowhere to surface
-    it.** The ABI typedef returns `void` and there is **no `TaskCompletionSource`**,
-    so unlike both other families a managed exception has no channel at all: catch
-    everything and **swallow**, writing it to `System.Diagnostics.Trace` so the
-    failure is not strictly silent (Java's `OffsetCommitCallback.onComplete` returns
-    `void` and cannot report its own failure; Python logs and swallows). The trace
-    call must itself be no-throw — a host `TraceListener` can throw, and diagnostics
-    must never escalate into an unwind across the FFI.
-  - **The callback owns *both* handles delivered to it** — the (always non-null)
-    `OffsetMap_t` and, on failure, the `KafkaError_t`. Free the error via
-    `KafkaException.FromHandle` (§B5) **first**, before anything fallible, since it
-    frees in its own `finally`; hand the map to
-    `OffsetMapMarshal.CopyOutAndDestroy`, which copies out and destroys the root in
-    its own `finally` (§B2) — the twin of the
-    `TopicPartitionListMarshal.CopyOutAndDestroy` the listener trampolines use. Keep
-    a local ownership **baton** for the map (zeroed *before* the helper is called,
-    with a null-safe `_destroy` of the baton in the trampoline's own `finally`) so
-    "destroyed exactly once on every path" stays true even on a path that never
-    reaches the helper.
-  - **The `GCHandle` is freed by the ABI's `user_data_destroy` hook, and by nothing
-    else** — not by the callback. The hook is the only site that runs on every path:
-    `user_data` ownership transfers **unconditionally**, so the hook fires *even when
-    the submitting call returns an error*, and the offsets-taking entry point returns
-    a marshal error **without registering the callback** — the callback never fires,
-    the hook still does. Freeing in the callback therefore leaks on that path; and on
-    the **success** path the header pins the ordering that rules it out there too —
-    the hook fires "after the commit completed and the callback returned"
-    (`confluent_kafka.h:524-528`), so a trampoline-side free would release a
-    `GCHandle` the core is still about to hand to the hook.
-    Make the free idempotent-safe (`Interlocked` + `IsAllocated`): the "native never
-    ran" abandon path (the submitting P/Invoke threw) can reach the same site.
-  - **Where the safety of freeing from the hook comes from:** the same two properties
-    as the multi-shot rule above — the **ref-counted `SafeConsumerHandle`** and the
-    **single serialised dispatcher** — and, as there, **not** an owned `Arc` held
-    across the callback (disproved: the core copies `user_data` out before
-    dispatching). If either property is weakened, re-derive this rule.
-  - **A callback-less commit is a *fourth* shape, and it needs no registration.** The
-    ABI's `callback` parameter is **not nullable** and there is no plain
-    `Consumer_commit_async_offsets`, so Java's legal `commitAsync(Map, null)` is
-    expressed with a **no-op discard trampoline** that still frees both delivered
-    handles (C's `discard_commit_complete` is the reference shape). Pass a **null**
-    `user_data` and **no** hook on that path: there is nothing managed to root, so
-    allocating a `GCHandle` there would create a handle with no releaser. Passing
-    `NULL` for `callback` instead is **undefined behavior**.
-  - **Decide the triple in one place.** The `(callback, user_data, user_data_destroy)`
-    triple should come from a single named helper that both production and the tests
-    call (`definition-of-done.md` §12), so a test driving the ABI directly cannot
-    keep passing a hook that production has stopped passing.
+**The async commit callback (M19/P1, ledger 47).** `IAsyncOffsetCommitCallback` uses the
+sync commit callback's `OffsetCommitCallback_t` and trampoline. The trampoline copies the
+offsets and converts the error before it returns (both are freed after the call), calls the
+callback, and does not wait for its `Task`. The `Task`'s continuation reports through
+`kafka_consumer_Consumer__set_callback_result`, from any thread: `NULL`, or a
+`local_callback` error carrying the exception, a cancel included. Exactly one report per
+call, on every path. The report goes through the borrowed `__as_Consumer` view, not the
+SafeHandle: the destroy runs the pending callbacks inside the handle's release, where a
+SafeHandle argument is refused, and returns only after every report it waits for
+(`kafka_consumer_Consumer__set_callback_result` is callable while the destroy runs, never once
+it returned, BH:29188-29192 and BH:33145-33165 at `3f8a5bc6`). A report made after the destroy
+returned is dropped by the binding and its error freed. Inside
+a blocking `ConsumerHandle` commit, which runs the commit callbacks queued behind it on the
+waiting thread (`rust/src/ffi/consumer/mod.rs:188-226` at `3f8a5bc6`), the callback is
+reported to the core at once and its `Task` runs on; the callbacks after it may start before
+it ends. The call that delivered the outer callback waits for the `Task`, then throws the
+exception it threw, wrapped as that call wraps a callback's; a `Poll` instead returns its
+records, and the next awaited call throws the exception (ledger 52).
 
-The async *flow* (submit → dispatcher → `SetResult` with
-`RunContinuationsAsynchronously`; one-op-in-flight; `Dispose`) is **§B7** — this
-section is only the callback *marshalling*. Neither a registration nor a commit
-callback has a `Task` or a flow of its own: the registration is bound to the
-subscription's lifetime, and the commit callback is fire-and-forget (§B7).
+The async *flow* (call → drain thread → `SetResult` with `RunContinuationsAsynchronously`;
+one op in flight; teardown) is **§B7**. This section is only the callback *marshalling*.
+Neither a registration nor a commit callback has a `Task` of its own: the registration is
+bound to the subscription's lifetime, and the commit's outcome reaches the callback, not the
+`Task` of `IAsyncConsumer.CommitAsync` (decision 13).
 
 **Why:** the floor (netstandard2.0/net462) has no function pointers or
 `[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
 mechanism — the pattern confluent-kafka-dotnet uses. The GC sees only managed
-refs, not the native thunk (→ keep-alive); `user_data` is C's only per-call
-context channel (→ `GCHandle`). Because the callback runs on the core's **foreign**
-dispatcher thread, no-throw is not optional (there is no caller frame to catch)
-and the keep-alive spans the whole op (submit→fire), not a synchronous call.
+refs, not the native thunk (→ keep-alive); `opaque` / `self_` is C's only per-call context
+channel (→ `GCHandle`). No-throw is not optional, because the frame below every callback is
+Rust, and the keep-alive spans the whole op (call → `cb`) or the whole registration, not one
+synchronous call.
 
 **Anti-patterns:**
 
-  - A per-op delegate / `GCHandle` not rooted for the whole submit→fire window
+  - A per-op delegate / `GCHandle` not rooted for the whole call → `cb` window
     (collected mid-op → crash); a **registration** delegate that is not
     `static readonly` (a registration has no per-op handle to root the thunk).
-  - An exception escaping into the dispatcher thread (no caller to catch → UB).
-  - Not freeing the owned result/error + `GCHandle` on some path (esp. the inline
-    guard-rejection).
+  - An exception escaping a callback into native (UB).
+  - Not freeing the owned result/error + `GCHandle` on some path (esp. the queued -2
+    rejection).
   - Reading a borrowed `topic`/bytes pointer after its batch is destroyed (§B3/§B4).
-  - **Multi-shot only:** freeing the **registration** `GCHandle` from a listener
-    callback (a use-after-free on fire 2..N) **or** from binding teardown — the
-    `user_data_destroy` hook is its sole owner. Destroying the `KafkaError*` the
-    callback **returns** (ownership transferred to the core — a double free).
-    Skipping the delivered `TopicPartitionList_t` destroy on the exception path (a
-    leak), or destroying it twice by pairing a hand-rolled `_destroy` with a
-    copy-out helper that already destroys. Inferring "the registration is dead"
-    from a subscribe's return code instead of from the hook.
-  - **Hook-bearing one-shot only (the commit callback):** freeing the `GCHandle` in
-    the trampoline because "it is a one-shot" — that is the *hookless* rule, and here
-    it leaks on the path where the callback never fires. Releasing the registration
-    when the submitting call returns a **non-null error** (the transfer is
-    unconditional; the hook fires anyway, so this is a double free). Pairing
-    `OffsetMapMarshal.CopyOut` with no `OffsetMap_destroy` — a leak on **every**
-    commit — where `CopyOutAndDestroy` is the intended helper. Blanket-attributing a
-    swallowed exception to "the user's callback" when the same `catch` also covers
-    marshalling and `GCHandle` recovery, or when the path has no user callback at
-    all (the discard trampoline) — a confidently-wrong diagnostic is a worse
-    debugging cliff than a silent one, which is the whole thing tracing exists to
-    avoid. Passing `NULL` for the non-nullable `callback` parameter (UB), or
-    allocating a `GCHandle` on the callback-less discard path (a handle with no
-    releaser). Letting the swallowed exception be *silently* discarded with no
-    diagnostic, or letting the diagnostic itself throw.
+  - **Listener:** freeing `self_` from a listener method (a use-after-free on fire 2..N),
+    at `unsubscribe`, or before the consumer's destroy has returned; destroying the
+    delivered partitions (borrowed: a double free); destroying the error passed to
+    `__set_callback_result` (the core took it over); reporting twice, or not at all, for
+    one `callback_id`.
+  - **Commit callback:** freeing `self_` when the call failed (the callback may still
+    fire); destroying the delivered offsets or error; swallowing a user exception instead
+    of reporting it (decision 12); passing `NULL` for `callback` (UB).
+  - A `catch` whose diagnostic blames "the user's callback" when it also covers
+    marshalling and `GCHandle` recovery, or a diagnostic that can itself throw.
 
 **Tests required:**
 
   - Each callback delivers the right result/error and frees the owned handle +
     `GCHandle` exactly once.
-  - An exception thrown in the callback is caught (no crash, no unwind into native)
-    and faults the `Task` — or, for a registration, is **returned** as a
-    `KafkaError*` and surfaces on the operation that triggered the callback (assert
-    the code **and** the message, `definition-of-done.md` §3).
+  - An exception thrown in a callback is caught (no crash, no unwind into native). For a
+    `_cb` it faults the `Task`; for a listener or commit callback it is reported through
+    `__set_callback_result` and surfaces from the call that ran it, with the same instance
+    (assert the type **and** the message, `definition-of-done.md` §3).
   - Aggressive GC during an in-flight op doesn't collect the delegate (keep-alive
-    across submit→fire) — and, for a registration, across the whole **live
+    across call → `cb`) — and, for a registration, across the whole **live
     registration**, which is a much wider window.
-  - **Multi-shot only:** the registration survives **N** fires (a churn loop — a
-    per-fire `GCHandle` free turns it red on iteration 2); the release rules hold
-    (a *replacing* subscribe releases it, an `unsubscribe` does **not**); the free
-    site is idempotent-safe (calling it twice frees nothing and does not throw);
-    and teardown with a live registration returns without hanging.
-  - **Hook-bearing one-shot only (the commit callback):** the **failure path where
-    the callback never fires** still releases the `GCHandle` **exactly once** — this
-    is the test that discriminates the correct free site, and without it a wrong
-    choice passes silently; the **success** path releases it too (so the trampoline
-    freeing as well would be freeing a handle the core still holds); a **throwing**
-    callback is swallowed, does not unwind, and does **not** release the
-    registration; the swallowed exception is **observable** (a `TraceListener` sees
-    it) rather than silently discarded; the callback-less **discard** path allocates
-    no registration at all; and the ABI triple the tests pass comes from
-    **production's own builder** (`definition-of-done.md` §12), so removing the hook
-    from production turns those tests red rather than leaving them measuring a hook
-    only the test supplied.
+  - **Listener:** the registration survives **N** fires (a churn loop); a replacing
+    subscribe frees the old `self_`; a failed subscribe frees the new one; an
+    `unsubscribe` frees nothing; destroy frees the current one after it returns; and
+    teardown with a live registration returns without hanging.
+  - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
+    initiation error it is kept until destroy, then freed once; a throwing callback's
+    exception surfaces from the call that ran it; `CommitAsync(offsets)` with no callback
+    commits and its registration reports once; and the registration the tests pass comes
+    from production's own helper (`definition-of-done.md` §12).
+  - **Async commit callback:** one report per call, a faulted or cancelled `Task`
+    included, and its exception surfaces from the call that delivered the callback; inside
+    a blocking `ConsumerHandle` commit the callback is reported at once, and the delivering
+    call throws after its `Task` ends (ledger 52).
   - **Converting a shape-4 countdown RPC to a single callback (M15/P13.1):** a
     leftover countdown armed at **≥ 2** is an **equivalent mutant** — it never reaches
     zero, the callback's `finally` frees once, and nothing leaks, double-frees or is
@@ -2071,119 +2257,98 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
 
 ---
 
-## B7 Async / completion → `TaskCompletionSource` (push)
+## B7 Async / completion → `TaskCompletionSource` (the async consumer's drain thread)
 
-**Decision:** The consumer uses the ABI's *push* surface (settled — no pump):
-every async op (`Consumer_poll_async` / `commit_async` / `position_async` / …)
-takes a completion callback (§B6) that fires when the op resolves, so the callback
-*is* the bridge. Single-owner / one-operation-in-flight (nothing to batch),
-serialized by the **Rust core's** guard — **no managed guard** (M3/P2). Bridges to
-`Task<T>` via a `TaskCompletionSource` built with `RunContinuationsAsynchronously`.
+**Decision (M19/P1, decision 27):** `IAsyncConsumer` calls each op's `_cb` twin, and the
+`cb` completes a `TaskCompletionSource` built with `RunContinuationsAsynchronously`. The
+`cb`, like every listener and commit callback, runs inside `Consumer__execute_callbacks` on
+the consumer's drain thread `confluent-kafka-consumer-pump`, woken by the notify hook (§B1).
+Single-owner, one op in flight: the binding's owner check, then the core's flag (§B1, ledger
+136). An async call's use ends before its `Task` completes, so the next awaited call passes the
+check whichever thread it resumes on.
+`IConsumer` has no flow here: it calls the blocking forms (§B1).
 
-⚠ **Scope — this section is about callbacks that complete a `Task`. Two §B6 families
-complete none, and nothing here applies to them.** A **multi-shot registration**
-(the rebalance listener) has no `Task` and no flow of its own. The **offset-commit
-callback** (M9/P7) likewise has none: `CommitAsync(callback)` is a *sync* call that
-returns the moment the commit is initiated, and the callback is **fire-and-forget** —
-there is no `TaskCompletionSource`, no `RunContinuationsAsynchronously`, no
-cancellation, and no `GCHandle`-freed-by-the-callback. Its lifetime rule is §B6's
-third Rule (the release hook); its error channels are §B5. Do not read a sentence
-below as governing either family just because it says "the callback".
+⚠ **Scope — this section is about the `_cb` completions that complete a `Task`.** A listener
+has no `Task` of its own (§B6). The `Task` of `IAsyncConsumer.CommitAsync` is its
+`commit_async*_cb` completion: it says the core accepted the commit (decision 13). The
+commit's outcome reaches the callback, not that `Task` (§B5, §B6).
 
 ```
-Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
-─────────────                       ────────────────────────────────────────────────────
-PollWithCallback():                 worker task: poll(timeout).await   ← runs the op
-  tcs = new TaskCompletionSource                 build (records | error)
-  ud  = GCHandle.Alloc(tcs)  (§B6)                enqueue completion ──┐
-  Consumer_poll_async(…, cb, ud) ─► (core guard serializes ops)       ▼
-  return tcs.Task                   dispatcher:
-  … await tcs.Task                    cb(records | error, ud): marshal + free handles (§B2)
-     ◄── continuation on pool ─────   tcs.SetResult / SetException  (RunContinuationsAsync)
-                                    no pump · no managed guard · one op in flight
+Caller thread                       Rust core                       confluent-kafka-consumer-pump
+─────────────                       ─────────                       ─────────────────────────────
+Poll():                             runtime task: poll(timeout)
+  tcs = new TCS(RunContinuationsAsynchronously)
+  op  = GCHandle.Alloc(state)
+  Consumer_poll_cb(view, t, cb, op) ─► done → queue the cb
+  return tcs.Task                     empty → non-empty: hook ─────► signal
+  … await tcs.Task                                                   __execute_callbacks(view):
+                                                                       cb(records | error, op):
+                                                                         marshal, free owned (§B2)
+     ◄── continuation on the pool ────────────────────────────────────   tcs.Set*, free op
 ```
 
 **Rule:**
 
-  - `PollWithCallback` (etc.) makes a `TaskCompletionSource`, `GCHandle.Alloc`s it as
-    `user_data` (§B6), submits the `*_async` op with a kept-alive Cdecl callback,
-    and returns `tcs.Task` immediately — no blocked thread.
-  - The callback fires on a **dedicated callback-dispatcher thread** — the core
-    runs the op on a runtime worker, then hands the completed op over a channel to
-    that one thread, so callbacks are **serialized** on a single foreign thread
-    (the core's concurrent-rejection fires inline on the caller; shutdown, inline on
-    the worker). It marshals the result (copy-out CLAUDE.md §6.4, or an error via
-    `FromHandle` §B5), frees the handles it owns (§B2 Category 3), and completes the
-    TCS — with **`RunContinuationsAsynchronously`** (essential: the continuation must
-    not run on that dispatcher thread), exactly once, on every path (incl. the
-    inline core-rejection error). The completion callback is the **sole owner** of
-    the per-op `GCHandle` free (the only other path, `AbandonBeforeSubmit`, runs
-    only when the submitting P/Invoke threw so native never ran) — ⚠ true of these
-    **hookless** ops only, per the scope note at the head of this section.
-  - **One operation in flight** per consumer, enforced by the **core's** access
-    guard (not a managed mirror) → at most one pending `(callback, TCS)` at a time,
-    no batching. The core releases its guard before firing the callback, so an
-    `await`-then-resubmit from the continuation is safe — it won't hit the one-op
-    rejection. A concurrent op submitted while one is in flight is rejected by the
-    core inline and surfaces as a **faulted `Task`** (`ConcurrentModification`, §B5).
-  - **Cancellation** = `CancellationToken` → `wakeup()` (aborts the in-flight op)
-    → the callback fires with a Wakeup error → the `Task` cancels/faults
-    (best-effort; §B5, consumer-threading §11).
-  - **`Dispose` / `DisposeAsync` (single-owner teardown):** close gracefully then
-    destroy, with **no separate-op drain**. Under single-owner the **awaiter of an
-    op is its disposer**, so there is no concurrent submitter to drain — teardown
-    never wakes+awaits a *separately-submitted* op.
-    ⚠ **For the routes themselves — all five paths to `Consumer_destroy`, which are
-    immediate, which deferred, and on which thread — see §B2's authoritative path
-    list. Do not restate them here.** (This bullet used to carry its own
-    enumeration; it went stale twice during M9, which is why the list is now
-    single-sourced.) The two facts §B7 adds on top: `Consumer_destroy` is not a
-    graceful close at the ABI (it does **not** join the bg task; since master #233
-    it wakes and waits for any remaining in-flight `_async` op, whose callback still
-    fires once, §B2), and since M9/P4 H1 the binding rarely reaches it directly at
-    `Dispose` because release is ref-counted. Disposing with an **unawaited** op in
-    flight therefore does **NOT** strand the `Task` and does **NOT** leak the
-    `GCHandle` (the pre-M9/P4 description, now **obsolete**). Retention until the op
-    finishes, and that bare destroy,
-    are the **accepted single-owner residuals** — see §B2's carve-out; do not file
-    either. `DisposeAsync` on the awaiting task is the clean, immediate path.
+  - Each async op makes a `TaskCompletionSource` with `RunContinuationsAsynchronously` and
+    a `GCHandle` over its state as the `opaque`, calls the `_cb` twin with a rooted Cdecl
+    `cb`, and returns `tcs.Task` at once. No thread blocks.
+  - The `cb` runs on the drain thread, or on the closing thread during destroy (§B2). It
+    marshals the owned `value` (copy-out, CLAUDE.md §6.4) or the owned `error` (the error
+    table, §B5), frees what it owns (§B2 Category 3), completes the TCS exactly once, and
+    frees the `opaque`. It is the sole owner of that free; the only other site is the
+    `catch` around a P/Invoke that threw before native ran.
+  - **One op in flight** per consumer. A `_cb` call while another op runs gets its `cb`
+    with -2, queued like any completion, and the `Task` faults with
+    `InvalidOperationException` (decision 17, §B5). The core releases its guard before it
+    queues a completion (`rust/src/ffi/consumer/mod.rs:700-712` at `3f8a5bc6`), so an
+    `await`-then-resubmit from the continuation is not rejected.
+  - No continuation runs on the drain thread, and the drain thread never waits on user
+    code: an async listener reports from its `Task`'s continuation (§B1).
+  - **Cancellation**, for an op Java's `wakeup()` interrupts (`Poll`, `Commit`, `Position`,
+    `Committed`, `PartitionsFor`, `ListTopics`, §B5) = `CancellationToken` →
+    `Consumer_wakeup_err`, which ends the in-flight op sooner (best-effort;
+    consumer-threading §11). Any other op's token sends no wakeup: the op would not
+    consume it, and it would then fail the next wakeable call. Either way the op runs to
+    its end (`CurrentLag` included, ledger 103), and once the token has fired its `Task`
+    ends with `OperationCanceledException` whatever the op returned (ledger 123): a
+    success or a failure that lands after the cancel is freed and dropped, a commit
+    callback's exception the call delivered is kept for the next awaited call, and a
+    dropped `Poll` result first seeks each partition back to its first record not
+    returned, so none is skipped, as on Python's async consumer
+    (`python/confluent_kafka/consumer/_base.py:1054-1062`, `:1123-1131`, `:1161-1168`,
+    `:1343-1352` at `3f8a5bc6`).
+  - **Teardown:** see §B2's path list; do not restate it. The one fact §B7 adds: destroy
+    first wakes the op still waiting, then awaits the `_cb` ops in flight and runs every
+    pending `cb` on the closing thread, each once, so every `Task` settles
+    (BH:33145-33170 at `3f8a5bc6`).
 
-**Why:** the consumer op has nothing to batch (one op in flight) and the ABI
-already pushes a completion, so a pump would be pure overhead — the callback is
-the bridge. `RunContinuationsAsynchronously` is essential because the callback
-runs on the core's foreign dispatcher thread; without it the awaiter's
-continuation would run there and stall the core (or deadlock if it calls back in).
-Serialization is the **core's** job (single-owner) — M3/P2 removed the extra
-managed guard/in-flight tracking to match the in-repo Python sibling, which also
-eliminated the M3/P1 op-submit-vs-teardown publish window (no tracking fields → no
-window).
+**Why:** one named drain thread is the closest analogue of Python's event loop: FIFO and
+serialized (decision 27). `RunContinuationsAsynchronously` keeps the awaiter's continuation
+off it; otherwise one slow continuation stalls every later callback, and a continuation that
+calls back into the consumer can block the drain. Single ownership is the owner check's and
+the core's flag's (§B1, ledger 136).
 
 **Anti-patterns:**
 
-  - A TCS without `RunContinuationsAsynchronously` — the awaiter's continuation
-    runs on the core's dispatcher/worker thread → stalls the core (or deadlocks if
-    the continuation calls back into the consumer).
-  - A **managed access guard / in-flight tracking** mirroring the core (removed in
-    M3/P2) — the core serializes; a concurrent op faults the `Task`, a concurrent
-    state read throws `InvalidOperationException` (§B5).
-  - Wrapping the *sync* variants (`Consumer_poll` + `block_on`) in a `Task.Run`
-    per op — sync-over-async; the push ABI makes it needless.
-  - Letting the callback throw (unwinds into native, §B6); completing the TCS
-    twice; freeing the **per-op** `GCHandle` from **anywhere but** the callback (the
-    sole owner) / `AbandonBeforeSubmit` (native never ran) — a teardown-side free is
-    a use-after-free against a straggler callback. ⚠ *Hookless per-op only* — both a
-    **multi-shot registration** and a **commit-callback registration** have a
-    different sole owner (the `user_data_destroy` hook, §B6); do not read this
-    bullet as forbidding either.
-  - A teardown that wakes+awaits a *separately-submitted* op (there is no concurrent
-    submitter under single-owner) or that re-adds the M3/P1 `Dispose`-side
-    `FaultTaskOnly` machinery — it exists to fault a `Task` that no longer strands
-    (§B2), so it would now only add a second `GCHandle`-free site, i.e. the
-    use-after-free this section's previous bullet forbids.
+  - A TCS without `RunContinuationsAsynchronously`.
+  - An async call that still counts as a use once its `Task` completed, or an owner check
+    on a call made inside a callback (ledger 114 routes it to `ConsumerHandle`; §B1,
+    ledger 136).
+  - Wrapping a blocking form in `Task.Run` per op (sync-over-async): every async op has a
+    `_cb` twin.
+  - Letting a `cb` throw into native; completing a TCS twice; freeing the per-op
+    `GCHandle` anywhere but the `cb` or the `catch` around a P/Invoke that never reached
+    native.
+  - A wakeup for a cancelled op Java's `wakeup()` does not interrupt (it stays armed and
+    fails the next wakeable call).
+  - Re-adding the M3/P1 `Dispose`-side `FaultTaskOnly` machinery: destroy settles every
+    `Task` (BH:33145-33170 at `3f8a5bc6`), so it would only add a second `GCHandle`-free
+    site, a use-after-free against a straggler `cb`.
   - Releasing the span-the-op ref anywhere but `FreeGcHandle`, or taking the
     `AddRef` **outside** the `try` that routes a failure through
     `AbandonBeforeSubmit` — an `AddRef` throw would then skip the abandon path and
     permanently root the per-op `GCHandle` (M9/P4 M3).
+  - Destroying the consumer inside `__execute_callbacks` (§0.3, §B2).
   - A sync admin Result composed over Tasks (`Task.WhenAll`, an `async` projection,
     `ContinueWith`) and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`,
     `.Result`). This is sync-over-async: with `RunContinuationsAsynchronously` the
@@ -2193,14 +2358,16 @@ window).
 
 **Tests required:**
 
-  - `PollWithCallback` resolves with records / faults with `KafkaException` (mock
-    `set_poll_error`); the result/error handle + `GCHandle` are freed exactly once.
-  - `wakeup()` during an in-flight `poll` cancels/faults the `Task` **once**, then
-    the consumer is reusable (§B5); a `CancellationToken` cancel →
-    `OperationCanceledException`.
-  - A concurrent async op → a faulted `Task` (`KafkaException` /
-    ConcurrentModification); a concurrent sync state read →
-    `InvalidOperationException` (§B5).
-  - `Dispose` / `DisposeAsync` return without hanging even with an (unawaited) op in
-    flight — the teardown-returns regression (`close_(with_timeout|async)` →
-    `destroy`, no separate-op drain).
+  - `Poll` resolves with records, or faults with the exception set by
+    `MockConsumer.SetPollException` (decision 15); the owned handles and the `GCHandle` are
+    freed exactly once.
+  - `wakeup()` during an in-flight `Poll` ends the `Task` **once**, then the consumer works
+    again (§B5); a `CancellationToken` cancel → `OperationCanceledException`.
+  - A cancelled `CurrentLag` sends no wakeup: the next `Poll` is not woken (ledger 103).
+  - A concurrent async op → a faulted `Task` with `InvalidOperationException`; a concurrent
+    state read → `InvalidOperationException` (§B5, decision 17).
+  - An `await`-then-resubmit from the continuation succeeds (no -2).
+  - The `cb`s, listeners and commit callbacks run on `confluent-kafka-consumer-pump`; no
+    continuation runs on it.
+  - `Dispose` / `DisposeAsync` return without hanging with an op in flight, and every
+    pending `Task` settles (routes: §B2's path list).

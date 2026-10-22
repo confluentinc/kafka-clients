@@ -13,7 +13,9 @@
 // limitations under the License.
 
 using System;
+using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -22,43 +24,32 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public consumer round-trip (PLAN §5.1) exercised end to end through the
-/// <b>public</b> <see cref="AsyncMockConsumer"/> / <see cref="IAsyncConsumer"/> surface: assign →
-/// add records → poll → assert every public field (<see cref="ConsumerRecord.Topic"/> /
-/// <c>Partition</c> / <c>Offset</c> / <c>Timestamp</c> / <see cref="TimestampType"/> /
-/// <c>Key</c> / <c>Value</c> / <c>Headers</c>), incl. the non-ASCII length-delimited
-/// path (§B3), empty / tombstone / absent sentinels, and the FAILURE path. Every
-/// awaited op runs under a <see cref="TestTimeout"/> hang guard.
+/// The round-trip through <see cref="AsyncMockConsumer{TKey, TValue}"/>: every field of a polled record, a non-ASCII
+/// topic, key and value, the empty, tombstone and absent sentinels, and the failure path.
 /// </summary>
 public sealed class PublicConsumerRoundTripTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
-
-    // SetPollError's injected failure is built via Error::local_illegal_state (a8205c5c),
-    // which is a specific, meaningful code (LOCAL_ILLEGAL_STATE == -4) — not one of the
-    // indistinct broker-free codes the M3/P3 finding #8 comment originally warned about.
-    private const int LocalIllegalStateErrorCode = -4;
+    private static readonly TimeSpan s_settle = TimeSpan.FromSeconds(2);
 
     private const string Topic = "public-topic";
     private const int Partition = 0;
 
-    // Assign + seek to offset 0 so the mock poll has a valid position — the canonical
-    // broker-free poll setup, now through the public AsyncMockConsumer surface.
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
-        // Seek is now SYNC (M5/P7) — a direct sync ABI call, no await / hang guard needed.
-        consumer.Seek(new TopicPartition(topic, partition), offset: 0);
+        await TestTimeout.Run(() => consumer.Seek(new TopicPartition(topic, partition), offset: 0), s_deadline);
         return consumer;
     }
 
     [Fact]
     public async Task Poll_RoundTripsAllPublicFields()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         byte[] key = Encoding.UTF8.GetBytes("key-1");
         byte[] value = Encoding.UTF8.GetBytes("value-1");
         consumer.AddRecord(Topic, Partition, offset: 42, key, value);
@@ -72,8 +63,6 @@ public sealed class PublicConsumerRoundTripTests
         Assert.Equal(key, record.Key);
         Assert.Equal(value, record.Value);
         Assert.Empty(record.Headers);
-        // Timestamp/TimestampType are ABI-provided; assert the enum is one of the valid
-        // members (the mock stamps a real CreateTime timestamp).
         Assert.True(
             record.TimestampType is TimestampType.NoTimestampType
                 or TimestampType.CreateTime
@@ -84,7 +73,8 @@ public sealed class PublicConsumerRoundTripTests
     public async Task Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll(nonAsciiTopic);
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll(nonAsciiTopic);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         byte[] key = Encoding.UTF8.GetBytes("café-key-Ω");
         byte[] value = Encoding.UTF8.GetBytes("naïve-value-🎉");
         consumer.AddRecord(nonAsciiTopic, Partition, offset: 7, key, value);
@@ -100,7 +90,8 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_TombstoneAndAbsentKey_MapToNull()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
@@ -113,7 +104,8 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_EmptyKeyAndValue_MapToEmptyNonNull()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
@@ -128,7 +120,8 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_MultipleRecords_RoundTripInOrder()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         for (int i = 0; i < 5; i++)
         {
             consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes($"k{i}"), Encoding.UTF8.GetBytes($"v{i}"));
@@ -143,7 +136,8 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_Empty_ReturnsNonNullZeroCount()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
@@ -154,10 +148,9 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_HeaderValueIsByteArray()
     {
-        // Header.Value is byte[]? (PLAN micro-decision A). The AsyncMockConsumer's add_record
-        // carries no headers (M3/P3 finding), so the reachable broker-free case is the
-        // empty Headers collection — assert its byte[]-typed, read-only shape.
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        // The mock's AddRecord takes no headers, so only an empty Headers is reachable.
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
@@ -165,9 +158,6 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers);
         Assert.Empty(record.Headers);
-        // A Header, if present, exposes byte[]? Value — verified as a construction check
-        // (no public ConsumerRecord ctor this phase; the copy-out marshaller produces
-        // Headers). The Header type itself round-trips its bytes as byte[].
         Header header = new Header("hk", Encoding.UTF8.GetBytes("hv"));
         Assert.Equal("hk", header.Key);
         Assert.Equal(Encoding.UTF8.GetBytes("hv"), header.Value);
@@ -175,27 +165,35 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task Poll_SetPollError_FaultsWithKafkaException()
+    public async Task Poll_SetPollException_FaultsWithTheSameInstance()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
-        consumer.SetPollError("boom");
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        KafkaException injected = new KafkaException("boom");
+        consumer.SetPollException(injected);
 
-        // Poll already carries the TestTimeout hang guard, so a stall on the FAILURE
-        // path also fails fast rather than hanging the run.
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
 
-        // Assert TYPE + Code (LOCAL_ILLEGAL_STATE == -4) + Message content (part of the
-        // contract, DoD §3) + the retriable flag.
-        Assert.Equal(LocalIllegalStateErrorCode, ex.Code);
-        Assert.Contains("boom", ex.Message, StringComparison.Ordinal);
-        Assert.False(ex.IsRetriable);
+        Assert.Same(injected, ex);
     }
 
     [Fact]
-    public async Task Poll_SetPollError_IsOneShot_ThenReusable()
+    public async Task Poll_SetPollExceptionNull_ClearsAPendingOne()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
-        consumer.SetPollError("transient");
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.SetPollException(new KafkaException("cleared"));
+        consumer.SetPollException(null);
+
+        Assert.Empty(await Poll(consumer));
+    }
+
+    [Fact]
+    public async Task Poll_SetPollException_IsOneShot_ThenReusable()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.SetPollException(new KafkaException("transient"));
 
         await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
 
@@ -204,12 +202,21 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
+    public async Task Poll_SetPollException_AConsumedOne_IsReleasedOnceThePollHasThrownIt()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        WeakReference consumed = await PollAnUnreferencedPollException(consumer);
+
+        Assert.False(await StaysAlive(consumed), "the poll that threw the exception must release it");
+        Assert.Empty(await Poll(consumer));
+    }
+
+    [Fact]
     public async Task Poll_RecordsErrorsEmpties_Churned_NoCorruption()
     {
-        // The double-free / leak detector for the owned-result path through the PUBLIC
-        // surface: batch _destroy, error handle, and per-op GCHandle each freed exactly
-        // once per poll over many iterations.
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         for (int i = 0; i < 100; i++)
         {
@@ -221,8 +228,9 @@ public sealed class PublicConsumerRoundTripTests
                     break;
 
                 case 1:
-                    consumer.SetPollError($"err-{i}");
-                    await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
+                    KafkaException injected = new KafkaException($"err-{i}");
+                    consumer.SetPollException(injected);
+                    Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer)));
                     break;
 
                 default:
@@ -235,26 +243,58 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task TimestampType_MapsAllThreeValues()
     {
-        // The enum maps directly from the ABI int (-1 / 0 / 1). The record path only
-        // surfaces the mock's stamped type, so assert the enum value mapping directly
-        // (the marshaller casts (TimestampType)int) plus the record's type is valid.
         Assert.Equal(-1, (int)TimestampType.NoTimestampType);
         Assert.Equal(0, (int)TimestampType.CreateTime);
         Assert.Equal(1, (int)TimestampType.LogAppendTime);
 
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 0, null, Encoding.UTF8.GetBytes("v"));
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
         Assert.True(Enum.IsDefined(typeof(TimestampType), record.TimestampType));
     }
 
-    // Every awaited poll routes through the TestTimeout hang guard (PLAN §5) so a
-    // future stall in the owned-handle bridge or the mock fails the run fast instead
-    // of hanging it — mirroring PublicConsumerTfmSmokeTests.Poll.
     private static async Task<ConsumerRecords<byte[], byte[]>> Poll(IAsyncConsumer<byte[], byte[]> consumer)
     {
         ConsumerRecords<byte[], byte[]> result = default!;
         await TestTimeout.Run(async () => result = await consumer.Poll(s_pollTimeout), s_deadline);
         return result;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference SetAnUnreferencedPollException(AsyncMockConsumer<byte[], byte[]> consumer)
+    {
+        KafkaException exception = new KafkaException("pending");
+        consumer.SetPollException(exception);
+        return new WeakReference(exception);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<WeakReference> PollAnUnreferencedPollException(AsyncMockConsumer<byte[], byte[]> consumer)
+    {
+        WeakReference pending = SetAnUnreferencedPollException(consumer);
+        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
+        Assert.Same(pending.Target, thrown);
+        return pending;
+    }
+
+    private static async Task<bool> StaysAlive(WeakReference reference)
+    {
+        Stopwatch watch = Stopwatch.StartNew();
+        do
+        {
+            await Task.Yield();
+            Collect();
+        }
+        while (reference.IsAlive && watch.Elapsed < s_settle);
+
+        return reference.IsAlive;
+    }
+
+    private static void Collect()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
     }
 }

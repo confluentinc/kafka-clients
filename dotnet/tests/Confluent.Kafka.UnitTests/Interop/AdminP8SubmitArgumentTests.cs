@@ -486,7 +486,8 @@ public sealed class AdminP8SubmitArgumentTests
 
     private static CapturedListTransactions CaptureListTransactions(ListTransactionsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedListTransactions captured = new CapturedListTransactions();
         AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
@@ -541,7 +542,8 @@ public sealed class AdminP8SubmitArgumentTests
     private static CapturedDescribeProducers CaptureDescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedDescribeProducers captured = new CapturedDescribeProducers();
         AsyncDescribeProducersResult.From(admin.DescribeProducers(
@@ -575,7 +577,8 @@ public sealed class AdminP8SubmitArgumentTests
     private static (IReadOnlyList<string?> Ids, int Count, int TimeoutMs) CaptureDescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyList<string?> ids = Array.Empty<string?>();
         int count = 0;
@@ -601,7 +604,8 @@ public sealed class AdminP8SubmitArgumentTests
     private static (IReadOnlyList<string?> Ids, int Count, int TimeoutMs) CaptureFence(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyList<string?> ids = Array.Empty<string?>();
         int count = 0;
@@ -627,7 +631,8 @@ public sealed class AdminP8SubmitArgumentTests
     private static CapturedAbort CaptureAbort(
         AbortTransactionSpec spec, AbortTransactionOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedAbort captured = new CapturedAbort();
         AsyncAbortTransactionResult.From(admin.AbortTransaction(
@@ -654,7 +659,8 @@ public sealed class AdminP8SubmitArgumentTests
     private static (string? Id, int TimeoutMs) CaptureForceTerminate(
         string transactionalId, TerminateTransactionOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         string? id = null;
         int timeout = 0;

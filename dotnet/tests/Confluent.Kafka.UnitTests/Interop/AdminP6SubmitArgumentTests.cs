@@ -355,7 +355,8 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public async Task PerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding alpha = Binding("inline-alpha");
         AclBinding beta = Binding("inline-beta");
@@ -501,7 +502,8 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public async Task DeletePerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter alpha = DeleteFilter("inline-alpha");
         AclBindingFilter beta = DeleteFilter("inline-beta");
@@ -636,7 +638,8 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public async Task DescribeInlineCallback_FaultsTheTask_AndReleasesTheRegistration()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
             DescribeFilter("inline"),
@@ -804,7 +807,8 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public async Task QuotaInlineCallback_FaultsTheTask_AndReleasesTheRegistration()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             ClientQuotaFilter.All(),
@@ -1167,7 +1171,8 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public async Task AlterPerKeyCallbacks_FaultEveryTask_AndReleaseTheRegistration()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
             new[]
@@ -1226,7 +1231,8 @@ public sealed class AdminP6SubmitArgumentTests
     /// </summary>
     private static Captured Capture(IEnumerable<AclBinding> acls, CreateAclsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
@@ -1311,7 +1317,8 @@ public sealed class AdminP6SubmitArgumentTests
     private static Captured CaptureDelete(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
@@ -1374,7 +1381,8 @@ public sealed class AdminP6SubmitArgumentTests
     private static DescribeCaptured CaptureDescribe(
         AclBindingFilter filter, DescribeAclsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DescribeCaptured captured = new DescribeCaptured();
         AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
@@ -1444,7 +1452,8 @@ public sealed class AdminP6SubmitArgumentTests
     private static QuotaCaptured CaptureQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         QuotaCaptured captured = new QuotaCaptured();
         AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
@@ -1503,7 +1512,8 @@ public sealed class AdminP6SubmitArgumentTests
     private static AlterCaptured CaptureAlter(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AlterCaptured captured = new AlterCaptured();
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(

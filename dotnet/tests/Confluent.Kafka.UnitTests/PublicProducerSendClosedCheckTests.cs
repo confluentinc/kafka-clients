@@ -43,7 +43,7 @@ public sealed class PublicProducerSendClosedCheckTests
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, value);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
@@ -56,7 +56,7 @@ public sealed class PublicProducerSendClosedCheckTests
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(RealConfig(), key, value);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
@@ -69,7 +69,7 @@ public sealed class PublicProducerSendClosedCheckTests
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, value);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         // Send throws synchronously (not an async method), so Assert.Throws is the overload.
         Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
@@ -83,7 +83,7 @@ public sealed class PublicProducerSendClosedCheckTests
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key, value);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
         Assert.Equal(0, key.InvocationCount);
@@ -95,7 +95,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, Serdes.ByteArray);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
@@ -106,7 +106,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, Serdes.ByteArray);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
         Assert.Equal(0, key.InvocationCount);
@@ -117,7 +117,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, Serdes.ByteArray);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.Send(null!));
         Assert.Equal("record", ex.ParamName);
@@ -129,7 +129,8 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray);
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray);
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, value);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, value);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = producer.Send(Record()).Get();
 

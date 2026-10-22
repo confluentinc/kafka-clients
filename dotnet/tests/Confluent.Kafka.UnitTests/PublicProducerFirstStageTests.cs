@@ -110,8 +110,9 @@ public sealed class PublicProducerFirstStageTests
     public async Task Send_CallerTokenFiresAfterTheHandOver_DoesNotCancelGet()
     {
         string topic = "first-stage-token-after-" + Guid.NewGuid().ToString("N");
-        await using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
 
@@ -201,8 +202,9 @@ public sealed class PublicProducerFirstStageTests
     [Fact]
     public async Task AsyncSend_RecordTakenAtOnce_FirstStageIsCompleteWhenSendReturns()
     {
-        await using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         UnreachableProducers.HoldingCallback hold = new UnreachableProducers.HoldingCallback();
         try
         {
@@ -225,8 +227,9 @@ public sealed class PublicProducerFirstStageTests
     [Fact]
     public async Task AsyncSend_NotifyHookFiredOnTheSendingThread_WakesThePump_WithoutADeadlock()
     {
-        await using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: true);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         NativeProducer native = NativeOf(producer);
         CompletionThread completion = (CompletionThread)typeof(NativeProducer)
             .GetField("_completion", BindingFlags.NonPublic | BindingFlags.Instance)!

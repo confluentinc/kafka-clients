@@ -21,15 +21,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M6/P1b Decision E — the <b>mandatory</b> <see cref="SerializationException"/> wrap (PLAN
-/// §6). A throw from a user <see cref="IDeserializer{T}"/> is caught by the typed-poll
-/// marshaller and wrapped in a <see cref="SerializationException"/> (inner exception + topic
-/// / partition / offset), surfacing as a synchronous throw on the <b>sync</b> path and a
-/// faulted <see cref="Task"/> on the <b>async</b> path. The async wrap is mandatory (not
-/// optional): the deserialize runs inside the poll completion callback on the core's
-/// <b>foreign dispatcher thread</b>, where an escaping managed exception is UB — so the
-/// churn test (a throwing deserializer polled repeatedly) doubles as the "does not unwind
-/// into native" crash regression.
+/// A throwing <see cref="IDeserializer{T}"/>: the sync Poll throws, and the async Poll's Task faults with, a
+/// <see cref="RecordDeserializationException"/> carrying Java's message, the origin and the inner exception, and
+/// repeated failures leave the consumer usable.
 /// </summary>
 public sealed class PublicConsumerSerdeThrowTests
 {
@@ -40,43 +34,45 @@ public sealed class PublicConsumerSerdeThrowTests
     private const int Partition = 0;
 
     [Fact]
-    public void SyncPoll_ValueDeserializerThrows_ThrowsSerializationExceptionWithContext()
+    public void SyncPoll_ValueDeserializerThrows_ThrowsRecordDeserializationException()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        using MockConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray, valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray, valueDeserializer);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 99, key: new byte[] { 1 }, value: new byte[] { 2, 3 });
 
-        // The mock poll + copy-out are synchronous on the caller thread, so the throw is
-        // synchronous — call Poll directly (no TestTimeout hang guard needed; the mock poll
-        // never blocks), mirroring the shipped sync SetPollError precedent.
-        SerializationException ex = Assert.Throws<SerializationException>(() => consumer.Poll(s_pollTimeout));
+        RecordDeserializationException ex = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        // Catchable as the flat base (Java parity, ffi §A5).
-        Assert.IsAssignableFrom<KafkaException>(ex);
-        // Inner is the exact user throw.
+        Assert.IsAssignableFrom<SerializationException>(ex);
         Assert.IsType<ThrowingDeserializer<int>.BoomException>(ex.InnerException);
-        // Message carries topic / value-vs-key / partition / offset context.
-        Assert.Contains(Topic, ex.Message, StringComparison.Ordinal);
-        Assert.Contains("value", ex.Message, StringComparison.Ordinal);
-        Assert.Contains(Partition.ToString(CultureInfo.InvariantCulture), ex.Message, StringComparison.Ordinal);
-        Assert.Contains("99", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Value, ex.Origin);
+        Assert.Equal(
+            "Error deserializing VALUE for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
+                + " at offset 99. If needed, please seek past the record to continue consumption.",
+            ex.Message);
+        Assert.Equal(99L, consumer.Position(new TopicPartition(Topic, Partition)));
     }
 
     [Fact]
-    public void SyncPoll_KeyDeserializerThrows_MessageSaysKey()
+    public void SyncPoll_KeyDeserializerThrows_ThrowsRecordDeserializationException_ForTheKey()
     {
         ThrowingDeserializer<int> keyDeserializer = new ThrowingDeserializer<int>();
-        using MockConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray);
+        MockConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 1 }, value: new byte[] { 2 });
 
-        SerializationException ex = Assert.Throws<SerializationException>(() => consumer.Poll(s_pollTimeout));
+        RecordDeserializationException ex = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Contains("key", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Key, ex.Origin);
+        Assert.Equal(
+            "Error deserializing KEY for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
+                + " at offset 5. If needed, please seek past the record to continue consumption.",
+            ex.Message);
         Assert.IsType<ThrowingDeserializer<int>.BoomException>(ex.InnerException);
     }
 
     [Fact]
-    public async Task AsyncPoll_ValueDeserializerThrows_FaultsTaskWithSerializationException()
+    public async Task AsyncPoll_ValueDeserializerThrows_FaultsTaskWithRecordDeserializationException()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
@@ -85,29 +81,29 @@ public sealed class PublicConsumerSerdeThrowTests
         {
             await TestTimeout.Run(
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
-            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
+            await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
             consumer.AddRecord(Topic, Partition, offset: 7, key: new byte[] { 1 }, value: new byte[] { 2, 3, 4 });
 
-            // The deserialize runs on the FOREIGN dispatcher thread inside the poll callback;
-            // the wrap-and-fault (not an unwind into native) is what surfaces here.
-            SerializationException ex = await Assert.ThrowsAsync<SerializationException>(
+            RecordDeserializationException ex = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline));
 
             Assert.IsType<ThrowingDeserializer<int>.BoomException>(ex.InnerException);
-            Assert.Contains("offset 7", ex.Message, StringComparison.Ordinal);
+            Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Value, ex.Origin);
+            Assert.Equal(
+                "Error deserializing VALUE for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
+                    + " at offset 7. If needed, please seek past the record to continue consumption.",
+                ex.Message);
+            Assert.Equal(7L, await consumer.Position(new TopicPartition(Topic, Partition)));
         }
         finally
         {
-            await consumer.DisposeAsync();
+            await TestTimeout.DisposeAsync(consumer);
         }
     }
 
     [Fact]
     public async Task AsyncPoll_ThrowingDeserializer_Churned_DoesNotUnwindIntoNative()
     {
-        // The dispatcher-thread safety regression: poll a throwing deserializer many times.
-        // If the wrap ever let a managed exception escape into the native dispatcher frame,
-        // the process would crash here rather than faulting each Task cleanly.
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
             new AsyncMockConsumer<byte[], int>(Serdes.ByteArray, valueDeserializer);
@@ -115,18 +111,18 @@ public sealed class PublicConsumerSerdeThrowTests
         {
             await TestTimeout.Run(
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
-            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
+            await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
 
             for (int i = 0; i < 50; i++)
             {
                 consumer.AddRecord(Topic, Partition, offset: i, key: new byte[] { 1 }, value: new byte[] { 2 });
-                await Assert.ThrowsAsync<SerializationException>(
+                await Assert.ThrowsAsync<RecordDeserializationException>(
                     () => TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline));
             }
         }
         finally
         {
-            await consumer.DisposeAsync();
+            await TestTimeout.DisposeAsync(consumer);
         }
     }
 

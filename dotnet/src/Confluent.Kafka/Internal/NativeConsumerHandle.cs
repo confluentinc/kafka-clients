@@ -19,413 +19,266 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The native-call layer behind the public <see cref="Confluent.Kafka.ConsumerHandle"/> — the
-/// reentrancy-handle sibling of <see cref="NativeConsumer"/> (M9/P8). It owns the
-/// <see cref="SafeConsumerReentrancyHandle"/>, validates preconditions before every P/Invoke
-/// (ffi §B5), pins call-scoped, and copies out every owned container through the marshaller
-/// the consumer's own equivalent already uses.
+/// Calls a consumer's <c>kafka_consumer_ConsumerHandle_t</c> with arguments its caller has already validated.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Every op here is synchronous, and deliberately does NOT take the access guard.</b>
-/// "Nothing in this module acquires the single-owner access guard ... That is deliberate and
-/// is the whole reason the type exists" (<c>rust/src/ffi/consumer_handle.rs:29-31</c>). The core
-/// drives each future to completion with <c>block_on</c> on the <em>calling</em> thread, which
-/// is safe from the core's callback-dispatcher thread and from any plain OS thread, and is
-/// <b>not</b> the forbidden managed sync-over-async (the <c>block_on</c> is the core's, inside
-/// the sync ABI — the shipped <c>Seek</c> / <c>CurrentLag</c> precedent; CLAUDE.md §4).
-/// </para>
-/// <para>
-/// <b>No callbacks, no <c>GCHandle</c>, no free-site rule.</b> None of the 22 entry points
-/// takes a callback or a <c>user_data_destroy</c>, so ffi §B6's free-site rule ("hook present
-/// ⇒ the hook is the sole free site; no hook ⇒ the callback frees") does not engage anywhere
-/// in this file. There is nothing to root and nothing to release.
-/// </para>
-/// <para>
-/// <b>Shared helpers, not cloned ones.</b> The snapshot / pin / copy-out-then-destroy helpers
-/// come from <see cref="NativeConsumer"/> (widened to <c>internal</c> for exactly this) so the
-/// handle family cannot silently diverge from the consumer family it mirrors (DoD §6).
-/// </para>
-/// </remarks>
 internal sealed class NativeConsumerHandle : IDisposable
 {
+    private readonly NativeConsumer _owner;
     private readonly SafeConsumerReentrancyHandle _handle;
 
-    private NativeConsumerHandle(SafeConsumerReentrancyHandle handle)
+    private NativeConsumerHandle(NativeConsumer owner, SafeConsumerReentrancyHandle handle)
     {
+        _owner = owner;
         _handle = handle;
     }
 
-    /// <summary>
-    /// The inner reentrancy <c>SafeHandle</c>. Exposed so a test can take a
-    /// <c>DangerousAddRef</c> on it — standing in for the call-scoped reference the interop
-    /// marshaller holds while a handle op is blocked inside the core — and thereby grade the
-    /// P8-D1 release-site ordering, which is otherwise undetectable (see
-    /// <c>ReentrancyHandleSafeHandle_DefersTheParentRelease_WhileAnOpHoldsIt</c>).
-    /// </summary>
-    internal SafeConsumerReentrancyHandle NativeHandle => _handle;
+    internal static NativeConsumerHandle Create(NativeConsumer owner) => Create(owner, owner.Handle);
 
-    /// <summary>
-    /// Creates a reentrancy handle for <paramref name="consumer"/> via
-    /// <c>kafka_consumer_Consumer_handle</c>, and hands the parent's ref-count to the returned
-    /// <see cref="SafeConsumerReentrancyHandle"/> (P8-D1; see that type's remarks). The ABI
-    /// call "never fails with <c>ConcurrentModificationError</c>" and returns a non-null
-    /// handle, so there is no error out-param to read.
-    /// </summary>
-    /// <remarks>
-    /// <b>Exactly one</b> <c>DangerousAddRef</c> is taken, here, <b>before</b> the native call —
-    /// so the consumer cannot be destroyed across handle creation, and so the count balances
-    /// the single <c>DangerousRelease</c> in
-    /// <see cref="SafeConsumerReentrancyHandle.ReleaseHandle"/>. The <c>catch</c> releases it on
-    /// every failure path, and <see cref="SafeConsumerReentrancyHandle.AdoptParentReference"/>
-    /// takes over ownership on the success path (hence <c>parentRefTaken = false</c>, which is
-    /// what stops the <c>catch</c> releasing a reference the handle now owns).
-    /// </remarks>
-    /// <param name="consumer">The owning consumer's handle.</param>
-    internal static NativeConsumerHandle Create(SafeConsumerHandle consumer)
+    internal static NativeConsumerHandle Create(NativeConsumer owner, SafeConsumerHandle consumer)
     {
-        bool parentRefTaken = false;
-        SafeConsumerReentrancyHandle? native = null;
-        try
+        IntPtr outErr = IntPtr.Zero;
+        SafeConsumerReentrancyHandle handle = NativeMethods.ConsumerGetHandle(consumer, ref outErr);
+        if (outErr != IntPtr.Zero || handle.IsInvalid)
         {
-            consumer.DangerousAddRef(ref parentRefTaken);
-            native = NativeMethods.ConsumerGetHandle(consumer);
-            if (native.IsInvalid)
-            {
-                // The header contracts a non-null return; treat a null as a hard failure
-                // rather than handing out a handle whose every op would be undefined.
-                throw new InvalidOperationException(
-                    "The consumer did not return a reentrancy handle.");
-            }
-
-            native.AdoptParentReference(consumer);
-            parentRefTaken = false;
-            return new NativeConsumerHandle(native);
+            handle.Dispose();
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            throw new InvalidOperationException("The consumer did not return a reentrancy handle.");
         }
-        catch
-        {
-            // IsInvalid ⇒ ReleaseHandle is skipped by the CLR, so this is a no-op destroy on
-            // the null-return path and a real one if TransferParentReference threw.
-            native?.Dispose();
-            if (parentRefTaken)
-            {
-                consumer.DangerousRelease();
-            }
 
-            throw;
-        }
+        return new NativeConsumerHandle(owner, handle);
     }
 
-    // ---- Sync getters (work on a mock; non-null, never a concurrent-null) ----
-
-    /// <summary>
-    /// <c>ConsumerHandle_assignment</c> — copied out and freed via
-    /// <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/>. Unlike
-    /// <see cref="NativeConsumer.Assignment"/> there is no
-    /// <see cref="InvalidOperationException"/> concurrent-null mapping: the ABI documents this
-    /// return as non-null because the handle takes no guard, so there is no rejection to
-    /// signal. Always empty on a mock-derived handle (core behavior).
-    /// </summary>
-    internal IReadOnlyCollection<TopicPartition> Assignment() =>
-        TopicPartitionListMarshal.CopyOutAndDestroy(NativeMethods.ConsumerHandleAssignment(_handle));
-
-    /// <summary>
-    /// <c>ConsumerHandle_subscription</c> — copied out and freed via
-    /// <see cref="StringListMarshal.CopyOutAndDestroy"/>. Non-null; always empty on a
-    /// mock-derived handle.
-    /// </summary>
-    internal IReadOnlyCollection<string> Subscription() =>
-        StringListMarshal.CopyOutAndDestroy(NativeMethods.ConsumerHandleSubscription(_handle));
-
-    /// <summary>
-    /// <c>ConsumerHandle_paused</c> — copied out and freed via
-    /// <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/>. Non-null; always empty on a
-    /// mock-derived handle.
-    /// </summary>
-    internal IReadOnlyCollection<TopicPartition> Paused() =>
-        TopicPartitionListMarshal.CopyOutAndDestroy(NativeMethods.ConsumerHandlePaused(_handle));
-
-    /// <summary>
-    /// <c>ConsumerHandle_wakeup</c> — wakes the owning consumer. Neither blocks nor takes the
-    /// guard, and works on a mock-derived handle.
-    /// </summary>
-    internal void Wakeup() => NativeMethods.ConsumerHandleWakeup(_handle);
-
-    // ---- Collection ops (error-only) ----
-
-    /// <summary><c>ConsumerHandle_assign</c>. An empty collection is rejected by the core.</summary>
-    internal void Assign(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionOp(partitions, NativeMethods.ConsumerHandleAssign);
-
-    /// <summary><c>ConsumerHandle_pause</c>.</summary>
-    internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionOp(partitions, NativeMethods.ConsumerHandlePause);
-
-    /// <summary><c>ConsumerHandle_resume</c>.</summary>
-    internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionOp(partitions, NativeMethods.ConsumerHandleResume);
-
-    /// <summary><c>ConsumerHandle_seek_to_beginning</c>.</summary>
-    internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionOp(partitions, NativeMethods.ConsumerHandleSeekToBeginning);
-
-    /// <summary><c>ConsumerHandle_seek_to_end</c>.</summary>
-    internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionOp(partitions, NativeMethods.ConsumerHandleSeekToEnd);
-
-    // ---- Single-partition ops ----
-
-    /// <summary>
-    /// <c>ConsumerHandle_seek</c>. Carries the same Java-fidelity negative-offset guard as
-    /// <see cref="NativeConsumer.Seek(string, int, long)"/> — the exact message is part of the
-    /// contract (DoD §3).
-    /// </summary>
-    internal void Seek(TopicPartition partition, long offset)
+    internal void Wakeup()
     {
-        ValidatePartition(partition, nameof(partition));
-        if (offset < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(offset), offset, "seek offset must not be a negative number");
-        }
-
-        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic);
-        ThrowIfFailed(NativeMethods.ConsumerHandleSeek(
-            _handle, topicPin.Pointer, partition.Partition, offset));
+        _owner.CountUserWakeup();
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerHandleWakeup(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    /// <summary>
-    /// <c>ConsumerHandle_seek_with_metadata</c>. No offset guard (the
-    /// <see cref="OffsetAndMetadata"/> ctor is the upstream gate); a null leader epoch maps to
-    /// the ABI's <c>-1</c> "no epoch" sentinel, and <see cref="OffsetAndMetadata.Metadata"/> is
-    /// never null, so a valid pointer is always pinned and passed.
-    /// </summary>
-    internal void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)
+    internal IReadOnlyCollection<TopicPartition> Assignment()
     {
-        ValidatePartition(partition, nameof(partition));
-        if (offsetAndMetadata is null)
-        {
-            throw new ArgumentNullException(nameof(offsetAndMetadata));
-        }
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr list = NativeMethods.ConsumerHandleAssignment(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+    }
 
-        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic);
-        using Utf8Marshal.PinnedUtf8String metadataPin = Utf8Marshal.Pin(offsetAndMetadata.Metadata);
-        ThrowIfFailed(NativeMethods.ConsumerHandleSeekWithMetadata(
+    internal IReadOnlyCollection<TopicPartition> Paused()
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr list = NativeMethods.ConsumerHandlePaused(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+    }
+
+    internal void Pause((string Topic, int Partition)[] partitions) =>
+        RunPartitions(partitions, NativeMethods.ConsumerHandlePause);
+
+    internal void Resume((string Topic, int Partition)[] partitions) =>
+        RunPartitions(partitions, NativeMethods.ConsumerHandleResume);
+
+    internal void SeekToBeginning((string Topic, int Partition)[] partitions) =>
+        RunPartitions(partitions, NativeMethods.ConsumerHandleSeekToBeginning);
+
+    internal void SeekToEnd((string Topic, int Partition)[] partitions) =>
+        RunPartitions(partitions, NativeMethods.ConsumerHandleSeekToEnd);
+
+    internal void Seek(string topic, int partition, long offset)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerHandleSeekWithOffset(_handle, arguments.TopicPartition(topic, partition), offset, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    internal void SeekWithMetadata(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerHandleSeekWithOffsetAndMetadata(
             _handle,
-            topicPin.Pointer,
-            partition.Partition,
-            offsetAndMetadata.Offset,
-            offsetAndMetadata.LeaderEpoch ?? -1,
-            metadataPin.Pointer));
+            arguments.TopicPartition(topic, partition),
+            arguments.OffsetAndMetadata(
+                offsetAndMetadata.Offset, offsetAndMetadata.LeaderEpoch ?? -1, offsetAndMetadata.Metadata),
+            ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    /// <summary>
-    /// <c>ConsumerHandle_position</c> — the offset is written to the out-param only on
-    /// success, so the error is read and thrown before the (unset) value is returned.
-    /// </summary>
-    internal long Position(TopicPartition partition)
+    internal long Position(string topic, int partition, long? timeoutMs)
     {
-        ValidatePartition(partition, nameof(partition));
-
-        long position;
-        IntPtr error;
-        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic))
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr topicPartition = arguments.TopicPartition(topic, partition);
+        while (true)
         {
-            error = NativeMethods.ConsumerHandlePosition(
-                _handle, topicPin.Pointer, partition.Partition, out position);
-        }
+            IntPtr outErr = IntPtr.Zero;
+            long position = timeoutMs is long ms
+                ? NativeMethods.ConsumerHandlePositionWithTimeout(_handle, topicPartition, ms, ref outErr)
+                : NativeMethods.ConsumerHandlePosition(_handle, topicPartition, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
 
-        ThrowIfFailed(error);
-        return position;
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return position;
+        }
     }
 
-    /// <summary>
-    /// <c>ConsumerHandle_position_timeout</c> — the timeout-bounded twin of
-    /// <see cref="Position(TopicPartition)"/>.
-    /// </summary>
-    internal long Position(TopicPartition partition, long timeoutMs)
+    internal long? CurrentLag(string topic, int partition)
     {
-        ValidatePartition(partition, nameof(partition));
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        long lag = NativeMethods.ConsumerHandleCurrentLag(_handle, arguments.TopicPartition(topic, partition), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return lag < 0 ? (long?)null : lag;
+    }
 
-        long position;
-        IntPtr error;
-        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic))
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed((string Topic, int Partition)[] partitions)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr list = arguments.TopicPartitionList(partitions);
+        while (true)
         {
-            error = NativeMethods.ConsumerHandlePositionTimeout(
-                _handle, topicPin.Pointer, partition.Partition, timeoutMs, out position);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = NativeMethods.ConsumerHandleCommitted(_handle, list, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return _owner.CopyCommitted(map, partitions);
         }
-
-        ThrowIfFailed(error);
-        return position;
     }
 
-    // ---- Owned-container queries ----
-
-    /// <summary><c>ConsumerHandle_committed</c>.</summary>
-    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(
-        IReadOnlyCollection<TopicPartition> partitions) =>
-        RunContainerQuery(
-            partitions,
-            NativeMethods.ConsumerHandleCommitted,
-            OffsetMapMarshal.CopyOut,
-            NativeMethods.OffsetMapDestroy);
-
-    /// <summary><c>ConsumerHandle_beginning_offsets</c>.</summary>
-    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
-        IReadOnlyCollection<TopicPartition> partitions) =>
-        RunContainerQuery(
-            partitions,
-            NativeMethods.ConsumerHandleBeginningOffsets,
-            LongOffsetMapMarshal.CopyOut,
-            NativeMethods.LongOffsetMapDestroy);
-
-    /// <summary><c>ConsumerHandle_end_offsets</c>.</summary>
-    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
-        IReadOnlyCollection<TopicPartition> partitions) =>
-        RunContainerQuery(
-            partitions,
-            NativeMethods.ConsumerHandleEndOffsets,
-            LongOffsetMapMarshal.CopyOut,
-            NativeMethods.LongOffsetMapDestroy);
-
-    /// <summary>
-    /// <c>ConsumerHandle_offsets_for_times</c> — the one map-input query; unresolved
-    /// partitions are omitted from the result.
-    /// </summary>
-    internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
-        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets((string Topic, int Partition)[] partitions)
     {
-        NativeConsumer.TimestampsSnapshot snapshot = NativeConsumer.SnapshotTimestamps(timestampsToSearch);
-
-        // Pre-init: the ABI leaves *out_map untouched on failure, so the failure path must
-        // yield IntPtr.Zero for the null-safe destroy (the sync-query discipline).
-        IntPtr error = IntPtr.Zero;
-        IntPtr map = IntPtr.Zero;
-        NativeConsumer.WithPinnedTopicsAndTimestamps(
-            snapshot.Count,
-            i => snapshot.Topics[i],
-            snapshot.Partitions,
-            snapshot.Timestamps,
-            (topics, parts, timestamps, count) =>
-                error = NativeMethods.ConsumerHandleOffsetsForTimes(
-                    _handle, topics, parts, timestamps, count, out map));
-
-        return NativeConsumer.ThrowOrCopyOutAndDestroy(
-            error, map, OffsetAndTimestampMapMarshal.CopyOut, NativeMethods.OffsetAndTimestampMapDestroy);
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr map = NativeMethods.ConsumerHandleBeginningOffsets(_handle, arguments.TopicPartitionList(partitions), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return LongOffsetMapMarshal.CopyOutAndDestroy(map);
     }
 
-    // ---- Commits ----
+    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets((string Topic, int Partition)[] partitions)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr map = NativeMethods.ConsumerHandleEndOffsets(_handle, arguments.TopicPartitionList(partitions), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return LongOffsetMapMarshal.CopyOutAndDestroy(map);
+    }
 
-    /// <summary><c>ConsumerHandle_commit_sync</c> — Java <c>commitSync()</c>.</summary>
-    internal void CommitSync() => ThrowIfFailed(NativeMethods.ConsumerHandleCommitSync(_handle));
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        NativeConsumer.TimestampsSnapshot timestampsToSearch)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr timestamps = arguments.LongMap(
+            timestampsToSearch.Topics, timestampsToSearch.Partitions, timestampsToSearch.Timestamps, timestampsToSearch.Count);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr map = NativeMethods.ConsumerHandleOffsetsForTimes(_handle, timestamps, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return NativeConsumer.CopyOffsetsForTimes(map, timestampsToSearch);
+    }
 
-    /// <summary><c>ConsumerHandle_commit_sync_offsets</c> — Java <c>commitSync(Map)</c>.</summary>
-    internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        RunCommitOffsets(offsets, NativeMethods.ConsumerHandleCommitSyncOffsets);
+    internal void CommitSync()
+    {
+        using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+        while (true)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitSync(_handle, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
 
-    /// <summary><c>ConsumerHandle_commit_async</c> — Java <c>commitAsync()</c>, fire-and-forget.</summary>
-    internal void CommitAsync() => ThrowIfFailed(NativeMethods.ConsumerHandleCommitAsync(_handle));
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return;
+        }
+    }
 
-    /// <summary><c>ConsumerHandle_commit_async_offsets</c> — Java <c>commitAsync(Map)</c>.</summary>
-    internal void CommitAsyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        RunCommitOffsets(offsets, NativeMethods.ConsumerHandleCommitAsyncOffsets);
+    internal void CommitSync(NativeConsumer.CommitOffsetsSnapshot offsets)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr map = arguments.OffsetMap(offsets);
+        using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+        while (true)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitSyncWithOffsets(_handle, map, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
 
-    /// <summary>
-    /// Releases the reentrancy handle, which destroys it natively and then releases the
-    /// consumer ref-count it holds (in that order — see
-    /// <see cref="SafeConsumerReentrancyHandle"/>). Idempotent via
-    /// <see cref="System.Runtime.InteropServices.SafeHandle"/>.
-    /// </summary>
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return;
+        }
+    }
+
+    internal void CommitAsync()
+    {
+        using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerHandleCommitAsync(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    internal void CommitAsync(IOffsetCommitCallback callback) =>
+        _owner.CommitWithRegistration(callback, emptyOffsets: false, callbackHandle =>
+        {
+            using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitAsyncWithCallback(_handle, callbackHandle, ref outErr);
+            return outErr;
+        });
+
+    internal void CommitAsync(NativeConsumer.CommitOffsetsSnapshot offsets, IOffsetCommitCallback? callback)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr map = arguments.OffsetMap(offsets);
+        _owner.CommitWithRegistration(callback, offsets.Count == 0, callbackHandle =>
+        {
+            using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitAsyncWithOffsetsCallback(_handle, map, callbackHandle, ref outErr);
+            return outErr;
+        });
+    }
+
+    internal void CommitAsync(IAsyncOffsetCommitCallback callback) =>
+        _owner.CommitWithRegistration(callback, emptyOffsets: false, callbackHandle =>
+        {
+            using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitAsyncWithCallback(_handle, callbackHandle, ref outErr);
+            return outErr;
+        });
+
+    internal void CommitAsync(NativeConsumer.CommitOffsetsSnapshot offsets, IAsyncOffsetCommitCallback callback)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr map = arguments.OffsetMap(offsets);
+        _owner.CommitWithRegistration(callback, offsets.Count == 0, callbackHandle =>
+        {
+            using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerHandleCommitAsyncWithOffsetsCallback(_handle, map, callbackHandle, ref outErr);
+            return outErr;
+        });
+    }
+
     public void Dispose() => _handle.Dispose();
 
-    // ---- Shared tails ----
+    private delegate void PartitionsCall(SafeConsumerReentrancyHandle handle, IntPtr partitions, ref IntPtr outErr);
 
-    private delegate IntPtr PartitionOp(
-        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
-
-    private delegate IntPtr ContainerQuery(
-        SafeConsumerReentrancyHandle handle,
-        IntPtr[] topics,
-        int[] partitions,
-        int count,
-        out IntPtr outMap);
-
-    private delegate IntPtr CommitOffsetsOp(
-        SafeConsumerReentrancyHandle handle,
-        IntPtr[] topics,
-        int[] partitions,
-        long[] offsets,
-        int[] leaderEpochs,
-        IntPtr[] metadata,
-        int count);
-
-    private static void ValidatePartition(TopicPartition partition, string parameterName)
+    private void RunPartitions((string Topic, int Partition)[] partitions, PartitionsCall call)
     {
-        // Preconditions BEFORE any pin / P-Invoke (§B5) — the ABI does not validate them.
-        if (partition.Topic is null)
-        {
-            throw new ArgumentNullException(parameterName, "TopicPartition.Topic must not be null.");
-        }
-
-        if (partition.Partition < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                parameterName, partition.Partition, "Partition must not be negative.");
-        }
-    }
-
-    private static void ThrowIfFailed(IntPtr error)
-    {
-        KafkaException? failure = KafkaException.FromHandle(error);
-        if (failure is not null)
-        {
-            throw failure;
-        }
-    }
-
-    private void RunPartitionOp(IReadOnlyCollection<TopicPartition> partitions, PartitionOp submit)
-    {
-        (string Topic, int Partition)[] snapshot = NativeConsumer.SnapshotPartitions(partitions);
-
-        IntPtr error = IntPtr.Zero;
-        NativeConsumer.WithPinnedTopics(
-            snapshot.Length,
-            i => snapshot[i].Topic,
-            NativeConsumer.ExtractPartitions(snapshot),
-            (topics, parts, count) => error = submit(_handle, topics, parts, count));
-
-        ThrowIfFailed(error);
-    }
-
-    private TResult RunContainerQuery<TResult>(
-        IReadOnlyCollection<TopicPartition> partitions,
-        ContainerQuery submit,
-        Func<IntPtr, TResult> copyOut,
-        Action<IntPtr> destroy)
-    {
-        (string Topic, int Partition)[] snapshot = NativeConsumer.SnapshotPartitions(partitions);
-
-        // Pre-init: the ABI leaves *out_map untouched on failure (the sync-query discipline).
-        IntPtr error = IntPtr.Zero;
-        IntPtr container = IntPtr.Zero;
-        NativeConsumer.WithPinnedTopics(
-            snapshot.Length,
-            i => snapshot[i].Topic,
-            NativeConsumer.ExtractPartitions(snapshot),
-            (topics, parts, count) => error = submit(_handle, topics, parts, count, out container));
-
-        return NativeConsumer.ThrowOrCopyOutAndDestroy(error, container, copyOut, destroy);
-    }
-
-    private void RunCommitOffsets(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, CommitOffsetsOp submit)
-    {
-        NativeConsumer.CommitOffsetsSnapshot snapshot = NativeConsumer.SnapshotCommitOffsets(offsets);
-
-        IntPtr error = IntPtr.Zero;
-        NativeConsumer.WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, count) =>
-            error = submit(_handle, topics, parts, offs, epochs, meta, count));
-
-        ThrowIfFailed(error);
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr outErr = IntPtr.Zero;
+        call(_handle, arguments.TopicPartitionList(partitions), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 }

@@ -81,10 +81,20 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     public long Position(TopicPartition partition) => _inner.Position(partition);
 
     /// <inheritdoc/>
+    public long Position(TopicPartition partition, TimeSpan timeout) => _inner.Position(partition, timeout);
+
+    /// <inheritdoc/>
     public void Commit()
     {
         _script.OnCall("Commit");
         _inner.Commit();
+    }
+
+    /// <inheritdoc/>
+    public void Commit(TimeSpan timeout)
+    {
+        _script.OnCall("Commit(timeout)");
+        _inner.Commit(timeout);
     }
 
     /// <inheritdoc/>
@@ -95,29 +105,65 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     }
 
     /// <inheritdoc/>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions)
+    public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
+    {
+        _script.OnCall("Commit(offsets, timeout)");
+        _inner.Commit(offsets, timeout);
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions)
     {
         _script.OnCall("Committed");
         return _inner.Committed(partitions);
     }
 
     /// <inheritdoc/>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
+    {
+        _script.OnCall("Committed(timeout)");
+        return _inner.Committed(partitions, timeout);
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) => _inner.OffsetsForTimes(timestampsToSearch);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout) =>
+        _inner.OffsetsForTimes(timestampsToSearch, timeout);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions) =>
         _inner.BeginningOffsets(partitions);
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _inner.BeginningOffsets(partitions, timeout);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions) =>
         _inner.EndOffsets(partitions);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _inner.EndOffsets(partitions, timeout);
 
     /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _inner.PartitionsFor(topic);
 
     /// <inheritdoc/>
+    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout) =>
+        _inner.PartitionsFor(topic, timeout);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() => _inner.ListTopics();
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout) =>
+        _inner.ListTopics(timeout);
 
     /// <inheritdoc/>
     public void Close()
@@ -125,6 +171,14 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         _script.OnCall("Close");
         _script.HandleUsableAtClose = IsHandleUsable();
         _inner.Close();
+    }
+
+    /// <inheritdoc/>
+    public void Close(CloseOptions option)
+    {
+        _script.OnCall("Close(option)");
+        _script.HandleUsableAtClose = IsHandleUsable();
+        _inner.Close(option);
     }
 
     /// <inheritdoc/>
@@ -179,9 +233,6 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
     /// <inheritdoc/>
-    public string ClientId() => _inner.ClientId();
-
-    /// <inheritdoc/>
     public ConsumerHandle Handle()
     {
         ConsumerHandle handle = _inner.Handle();
@@ -204,7 +255,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     void IMockConsumerOperations.AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _inner.AddRecord(topic, partition, offset, key, value);
 
-    void IMockConsumerOperations.SetPollError(string message) => _inner.SetPollError(message);
+    void IMockConsumerOperations.SetPollException(KafkaException? exception) => _inner.SetPollException(exception);
 
     private bool IsHandleUsable()
     {

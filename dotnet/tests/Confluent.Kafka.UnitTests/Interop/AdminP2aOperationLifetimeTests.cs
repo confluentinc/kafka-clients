@@ -134,7 +134,8 @@ public sealed class AdminP2aOperationLifetimeTests
     [Fact]
     public void EntryPointSelection_FollowsTheCollectionsRuntimeType()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Uuid id = new Uuid(1L, 2L);
 
@@ -218,7 +219,8 @@ public sealed class AdminP2aOperationLifetimeTests
     [Fact]
     public void Options_AreDestructuredOntoTheAbiParameters()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         int deleteTimeout = 0;
         bool deleteRetry = true;
@@ -477,7 +479,8 @@ public sealed class AdminP2aOperationLifetimeTests
     [Fact]
     public async Task TopLevelSubmitFailure_FaultsEveryPerKeyTask_ForBothKeyTypes()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr nameUserData = IntPtr.Zero;
         AsyncDeleteTopicsResult byName = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
@@ -536,7 +539,8 @@ public sealed class AdminP2aOperationLifetimeTests
     [Fact]
     public void AggressiveGcDuringAnInFlightOperation_CollectsNothingNativeStillHolds()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr capturedUserData = IntPtr.Zero;
         AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
@@ -588,7 +592,8 @@ public sealed class AdminP2aOperationLifetimeTests
     [Fact]
     public async Task KeyStringsStayPinned_AcrossACollectionInsideTheNativeCall()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Doomed = "p2a-pin-lifetime";
 
         AsyncCreateTopicsResult created = AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Doomed, 1, 1) }, options: null, AdminFlavour.Async));

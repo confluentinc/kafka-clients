@@ -132,7 +132,8 @@ public sealed class AdminP2bResultMarshalTests
     [Fact]
     public void PerKeyError_IsOwned_AndArrivesWithANullValue()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TopicPartition partition = new TopicPartition("p2b-owned", 3);
         Capture capture = Assert.Single(SubmitAndCapture(admin, partition));
@@ -162,7 +163,8 @@ public sealed class AdminP2bResultMarshalTests
     [Fact]
     public void CompositeKey_DistinguishesPartitionsWithinATopic_AndTopicsAtOnePartition()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TopicPartition a0 = new TopicPartition("p2b-composite-a", 0);
         TopicPartition a1 = new TopicPartition("p2b-composite-a", 1);
@@ -217,7 +219,8 @@ public sealed class AdminP2bResultMarshalTests
     [Fact]
     public async Task ListTopics_AggregateFailure_FaultsTheOneTask()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr capturedUserData = IntPtr.Zero;
         AsyncListTopicsResult result = AsyncListTopicsResult.From(admin.ListTopics(

@@ -14,9 +14,9 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
-using System.Text;
+using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Xunit;
@@ -24,52 +24,22 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The M9/P7 offset-commit-callback surface through the <b>public</b> API, broker-free: the
-/// two new <c>CommitAsync</c> overloads on <see cref="IConsumerCommon"/> (Java
-/// <c>commitAsync(OffsetCommitCallback)</c> / <c>commitAsync(Map, OffsetCommitCallback)</c>,
-/// including its legal <c>null</c>-callback form) across all four consumer types.
+/// The offset-commit callback through the public API of both mock consumers: what <c>OnComplete</c> receives, where
+/// it runs, its exceptions, the preconditions, and the overloads each consumer interface declares.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Mock determinism.</b> On a <c>MockConsumer</c> the core invokes the callback
-/// <b>inline during the commit call</b> with a null error
-/// (header, <c>kafka_consumer_Consumer_commit_async_with_callback</c>), so every assertion below is
-/// synchronous — no polling, no <c>wait_for</c>.
-/// </para>
-/// <para>
-/// <b>Reachability limit, stated rather than asserted weakly.</b> Because that mock error is
-/// <em>always</em> null, a <b>broker-originated</b> commit failure delivered <em>to</em> the
-/// callback has no broker-free vehicle. That channel is covered instead by driving the
-/// trampoline the way the core would, in
-/// <c>Interop/ConsumerCommitCallbackBridgeTests.CommitTrampoline_NonNullError_...</c> (code +
-/// exact message). The other channel — the <b>initiation</b> failure this method throws
-/// synchronously — is covered there too, via the ABI marshal-failure path
-/// (a negative offset), which the managed <see cref="OffsetAndMetadata"/> constructor makes
-/// unreachable from this surface by construction.
-/// </para>
-/// <para>
-/// <b>DoD #10 (hot-path allocation audit): N/A.</b> A commit callback fires per commit, not
-/// per record.
-/// </para>
-/// </remarks>
 public sealed class PublicConsumerCommitCallbackTests
 {
     private const string Topic = "commit-callback-topic";
 
+    private const string PumpThreadName = "confluent-kafka-consumer-pump";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
-
-    private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-
-    private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-
-    // ---- The callback receives the committed offsets (VALUES, not just non-empty) ----
 
     [Fact]
     public void CommitAsyncWithOffsetsAndCallback_DeliversThoseOffsetsAndANullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition first = new TopicPartition(Topic, 0);
         TopicPartition second = new TopicPartition(Topic, 1);
         consumer.Assign(new[] { first, second });
@@ -83,12 +53,10 @@ public sealed class PublicConsumerCommitCallbackTests
             },
             callback);
 
-        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-            Assert.Single(callback.Completions);
+        Completion completion = Assert.Single(callback.Completions);
         Assert.Null(completion.Exception);
-        Assert.Equal(2, completion.Offsets.Count);
-
-        // The VALUES, not merely non-empty: offset, metadata and leader epoch all round-trip.
+        Assert.NotNull(completion.Offsets);
+        Assert.Equal(2, completion.Offsets!.Count);
         Assert.Equal(42, completion.Offsets[first].Offset);
         Assert.Equal("meta-x", completion.Offsets[first].Metadata);
         Assert.Equal(7, completion.Offsets[first].LeaderEpoch);
@@ -98,86 +66,152 @@ public sealed class PublicConsumerCommitCallbackTests
     }
 
     [Fact]
-    public void CommitAsyncWithCallback_NoOffsets_FiresWithTheCurrentPositions()
+    public void CommitAsyncWithCallback_RunsInsideTheCall_OnTheCallersThread()
     {
-        // Java commitAsync(OffsetCommitCallback): commits what has been consumed. A freshly
-        // created mock has consumed nothing, so the delivered map is empty — which is exactly
-        // the contract ("always non-null; may be empty"), not a missing assertion.
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
         consumer.CommitAsync(callback);
 
-        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-            Assert.Single(callback.Completions);
+        Completion completion = Assert.Single(callback.Completions);
+        Assert.Same(Thread.CurrentThread, completion.Thread);
         Assert.Null(completion.Exception);
         Assert.NotNull(completion.Offsets);
-        Assert.Empty(completion.Offsets);
+        Assert.Empty(completion.Offsets!);
     }
 
     [Fact]
-    public async Task AsyncMock_CommitAsyncWithOffsetsAndCallback_DeliversThoseOffsets()
+    public void CommitAsyncWithOffsetsAndCallback_EmptyMap_DeliversTheEmptyMap()
     {
-        await using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
-        TopicPartition partition = new TopicPartition(Topic, 2);
-        await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);
-        RecordingCommitCallback callback = new RecordingCommitCallback();
-
-        consumer.CommitAsync(
-            new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(5, "m") },
-            callback);
-
-        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-            Assert.Single(callback.Completions);
-        Assert.Null(completion.Exception);
-        Assert.Equal(5, completion.Offsets[partition].Offset);
-        Assert.Equal("m", completion.Offsets[partition].Metadata);
-    }
-
-    [Fact]
-    public void CommitAsyncWithOffsetsAndCallback_EmptyMap_CommitsNothingAndStillFires()
-    {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
         consumer.CommitAsync(new Dictionary<TopicPartition, OffsetAndMetadata>(), callback);
 
-        Assert.Empty(Assert.Single(callback.Completions).Offsets);
+        Completion completion = Assert.Single(callback.Completions);
+        Assert.NotNull(completion.Offsets);
+        Assert.Empty(completion.Offsets!);
+        Assert.Null(completion.Exception);
     }
 
-    // ---- The discard path: Java's commitAsync(Map, null) ----
+    [Fact]
+    public async Task AsyncMock_CommitAsyncWithOffsetsAndCallback_DeliversThoseOffsetsOnThePumpThread()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        TopicPartition partition = new TopicPartition(Topic, 2);
+        await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);
+        RecordingCommitCallback callback = new RecordingCommitCallback();
+
+        await TestTimeout.Run(
+            () => consumer.CommitAsync(
+                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(5, "m") },
+                callback),
+            s_deadline);
+        Completion completion = await TestTimeout.Run(() => callback.First, s_deadline);
+
+        Assert.Equal(PumpThreadName, completion.Thread.Name);
+        Assert.Null(completion.Exception);
+        Assert.Equal(5, completion.Offsets![partition].Offset);
+        Assert.Equal("m", completion.Offsets[partition].Metadata);
+    }
+
+    [Fact]
+    public async Task AsyncMock_CommitAsyncWithCallback_RunsOnThePumpThread()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        RecordingCommitCallback callback = new RecordingCommitCallback();
+
+        await TestTimeout.Run(() => consumer.CommitAsync(callback), s_deadline);
+        Completion completion = await TestTimeout.Run(() => callback.First, s_deadline);
+
+        Assert.Equal(PumpThreadName, completion.Thread.Name);
+        Assert.Null(completion.Exception);
+        Assert.Empty(completion.Offsets!);
+    }
+
+    [Fact]
+    public void CommitAsyncWithCallback_AfterAPoll_DeliversTheConsumedPositions()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition partition = new TopicPartition(Topic, 0);
+        consumer.Assign(new[] { partition });
+        consumer.Seek(partition, 0);
+        consumer.AddRecord(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' });
+        Assert.Single(consumer.Poll(TimeSpan.Zero));
+        RecordingCommitCallback callback = new RecordingCommitCallback();
+
+        consumer.CommitAsync(callback);
+
+        AssertTheConsumedPosition(partition, Assert.Single(callback.Completions));
+    }
+
+    [Fact]
+    public async Task AsyncMock_CommitAsyncWithCallback_AfterAPoll_DeliversTheConsumedPositionsOnThePumpThread()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        TopicPartition partition = new TopicPartition(Topic, 0);
+        await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);
+        await TestTimeout.Run(() => consumer.Seek(partition, 0), s_deadline);
+        consumer.AddRecord(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' });
+        Assert.Single(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
+        RecordingCommitCallback callback = new RecordingCommitCallback();
+
+        await TestTimeout.Run(() => consumer.CommitAsync(callback), s_deadline);
+        Completion completion = await TestTimeout.Run(() => callback.First, s_deadline);
+
+        Assert.Equal(PumpThreadName, completion.Thread.Name);
+        AssertTheConsumedPosition(partition, Assert.Single(callback.Completions));
+    }
+
+    [Fact]
+    public async Task AsyncMock_CommitAsyncWithOffsets_NoCallback_StillCommits()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        TopicPartition partition = new TopicPartition(Topic, 6);
+        await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);
+
+        await TestTimeout.Run(
+            () => consumer.CommitAsync(
+                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(17) }),
+            s_deadline);
+
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
+            await TestTimeout.Run(() => consumer.Committed(new[] { partition }), s_deadline);
+        Assert.Equal(17, committed[partition]!.Offset);
+    }
 
     [Fact]
     public void CommitAsyncWithOffsets_NoCallback_StillCommits()
     {
-        // The ABI's `callback` parameter is NOT nullable and there is no plain
-        // Consumer_commit_async_offsets, so this overload is backed by the CommitDiscard no-op
-        // trampoline (C's discard_commit_complete shape). End-to-end proof that the discard
-        // path actually commits: read the offsets back.
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition partition = new TopicPartition(Topic, 3);
         consumer.Assign(new[] { partition });
 
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [partition] = new OffsetAndMetadata(31, "discard-meta", 2),
+                [partition] = new OffsetAndMetadata(31, "no-callback-meta", 2),
             });
 
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed =
-            consumer.Committed(new[] { partition });
-        Assert.Equal(31, committed[partition].Offset);
-        Assert.Equal("discard-meta", committed[partition].Metadata);
-        Assert.Equal(2, committed[partition].LeaderEpoch);
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed = consumer.Committed(new[] { partition });
+        Assert.Equal(31, committed[partition]!.Offset);
+        Assert.Equal("no-callback-meta", committed[partition]!.Metadata);
+        Assert.Equal(2, committed[partition]!.LeaderEpoch);
     }
 
     [Fact]
     public void CommitAsyncWithOffsets_NoCallback_Churned_StaysHealthy()
     {
-        // The discard trampoline frees both delivered handles on every fire. A leak is not
-        // observable from managed code, but a double free or a missing destroy that corrupts
-        // the allocator would surface here rather than in a single-shot test.
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition partition = new TopicPartition(Topic, 4);
         consumer.Assign(new[] { partition });
 
@@ -187,103 +221,41 @@ public sealed class PublicConsumerCommitCallbackTests
                 new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(i) });
         }
 
-        Assert.Equal(499, consumer.Committed(new[] { partition })[partition].Offset);
+        Assert.Equal(499, consumer.Committed(new[] { partition })[partition]!.Offset);
     }
 
-    // ---- A throwing callback is swallowed, and traced ----
-
     [Fact]
-    public void ThrowingCallback_IsSwallowed_AndTheConsumerStaysUsable()
+    public void ThrowingCallback_PropagatesTheSameInstanceOutOfTheCallThatRanIt_AndTheCommitLands()
     {
-        // Java's onComplete returns void and the ABI typedef returns void, so there is no
-        // channel to report a callback's own failure on: it is caught at the boundary (never
-        // unwound into native) and swallowed. The commit itself still lands, and the consumer
-        // is still usable afterwards.
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition partition = new TopicPartition(Topic, 5);
         consumer.Assign(new[] { partition });
-        ThrowingCommitCallback throwing = new ThrowingCommitCallback("boom");
+        InvalidCastException thrown = new InvalidCastException("boom");
+        ThrowingCommitCallback throwing = new ThrowingCommitCallback(thrown);
 
-        consumer.CommitAsync(
+        Exception? propagated = Record.Exception(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(3) },
-            throwing);
+            throwing));
 
-        Assert.True(throwing.WasInvoked);
+        Assert.Same(thrown, propagated);
+        Assert.Equal(1, throwing.Invocations);
+        Assert.Equal(3, consumer.Committed(new[] { partition })[partition]!.Offset);
 
-        // Still usable: another commit with a well-behaved callback works, and both commits
-        // landed.
         RecordingCommitCallback recording = new RecordingCommitCallback();
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(4) },
             recording);
         Assert.Single(recording.Completions);
-        Assert.Equal(4, consumer.Committed(new[] { partition })[partition].Offset);
+        Assert.Equal(4, consumer.Committed(new[] { partition })[partition]!.Offset);
     }
-
-    [Fact]
-    public void ThrowingCallback_IsTraced_NotSilentlyDiscarded()
-    {
-        // P7-D3 option (b): swallow AND write to System.Diagnostics.Trace. Python's adapter
-        // logs and swallows; swallowing silently would match only half of that and would leave
-        // no trace at all of a user callback that failed. Trace is the whole of the binding's
-        // diagnostics — no logging abstraction, no dependency, no public API.
-        string marker = "trace-marker-" + Guid.NewGuid().ToString("N");
-        CapturingTraceListener listener = new CapturingTraceListener();
-        Trace.Listeners.Add(listener);
-        try
-        {
-            using MockConsumer<byte[], byte[]> consumer = NewMock();
-            consumer.CommitAsync(new ThrowingCommitCallback(marker));
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-
-        Assert.Contains(listener.Lines, line => line.Contains(marker, StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void TraceAttribution_NamesTheUserCallback_OnlyWhenTheUserCallbackThrew()
-    {
-        // M9/P7 review, finding 2. The trace helper serves THREE catch sites, only one of
-        // which is the user's callback. A fixed "an IOffsetCommitCallback threw" message
-        // misattributed a marshalling / GCHandle-recovery fault to the user's code — and on
-        // the discard path named a callback that does not exist. A confidently-wrong
-        // diagnostic is a worse debugging cliff than a silent one, which is the whole thing
-        // P7-D3 exists to avoid.
-        //
-        // Here the USER callback throws, so naming it is correct.
-        string marker = "attribution-" + Guid.NewGuid().ToString("N");
-        CapturingTraceListener listener = new CapturingTraceListener();
-        Trace.Listeners.Add(listener);
-        try
-        {
-            using MockConsumer<byte[], byte[]> consumer = NewMock();
-            consumer.CommitAsync(new ThrowingCommitCallback(marker));
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-
-        string line = Assert.Single(listener.Lines, l => l.Contains(marker, StringComparison.Ordinal));
-        Assert.Contains("IOffsetCommitCallback", line, StringComparison.Ordinal);
-        // ...and NOT blamed on the trampoline, which did its job.
-        Assert.DoesNotContain("before reaching the callback", line, StringComparison.Ordinal);
-        Assert.DoesNotContain("discard trampoline", line, StringComparison.Ordinal);
-    }
-
-    // ---- Non-ASCII round-trip through the delivered offsets (ffi §B3) ----
 
     [Fact]
     public void NonAsciiTopic_RoundTripsThroughTheDeliveredOffsets()
     {
-        // Guards a MarshalAs(LPStr) mistake, which corrupts non-ASCII silently and hides in
-        // ASCII-only tests. The delivered map's topic strings are the NUL-terminated,
-        // handle-owned form (OffsetMapMarshal), copied out before the map root is destroyed.
         const string NonAscii = "témas-日本語-🎉";
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition partition = new TopicPartition(NonAscii, 0);
         consumer.Assign(new[] { partition });
         RecordingCommitCallback callback = new RecordingCommitCallback();
@@ -295,21 +267,18 @@ public sealed class PublicConsumerCommitCallbackTests
             },
             callback);
 
-        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception) completion =
-            Assert.Single(callback.Completions);
-        KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(completion.Offsets);
+        KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(Assert.Single(callback.Completions).Offsets!);
         Assert.Equal(NonAscii, entry.Key.Topic);
         Assert.Equal(0, entry.Key.Partition);
         Assert.Equal(12, entry.Value.Offset);
         Assert.Equal("métadonnées-メタ", entry.Value.Metadata);
     }
 
-    // ---- Preconditions (validated BEFORE any native call, ffi §B5) ----
-
     [Fact]
     public void CommitAsync_NullCallback_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException error =
             Assert.Throws<ArgumentNullException>(() => consumer.CommitAsync((IOffsetCommitCallback)null!));
@@ -318,9 +287,22 @@ public sealed class PublicConsumerCommitCallbackTests
     }
 
     [Fact]
+    public async Task AsyncMock_CommitAsync_NullCallback_ThrowsArgumentNullExceptionSynchronously()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
+            () => { _ = consumer.CommitAsync((IOffsetCommitCallback)null!); });
+
+        Assert.Equal("callback", error.ParamName);
+    }
+
+    [Fact]
     public void CommitAsync_NullOffsets_ThrowsArgumentNullException()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(
             () => consumer.CommitAsync(
@@ -331,9 +313,22 @@ public sealed class PublicConsumerCommitCallbackTests
     }
 
     [Fact]
+    public async Task AsyncMock_CommitAsync_NullOffsets_ThrowsArgumentNullExceptionSynchronously()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
+            () => { _ = consumer.CommitAsync((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>)null!, new RecordingCommitCallback()); });
+
+        Assert.Equal("offsets", error.ParamName);
+    }
+
+    [Fact]
     public void CommitAsync_NegativePartition_ThrowsArgumentOutOfRangeBeforeAnyNativeCall()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
         ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
@@ -344,14 +339,9 @@ public sealed class PublicConsumerCommitCallbackTests
                 },
                 callback));
 
-        // The consumer's own SnapshotCommitOffsets guard (M15/P13.2 D11), not the TopicPartition
-        // ctor — which stores a negative partition as Java's does — so the parameter named is
-        // the map, not the ctor's `partition`.
         Assert.Equal("offsets", error.ParamName);
         Assert.Equal(-1, error.ActualValue);
         Assert.StartsWith("Partition must not be negative.", error.Message, StringComparison.Ordinal);
-
-        // Rejected before the P/Invoke, so the callback was never registered and never fires.
         Assert.Empty(callback.Completions);
     }
 
@@ -359,118 +349,135 @@ public sealed class PublicConsumerCommitCallbackTests
     public void CommitAsync_AfterDispose_ThrowsObjectDisposedException()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
         Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>()));
     }
 
-    // ---- The overloads exist on every consumer type and interface ----
-
-    [Theory]
-    [InlineData(typeof(IConsumerCommon))]
-    [InlineData(typeof(IConsumer<byte[], byte[]>))]
-    [InlineData(typeof(IAsyncConsumer<byte[], byte[]>))]
-    [InlineData(typeof(KafkaConsumer<byte[], byte[]>))]
-    [InlineData(typeof(AsyncKafkaConsumer<byte[], byte[]>))]
-    [InlineData(typeof(MockConsumer<byte[], byte[]>))]
-    [InlineData(typeof(AsyncMockConsumer<byte[], byte[]>))]
-    public void BothOverloads_AreReachableFromEverySurface(Type surface)
+    [Fact]
+    public async Task AsyncMock_CommitAsync_AfterDispose_ThrowsObjectDisposedException()
     {
-        // The real clients cannot be driven broker-free, so this pins the SHAPE across all
-        // four implementations plus the three interfaces. Behaviour is covered against the
-        // mocks above.
-        Assert.NotNull(FindMethod(surface, typeof(IOffsetCommitCallback)));
-        Assert.NotNull(FindMethod(
-            surface,
-            typeof(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>),
-            typeof(IOffsetCommitCallback)));
-    }
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await TestTimeout.DisposeAsync(consumer);
 
-    /// <summary>
-    /// Finds a <c>CommitAsync</c> overload on <paramref name="surface"/>, searching inherited
-    /// interfaces too. <see cref="Type.GetMethod(string, Type[])"/> on an <em>interface</em>
-    /// does not walk base interfaces, so <see cref="IConsumer{TKey, TValue}"/> /
-    /// <see cref="IAsyncConsumer{TKey, TValue}"/> would report the inherited
-    /// <see cref="IConsumerCommon"/> members as missing — a reflection quirk, not a shape gap.
-    /// </summary>
-    private static System.Reflection.MethodInfo? FindMethod(Type surface, params Type[] parameters) =>
-        surface.GetMethod("CommitAsync", parameters)
-        ?? surface.GetInterfaces()
-            .Select(i => i.GetMethod("CommitAsync", parameters))
-            .FirstOrDefault(m => m is not null);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(
+            new Dictionary<TopicPartition, OffsetAndMetadata>(), new RecordingCommitCallback()));
+    }
 
     [Fact]
-    public void CommitAsyncOverloads_ReturnVoid_NotTask()
+    public void TheCallbackOverloads_AreDeclaredByEachFlavorsInterface_NotByTheSharedBase()
     {
-        // The §4 commit-callback divergence: the callback carries the offsets a Task cannot,
-        // and the ABI typedef returns void — so these stay sync `void`, like Java's, rather
-        // than being replaced by a Task (which is what §4's "takes a completion callback" row
-        // says for every OTHER such callback).
-        Assert.Equal(
-            typeof(void),
-            typeof(IConsumerCommon).GetMethod("CommitAsync", new[] { typeof(IOffsetCommitCallback) })!.ReturnType);
-        Assert.Equal(
-            typeof(void),
-            typeof(IOffsetCommitCallback).GetMethod(nameof(IOffsetCommitCallback.OnComplete))!.ReturnType);
+        Assert.DoesNotContain(typeof(IConsumerCommon).GetMethods(), m => m.Name == "CommitAsync");
+
+        MethodInfo syncCallback = Single(typeof(IConsumer<byte[], byte[]>), typeof(IOffsetCommitCallback));
+        MethodInfo syncOffsets = Single(
+            typeof(IConsumer<byte[], byte[]>),
+            typeof(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>),
+            typeof(IOffsetCommitCallback));
+        Assert.Equal(typeof(void), syncCallback.ReturnType);
+        Assert.Equal(typeof(void), syncOffsets.ReturnType);
+        Assert.True(syncOffsets.GetParameters()[1].HasDefaultValue);
+
+        MethodInfo asyncCallback = Single(
+            typeof(IAsyncConsumer<byte[], byte[]>), typeof(IOffsetCommitCallback), typeof(CancellationToken));
+        MethodInfo asyncOffsets = Single(
+            typeof(IAsyncConsumer<byte[], byte[]>),
+            typeof(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>),
+            typeof(IOffsetCommitCallback),
+            typeof(CancellationToken));
+        Assert.Equal(typeof(Task), asyncCallback.ReturnType);
+        Assert.Equal(typeof(Task), asyncOffsets.ReturnType);
+        Assert.True(asyncOffsets.GetParameters()[1].HasDefaultValue);
     }
 
-    // ---- Fixtures ----
+    [Fact]
+    public void OnComplete_TakesNullableOffsetsAndAnException_AndReturnsVoid()
+    {
+        MethodInfo onComplete = Assert.Single(typeof(IOffsetCommitCallback).GetMethods());
+        Assert.Equal(nameof(IOffsetCommitCallback.OnComplete), onComplete.Name);
+        Assert.Equal(typeof(void), onComplete.ReturnType);
+        ParameterInfo[] parameters = onComplete.GetParameters();
+        Assert.Equal(
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>), typeof(Exception) },
+            parameters.Select(p => p.ParameterType).ToArray());
+    }
 
+    private static MethodInfo Single(Type surface, params Type[] parameters) =>
+        Assert.Single(
+            surface.GetMethods(),
+            m => m.Name == "CommitAsync" && m.GetParameters().Select(p => p.ParameterType).SequenceEqual(parameters));
+
+    private static MockConsumer<byte[], byte[]> NewMock() =>
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static void AssertTheConsumedPosition(TopicPartition partition, Completion completion)
+    {
+        Assert.Null(completion.Exception);
+        KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(completion.Offsets!);
+        Assert.Equal(partition, entry.Key);
+        Assert.Equal(new OffsetAndMetadata(1), entry.Value);
+        Assert.Equal(1L, entry.Value.Offset);
+        Assert.Equal(string.Empty, entry.Value.Metadata);
+        Assert.Null(entry.Value.LeaderEpoch);
+    }
+
+    /// <summary>One completion: its offsets, its exception and the thread it ran on.</summary>
+    private sealed class Completion
+    {
+        internal Completion(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
+        {
+            Offsets = offsets;
+            Exception = exception;
+        }
+
+        internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets { get; }
+
+        internal Exception? Exception { get; }
+
+        internal Thread Thread { get; } = Thread.CurrentThread;
+    }
+
+    /// <summary>Records every completion, and exposes the first as a task.</summary>
     private sealed class RecordingCommitCallback : IOffsetCommitCallback
     {
-        internal List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, KafkaException? Exception)>
-            Completions
-        { get; } =
-            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>, KafkaException?)>();
+        private readonly TaskCompletionSource<Completion> _first =
+            new TaskCompletionSource<Completion>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public void OnComplete(
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception) =>
-            Completions.Add((offsets, exception));
-    }
+        internal List<Completion> Completions { get; } = new List<Completion>();
 
-    private sealed class ThrowingCommitCallback : IOffsetCommitCallback
-    {
-        private readonly string _message;
+        internal Task<Completion> First => _first.Task;
 
-        internal ThrowingCommitCallback(string message)
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
         {
-            _message = message;
-        }
-
-        internal bool WasInvoked { get; private set; }
-
-        public void OnComplete(
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception)
-        {
-            WasInvoked = true;
-            throw new InvalidOperationException(_message);
-        }
-    }
-
-    /// <summary>
-    /// Captures whatever the binding writes to <see cref="Trace"/>. Registered only for the
-    /// duration of one test and matched on a per-test unique marker, so assembly-wide parallel
-    /// execution cannot make it observe another test's output.
-    /// </summary>
-    private sealed class CapturingTraceListener : TraceListener
-    {
-        private readonly StringBuilder _pending = new StringBuilder();
-
-        internal List<string> Lines { get; } = new List<string>();
-
-        public override void Write(string? message) => _pending.Append(message);
-
-        public override void WriteLine(string? message)
-        {
-            _pending.Append(message);
-            lock (Lines)
+            Completion completion = new Completion(offsets, exception);
+            lock (Completions)
             {
-                Lines.Add(_pending.ToString());
+                Completions.Add(completion);
             }
 
-            _pending.Clear();
+            _first.TrySetResult(completion);
+        }
+    }
+
+    /// <summary>A commit callback that counts its calls and throws the exception it is given.</summary>
+    private sealed class ThrowingCommitCallback : IOffsetCommitCallback
+    {
+        private readonly Exception _exception;
+
+        internal ThrowingCommitCallback(Exception exception) => _exception = exception;
+
+        internal int Invocations { get; private set; }
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
+        {
+            Invocations++;
+            throw _exception;
         }
     }
 }

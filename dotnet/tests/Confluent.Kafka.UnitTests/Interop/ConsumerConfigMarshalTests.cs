@@ -22,18 +22,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Config-map → <c>ConsumerProperties</c> marshalling and the precondition surface
-/// (ffi §A5/§B5): a valid consumer config constructs successfully, while bad
-/// arguments are rejected with standard .NET exceptions <b>before</b> any native
-/// call — never <see cref="KafkaException"/> (the ABI does not validate
-/// preconditions and would panic).
+/// The consumer config map: a valid config builds a consumer, and a bad argument is rejected with a .NET exception
+/// before any native call.
 /// </summary>
 public sealed class ConsumerConfigMarshalTests
 {
-    // ⚠ Equal to the sync Dispose's close bound since D2 (M17/P2: Consumer_close, the
-    // core's 30 s default, was 5 s) — kept, not raised: these real consumers are never
-    // subscribed, so their graceful close has nothing to wait on and returns in
-    // milliseconds. A close that ran to its bound is itself the regression here.
+    // A regression bound: these consumers never subscribe, so their close returns in milliseconds.
     private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
 
     [Fact]
@@ -56,15 +50,12 @@ public sealed class ConsumerConfigMarshalTests
     [Fact]
     public void Create_NullConfig_ThrowsArgumentNullException()
     {
-        // Precondition validated before any native call (no panic across FFI).
         Assert.Throws<ArgumentNullException>(() => NativeConsumer.Create(null!));
     }
 
     [Fact]
     public void Create_ConfigWithNullValue_ThrowsArgumentException()
     {
-        // Bad-shape config: a null value is a programmer error, rejected before any
-        // pin/marshal/P-Invoke (ArgumentException, not KafkaException).
         var config = new Dictionary<string, string>
         {
             ["bootstrap.servers"] = "localhost:9092",

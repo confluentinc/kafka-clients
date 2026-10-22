@@ -18,9 +18,9 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a <c>kafka_List_t</c> of <c>kafka_common_PartitionInfo_t</c>, or a
-/// <c>kafka_common_PartitionInfoList_t</c>, into an owned list of <see cref="PartitionInfo"/>, each element through
-/// <see cref="PartitionInfoMarshal"/>; only <see cref="CopyOutAndDestroy"/> frees the list.
+/// Copies a <c>kafka_List_t</c> of <c>kafka_common_PartitionInfo_t</c> into an owned list of
+/// <see cref="PartitionInfo"/>, each element through <see cref="PartitionInfoMarshal"/>; only
+/// <see cref="CopyOutAndDestroy"/> frees the list.
 /// </summary>
 internal static class PartitionInfoListMarshal
 {
@@ -55,28 +55,5 @@ internal static class PartitionInfoListMarshal
             NativeMethods.ListDestroy(list, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
-    }
-
-    internal static IReadOnlyList<PartitionInfo> CopyOutPartitionInfoList(IntPtr list)
-    {
-        int count = NativeMethods.PartitionInfoListCount(list);
-        if (count <= 0)
-        {
-            return Array.Empty<PartitionInfo>();
-        }
-
-        List<PartitionInfo> result = new List<PartitionInfo>(count);
-        for (int i = 0; i < count; i++)
-        {
-            IntPtr info = NativeMethods.PartitionInfoListGet(list, i);
-            if (info == IntPtr.Zero)
-            {
-                continue;
-            }
-
-            result.Add(PartitionInfoMarshal.CopyOut(info));
-        }
-
-        return result;
     }
 }

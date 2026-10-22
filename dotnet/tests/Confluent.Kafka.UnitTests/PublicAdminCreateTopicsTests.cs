@@ -48,7 +48,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task MixedOutcome_EachTopicCarriesItsOwnResult()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // Replication factor 5 against a 1-broker mock is rejected; the other is fine.
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -79,7 +80,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task OneTopicCanBeAwaited_WithoutTouchingTheOthers()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
@@ -105,7 +107,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task All_SucceedsWhenEveryTopicSucceeds_AndFaultsOtherwise()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult ok = admin.CreateTopics(new[]
         {
@@ -140,7 +143,8 @@ public sealed class PublicAdminCreateTopicsTests
         const string Topic = "derived-topic";
         const string ConfigValue = "délété-🎈";
 
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
@@ -186,7 +190,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task DerivedAccessor_ForAnUnrequestedTopic_ThrowsArgumentExceptionSynchronously()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -213,7 +218,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ExistingTopic_FailsOnlyThatTopic()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult first = admin.CreateTopics(new[] { new NewTopic("dup", 1, 1) });
         await TestTimeout.Run(() => first.All().Get(), s_deadline);
@@ -240,7 +246,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task RepeatedTopicName_YieldsOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
@@ -263,7 +270,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task EmptyRequest_YieldsAnEmptyResultThatCompletes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
 
@@ -281,7 +289,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ReplicaAssignmentForm_IsMutuallyExclusiveAndRoundTrips()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         NewTopic assigned = new NewTopic(
             "assigned-topic",
@@ -329,7 +338,8 @@ public sealed class PublicAdminCreateTopicsTests
     [InlineData(true, true)]
     public async Task BothBoolOptions_CrossTheAbiForEveryCombination(bool validateOnly, bool retryOnQuotaViolation)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic($"bools-{validateOnly}-{retryOnQuotaViolation}", 1, 1) },
@@ -351,7 +361,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ExplicitTimeout_CrossesTheAbi()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic("timeout-topic", 1, 1) },
@@ -382,7 +393,8 @@ public sealed class PublicAdminCreateTopicsTests
     {
         const string Topic = "d13-config-entries";
 
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
@@ -419,7 +431,8 @@ public sealed class PublicAdminCreateTopicsTests
         const string Topic = "d16-null-config";
         const string Name = "retention.ms";
 
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
@@ -456,7 +469,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public void Preconditions_FireBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException nullTopics =
             Assert.Throws<ArgumentNullException>(() => admin.CreateTopics(null!));
@@ -578,7 +592,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task MinusOneCounts_CreateWithTheBrokerDefaults_LikeUnsetOnes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {

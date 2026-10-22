@@ -12,79 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The completion callback of an asynchronous offset commit — the C# realization of Java's
-/// <c>org.apache.kafka.clients.consumer.OffsetCommitCallback</c>. Pass an implementation to
-/// <see cref="IConsumerCommon.CommitAsync(IOffsetCommitCallback)"/> or
-/// <see cref="IConsumerCommon.CommitAsync(IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, IOffsetCommitCallback)"/>.
+/// The completion callback of an asynchronous offset commit (Java's <c>OffsetCommitCallback</c>), passed to
+/// <see cref="IConsumer{TKey, TValue}.CommitAsync(IOffsetCommitCallback)"/>,
+/// <see cref="IAsyncConsumer{TKey, TValue}.CommitAsync(IOffsetCommitCallback, System.Threading.CancellationToken)"/>
+/// and their offsets-taking overloads.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The method is synchronous, not <see cref="System.Threading.Tasks.Task"/>-returning
-/// (declared divergence D4 / the §4 commit-callback divergence).</b> The ABI callback typedef
-/// returns <c>void</c> (header, <c>kafka_consumer_Consumer_commit_async_callback_t</c>), so there
-/// is no completion for the core to await; restoring Java's <c>void onComplete(Map, Exception)</c>
-/// faithfully in C# means a sync method. This is the same divergence, for the same reason, as
-/// <see cref="IConsumerRebalanceListener"/>.
+/// On <see cref="IConsumer{TKey, TValue}"/> it runs on the caller's thread, inside the consumer call that delivers
+/// it (<c>Poll</c>, <c>Commit</c>, <c>CommitAsync</c>, <c>Close</c>, …); on <see cref="IAsyncConsumer{TKey, TValue}"/>,
+/// on the consumer's <c>confluent-kafka-consumer-pump</c> thread. A call back into the consumer from inside it goes
+/// through the consumer's own <see cref="ConsumerHandle"/>, as from a rebalance listener
+/// (<see cref="IConsumerRebalanceListener"/>).
 /// </para>
 /// <para>
-/// <b>It runs on the core's callback-dispatcher thread, not the caller's task.</b>
-/// <c>consumer-threading.md</c> §31's caller's-task model is the Rust core's contract; the C
-/// ABI flattens it, and Python documents the identical divergence
-/// (<c>consumer.py:686-696</c>). The dispatcher never runs two callbacks of the same consumer
-/// concurrently. On a <c>MockConsumer</c> the core invokes it <b>inline during the commit
-/// call</b> (with <c>exception</c> always <see langword="null"/>), so it has
-/// already run by the time <c>CommitAsync</c> returns.
-/// </para>
-/// <para>
-/// <b>Do not block on consumer progress from inside it.</b> A callback that waits for another
-/// thread's <c>Poll</c> to return deadlocks the single dispatcher queue that must also deliver
-/// every other callback of this consumer (header,
-/// <c>kafka_consumer_Consumer_commit_async_with_callback</c>).
-/// </para>
-/// <para>
-/// <b>It must not call back into its own consumer.</b> The plain consumer API is rejected with
-/// a <see cref="KafkaException"/> (ConcurrentModification) because the core's access guard is
-/// held for the duration of the commit. The sanctioned reentrancy path is
-/// <see cref="ConsumerHandle"/>, obtained from <see cref="IConsumerCommon.Handle"/> and
-/// <b>shipped since M9/P8</b>: capture one up front and use it from inside the callback,
-/// where the consumer's own API is not available.
-/// </para>
-/// <para>
-/// <b>Throwing is NOT meaningful (unlike <see cref="IConsumerRebalanceListener"/>).</b> Java's
-/// <c>onComplete</c> returns <c>void</c> and has nowhere to report a failure of its own, and
-/// the ABI callback likewise has no error return channel. An exception thrown here is caught
-/// at the interop boundary (it is never allowed to unwind into native code) and
-/// <b>swallowed</b>, after being written to <see cref="System.Diagnostics.Trace"/> so the
-/// failure leaves a trace — matching Python, which logs and swallows
-/// (<c>consumer.py:363-372</c>). It does not fail the commit and it does not surface anywhere
-/// else.
-/// </para>
-/// <para>
-/// <b>Two distinct error surfaces.</b> The <see cref="KafkaException"/> thrown
-/// <em>synchronously</em> by <c>CommitAsync</c> is a commit-<b>initiation</b> failure (the
-/// commit never started); the <c>exception</c> delivered here is the
-/// <b>commit's own</b> outcome.
+/// An exception it throws propagates out of the consumer call that delivered it: <c>Commit</c> and
+/// <c>CommitAsync</c> rethrow it as is, <c>Poll</c> wraps it in a <see cref="KafkaException"/>, and <c>Close</c>
+/// in a <see cref="KafkaException"/> with the message "Failed to close kafka consumer". The callbacks queued behind
+/// it run at the next such call.
 /// </para>
 /// </remarks>
 public interface IOffsetCommitCallback
 {
     /// <summary>
-    /// Invoked when the commit completes (Java
-    /// <c>onComplete(Map&lt;TopicPartition, OffsetAndMetadata&gt;, Exception)</c>) — exactly
-    /// once per successful <c>CommitAsync</c> call.
+    /// Invoked once when the commit completes (Java
+    /// <c>onComplete(Map&lt;TopicPartition, OffsetAndMetadata&gt;, Exception)</c>).
     /// </summary>
     /// <param name="offsets">
-    /// The offsets the commit applied to (never <see langword="null"/>; may be empty). An owned
-    /// snapshot — nothing native-backed escapes the callback.
+    /// The offsets the commit applied to, or <see langword="null"/> when the commit failed or, on a
+    /// <c>KafkaConsumer</c>, was given an empty offsets map; a mock consumer hands that commit's empty map.
     /// </param>
     /// <param name="exception">
-    /// The commit's outcome: <see langword="null"/> on success, mirroring Java's
-    /// "exception == null means success".
+    /// <see langword="null"/> on success; otherwise the commit's failure: a <see cref="KafkaException"/>, or the
+    /// .NET exception the error maps to.
     /// </param>
-    void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception);
+    void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception);
 }

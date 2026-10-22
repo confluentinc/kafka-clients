@@ -66,7 +66,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task AnEmptyEntity_IsSent_AndAnsweredForItselfAlone()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity empty = EmptyEntity();
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -99,7 +100,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task TwoEmptyEntities_AreOneEntity_SentAndAnsweredOnce()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[]
@@ -124,7 +126,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task ARepeatedEntity_IsAccepted_AndHasOneAwaitable()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("dup", 1d), Alteration("dup", 2d) });
@@ -148,7 +151,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("keyed-by-value", 1d) });
@@ -170,7 +174,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task TheEntityNameTernary_ProducesThreeDistinctKeys()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[]
@@ -203,7 +208,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task EachEntity_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity alpha = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -245,7 +251,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity first = Entity("solo-first");
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -263,7 +270,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task All_FaultsWhenAnyEntityFails()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("all-a", 1d), Alteration("all-b", 2d) });
@@ -280,7 +288,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result =
             admin.AlterClientQuotas(Array.Empty<ClientQuotaAlteration>());
@@ -296,7 +305,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result =
             admin.AlterClientQuotas(new[] { Alteration("用户-café", 1d) });
@@ -317,7 +327,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "entries",
@@ -370,7 +381,7 @@ public sealed class PublicAdminAlterClientQuotasTests
     public void AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.AlterClientQuotas(new[] { Alteration("gone", 1d) }));

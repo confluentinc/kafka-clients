@@ -22,32 +22,21 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A broker-free Kafka consumer for tests — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.MockConsumer</c>. A thin, Java-shaped forwarder
-/// over the internal <see cref="NativeConsumer"/> (like <see cref="AsyncKafkaConsumer{TKey, TValue}"/>),
-/// plus mock-only helpers to drive records and errors without a broker.
+/// A broker-free asynchronous consumer for tests, Java's <c>org.apache.kafka.clients.consumer.MockConsumer</c>.
 /// </summary>
 /// <remarks>
-/// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollError"/>,
-/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>,
-/// <see cref="UpdatePartitions"/>) are <b>inherent methods on this concrete type, not on
-/// <see cref="IAsyncConsumer{TKey, TValue}"/></b>
-/// (consumer-threading §2; Python's <c>_MockConsumerMixin</c> parity) — tests hold an
-/// <see cref="AsyncMockConsumer{TKey, TValue}"/> directly and pass it as an <see cref="IAsyncConsumer{TKey, TValue}"/>
-/// where the interface is expected. Partition management (<see cref="Assign"/> /
-/// <see cref="Pause"/> / <see cref="SeekToBeginning"/> / …) is <b>not</b> mock-only — it
-/// lives on <see cref="IAsyncConsumer{TKey, TValue}"/> (Java parity; broker-free on the mock), so test
-/// setup uses the public async <see cref="Assign"/>. Single-owner / not thread-safe, same
-/// as <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
-/// </remarks>
-/// <remarks>
-/// <b>Two documented deviations from Java's <c>MockConsumer</c> (PLAN M6/P1b §7,
-/// consumer-threading §28 style)</b>, identical to the sync
-/// <see cref="MockConsumer{TKey, TValue}"/>: (1) the ctor <b>takes the two deserializers</b>
-/// (Java's takes only an offset-reset) because this forwarder's <see cref="Poll"/> decodes
-/// native bytes exactly as <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does; (2)
-/// <see cref="AddRecord"/> is <b>bytes-in</b>, not typed-in, to test the deserialize path in
-/// isolation (and because the bytes-only core ABI takes byte key/value).
+/// <para>
+/// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollException"/>,
+/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>, <see cref="UpdatePartitions"/>,
+/// <see cref="Rebalance"/>, <see cref="LosePartitions"/>) are on this type only; hold an
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/> and pass it where an <see cref="IAsyncConsumer{TKey, TValue}"/>
+/// is expected.
+/// </para>
+/// <para>
+/// Two deviations from Java's <c>MockConsumer</c>, shared with <see cref="MockConsumer{TKey, TValue}"/>: the
+/// constructor takes the deserializers, because <see cref="Poll"/> decodes bytes as
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does; and <see cref="AddRecord"/> takes bytes, not a typed record.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
 /// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
@@ -58,9 +47,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     private readonly IDeserializer<TValue> _valueDeserializer;
 
     /// <summary>
-    /// Creates a broker-free mock consumer with the two deserializers its <see cref="Poll"/>
-    /// uses to decode the raw bytes queued by <see cref="AddRecord"/> (the §7 deviation:
-    /// Java's mock ctor takes no deserializers, ours must).
+    /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
+    /// <see cref="AddRecord"/> with the two deserializers.
     /// </summary>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
@@ -98,20 +86,30 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.SubscribeWithCallback(topics, listener, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Subscribe(
+        IReadOnlyCollection<string> topics,
+        IAsyncConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void Seek(TopicPartition partition, long offset) =>
-        _native.Seek(partition.Topic, partition.Partition, offset);
+    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
+        _native.SeekWithCallback(partition, offset, cancellationToken);
 
     /// <inheritdoc/>
-    public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+    public Task Seek(
+        TopicPartition partition,
+        OffsetAndMetadata offsetAndMetadata,
+        CancellationToken cancellationToken = default) =>
+        _native.SeekWithCallback(partition, offsetAndMetadata, cancellationToken);
 
     /// <inheritdoc/>
-    public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic, partition.Partition);
+    public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default) =>
+        _native.CurrentLagWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
@@ -138,8 +136,16 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.PositionWithCallback(partition, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<long> Position(TopicPartition partition, TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.PositionWithCallback(partition, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Commit(CancellationToken cancellationToken = default) =>
         _native.CommitWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task Commit(
@@ -147,14 +153,35 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.CommitWithCallback(offsets, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+    public Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(offsets, timeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
         _native.CommittedWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.CommittedWithCallback(partitions, timeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default) =>
         _native.OffsetsForTimesWithCallback(timestampsToSearch, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.OffsetsForTimesWithCallback(timestampsToSearch, timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
@@ -162,21 +189,52 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.BeginningOffsetsWithCallback(partitions, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.BeginningOffsetsWithCallback(partitions, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
         _native.EndOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.EndOffsetsWithCallback(partitions, timeout, cancellationToken);
 
     /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
         _native.PartitionsForWithCallback(topic, cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(
+        string topic,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
         _native.ListTopicsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(timeout, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken).AsTask();
+
+    /// <inheritdoc/>
+    public Task Close(CloseOptions option, CancellationToken cancellationToken = default) =>
+        _native.CloseWithCallback(option, cancellationToken).AsTask();
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();
@@ -197,31 +255,40 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
-    public void CommitAsync() => _native.CommitAsync();
+    public Task CommitAsync(CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void CommitAsync(IOffsetCommitCallback callback) => _native.CommitAsync(callback);
+    public Task CommitAsync(IOffsetCommitCallback callback, CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(callback, cancellationToken);
 
     /// <inheritdoc/>
-    public void CommitAsync(
+    public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
-        _native.CommitAsync(offsets, callback);
+        IOffsetCommitCallback? callback = null,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitAsync(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IAsyncOffsetCommitCallback callback,
+        CancellationToken cancellationToken = default) =>
+        _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>
-    public string ClientId() => _native.ClientId();
-
-    /// <inheritdoc/>
     public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <summary>
-    /// Sets the beginning (earliest) offset for a <c>(topic, partition)</c> used by a
-    /// subsequent <see cref="SeekToBeginning"/> reset (mock-only helper; mirrors Java
-    /// <c>updateBeginningOffsets</c>, one entry). Lets a <see cref="SeekToBeginning"/> be
-    /// observed end-to-end via a follow-up <see cref="Poll"/>.
+    /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
+    /// <c>updateBeginningOffsets</c>, one entry).
     /// </summary>
     /// <param name="topic">The record topic.</param>
     /// <param name="partition">The partition (non-negative).</param>
@@ -233,9 +300,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.UpdateBeginningOffset(topic, partition, offset);
 
     /// <summary>
-    /// Sets the end (latest) offset for a <c>(topic, partition)</c> used by a subsequent
-    /// <see cref="SeekToEnd"/> reset (mock-only helper; mirrors Java <c>updateEndOffsets</c>,
-    /// one entry). The <see cref="SeekToEnd"/> analog of <see cref="UpdateBeginningOffset"/>.
+    /// Sets the end offset of a partition, used when <see cref="SeekToEnd"/> resets it (Java
+    /// <c>updateEndOffsets</c>, one entry).
     /// </summary>
     /// <param name="topic">The record topic.</param>
     /// <param name="partition">The partition (non-negative).</param>
@@ -247,14 +313,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.UpdateEndOffset(topic, partition, offset);
 
     /// <summary>
-    /// Registers partition metadata for <paramref name="topic"/> (mock-only helper; mirrors
-    /// Java <c>updatePartitions(String, List&lt;PartitionInfo&gt;)</c>) so
-    /// <see cref="PartitionsFor"/> and <see cref="ListTopics"/> return data broker-free. Each
-    /// of <paramref name="partitionCount"/> partitions is built with a single leader node
-    /// <c>(leaderId, leaderHost, leaderPort)</c> that is also its sole replica and in-sync
-    /// replica; offline replicas are empty and the node has no rack (a reachable-slice limit
-    /// of the mock — the marshaller's offline-replica and rack paths are still exercised
-    /// structurally, as an empty list / null).
+    /// Registers <paramref name="partitionCount"/> partitions of <paramref name="topic"/> for
+    /// <see cref="PartitionsFor(string, CancellationToken)"/> and <see cref="ListTopics(CancellationToken)"/> (Java
+    /// <c>updatePartitions</c>). Each partition's leader, sole replica and sole in-sync replica is the node
+    /// <c>(leaderId, leaderHost, leaderPort)</c>, with no rack and no offline replicas.
     /// </summary>
     /// <param name="topic">The topic to register partition metadata for.</param>
     /// <param name="partitionCount">The number of partitions to register (non-negative).</param>
@@ -268,11 +330,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
     /// <summary>
-    /// Queues a record to be returned by the next <see cref="Poll"/> (mock-only
-    /// helper). The partition must already be assigned (via <see cref="Assign"/>). The
-    /// component-tuple form (topic / partition / offset / key / value) needs no public
-    /// <see cref="ConsumerRecord{TKey, TValue}"/> constructor this phase (PLAN decision 4); a
-    /// Java-style <c>AddRecord(ConsumerRecord)</c> can be added additively later.
+    /// Queues a record for the next <see cref="Poll"/> (Java <c>addRecord</c>). The partition must be assigned.
     /// </summary>
     /// <param name="topic">The record topic.</param>
     /// <param name="partition">The record partition (must be assigned; non-negative).</param>
@@ -282,90 +340,56 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core rejected the record (e.g. unassigned partition).</exception>
+    /// <exception cref="InvalidOperationException">The partition is not assigned.</exception>
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _native.AddRecord(topic, partition, offset, key, value);
 
     /// <summary>
-    /// Injects an error to be returned by the next <see cref="Poll"/> (mock-only
-    /// helper; mirrors Java <c>setPollException</c>). The awaiting <see cref="Poll"/>
-    /// faults with a <see cref="KafkaException"/> carrying <paramref name="message"/>.
+    /// Makes the next <see cref="Poll"/> fault with <paramref name="exception"/>, the same instance (Java
+    /// <c>MockConsumer.setPollException</c>); <see langword="null"/> clears a pending one.
     /// </summary>
-    /// <param name="message">The error message.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="message"/> is null.</exception>
+    /// <param name="exception">The exception for the next poll, or <see langword="null"/> to clear a pending one.</param>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    public void SetPollError(string message) => _native.SetPollError(message);
+    public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
-    /// Simulates a rebalance to the <b>new full assignment</b> <paramref name="partitions"/>
-    /// (mock-only helper; mirrors Java <c>MockConsumer.rebalance(Collection)</c>) — the
-    /// broker-free driver for <see cref="IConsumerRebalanceListener"/>.
+    /// Simulates a rebalance to the new full assignment <paramref name="partitions"/> (Java
+    /// <c>MockConsumer.rebalance(Collection)</c>).
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Revoked and added partitions are computed against the current assignment. While a
-    /// listener is registered it fires <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>
-    /// <b>only if something was removed</b>, then
-    /// <see cref="IConsumerRebalanceListener.OnPartitionsAssigned"/> <b>unconditionally</b>
-    /// with the <em>added</em> partitions (possibly an empty collection). It <b>never</b>
-    /// fires <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>, matching Java; use
-    /// <see cref="LosePartitions"/> for that. Buffered records are cleared, as in Java.
-    /// </para>
-    /// <para>
-    /// It is <b>synchronous all the way through</b>: it does not return until the listener
-    /// callbacks have returned, and an exception thrown by a listener surfaces here as a
-    /// <see cref="KafkaException"/>. This method is deliberately <b>not</b> a
-    /// <see cref="Task"/> even on the async mock — the underlying ABI entry point is sync
-    /// and blocking on the callbacks is the behaviour under test.
-    /// </para>
-    /// <para>
-    /// Requires a <b>topic subscription</b>: on a manually <see cref="Assign"/>ed consumer it
-    /// throws a <see cref="KafkaException"/> reading "manual assignment in use", matching
-    /// Java's <c>IllegalArgumentException</c>.
-    /// </para>
+    /// While a listener is registered, <c>OnPartitionsRevoked</c> fires with the removed partitions, only if there
+    /// are any, then <c>OnPartitionsAssigned</c> with the added ones, possibly none, on the consumer's drain thread.
+    /// The <see cref="Task"/> completes after they have ended; an exception from either faults it with the same
+    /// instance. Buffered records are cleared, as in Java. On a manually assigned consumer the <see cref="Task"/>
+    /// faults with <see cref="ArgumentException"/>, as Java's <c>IllegalArgumentException</c>.
     /// </remarks>
     /// <param name="partitions">The new full assignment.</param>
+    /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">No topic subscription, or a listener threw.</exception>
-    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
+    public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.RebalanceWithCallback(partitions);
 
     /// <summary>
-    /// Simulates losing <paramref name="partitions"/> (mock-only helper; mirrors Java
-    /// <c>MockConsumer.losePartitions(Collection)</c>, added in Kafka 4.4) — the broker-free
-    /// driver for <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>.
+    /// Simulates losing <paramref name="partitions"/> without a clean revocation (Java
+    /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Unlike <see cref="Rebalance"/>, which fires
-    /// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>, this models losing
-    /// partitions without a graceful revoke. The buffered records of the lost partitions are
-    /// cleared (records of the partitions kept are not); then, while a listener is
-    /// registered, <see cref="IConsumerRebalanceListener.OnPartitionsLost"/> fires with them;
-    /// then they are removed from the <see cref="Assignment"/>. A listener derived from
-    /// <see cref="ConsumerRebalanceListenerBase"/> that does not override
-    /// <c>OnPartitionsLost</c> gets <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>
-    /// instead, Java's default.
-    /// </para>
-    /// <para>
-    /// Like <see cref="Rebalance"/> it is <b>synchronous all the way through</b>, and for the
-    /// same reason not a <see cref="Task"/> even on the async mock: it does not return until
-    /// the listener callback has returned, and an exception thrown by the listener surfaces
-    /// here as a <see cref="KafkaException"/>.
-    /// </para>
+    /// The buffered records of the lost partitions are cleared; then, while a listener is registered,
+    /// <c>OnPartitionsLost</c> fires with them on the consumer's drain thread; then they leave the
+    /// <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
+    /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
+    /// <see cref="InvalidOperationException"/>, as Java's <c>IllegalStateException</c>.
     /// </remarks>
     /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
+    /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">
-    /// A partition is not currently assigned (Java's <c>IllegalStateException</c>, with its
-    /// message), or the listener threw.
-    /// </exception>
-    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions) => _native.LosePartitions(partitions);
+    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
+        _native.LosePartitionsWithCallback(partitions);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

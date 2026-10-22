@@ -15,25 +15,16 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A snapshot of the consumer's group membership — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.ConsumerGroupMetadata</c>. Returned by
-/// <c>IConsumerCommon.GroupMetadata()</c>; the fields are owned copies read out of the
-/// owned (Category-3) ABI handle, which is then destroyed (ffi-marshalling.md §B2/§B3).
+/// A snapshot of the consumer's group membership, Java's
+/// <c>org.apache.kafka.clients.consumer.ConsumerGroupMetadata</c>, returned by <c>GroupMetadata()</c>.
 /// </summary>
 /// <remarks>
-/// Broker-free / pre-join, the fields carry their Kafka defaults: on a real
-/// <c>AsyncKafkaConsumer</c> before it has joined a group, <see cref="GroupId"/> is the
-/// configured <c>group.id</c>, <see cref="GenerationId"/> is <c>-1</c>,
-/// <see cref="MemberId"/> is empty, and <see cref="GroupInstanceId"/> is the configured
-/// <c>group.instance.id</c> (or <see langword="null"/>); an <c>AsyncMockConsumer</c> returns
-/// Java's mock sentinels. The values become meaningful membership state once the
-/// consumer joins a group against a broker.
+/// Before the consumer has joined a group, <see cref="GroupId"/> is the configured <c>group.id</c>,
+/// <see cref="GenerationId"/> is <c>-1</c>, <see cref="MemberId"/> is empty, and <see cref="GroupInstanceId"/> is
+/// the configured <c>group.instance.id</c>, or <see langword="null"/>. A mock consumer returns Java's mock values.
 /// </remarks>
 public sealed class ConsumerGroupMetadata
 {
-    /// <summary>
-    /// Initializes a new instance from the values copied out of the ABI handle.
-    /// </summary>
     internal ConsumerGroupMetadata(string groupId, int generationId, string memberId, string? groupInstanceId)
     {
         GroupId = groupId;

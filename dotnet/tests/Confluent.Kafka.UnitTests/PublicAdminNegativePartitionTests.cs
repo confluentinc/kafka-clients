@@ -70,7 +70,8 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task Mock_AlterPartitionReassignments_ANegativeKey_FaultsOnlyItself_AndRoundTripsTheKey()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("neg-apr", 2, 1) }).All().Get(), s_deadline);
 
@@ -99,7 +100,8 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_ListPartitionReassignments_ANegativePartition_FailsTheWholeRequest()
     {
-        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListPartitionReassignmentsResult result =
             admin.ListPartitionReassignments(new[] { new TopicPartition("neg-lpr", -1) });
@@ -113,7 +115,8 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_AlterPartitionReassignments_ANegativePartition_FaultsThatKey()
     {
-        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         TopicPartition negative = new TopicPartition("neg-apr", -1);
 
         AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(

@@ -92,8 +92,9 @@ public sealed class PublicProducerMockFlushInCallbackTests
     private static Observation RunOnMockProducer()
     {
         Observation seen = new Observation();
-        using MockProducer<byte[], byte[]> producer =
+        MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         string topic = Topic("mock-flush-in-callback");
         Recording pending = new Recording(seen);
         Flushing flushing = new Flushing(seen, () =>
@@ -128,8 +129,9 @@ public sealed class PublicProducerMockFlushInCallbackTests
     {
         Observation seen = new Observation();
         TaskCompletionSource<bool> gate = NewGate();
-        await using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         try
         {
             string topic = Topic("async-mock-flush-in-callback");

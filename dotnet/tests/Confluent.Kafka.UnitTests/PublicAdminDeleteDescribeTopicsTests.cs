@@ -48,7 +48,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task TopicId_RoundTripsThroughTheAbiAsBase64_AndComesBackAsTheSameUuid()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-roundtrip";
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }).All().Get(), s_deadline);
@@ -84,7 +85,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task WrongAccessor_ReturnsNull_BothDirections_BothResultTypes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Alpha = "p2a-d8-alpha";
         const string Beta = "p2a-d8-beta";
 
@@ -130,7 +132,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task MixedOutcome_EachKeyCarriesItsOwnResult()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Present = "p2a-mixed-present";
         const string Absent = "p2a-mixed-absent";
 
@@ -177,7 +180,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task DescriptionTree_IsCopiedOut_AndOutlivesTheResultRoot()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-tree";
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 3) }).All().Get(), s_deadline);
@@ -224,7 +228,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task ReportedButEmptySets_AreEmptyCollections_NotNull()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-empty-sets";
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -253,7 +258,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task RepeatedKeys_YieldOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-dedup";
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -280,7 +286,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public void Preconditions_AreRejectedBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // The cast picks the TopicCollection overload: a lone literal null matches the
         // name-collection one too (CS0121) since M15/P13.5 G1-10.
@@ -324,7 +331,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     public void AfterClose_BothRpcsThrowObjectDisposed()
     {
         MockAdminClient admin = new MockAdminClient(1);
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
@@ -341,7 +348,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task NonAsciiTopicName_RoundTripsThroughBothRpcs()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-témas-日本語";
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -369,7 +377,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
         finally
         {
-            mock.Dispose();
+            TestTimeout.Dispose(mock);
         }
 
         IAdmin real = new KafkaAdminClient(
@@ -381,7 +389,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
         finally
         {
-            real.Dispose();
+            TestTimeout.Dispose(real);
         }
     }
 
@@ -434,7 +442,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task G1_10_TheNameCollectionForms_BehaveAsTheTopicCollectionForm()
     {
-        using AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncAdmin admin = mock;
         const string Present = "p135-g110-present";
         const string Absent = "p135-g110-absent";
@@ -516,8 +525,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
         finally
         {
-            mock.Dispose();
-            real.Dispose();
+            TestTimeout.Dispose(mock);
+            TestTimeout.Dispose(real);
         }
     }
 
@@ -562,8 +571,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
         finally
         {
-            mock.Dispose();
-            real.Dispose();
+            TestTimeout.Dispose(mock);
+            TestTimeout.Dispose(real);
         }
     }
 

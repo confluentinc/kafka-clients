@@ -43,7 +43,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task DescribeCluster_ReportsTheMocksNodesControllerAndClusterId()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster();
 
@@ -73,7 +74,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [InlineData(true)]
     public async Task DescribeCluster_TheMocksNodesAreUnfenced_AndRenderIt(bool includeFencedBrokers)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
             new DescribeClusterOptions { IncludeFencedBrokers = includeFencedBrokers });
@@ -101,7 +103,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task DescribeCluster_AuthorizedOperations_AreEmptyNotNull_AgainstTheMock()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
             new DescribeClusterOptions { IncludeAuthorizedOperations = true });
@@ -121,7 +124,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task ListConfigResources_NullOrEmptyFilter_MeansEverySupportedType()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> byDefault =
             await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline);
@@ -147,7 +151,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task ListConfigResources_HonoursTheTypeFilter()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p3-topic", 1, 1) }).All().Get(), s_deadline);
@@ -170,7 +175,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task ListConfigResources_DeduplicatesTheRequestedTypes()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> once = await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.Broker }).All().Get(), s_deadline);
@@ -189,7 +195,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task ListConfigResources_AllReturnsTheSameTaskInstance()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListConfigResourcesResult result = admin.ListConfigResources();
         Assert.Same(result.All().Get(), result.All().Get());
@@ -206,7 +213,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public void NegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.DescribeCluster(new DescribeClusterOptions { TimeoutMs = -1 })));
@@ -239,7 +247,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task TfmSmoke_TheNewRpcsWorkOnThisFramework()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId().Get(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline));
@@ -252,7 +261,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task TheRpcs_AreReachableThroughIAdmin()
     {
-        using IAsyncAdmin admin = new AsyncMockAdminClient();
+        IAsyncAdmin admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId().Get(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline));

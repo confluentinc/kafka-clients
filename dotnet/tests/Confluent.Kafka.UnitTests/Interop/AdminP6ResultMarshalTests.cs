@@ -438,7 +438,8 @@ public sealed class AdminP6ResultMarshalTests
     [Fact]
     public async Task DescribeAclsWalk_BuildsAnOrderedCollection_CopiedOutBeforeTheRootDies()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding[] submitted = { Binding("alpha"), Binding("beta"), Binding("gamma") };
         IntPtr root = SubmitAndCaptureCreateAcls(admin, submitted);
@@ -474,7 +475,8 @@ public sealed class AdminP6ResultMarshalTests
     [Fact]
     public async Task DescribeAclsTopLevelFailure_FaultsTheOneTask()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
             Filter("top-level"),
@@ -690,7 +692,8 @@ public sealed class AdminP6ResultMarshalTests
     [Fact]
     public async Task QuotaTopLevelFailure_FaultsTheOneTask()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             ClientQuotaFilter.All(),

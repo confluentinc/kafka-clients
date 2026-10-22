@@ -78,7 +78,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_FansOutOneFuturePerGroupId()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(new[] { "p5-dclg-a", "p5-dclg-b", "p5-dclg-c" });
@@ -109,7 +110,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_AllFaultsWhenAKeyFails()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
 
@@ -133,7 +135,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_DeduplicatesIdsOrdinally()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(new[] { "p5-cdup", "p5-cdup", "P5-CDUP" });
@@ -153,7 +156,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_AnEmptyRequestCompletesEmpty()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(Array.Empty<string>());
@@ -176,7 +180,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [InlineData(false)]
     public async Task DescribeClassicGroups_AcceptsBothAuthorizedOperationsSettings(bool include)
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(
             new[] { "p5-dclg-flag" },
@@ -197,7 +202,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_IsReachableThroughTheInterface()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         IAsyncAdmin api = admin;
 
         AsyncDescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
@@ -214,7 +220,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_RejectsAMalformedIdList()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
             () => { admin.DescribeClassicGroups(null!); });
@@ -233,7 +240,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         Assert.Null(Record.Exception(
             () =>
@@ -252,7 +260,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     public async Task DescribeClassicGroups_AfterDispose_Throws()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => { admin.DescribeClassicGroups(new[] { "p5-dclg-disposed" }); });

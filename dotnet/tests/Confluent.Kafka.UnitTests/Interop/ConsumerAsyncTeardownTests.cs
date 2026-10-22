@@ -23,16 +23,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Single-owner teardown (ffi-marshalling.md §B7): <c>DisposeAsync</c> closes
-/// asynchronously (<c>close_async</c> joins the bg task) before destroy;
-/// <c>Dispose</c> is the blocking fallback (<c>close → destroy</c>).
-/// Under the not-thread-safe contract the awaiter of an op is its disposer, so
-/// neither path drains a <em>separately-submitted</em> op; the regression these
-/// tests guard is that teardown <b>returns without hanging</b> even with an
-/// (unawaited) op still in flight — an accepted misuse case that may strand the op's
-/// <c>Task</c> + leak its <c>GCHandle</c> once, so the tests must NOT assert the op
-/// <c>Task</c> reaches a terminal state. The atomic closed flag makes double /
-/// concurrent / mixed teardown safe, and use-after-dispose throws.
+/// <see cref="NativeConsumer"/>'s teardown: DisposeAsync and Dispose return with an unawaited operation in flight,
+/// under GC churn too; double, concurrent and mixed teardown is safe, and a call after it throws
+/// <see cref="ObjectDisposedException"/>.
 /// </summary>
 public sealed class ConsumerAsyncTeardownTests
 {
@@ -45,11 +38,6 @@ public sealed class ConsumerAsyncTeardownTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        // Submit and do NOT await: under single-owner, DisposeAsync does NOT drain a
-        // separately-submitted op — it closes gracefully (close_async joins the bg
-        // task) then destroys. The regression is that teardown RETURNS without hanging
-        // even with an unawaited op in flight. The op's own Task is an accepted
-        // strand+leak residual (misuse case), so it is deliberately NOT observed here.
         _ = consumer.SubscribeWithCallback(ProofTopic());
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
@@ -68,11 +56,6 @@ public sealed class ConsumerAsyncTeardownTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        // Submit and do NOT await. Under single-owner the sync Dispose does not drain
-        // a separately-submitted op — it closes gracefully (close) then
-        // destroys. The regression is that Dispose RETURNS without hanging even with
-        // an unawaited op in flight. The op's Task is an accepted strand+leak residual
-        // (misuse case), so it is deliberately NOT observed to a terminal state.
         _ = consumer.SubscribeWithCallback(ProofTopic());
 
         TestTimeout.Run(consumer.Dispose, s_deadline);
@@ -81,13 +64,6 @@ public sealed class ConsumerAsyncTeardownTests
     [Fact]
     public void Dispose_WithOpInFlight_Churned_ReturnsUnderChurn()
     {
-        // Churn create → submit → Dispose under GC pressure. The regression is that
-        // teardown RETURNS without hanging every time (the TestTimeout guard fails
-        // fast on any hang). Aggressive GC + WaitForPendingFinalizers surface a
-        // double-free / use-after-free on the straggler-callback path as a crash
-        // instead of hiding. The unawaited op's Task is the accepted strand+leak
-        // residual (DisposeAsync on the awaiting task avoids it), so it is not
-        // observed here.
         for (int i = 0; i < 100; i++)
         {
             NativeConsumer consumer = NativeConsumer.CreateMock();
@@ -107,8 +83,6 @@ public sealed class ConsumerAsyncTeardownTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
-        // The second call is a no-op (thread-safe closed flag) — no double close /
-        // double destroy / throw.
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
 
@@ -126,8 +100,6 @@ public sealed class ConsumerAsyncTeardownTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        // Many threads race Dispose: exactly one wins TryBeginClose; the rest no-op.
-        // No double destroy, no crash, all return.
         Task[] disposers = Enumerable
             .Range(0, 8)
             .Select(_ => Task.Run(() => consumer.Dispose()))

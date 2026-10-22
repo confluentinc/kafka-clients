@@ -61,7 +61,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_ReportsEverySeededGroup()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-a", "public-lg-b", "public-lg-c");
 
@@ -95,7 +96,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_AllAgreesWithValid_WhenNothingFailed()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-all-1", "public-lg-all-2");
 
@@ -117,7 +119,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_WithNoGroups_YieldsTwoEmptyCollections()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListGroupsResult result = admin.ListGroups();
 
@@ -133,7 +136,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_IsReachableThroughTheInterface()
     {
-        using AsyncMockAdminClient mock = new AsyncMockAdminClient();
+        AsyncMockAdminClient mock = new AsyncMockAdminClient();
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncAdmin admin = mock;
 
         await SeedGroups(mock, "public-lg-iface");
@@ -152,7 +156,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_NoFilter_IsTheSameCallHoweverItIsSpelled()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-nofilter");
 
@@ -180,7 +185,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_AFullyFilteredCall_CompletesNormally()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-filtered");
 
@@ -202,7 +208,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_JavasFilterFactories_AreCallableEndToEnd()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-factory");
 
@@ -225,7 +232,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public void ListGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 })));
     }
@@ -238,7 +246,8 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public void ListGroups_AnUndefinedEnumValue_ThrowsRightAway()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentOutOfRangeException state = Assert.Throws<ArgumentOutOfRangeException>(
             () => admin.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }));
@@ -259,7 +268,7 @@ public sealed class PublicAdminListGroupsTests
     public void ListGroups_AfterDispose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ListGroups());
     }

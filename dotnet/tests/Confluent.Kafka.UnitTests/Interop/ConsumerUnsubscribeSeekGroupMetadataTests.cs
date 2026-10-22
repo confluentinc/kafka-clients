@@ -23,11 +23,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The M4/P4a <c>NativeConsumer</c> edits driven through the internal surface: the new
-/// <c>UnsubscribeWithCallback</c> void wire (<c>Consumer_unsubscribe_async</c>), the sync
-/// <c>Seek</c> negative-<b>offset</b> precondition (Java-fidelity, Q1; M5/P7 made Seek sync),
-/// and <c>GroupMetadata()</c> (the full four-field owned-handle read). Every awaited op
-/// runs under a <see cref="TestTimeout"/> hang guard.
+/// The internal <c>NativeConsumer</c>'s <c>UnsubscribeWithCallback</c>, its <c>Seek</c> preconditions,
+/// <c>GroupMetadata()</c> on the real and mock consumers, and <c>CloseWithCallback</c>.
 /// </summary>
 public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 {
@@ -52,12 +49,11 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         return config;
     }
 
-    // ---- UnsubscribeWithCallback (the one new void wire) ----
-
     [Fact]
     public async Task UnsubscribeWithCallback_OnMock_Completes()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await consumer.SubscribeWithCallback(ProofTopic());
         await TestTimeout.Run(() => consumer.UnsubscribeWithCallback(), s_deadline);
@@ -66,8 +62,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public async Task UnsubscribeWithCallback_WithoutSubscribe_Completes()
     {
-        // Unsubscribing when not subscribed is a no-op that still resolves the Task.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await TestTimeout.Run(() => consumer.UnsubscribeWithCallback(), s_deadline);
     }
@@ -75,10 +71,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public async Task UnsubscribeWithCallback_Churned_NoLeakOrHang()
     {
-        // Churn subscribe → unsubscribe: the void bridge (batch _destroy is N/A here,
-        // but the per-op GCHandle) must be freed exactly once per op. A leak / double
-        // free would corrupt the allocator over many iterations.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         for (int i = 0; i < 100; i++)
         {
@@ -91,22 +85,20 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     public async Task UnsubscribeWithCallback_AfterDispose_ThrowsObjectDisposed()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeWithCallback());
     }
 
-    // ---- Seek (sync, M5/P7) negative-offset precondition (Java-fidelity, DoD §3 message) ----
-
     [Fact]
     public void Seek_NegativeOffset_ThrowsWithExactJavaMessage()
     {
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek("proof-topic", 0, offset: -1));
 
-        // The exact Java message is part of the behavioral contract (DoD §3), kept under Q1.
         Assert.Equal("offset", ex.ParamName);
         Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
     }
@@ -114,12 +106,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
     {
-        // Preconditions are validated BEFORE the FFI call (ffi §B5). Even a closed
-        // consumer throws the offset precondition (ArgumentOutOfRangeException), not
-        // ObjectDisposedException — the argument check precedes ThrowIfClosed inside
-        // the sync Seek (Q1).
         NativeConsumer consumer = NativeConsumer.CreateMock();
-        await consumer.DisposeAsync();
+        await TestTimeout.DisposeAsync(consumer);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek("proof-topic", 0, offset: -5));
@@ -129,25 +117,19 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public void Seek_NegativePartition_ThrowsArgumentOutOfRange()
     {
-        // The partition precondition is carried unchanged from M3/P1.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek("proof-topic", partition: -1, offset: 0));
         Assert.Equal("partition", ex.ParamName);
     }
 
-    // ---- GroupMetadata() full-field read (M2/P1 D5 + PLAN dec. 5) ----
-
     [Fact]
     public void GroupMetadata_RealConsumer_PreJoin_ReturnsConfiguredGroupIdAndDefaults()
     {
-        // A real KIP-848 consumer stubs group_metadata from the configured group.id
-        // before join (M2/P1 D5). The reachable broker-free field is GroupId (the
-        // configured value); generation_id = -1 and member_id = "" are the documented
-        // pre-join defaults (UNKNOWN_GENERATION_ID / UNKNOWN_MEMBER_ID in the core);
-        // group.instance.id is unset here → GroupInstanceId is null.
-        using NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("proof-group"));
+        NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("proof-group"));
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -160,8 +142,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public void GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips()
     {
-        // The M2/P1 D5 non-ASCII group.id round-trip, carried to the full-field read.
-        using NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("grüße-café-Ω-日本語-😀"));
+        NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("grüße-café-Ω-日本語-😀"));
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -171,15 +153,9 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public void GroupMetadata_RealConsumer_WithGroupInstanceId_IsTheConfiguredValuePreJoin()
     {
-        // SOURCE-VERIFIED broker-free behavior (M2/P1 D5 precedent): a consumer with a
-        // group.id seeds its group metadata at construction with the configured
-        // group.instance.id (initialize_group_metadata, async_kafka_consumer.rs:1483;
-        // Java AsyncKafkaConsumer.initializeGroupMetadata), so it reads back before any
-        // join, against no broker. Before master #197 the pre-join value was a stub with
-        // group_instance_id = None; this test asserted that null until then. The generation
-        // and member id keep their pre-join defaults until the first heartbeat.
-        using NativeConsumer consumer = NativeConsumer.Create(
+        NativeConsumer consumer = NativeConsumer.Create(
             RealConsumerConfig("static-group", groupInstanceId: "instance-7"));
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -190,10 +166,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public void GroupMetadata_MockConsumer_ReturnsMockSentinels()
     {
-        // The MockConsumer returns Java-parity hard-coded sentinels
-        // (ConsumerGroupMetadata::with_details("dummy.group.id", 1, "1", None)) — it
-        // ignores config. Asserts the full-field marshal off those deterministic values.
-        using NativeConsumer consumer = NativeConsumer.CreateMock();
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -207,12 +181,10 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     public void GroupMetadata_AfterDispose_ThrowsObjectDisposed()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
     }
-
-    // ---- CloseWithCallback() wiring (PLAN decision 6: latch → close → destroy, surface error) ----
 
     [Fact]
     public async Task CloseWithCallback_OnMock_ReturnsWithoutHang()
@@ -225,13 +197,11 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     [Fact]
     public async Task CloseWithCallback_ThenDisposeAsync_IsIdempotent()
     {
-        // CloseWithCallback takes the one-shot latch and destroys; a subsequent DisposeAsync
-        // loses the latch and no-ops (no double-destroy).
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
         await consumer.CloseWithCallback();
-        await consumer.DisposeAsync();
-        consumer.Dispose();
+        await TestTimeout.DisposeAsync(consumer);
+        TestTimeout.Dispose(consumer);
     }
 
     [Fact]

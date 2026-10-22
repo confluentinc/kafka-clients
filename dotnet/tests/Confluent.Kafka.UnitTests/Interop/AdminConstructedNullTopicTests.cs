@@ -46,7 +46,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void DeleteRecords_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncDeleteRecordsResult.From(admin.DeleteRecords(
@@ -67,7 +68,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void AlterPartitionReassignments_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
@@ -86,7 +88,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void AlterConsumerGroupOffsets_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
@@ -105,7 +108,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void DeleteConsumerGroupOffsets_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
@@ -125,7 +129,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void AbortTransaction_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncAbortTransactionResult.From(admin.AbortTransaction(
@@ -144,7 +149,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void ListOffsets_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncListOffsetsResult.From(admin.ListOffsets(
@@ -165,7 +171,8 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void ListConsumerGroupOffsets_RejectsANullTopic(bool constructed)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
@@ -191,7 +198,8 @@ public sealed class AdminConstructedNullTopicTests
     public void DistinctPartitions_ElectLeaders_ListReassignments_DescribeProducers_RejectANullTopic(bool constructed)
     {
         const string Message = "The partitions must not contain a topic partition with a null topic.";
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         bool submitted = false;
         TopicPartition[] partitions = { NullTopic(constructed) };
 

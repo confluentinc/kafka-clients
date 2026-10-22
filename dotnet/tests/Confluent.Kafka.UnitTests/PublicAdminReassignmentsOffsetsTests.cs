@@ -72,7 +72,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_ForTimestampAtTheEarliestSentinel_DiffersFromEarliest()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-collide", 2, 1) }).All().Get(), s_deadline);
 
@@ -117,7 +118,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [InlineData("earliestPendingUpload")]
     public async Task ListOffsets_EverySentinelKindIsAccepted(string kind)
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-kinds", 1, 1) }).All().Get(), s_deadline);
 
@@ -154,7 +156,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_FaultsOnlyTheFailingPartition()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-granular", 2, 1) }).All().Get(), s_deadline);
 
@@ -182,7 +185,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_PartitionResultThrowsForAnUnrequestedPartition()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-unrequested", 1, 1) }).All().Get(), s_deadline);
 
@@ -219,7 +223,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_ReturnsTheReassignmentJustCreated()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-lpr", 1, 2) }).All().Get(), s_deadline);
 
@@ -257,7 +262,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_AQuietPartitionIsAbsentNotFaulted()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p4s2-quiet", 2, 1) }).All().Get(), s_deadline);
 
@@ -282,7 +288,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_AcceptsNullAndEmptySelections()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         Assert.Empty(await TestTimeout.Run(
             () => admin.ListPartitionReassignments(partitions: null).Reassignments().Get(), s_deadline));
@@ -297,7 +304,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignmentsResult_ReturnsTheSameTaskInstance()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         AsyncListPartitionReassignmentsResult result = admin.ListPartitionReassignments();
 
         Assert.Same(result.Reassignments().Get(), result.Reassignments().Get());
@@ -311,7 +319,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task BothRpcs_ThrowObjectDisposedAfterClose_AndAreReachableThroughTheInterface()
     {
-        await using (AsyncMockAdminClient live = new AsyncMockAdminClient(1))
+        AsyncMockAdminClient live = new AsyncMockAdminClient(1);
+        await using (TestTimeout.AsyncDisposal(live))
         {
             IAsyncAdmin admin = live;
             await TestTimeout.Run(() => admin.ListPartitionReassignments().Reassignments().Get(), s_deadline);
@@ -320,7 +329,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         }
 
         AsyncMockAdminClient closed = new AsyncMockAdminClient(1);
-        closed.Dispose();
+        TestTimeout.Dispose(closed);
 
         Assert.Throws<ObjectDisposedException>(() => closed.ListPartitionReassignments());
         Assert.Throws<ObjectDisposedException>(
@@ -378,7 +387,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task G3_7_TheZeroArgAndOptionsOnlyForms_ListEveryReassignment()
     {
-        await using AsyncMockAdminClient mock = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient mock = new AsyncMockAdminClient(3);
+        await using IAsyncDisposable mockDisposal = TestTimeout.AsyncDisposal(mock);
         IAsyncAdmin admin = mock;
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("p135-g37", 1, 2) }).All().Get(), s_deadline);
@@ -426,8 +436,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
     {
-        using AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
+        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+        using IDisposable realDisposal = TestTimeout.Disposal(real);
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
 
         KafkaException explicitNull = await TestTimeout.Run(

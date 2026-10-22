@@ -64,7 +64,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_SurfacesTheMocksDocumentedRefusal()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         MemberToRemove member = new MemberToRemove("instance-1");
         RemoveMembersFromConsumerGroupOptions options =
@@ -98,7 +99,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_RemoveAllMode_SurfacesTheMocksDocumentedRefusal()
     {
-        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
 
@@ -118,7 +120,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     public async Task RemoveMembersFromConsumerGroup_ThrowsAfterDispose()
     {
         AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-        await admin.DisposeAsync();
+        await TestTimeout.DisposeAsync(admin);
 
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
 
@@ -130,7 +132,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void RemoveMembersFromConsumerGroup_NullGroupId_ThrowsArgumentNullException()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
 
         Assert.Throws<ArgumentNullException>(() => admin.RemoveMembersFromConsumerGroup(null!, options));
@@ -143,7 +146,8 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void RemoveMembersFromConsumerGroup_NullOptions_ThrowsArgumentNullException()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = new MockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.RemoveMembersFromConsumerGroup("p5-group", null!));
     }

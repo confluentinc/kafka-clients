@@ -191,7 +191,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
     [Fact]
     public void AlterReplicaLogDirs_ANullLogDirectory_IsRejectedBeforeTheCall()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
             () => AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
@@ -227,7 +228,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
     [Fact]
     public void NullInputs_AreRejectedWithTheirParameterNames()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "brokers",
@@ -258,7 +260,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
     private static Captured CaptureDescribeLogDirs(DescribeLogDirsOptions? options, params int[] brokers)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(brokers, options, AdminFlavour.Async, captured.RecordDescribeLogDirs));
@@ -277,7 +280,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
         AlterReplicaLogDirsOptions? options,
         params (TopicPartitionReplica Replica, string LogDir)[] moves)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Dictionary<TopicPartitionReplica, string> assignment = new Dictionary<TopicPartitionReplica, string>();
         foreach ((TopicPartitionReplica replica, string logDir) in moves)
@@ -305,7 +309,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
     private static Captured CaptureDescribeReplicas(
         DescribeReplicaLogDirsOptions? options, params TopicPartitionReplica[] replicas)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncDescribeReplicaLogDirsResult result =

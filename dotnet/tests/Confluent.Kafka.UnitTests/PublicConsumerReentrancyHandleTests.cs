@@ -14,7 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
@@ -25,205 +27,129 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The M9/P8 <see cref="ConsumerHandle"/> surface through the <b>public</b> API, broker-free:
-/// <see cref="IConsumerCommon.Handle"/> on all four consumer types, the handle's own method
-/// set, its disposal contract, and the two properties the type exists for — that it
-/// <b>bypasses the access guard</b> that makes the consumer's own API unusable from inside a
-/// callback, and that it <b>keeps its consumer alive</b> rather than dangling a pointer at it.
+/// <see cref="ConsumerHandle"/> through the public API, broker-free: <see cref="IConsumerCommon.Handle"/> on the four
+/// consumers, the handle's operations inside and outside a callback, on a mock, after its own <c>Dispose</c> and
+/// after its consumer's destroy.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>The mock's ceiling is a core contract, not a limitation being worked around.</b> On a
-/// <c>MockConsumer</c>-derived handle <c>wakeup</c> and the three sync getters work (the
-/// getters return <b>empty</b>) while every async operation fails with
-/// <c>UnsupportedVersionError</c> — "the mock has no event pipeline … This is core behavior,
-/// not an FFI limitation" (<c>rust/src/ffi/consumer_handle.rs:82-86</c>). Asserting it is coverage.
-/// </para>
-/// <para>
-/// <b><c>consumer-threading.md</c> §31 test #1 is satisfied in two parts.</b> The
-/// <b>mechanism proof</b> ships here, as
-/// <see cref="ReentrancyHandle_SucceedsInsideAListener_WhereTheConsumersOwnApiIsRejected"/>.
-/// The commit-specific <b>end-to-end</b> half needs a real broker and is tracked as follow-up
-/// O3 (roadmap §5.10) — a scoped split with both halves owned, not a deferral.
-/// </para>
-/// </remarks>
 public sealed class PublicConsumerReentrancyHandleTests
 {
     private const string Topic = "reentrancy-handle-topic";
 
-    // A non-ASCII topic that exercises the UTF-8 boundary in both directions (ffi §B3):
-    // an umlaut, an accent, and a Greek capital omega.
     private const string NonAsciiTopic = "grüße-café-Ω-topic";
 
-    // kafka_common_Error code for UnsupportedVersion, measured against the shipped core.
     private const int UnsupportedVersionCode = 35;
 
-    // The core's verbatim message for an async op on a mock-derived handle. Asserted in full
-    // (DoD §3) — the code alone would not distinguish this from any other UnsupportedVersion.
+    private const int WakeupCode = -18;
+
     private const string MockAsyncUnsupportedMessage =
         "ConsumerHandle async operations are not supported on a MockConsumer handle; " +
         "drive the MockConsumer directly.";
 
+    private const string Concurrent = "KafkaConsumer is not safe for multi-threaded access.";
+
+    private const string OutsideACallback =
+        "KafkaConsumer is not safe for multi-threaded access. ConsumerHandle operations are allowed only from inside "
+        + "a callback the consumer is running (ConsumerRebalanceListener, OffsetCommitCallback); from another thread "
+        + "call wakeup().";
+
+    private const string ConsumerDestroyed = "consumer destroyed";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+    private static readonly TopicPartition s_tp0 = new TopicPartition(Topic, 0);
 
-    private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+    private static readonly TopicPartition s_tp1 = new TopicPartition(Topic, 1);
 
-    // A real consumer constructs broker-free (unlike the producer, which rejects an empty
-    // bootstrap list); only operations that need the broker would block, and none used here does.
-    private static Dictionary<string, string> RealConfig(string groupId) => new()
-    {
-        ["bootstrap.servers"] = "localhost:9092",
-        ["group.protocol"] = "consumer",
-        ["group.id"] = groupId,
-    };
-
-    // ---- Test 6 · consumer-threading.md §31 test #1, the mechanism half ----
-
-    /// <summary>
-    /// The property the whole type exists for: from inside a rebalance listener,
-    /// <see cref="ConsumerHandle.Assignment"/> <b>succeeds</b> while the same listener's
-    /// <c>consumer.Assignment()</c> is <b>rejected</b> as concurrent access.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// No broker, no threads, no sleeps. <c>MockConsumer_rebalance</c> acquires the core's
-    /// single-owner access guard and holds it across the listener invocation
-    /// (<c>rust/src/ffi/consumer.rs:1400-1417</c> — <c>acquire(h)</c> then a <c>ReleaseGuard</c>
-    /// spanning <c>block_on(mock.rebalance(..))</c>). So inside the callback:
-    /// <c>kafka_consumer_Consumer_assignment</c> takes the guard, fails to acquire it, and
-    /// returns <b>null</b>, which the binding maps to <see cref="InvalidOperationException"/>;
-    /// <c>kafka_consumer_ConsumerHandle_assignment</c> takes no guard at all and is documented
-    /// <b>non-null</b>.
-    /// </para>
-    /// <para>
-    /// The consumer's rejection is <b>captured, not thrown</b>, so the rebalance still
-    /// completes — a listener that throws would have its exception converted into a
-    /// <c>Error*</c> and propagated out of <c>Rebalance</c>, which would tell us nothing
-    /// about the handle.
-    /// </para>
-    /// <para>
-    /// <b>Mutation-checked, and here is the mechanism it actually fails by</b> — worth
-    /// stating precisely, because the next person reasoning about non-vacuity will trust
-    /// it. Swapping the handle call for a second <c>consumer.Assignment()</c> makes the
-    /// listener throw (that call is deliberately <em>outside</em> the <c>try</c>), the
-    /// trampoline converts the throw into an <c>Error*</c>, and the test dies at the
-    /// <c>Rebalance</c> call with <c>KafkaException : KafkaConsumer is not safe for
-    /// multi-threaded access</c> — the assertions below are never reached. Detection is
-    /// genuine (this test is the sole detector), but it is <b>not</b> "viaHandle stays
-    /// null". A hypothetical both-succeed regression fails it by the other route, at the
-    /// <see cref="InvalidOperationException"/> assertion, which <em>is</em> reached.
-    /// </para>
-    /// </remarks>
     [Fact]
-    public void ReentrancyHandle_SucceedsInsideAListener_WhereTheConsumersOwnApiIsRejected()
+    public void InsideAListener_TheConsumersAssignment_RoutesToTheHandle_WhileItsSubscriptionIsRejected()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
         IReadOnlyCollection<TopicPartition>? viaHandle = null;
-        Exception? viaConsumer = null;
+        IReadOnlyCollection<TopicPartition>? viaConsumer = null;
+        Exception? subscription = null;
 
         ProbingListener listener = new ProbingListener(() =>
         {
-            // No guard -> succeeds, even though the rebalance is holding it.
             viaHandle = handle.Assignment();
-
-            // Guard-protected -> rejected. Captured so the rebalance completes normally.
+            viaConsumer = consumer.Assignment();
             try
             {
-                consumer.Assignment();
+                consumer.Subscription();
             }
             catch (Exception e)
             {
-                viaConsumer = e;
+                subscription = e;
             }
         });
 
         consumer.Subscribe(new[] { Topic }, listener);
-        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+        consumer.Rebalance(new[] { s_tp0 });
 
         Assert.True(listener.Fired, "the listener never ran, so neither call was exercised");
-
-        // The handle call SUCCEEDED (non-null), and is empty because the handle is
-        // mock-derived — "Always empty on a MockConsumer-derived handle (core behavior)".
-        Assert.NotNull(viaHandle);
-        Assert.Empty(viaHandle!);
-
-        // The consumer's own call was REJECTED as concurrent access. The message is
-        // asserted, not just the type (DoD §3): it is what proves this is the *guard*
-        // rejection rather than some unrelated InvalidOperationException.
-        InvalidOperationException rejected = Assert.IsType<InvalidOperationException>(viaConsumer);
-        Assert.Contains("not safe for multi-threaded access", rejected.Message, StringComparison.Ordinal);
+        Assert.Equal(new[] { s_tp0 }, viaHandle);
+        Assert.Equal(new[] { s_tp0 }, viaConsumer);
+        InvalidOperationException rejected = Assert.IsType<InvalidOperationException>(subscription);
+        Assert.Equal(Concurrent, rejected.Message);
     }
 
-    /// <summary>
-    /// The same guard asymmetry, stated as a plain fact about the two getters outside any
-    /// callback: with no operation in flight <b>both</b> succeed. This is the control for the
-    /// test above — without it, "the consumer's getter threw" could be read as the getter
-    /// simply being broken rather than being guard-rejected.
-    /// </summary>
     [Fact]
     public void OutsideACallback_BothTheHandleAndTheConsumerGettersSucceed()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
         Assert.Empty(handle.Assignment());
         Assert.Empty(consumer.Assignment());
     }
 
-    /// <summary>
-    /// <see cref="IConsumerCommon.Handle"/> itself never fails for concurrency —
-    /// <c>Consumer_handle</c> does not acquire the guard — so it is callable from inside a
-    /// listener too, not only up front.
-    /// </summary>
     [Fact]
     public void Handle_IsObtainable_FromInsideAListener_WhileTheGuardIsHeld()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerHandle? obtainedInCallback = null;
         ProbingListener listener = new ProbingListener(() => obtainedInCallback = consumer.Handle());
 
         consumer.Subscribe(new[] { Topic }, listener);
-        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+        consumer.Rebalance(new[] { s_tp0 });
 
         Assert.NotNull(obtainedInCallback);
         using (obtainedInCallback)
         {
-            Assert.Empty(obtainedInCallback!.Assignment());
+            Assert.Equal(new[] { s_tp0 }, obtainedInCallback!.Assignment());
         }
     }
-
-    // ---- Test 1/P8-D3 · Handle() on all four consumer types, through the interface ----
 
     [Fact]
     public void SyncMock_Handle_IsReachableThroughIConsumer()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = HandleOf(consumer);
 
-        Assert.Empty(handle.Subscription());
+        Assert.Empty(handle.Assignment());
     }
 
     [Fact]
     public void AsyncMock_Handle_IsReachableThroughIAsyncConsumer()
     {
-        using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = HandleOf(consumer);
 
-        Assert.Empty(handle.Subscription());
+        Assert.Empty(handle.Assignment());
     }
 
     [Fact]
     public void SyncKafkaConsumer_Handle_IsReachableThroughIConsumer()
     {
-        using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(RealConfig("p8-sync-handle"), Serdes.ByteArray, Serdes.ByteArray);
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("p8-sync-handle");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = HandleOf(consumer);
 
         Assert.Empty(handle.Assignment());
@@ -233,26 +159,25 @@ public sealed class PublicConsumerReentrancyHandleTests
     public async Task AsyncKafkaConsumer_Handle_IsReachableThroughIAsyncConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("p8-async-handle"), Serdes.ByteArray, Serdes.ByteArray);
-        await using (consumer)
+            new AsyncKafkaConsumer<byte[], byte[]>(Config("p8-async-handle"), Serdes.ByteArray, Serdes.ByteArray);
+        await using (TestTimeout.AsyncDisposal(consumer))
         {
             using ConsumerHandle handle = HandleOf(consumer);
             Assert.Empty(handle.Assignment());
         }
     }
 
-    /// <summary>Each call returns an independent handle; destroying one does not affect another.</summary>
     [Fact]
     public void Handles_AreIndependent_DisposingOneLeavesTheOtherUsable()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerHandle first = consumer.Handle();
         using ConsumerHandle second = consumer.Handle();
 
         Assert.NotSame(first, second);
         first.Dispose();
 
-        // "Destroying a handle never affects the owning consumer or any other handle."
         Assert.Empty(second.Assignment());
         Assert.Empty(consumer.Assignment());
     }
@@ -261,98 +186,83 @@ public sealed class PublicConsumerReentrancyHandleTests
     public void Handle_AfterConsumerDispose_ThrowsObjectDisposed()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Handle());
     }
 
-    // ---- Test 3 · wakeup + the three sync getters work on a mock, and return EMPTY ----
-
     [Fact]
-    public void MockDerivedHandle_WakeupAndTheThreeGetters_Work_AndTheGettersAreEmptyNotNull()
+    public void MockDerivedHandle_WakeupAndTheTwoGetters_Work()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
-        // Neither blocks nor takes the guard; a no-op here, but it must not throw.
         handle.Wakeup();
 
-        IReadOnlyCollection<TopicPartition> assignment = handle.Assignment();
-        IReadOnlyCollection<string> subscription = handle.Subscription();
-        IReadOnlyCollection<TopicPartition> paused = handle.Paused();
-
-        // Non-null is the contract ("Returns … a non-null …"); empty is the mock behavior.
-        Assert.NotNull(assignment);
-        Assert.NotNull(subscription);
-        Assert.NotNull(paused);
-        Assert.Empty(assignment);
-        Assert.Empty(subscription);
-        Assert.Empty(paused);
+        Assert.Empty(handle.Assignment());
+        Assert.Empty(handle.Paused());
     }
 
-    /// <summary>
-    /// The getters stay empty on a mock even after the consumer genuinely has a subscription —
-    /// pinning that "always empty" is the documented core behavior rather than an artifact of
-    /// an untouched consumer.
-    /// </summary>
     [Fact]
-    public void MockDerivedHandle_GettersStayEmpty_EvenWithALiveSubscription()
+    public void MockDerivedHandle_TheGetters_ReadTheMocksState()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
-        consumer.Subscribe(new[] { Topic });
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { s_tp0, s_tp1 });
+        consumer.Pause(new[] { s_tp1 });
         using ConsumerHandle handle = consumer.Handle();
 
-        // The consumer itself sees the subscription…
-        Assert.Equal(new[] { Topic }, consumer.Subscription());
-
-        // …while the mock-derived handle is always empty (core behavior).
-        Assert.Empty(handle.Subscription());
+        Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition));
+        Assert.Equal(new[] { s_tp1 }, handle.Paused());
     }
 
-    // ---- Test 4 · every async op on a mock handle: UnsupportedVersion + the exact message ----
+    [Fact]
+    public void MockDerivedHandle_Wakeup_IsRaisedByTheNextPoll()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { s_tp0 });
+        consumer.Seek(s_tp0, 0);
+        using ConsumerHandle handle = consumer.Handle();
+
+        handle.Wakeup();
+
+        KafkaException woken = Assert.Throws<KafkaException>(() => consumer.Poll(TimeSpan.Zero));
+        Assert.Equal(WakeupCode, woken.Code);
+        Assert.Empty(consumer.Poll(TimeSpan.Zero));
+    }
 
     public static TheoryData<string, Action<ConsumerHandle>> MockUnsupportedOperations()
     {
-        TopicPartition tp = new TopicPartition(Topic, 0);
-        IReadOnlyCollection<TopicPartition> one = new[] { tp };
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets =
-            new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(7, "m", null) };
-        IReadOnlyDictionary<TopicPartition, long> timestamps =
-            new Dictionary<TopicPartition, long> { [tp] = 1 };
+        IReadOnlyCollection<TopicPartition> one = new[] { s_tp0 };
+        IReadOnlyDictionary<TopicPartition, long> timestamps = new Dictionary<TopicPartition, long> { [s_tp0] = 1 };
 
         return new TheoryData<string, Action<ConsumerHandle>>
         {
-            { "Assign", h => h.Assign(one) },
             { "Pause", h => h.Pause(one) },
             { "Resume", h => h.Resume(one) },
             { "SeekToBeginning", h => h.SeekToBeginning(one) },
             { "SeekToEnd", h => h.SeekToEnd(one) },
-            { "Seek", h => h.Seek(tp, 5) },
-            { "Seek(OffsetAndMetadata)", h => h.Seek(tp, new OffsetAndMetadata(5, "m", null)) },
-            { "Position", h => h.Position(tp) },
-            { "Position(TimeSpan)", h => h.Position(tp, TimeSpan.FromSeconds(1)) },
+            { "Seek", h => h.Seek(s_tp0, 5) },
+            { "Seek(OffsetAndMetadata)", h => h.Seek(s_tp0, new OffsetAndMetadata(5, "m", null)) },
+            { "Position", h => h.Position(s_tp0) },
+            { "Position(TimeSpan)", h => h.Position(s_tp0, TimeSpan.FromSeconds(1)) },
             { "Committed", h => h.Committed(one) },
             { "BeginningOffsets", h => h.BeginningOffsets(one) },
             { "EndOffsets", h => h.EndOffsets(one) },
             { "OffsetsForTimes", h => h.OffsetsForTimes(timestamps) },
-            { "Commit", h => h.Commit() },
-            { "Commit(offsets)", h => h.Commit(offsets) },
-            { "CommitAsync", h => h.CommitAsync() },
-            { "CommitAsync(offsets)", h => h.CommitAsync(offsets) },
         };
     }
 
-    /// <summary>
-    /// Every async operation on a mock-derived handle fails with the documented
-    /// <c>UnsupportedVersion</c> code <b>and the exact core message</b> (DoD §3). This is
-    /// documented core behavior asserted, not a limitation worked around.
-    /// </summary>
     [Theory]
     [MemberData(nameof(MockUnsupportedOperations))]
-    public void MockDerivedHandle_EveryAsyncOperation_ThrowsUnsupportedVersion(
+    public void MockDerivedHandle_EveryUnwiredOperation_ThrowsUnsupportedVersion(
         string name, Action<ConsumerHandle> operation)
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { s_tp0 });
         using ConsumerHandle handle = consumer.Handle();
 
         KafkaException failure = Assert.Throws<KafkaException>(() => operation(handle));
@@ -362,239 +272,257 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.False(failure.IsRetriable, name);
     }
 
-    // ---- Test 2 · disposal: idempotent, and use-after-dispose throws ----
+    [Fact]
+    public void MockDerivedHandle_TheCommits_CommitIntoTheMock()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { s_tp0 });
+        using ConsumerHandle handle = consumer.Handle();
+        List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> seen =
+            new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
+        IOffsetCommitCallback recording = new DelegateCallback((o, e) => seen.Add((o, e)));
+
+        handle.Commit(Offsets(3));
+        Assert.Equal(3, CommittedOffset(consumer));
+
+        handle.CommitAsync(Offsets(4));
+        Assert.Equal(4, CommittedOffset(consumer));
+
+        handle.CommitAsync(Offsets(5), callback: null);
+        Assert.Equal(5, CommittedOffset(consumer));
+
+        handle.CommitAsync(Offsets(6), recording);
+        Assert.Equal(6, CommittedOffset(consumer));
+        (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? delivered, Exception? exception) = Assert.Single(seen);
+        Assert.Equal(6, Assert.Single(delivered!).Value.Offset);
+        Assert.Null(exception);
+
+        consumer.Seek(s_tp0, 7);
+        handle.Commit();
+        Assert.Equal(7, CommittedOffset(consumer));
+
+        consumer.Seek(s_tp0, 8);
+        handle.CommitAsync();
+        Assert.Equal(8, CommittedOffset(consumer));
+
+        consumer.Seek(s_tp0, 9);
+        handle.CommitAsync(recording);
+        Assert.Equal(9, CommittedOffset(consumer));
+        Assert.Equal(2, seen.Count);
+        Assert.Equal(9, Assert.Single(seen[1].Offsets!).Value.Offset);
+        Assert.Null(seen[1].Exception);
+
+        Assert.Equal((long?)0, handle.CurrentLag(s_tp0));
+    }
 
     [Fact]
     public void Dispose_IsIdempotent()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerHandle handle = consumer.Handle();
 
         handle.Dispose();
         handle.Dispose();
         handle.Dispose();
 
-        // The consumer is untouched by any of it.
         Assert.Empty(consumer.Assignment());
+    }
+
+    public static TheoryData<string, Action<ConsumerHandle>> GatedOperations()
+    {
+        TheoryData<string, Action<ConsumerHandle>> data = MockUnsupportedOperations();
+        data.Add("CurrentLag", h => h.CurrentLag(s_tp0));
+        data.Add("Commit", h => h.Commit());
+        data.Add("Commit(offsets)", h => h.Commit(Offsets(7)));
+        data.Add("CommitAsync", h => h.CommitAsync());
+        data.Add("CommitAsync(callback)", h => h.CommitAsync(new DelegateCallback((_, _) => { })));
+        data.Add("CommitAsync(offsets)", h => h.CommitAsync(Offsets(7)));
+        data.Add("CommitAsync(offsets, callback)", h => h.CommitAsync(Offsets(7), new DelegateCallback((_, _) => { })));
+        return data;
     }
 
     public static TheoryData<string, Action<ConsumerHandle>> AllOperations()
     {
-        TheoryData<string, Action<ConsumerHandle>> data = MockUnsupportedOperations();
+        TheoryData<string, Action<ConsumerHandle>> data = GatedOperations();
         data.Add("Wakeup", h => h.Wakeup());
         data.Add("Assignment", h => h.Assignment());
-        data.Add("Subscription", h => h.Subscription());
         data.Add("Paused", h => h.Paused());
         return data;
     }
 
-    /// <summary>
-    /// <b>Every</b> member throws <see cref="ObjectDisposedException"/> after
-    /// <see cref="ConsumerHandle.Dispose"/> — including the four that succeed on a live
-    /// mock-derived handle, which a spot-check of the throwing ones would miss.
-    /// </summary>
     [Theory]
     [MemberData(nameof(AllOperations))]
     public void EveryOperation_AfterDispose_ThrowsObjectDisposed(string name, Action<ConsumerHandle> operation)
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerHandle handle = consumer.Handle();
         handle.Dispose();
 
         ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => operation(handle));
-        Assert.Contains(nameof(ConsumerHandle), failure.Message, StringComparison.Ordinal);
         Assert.Equal(nameof(ConsumerHandle), failure.ObjectName);
         Assert.NotNull(name);
     }
 
-    /// <summary>
-    /// The one precondition validated in managed code before anything native (ffi §B5) — the
-    /// <see cref="TimeSpan"/> overload's negative-timeout guard. Asserts the parameter name
-    /// and the custom message, not merely the exception type.
-    /// </summary>
-    [Fact]
-    public void Position_WithNegativeTimeout_ThrowsArgumentOutOfRange()
+    [Theory]
+    [MemberData(nameof(GatedOperations))]
+    public void EveryBlockingOperation_AfterTheConsumersDestroy_ThrowsInvalidOperation(
+        string name, Action<ConsumerHandle> operation)
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        consumer.Assign(new[] { s_tp0 });
         using ConsumerHandle handle = consumer.Handle();
+        TestTimeout.Dispose(consumer);
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => handle.Position(new TopicPartition(Topic, 0), TimeSpan.FromMilliseconds(-1)));
-
-        Assert.Equal("timeout", failure.ParamName);
-        Assert.Contains("Timeout must not be negative.", failure.Message, StringComparison.Ordinal);
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(() => operation(handle));
+        Assert.Equal(ConsumerDestroyed, failure.Message);
+        Assert.NotNull(name);
     }
 
     [Fact]
-    public void Assign_WithNullPartitions_ThrowsArgumentNull()
+    public void KafkaConsumerHandle_AfterTheConsumersDestroy_ThrowsInvalidOperation()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-after-destroy");
+        using ConsumerHandle handle = consumer.Handle();
+        TestTimeout.Run(consumer.Dispose, s_deadline);
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(() => handle.Position(s_tp0));
+        Assert.Equal(ConsumerDestroyed, failure.Message);
+    }
+
+    [Fact]
+    public void Position_WithNegativeTimeout_ThrowsTheTimersMessage()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
-        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => handle.Assign(null!));
+        AssertTimerNegative(Assert.Throws<ArgumentOutOfRangeException>(() => handle.Position(s_tp0, TimeSpan.FromSeconds(-1))), -1000);
+        AssertTimerNegative(Assert.Throws<ArgumentOutOfRangeException>(() => handle.Position(s_tp0, TimeSpan.FromMilliseconds(-1))), -1);
+        AssertTimerNegative(Assert.Throws<ArgumentOutOfRangeException>(() => handle.Position(s_tp0, TimeSpan.FromTicks(-5000))), -1);
+    }
+
+    [Fact]
+    public void Position_WithNegativeTimeout_AfterDispose_ThrowsObjectDisposed()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        ConsumerHandle handle = consumer.Handle();
+        handle.Dispose();
+
+        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(
+            () => handle.Position(s_tp0, TimeSpan.FromSeconds(-1)));
+        Assert.Equal(nameof(ConsumerHandle), failure.ObjectName);
+    }
+
+    [Fact]
+    public void Position_WithNegativeTimeoutAndNullTopic_ThrowsForTheTimeout()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        using ConsumerHandle handle = consumer.Handle();
+
+        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+            () => handle.Position(new TopicPartition(null!, 0), TimeSpan.FromSeconds(-1)));
+        Assert.Equal("timeout", failure.ParamName);
+    }
+
+    [Fact]
+    public void Pause_WithNullPartitions_ThrowsArgumentNull()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        using ConsumerHandle handle = consumer.Handle();
+
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => handle.Pause(null!));
         Assert.Equal("partitions", failure.ParamName);
+    }
+
+    [Fact]
+    public void CommitAsync_WithANullCallback_ThrowsArgumentNull()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        using ConsumerHandle handle = consumer.Handle();
+
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(
+            () => handle.CommitAsync((IOffsetCommitCallback)null!));
+        Assert.Equal("callback", failure.ParamName);
     }
 
     [Fact]
     public void Seek_WithNegativeOffset_ThrowsArgumentOutOfRange()
     {
-        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => handle.Seek(new TopicPartition(Topic, 0), -1));
+        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(() => handle.Seek(s_tp0, -1));
 
         Assert.Equal("offset", failure.ParamName);
         Assert.Contains("seek offset must not be a negative number", failure.Message, StringComparison.Ordinal);
     }
 
-    // ---- Test 5 · the ref-count: a live handle DEFERS the consumer's native destroy ----
-
-    /// <summary>
-    /// The P8-D1 contract, as a three-way differential on the consumer's own
-    /// <see cref="SafeConsumerHandle"/>: with no handle outstanding the consumer's
-    /// <c>Dispose</c> releases immediately; with one outstanding it does <b>not</b>; and the
-    /// handle's own <c>Dispose</c> is what completes the release.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <c>SafeHandle.IsClosed</c> flips only when the reference count actually reaches zero and
-    /// <c>ReleaseHandle</c> (→ <c>Consumer_destroy</c>) runs, so it is a direct read of the
-    /// ref-count decision rather than a proxy for it. The three cases are asserted together
-    /// because only the <b>contrast</b> is meaningful: the baseline is what proves the
-    /// deferral is caused by the handle and not by teardown being lazy in general.
-    /// </para>
-    /// <para>
-    /// <b>This is the test that caught a real defect.</b> An earlier draft took the parent
-    /// reference twice (once in <c>Create</c>, once again while transferring ownership) against
-    /// a single release, so the count never reached zero and <b>every</b> consumer that ever
-    /// produced a handle leaked its native resources for the process lifetime. Nothing else in
-    /// the suite noticed: all three cases reported <c>IsClosed=False</c>. Re-introducing the
-    /// second <c>DangerousAddRef</c> turns the last two assertions red.
-    /// </para>
-    /// </remarks>
     [Fact]
-    public void LiveHandle_DefersTheConsumersNativeDestroy_AndDisposingItCompletesTheRelease()
+    public void LiveHandle_DoesNotDeferTheConsumersNativeDestroy()
     {
-        // Baseline: no reentrancy handle -> the consumer's Dispose releases immediately.
-        NativeConsumer baseline = NativeConsumer.CreateMock();
-        SafeConsumerHandle baselineNative = baseline.Handle;
-        baseline.Dispose();
-        Assert.True(baselineNative.IsClosed, "with no handle outstanding the release must be immediate");
-
-        // With a live handle -> the release is deferred past the consumer's own Dispose.
         NativeConsumer consumer = NativeConsumer.CreateMock();
         SafeConsumerHandle native = consumer.Handle;
         ConsumerHandle handle = consumer.CreateReentrancyHandle();
 
-        consumer.Dispose();
-        Assert.False(native.IsClosed, "a live reentrancy handle must defer Consumer_destroy");
+        TestTimeout.Dispose(consumer);
+        Assert.True(native.IsClosed, "a live reentrancy handle must not defer the consumer's destroy");
 
-        // …and the handle's own Dispose is what completes it.
         handle.Dispose();
-        Assert.True(native.IsClosed, "disposing the last handle must complete the release");
     }
 
-    /// <summary>
-    /// P8-D1's <b>release-site ordering</b>: the parent reference is released from the
-    /// reentrancy <c>SafeHandle</c>'s <c>ReleaseHandle</c>, <b>not</b> from the managed
-    /// wrapper's <c>Dispose</c> — so the parent count cannot drop while a handle operation
-    /// is still blocked inside the core.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Why this test exists: the ordering is otherwise ungradeable.</b> Moving the
-    /// release into the wrapper's <c>Dispose</c> leaves every other test in this file green
-    /// — the count still balances on every sequential path — so
-    /// <see cref="LiveHandle_DefersTheConsumersNativeDestroy_AndDisposingItCompletesTheRelease"/>
-    /// and its siblings cannot tell the correct ordering from the broken one. This is the
-    /// sole detector.
-    /// </para>
-    /// <para>
-    /// The outstanding <c>DangerousAddRef</c> on the <em>inner</em> handle stands in for the
-    /// call-scoped reference the interop marshaller holds while a handle op is executing —
-    /// every one of the 21 non-destroy ops passes that <c>SafeHandle</c> as a P/Invoke
-    /// parameter, so this models "a handle op is in flight" deterministically, with no
-    /// threads and no blocking. With the release in <c>ReleaseHandle</c> the parent survives
-    /// until that reference drops; with it in <c>Dispose</c> the parent would be released
-    /// while the op was still running — a use-after-free.
-    /// </para>
-    /// </remarks>
     [Fact]
-    public void ParentReference_IsReleasedFromReleaseHandle_NotFromTheWrappersDispose()
-    {
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        SafeConsumerHandle parent = consumer.Handle;
-        ConsumerHandle handle = consumer.CreateReentrancyHandle();
-
-        // Stand in for a handle op in flight: the marshaller's call-scoped ref on the inner
-        // handle, which defers its ReleaseHandle exactly as a running native call would.
-        bool taken = false;
-        handle.NativeHandle.DangerousAddRef(ref taken);
-        Assert.True(taken);
-
-        try
-        {
-            consumer.Dispose();
-            handle.Dispose();
-
-            // ReleaseHandle has NOT run (the inner ref defers it), so the parent reference
-            // is still held and the consumer is still alive. If the release lived in the
-            // wrapper's Dispose it would already have fired here — with an op "in flight".
-            Assert.False(
-                parent.IsClosed,
-                "the parent must not be released while a handle operation is still in flight");
-        }
-        finally
-        {
-            handle.NativeHandle.DangerousRelease();
-        }
-
-        // Dropping the last inner reference runs ReleaseHandle, which releases the parent.
-        Assert.True(parent.IsClosed, "dropping the last inner reference must release the parent");
-    }
-
-    /// <summary>
-    /// The reverse order: disposing the handle first hands the reference back, and the
-    /// consumer's own <c>Dispose</c> then releases immediately — the handle must not hold the
-    /// reference beyond its own lifetime.
-    /// </summary>
-    [Fact]
-    public void DisposingTheHandleFirst_ReturnsTheReference_SoTheConsumerReleasesNormally()
+    public void DisposingTheHandleFirst_LeavesTheConsumerAlive_AndItReleasesNormally()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         SafeConsumerHandle native = consumer.Handle;
         ConsumerHandle handle = consumer.CreateReentrancyHandle();
 
         handle.Dispose();
-        Assert.False(native.IsClosed, "the consumer is still alive; nothing should have released it");
+        Assert.False(native.IsClosed, "disposing a handle must not release its consumer");
 
-        consumer.Dispose();
-        Assert.True(native.IsClosed, "the handle must not retain the reference past its own Dispose");
+        TestTimeout.Dispose(consumer);
+        Assert.True(native.IsClosed, "the consumer must release on its own Dispose");
     }
 
-    /// <summary>
-    /// The user-visible consequence of the deferral: a handle outstanding across the
-    /// consumer's <c>Dispose</c> is still safe to call. Post-destroy this would be a
-    /// use-after-free rather than a clean result.
-    /// </summary>
     [Fact]
-    public void HandleOutstandingAcrossConsumerDispose_RemainsSafeToCall()
+    public void HandleOutstandingAcrossConsumerDispose_ReadsAndWakesButRefusesTheBlockingOperations()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         ConsumerHandle handle = consumer.Handle();
 
-        consumer.Dispose();
+        TestTimeout.Dispose(consumer);
 
         Assert.Empty(handle.Assignment());
-        Assert.Empty(handle.Subscription());
         Assert.Empty(handle.Paused());
         handle.Wakeup();
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(() => handle.Commit(Offsets(1)));
+        Assert.Equal(ConsumerDestroyed, failure.Message);
 
         handle.Dispose();
     }
 
-    // ---- Test 8 · teardown returns without hanging with a live handle outstanding ----
+    [Fact]
+    public void ACommitRegistration_ThatAHandleCommitRefusedAfterTheConsumersDestroy_IsReleasedAtOnce()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using ConsumerHandle handle = consumer.Handle();
+        TestTimeout.Dispose(consumer);
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
+            () => handle.CommitAsync(Offsets(1), new DelegateCallback((_, _) => { })));
+
+        Assert.Equal(ConsumerDestroyed, failure.Message);
+        CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
+        Assert.True(registration.IsReleased, "the registration of a commit refused after the destroy was kept");
+    }
 
     [Fact]
     public void SyncConsumerDispose_WithALiveHandleOutstanding_ReturnsWithoutHanging()
@@ -630,70 +558,152 @@ public sealed class PublicConsumerReentrancyHandleTests
             Assert.Empty(handle.Assignment());
         }
 
-        // 200 balanced add/release pairs must leave the count exactly where it started, so the
-        // consumer still releases on its own Dispose. An unbalanced pair would leak here.
-        consumer.Dispose();
-        Assert.True(native.IsClosed, "200 handle round-trips must leave the reference count balanced");
+        TestTimeout.Dispose(consumer);
+        Assert.True(native.IsClosed, "200 handle round-trips must leave the consumer releasable");
     }
 
-    /// <summary>
-    /// The handle and the consumer report the <b>same</b> underlying condition the
-    /// <b>same</b> way — a flat <see cref="KafkaException"/> with an identical code and
-    /// message. This is the contract M9/P8's fix round settled on (ffi §B5): the core's
-    /// <c>illegal_state</c> is <b>not</b> remapped to
-    /// <see cref="InvalidOperationException"/> on the handle.
-    /// </summary>
-    /// <remarks>
-    /// <c>ConsumerHandle::position</c> and <c>AsyncKafkaConsumer::position_timeout</c> share
-    /// one core implementation, so an unassigned partition yields the identical error on both
-    /// — measured: code <c>-1</c>, <i>"You can only check the position for partitions
-    /// assigned to this consumer."</i> Remapping only the handle side would make the
-    /// reentrancy twin throw a different exception type than the consumer it mirrors, for the
-    /// same call. That is the concrete reason the mapping was rejected, so it is the thing
-    /// worth pinning: this test fails the moment someone reintroduces it.
-    /// </remarks>
-    [Fact]
-    public void HandleAndConsumer_ReportTheSameCoreError_Identically()
+    [Theory]
+    [MemberData(nameof(GatedOperations))]
+    public void KafkaConsumerHandle_OutsideACallback_RefusesEveryBlockingOperation(
+        string name, Action<ConsumerHandle> operation)
     {
-        using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(RealConfig("p8-error-parity"), Serdes.ByteArray, Serdes.ByteArray);
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-outside-a-callback");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         TestTimeout.Run(
             () =>
             {
+                consumer.Assign(new[] { s_tp0 });
                 using ConsumerHandle handle = consumer.Handle();
-                TopicPartition unassigned = new TopicPartition("unassigned-parity-topic", 0);
 
-                KafkaException viaConsumer = Assert.Throws<KafkaException>(() => consumer.Position(unassigned));
-                KafkaException viaHandle = Assert.Throws<KafkaException>(() => handle.Position(unassigned));
-
-                Assert.Equal(viaConsumer.Code, viaHandle.Code);
-                Assert.Equal(viaConsumer.Message, viaHandle.Message);
-                Assert.Contains(
-                    "You can only check the position for partitions assigned to this consumer.",
-                    viaHandle.Message,
-                    StringComparison.Ordinal);
+                InvalidOperationException refused = Assert.Throws<InvalidOperationException>(() => operation(handle));
+                Assert.Equal(OutsideACallback, refused.Message);
+                Assert.NotNull(name);
             },
             s_deadline);
     }
 
-    // ---- Test 7 · non-ASCII round-trip through a handle result (ffi §B3) ----
+    [Fact]
+    public void KafkaConsumerHandle_OutsideACallback_WakesAndReads()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-wakes-and-reads");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-    /// <summary>
-    /// A non-ASCII topic set on the consumer comes back through a <b>handle</b> result
-    /// unchanged — the receive-path UTF-8 marshalling of the handle's own getters, which is a
-    /// distinct code path from the consumer's (a different P/Invoke, same marshaller).
-    /// </summary>
-    /// <remarks>
-    /// Driven against a <b>real</b> consumer because a mock-derived handle's getters are always
-    /// empty, so the mock cannot carry a topic out through one. <c>Assign</c> is a local
-    /// operation and needs no broker.
-    /// </remarks>
+        TestTimeout.Run(
+            () =>
+            {
+                consumer.Assign(new[] { s_tp0, s_tp1 });
+                consumer.Pause(new[] { s_tp1 });
+                using ConsumerHandle handle = consumer.Handle();
+
+                Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition));
+                Assert.Equal(new[] { s_tp1 }, handle.Paused());
+
+                handle.Wakeup();
+                KafkaException woken = Assert.Throws<KafkaException>(() => consumer.Poll(TimeSpan.Zero));
+                Assert.Equal(WakeupCode, woken.Code);
+                Assert.Empty(consumer.Poll(TimeSpan.Zero));
+            },
+            s_deadline);
+    }
+
+    [Fact]
+    public void KafkaConsumerHandle_InsideACommitCallback_RunsTheOperations()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-inside-a-callback");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        try
+        {
+            TestTimeout.Run(
+            () =>
+            {
+                consumer.Assign(new[] { s_tp0 });
+                using ConsumerHandle handle = consumer.Handle();
+                long? position = null;
+                long? lag = -1;
+                IReadOnlyCollection<TopicPartition>? paused = null;
+                IReadOnlyCollection<TopicPartition>? resumed = null;
+                Exception? failure = null;
+
+                consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
+                {
+                    try
+                    {
+                        handle.Seek(s_tp0, 5);
+                        position = handle.Position(s_tp0);
+                        handle.Pause(new[] { s_tp0 });
+                        paused = handle.Paused();
+                        handle.Resume(new[] { s_tp0 });
+                        resumed = handle.Paused();
+                        lag = handle.CurrentLag(s_tp0);
+                        handle.CommitAsync(Empty());
+                        handle.Commit(Empty());
+                    }
+                    catch (Exception e)
+                    {
+                        failure = e;
+                    }
+                }));
+                consumer.Commit(Empty());
+
+                Assert.Null(failure);
+                Assert.Equal((long?)5, position);
+                Assert.Equal(new[] { s_tp0 }, paused);
+                Assert.Empty(resumed!);
+                Assert.Null(lag);
+                Assert.Equal(5, consumer.Position(s_tp0));
+            },
+            s_deadline);
+        }
+        finally
+        {
+            TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
+        }
+    }
+
+    [Fact]
+    public void HandleAndConsumer_ReportTheSameCoreError_Identically()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("p8-error-parity");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        TestTimeout.Run(
+            () =>
+            {
+                consumer.Assign(new[] { s_tp0 });
+                using ConsumerHandle handle = consumer.Handle();
+                TopicPartition unassigned = new TopicPartition("unassigned-parity-topic", 0);
+                Exception? viaHandle = null;
+
+                consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
+                {
+                    try
+                    {
+                        handle.Position(unassigned);
+                    }
+                    catch (Exception e)
+                    {
+                        viaHandle = e;
+                    }
+                }));
+                consumer.Commit(Empty());
+                Exception viaConsumer = Assert.ThrowsAny<Exception>(() => consumer.Position(unassigned));
+
+                Assert.NotNull(viaHandle);
+                Assert.IsType<InvalidOperationException>(viaConsumer);
+                Assert.Equal(viaConsumer.GetType(), viaHandle!.GetType());
+                Assert.Equal(
+                    "You can only check the position for partitions assigned to this consumer.", viaHandle.Message);
+                Assert.Equal(viaConsumer.Message, viaHandle.Message);
+            },
+            s_deadline);
+    }
+
     [Fact]
     public void NonAsciiTopic_RoundTripsThroughAHandleResult()
     {
-        using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(RealConfig("p8-non-ascii"), Serdes.ByteArray, Serdes.ByteArray);
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("p8-non-ascii");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         TestTimeout.Run(
             () =>
@@ -704,27 +714,52 @@ public sealed class PublicConsumerReentrancyHandleTests
                 TopicPartition viaHandle = Assert.Single(handle.Assignment());
                 Assert.Equal(NonAsciiTopic, viaHandle.Topic);
                 Assert.Equal(3, viaHandle.Partition);
-
-                // The consumer's own getter agrees — so the handle is reading the same state,
-                // not a stale or separately-decoded copy.
                 Assert.Equal(consumer.Assignment(), handle.Assignment());
             },
             s_deadline);
     }
 
-    // ---- helpers ----
+    private static void AssertTimerNegative(ArgumentOutOfRangeException thrown, long ms)
+    {
+        Assert.Equal("timeout", thrown.ParamName);
+        Assert.StartsWith("Invalid negative timeout " + ms.ToString(CultureInfo.InvariantCulture), thrown.Message, StringComparison.Ordinal);
+    }
 
-    // Interface-typed accessors: calling Handle() through IConsumer / IAsyncConsumer is what
-    // pins P8-D3 (the member lives on IConsumerCommon, so it is reachable from wherever a user
-    // actually holds a consumer). A concrete-typed call would not.
+    private static MockConsumer<byte[], byte[]> NewMock() =>
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+    private static Dictionary<string, string> Config(string groupId) => new()
+    {
+        ["bootstrap.servers"] = "localhost:1",
+        ["group.protocol"] = "consumer",
+        ["group.id"] = groupId,
+    };
+
+    private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer(string groupId) =>
+        new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray, Serdes.ByteArray);
+
+    private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
+        new Dictionary<TopicPartition, OffsetAndMetadata>();
+
+    private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(long offset) =>
+        new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset) };
+
+    private static long CommittedOffset(MockConsumer<byte[], byte[]> consumer) =>
+        consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset;
+
+    private static CommitCallbackRegistration? Registration(object consumer) =>
+        ((NativeConsumer)consumer.GetType()
+            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(consumer)!).CurrentCommitCallbackRegistration;
+
     private static ConsumerHandle HandleOf(IConsumer<byte[], byte[]> consumer) => consumer.Handle();
 
     private static ConsumerHandle HandleOf(IAsyncConsumer<byte[], byte[]> consumer) => consumer.Handle();
 
-    /// <summary>
-    /// Runs <paramref name="probe"/> inside <c>OnPartitionsAssigned</c>, which
-    /// <c>MockConsumer.Rebalance</c> fires synchronously while holding the core's access guard.
-    /// </summary>
+    /// <summary>Runs a probe inside <c>OnPartitionsAssigned</c>.</summary>
     private sealed class ProbingListener : IConsumerRebalanceListener
     {
         private readonly Action _probe;
@@ -749,5 +784,17 @@ public sealed class PublicConsumerReentrancyHandleTests
         public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
+    }
+
+    /// <summary>An <see cref="IOffsetCommitCallback"/> over a delegate.</summary>
+    private sealed class DelegateCallback : IOffsetCommitCallback
+    {
+        private readonly Action<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?> _onComplete;
+
+        internal DelegateCallback(Action<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?> onComplete) =>
+            _onComplete = onComplete;
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            _onComplete(offsets, exception);
     }
 }

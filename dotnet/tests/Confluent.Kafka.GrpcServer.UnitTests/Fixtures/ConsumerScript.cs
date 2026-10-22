@@ -111,7 +111,7 @@ internal sealed class ConsumerScript
                         mock.AddRecord(record.Topic, record.Partition, record.Offset, record.Key, record.Value);
                         break;
                     case StepKind.PollError:
-                        mock.SetPollError(step.Record!.Topic);
+                        mock.SetPollException(new KafkaException(step.Record!.Topic));
                         break;
                 }
             }
@@ -152,5 +152,5 @@ internal interface IMockConsumerOperations
 
     void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
 
-    void SetPollError(string message);
+    void SetPollException(KafkaException? exception);
 }

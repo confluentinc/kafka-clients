@@ -147,7 +147,7 @@ public sealed class PublicAdminP14SyncCloseTests
             IAdmin admin = Create(kind);
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.FromSeconds(5))));
             thrown = Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
-            admin.Dispose();
+            TestTimeout.Dispose(admin);
         }
 
         Assert.Equal(objectName, thrown.ObjectName);

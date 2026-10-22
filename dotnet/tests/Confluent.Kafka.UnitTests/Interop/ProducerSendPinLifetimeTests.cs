@@ -103,8 +103,9 @@ public sealed class ProducerSendPinLifetimeTests
         // else references, which must become collectable once the send has completed.
         WeakReference[] valueRefs;
 
-        using (AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray))
+        AsyncMockProducer<byte[], byte[]> producer =
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using (TestTimeout.Disposal(producer))
         {
             valueRefs = await SendThrowawayBuffersAsync(producer, count: 64);
         }

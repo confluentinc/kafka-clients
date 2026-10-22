@@ -291,12 +291,19 @@ internal static class ChaosEvents
     /// </summary>
     internal static long UnixNanosNow() => (DateTime.UtcNow.Ticks - s_unixEpochTicks) * 100;
 
-    /// <summary>Python <c>_committed_events</c>: one <c>Committed</c> per read-back entry.</summary>
+    /// <summary>
+    /// Python <c>_committed_events</c>: one <c>Committed</c> per read-back entry that has an offset.
+    /// </summary>
     internal static void EmitCommitted(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, Action<Proto.WorkloadEvent> emit)
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets, Action<Proto.WorkloadEvent> emit)
     {
-        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
+        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> entry in offsets)
         {
+            if (entry.Value is null)
+            {
+                continue;
+            }
+
             emit(new Proto.WorkloadEvent
             {
                 Committed = new Proto.Committed

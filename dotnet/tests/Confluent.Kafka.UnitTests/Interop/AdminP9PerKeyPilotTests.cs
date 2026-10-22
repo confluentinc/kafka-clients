@@ -49,7 +49,8 @@ public sealed class AdminP9PerKeyPilotTests
     [Fact]
     public async Task CreateTopics_PerKeyOutcomes_AreIndependent()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // Replication factor 5 cannot be satisfied by 1 broker, so the same submit
         // carries one success and one failure.
@@ -78,7 +79,8 @@ public sealed class AdminP9PerKeyPilotTests
     [Fact]
     public async Task DeleteTopicsByName_PerKeyOutcomes_AreIndependent()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("cp2-present", 1, 1) }).All().Get(),

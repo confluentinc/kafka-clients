@@ -113,7 +113,8 @@ public sealed class AdminSubmitArgumentTests
     /// </summary>
     private static Captured Submit(CreateTopicsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(

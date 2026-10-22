@@ -18,29 +18,15 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
-// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
-// TFM smoke leg compiling.
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, so the class is net8.0 and later only.
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// M5/P8a — per-record receive-path allocation budget through the <b>public synchronous</b>
-/// <see cref="MockConsumer{TKey, TValue}"/> surface (PLAN §8; ffi-marshalling.md §B4,
-/// consumer-threading §27, DoD §10). The sync <see cref="IConsumer{TKey, TValue}.Poll"/> copy-out
-/// runs the shared receive-path marshaller (<c>ConsumerRecordsMarshal.CopyOut&lt;K,V&gt;</c>) on
-/// the caller's thread and produces the same owned <c>byte[]</c> key/value + topic string + record
-/// objects the async path does — so measuring it on-thread fully covers the async per-record
-/// budget too (M7/P1). Asserts the marginal per-record cost (large − small) is within a budget
-/// derived from the owned copy sizes; a native-backed view or an extra per-record copy would push
-/// it over.
+/// The per-record receive allocation of the sync <see cref="IConsumer{TKey, TValue}.Poll"/> on the
+/// <see cref="MockConsumer{TKey, TValue}"/>: the cost of a large poll minus a small one stays within the owned copies.
 /// </summary>
 /// <remarks>
-/// Uses the <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> counter (M7/P1),
-/// not the process-wide <see cref="GC.GetTotalAllocatedBytes(bool)"/>: the sync copy-out runs on
-/// the caller's (this) thread, so a per-thread count captures exactly this poll's allocation and is
-/// <b>immune to allocations by concurrently-running tests on other threads</b> — robust under
-/// parallel execution, with no assembly-wide serialization needed. The marginal (large − small)
-/// subtraction still cancels the fixed per-poll cost, and the poll path is warmed up first.
+/// The copy-out runs on the calling thread, so the per-thread counter sees only this poll, whatever other tests run.
 /// </remarks>
 public sealed class PublicSyncConsumerAllocationBudgetTests
 {
@@ -52,21 +38,8 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
     private const int KeySize = 16;
     private const int ValueSize = 64;
 
-    // Unavoidable per-record owned copies: key[16] + value[64] + the ConsumerRecord object + its
-    // list slot. (The topic string is no longer per-record — M9/P4 M6 memoizes one decode per
-    // distinct topic per batch.)
-    //
-    // Tightened from 1024 to 448 in M9/P4. The old ceiling was ~4x the actual cost, which made
-    // this test structurally unable to fail on the per-record topic string: measured per-record
-    // allocation was 280 B before the memo and is 224 B after, so removing ~56 B/record moved the
-    // measurement from well inside a 1024 B bound to further inside it. 448 B is ~2x the measured
-    // 224 B — tight enough to catch a newly-introduced per-record copy, loose enough not to flake
-    // on normal runtime/TFM variation.
-    //
-    // ⚠ Note this ceiling still would NOT have caught the topic regression on its own (280 B is
-    // below 448 B). The real gate for the topic clause is
-    // PublicConsumerTopicAllocationBudgetTests, which varies only the topic-name length and so
-    // fails by ~62x on the bug. This test is the general copy-out budget.
+    // The owned copies per record (key, value, the ConsumerRecord and its list slot), at about twice their measured
+    // size, so a new per-record copy fails the budget. The topic has its own budget test.
     private const long PerRecordBudgetBytes = 448;
 
     [Fact]
@@ -97,7 +70,8 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
 
     private static long MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         for (int i = 0; i < recordCount; i++)

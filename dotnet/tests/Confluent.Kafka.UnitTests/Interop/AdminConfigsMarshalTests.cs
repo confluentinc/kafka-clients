@@ -72,7 +72,8 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public async Task TheValueTree_IsCopiedOut_AndSurvivesTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(
@@ -147,7 +148,8 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public void PerKeyError_IsOwned_AndArrivesWithANullValue()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // A topic that does not exist: the mock reports UNKNOWN_TOPIC_OR_PARTITION for it.
         ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "cfg-absent-topic");
@@ -173,7 +175,8 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public async Task AFailedResource_FaultsOnlyItsOwnAwaitable()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
@@ -338,7 +341,8 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public async Task PerKeyValue_IsDestroyedExactlyOncePerCallback()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),

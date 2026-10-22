@@ -272,11 +272,13 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
     }
 
     /// <inheritdoc/>
-    public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, KafkaException? exception)
+    public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
     {
-        List<TopicPartition> partitions = new List<TopicPartition>(offsets.Count);
-        Dictionary<string, long> committed = new Dictionary<string, long>(offsets.Count);
-        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> pair in offsets)
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> applied =
+            offsets ?? new Dictionary<TopicPartition, OffsetAndMetadata>();
+        List<TopicPartition> partitions = new List<TopicPartition>(applied.Count);
+        Dictionary<string, long> committed = new Dictionary<string, long>(applied.Count);
+        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> pair in applied)
         {
             partitions.Add(pair.Key);
             committed[Translate.OffsetKey(pair.Key.Topic, pair.Key.Partition)] = pair.Value.Offset;

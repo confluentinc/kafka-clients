@@ -85,7 +85,8 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public async Task ElectLeaders_RegistersTheAggregateBridge_AndItsTrampolineAgrees()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         object? context = null;
         IntPtr captured = IntPtr.Zero;
@@ -126,7 +127,8 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public async Task AlterPartitionReassignments_RegistersThePerPartitionBridge_AndItsTrampolineAgrees()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         object? context = null;
         IntPtr captured = IntPtr.Zero;
@@ -230,7 +232,8 @@ public sealed class AdminP4SubmitArgumentTests
     [InlineData(int.MaxValue)]
     public void ElectLeaders_RejectsAnUndefinedElectionType(int value)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         ArgumentOutOfRangeException rejected = Assert.Throws<ArgumentOutOfRangeException>(() =>
@@ -275,7 +278,8 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public void ElectLeaders_RejectsANullTopic_BeforeTheNativeCall()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         ArgumentException rejected = Assert.Throws<ArgumentException>(() =>
@@ -371,7 +375,8 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public void AlterPartitionReassignments_RejectsANullTopic_BeforeTheNativeCall()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool submitted = false;
         ArgumentException rejected = Assert.Throws<ArgumentException>(() =>
@@ -390,7 +395,8 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public void AlterPartitionReassignments_RejectsANullMap()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() =>
             AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(null!, options: null, AdminFlavour.Async)));
@@ -449,7 +455,8 @@ public sealed class AdminP4SubmitArgumentTests
     private static Captured CaptureElect(
         ElectionType type, IReadOnlyCollection<TopicPartition>? partitions, ElectLeadersOptions? options = null)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         IntPtr userDataToRelease = IntPtr.Zero;
@@ -491,7 +498,8 @@ public sealed class AdminP4SubmitArgumentTests
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         IntPtr userDataToRelease = IntPtr.Zero;

@@ -43,7 +43,8 @@ public sealed class PublicProducerCloseWithTimeoutTests
     {
         if (flavor == SyncFlavor)
         {
-            using KafkaProducer<byte[], byte[]> producer = Sync(60000);
+            KafkaProducer<byte[], byte[]> producer = Sync(60000);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
 
             Assert.NotNull(producer.Metrics());
@@ -52,7 +53,8 @@ public sealed class PublicProducerCloseWithTimeoutTests
         }
         else
         {
-            await using AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
 
             Assert.NotNull(producer.Metrics());
@@ -68,13 +70,15 @@ public sealed class PublicProducerCloseWithTimeoutTests
     {
         if (flavor == SyncFlavor)
         {
-            using KafkaProducer<byte[], byte[]> producer = Sync(60000);
+            KafkaProducer<byte[], byte[]> producer = Sync(60000);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             TestTimeout.Run(producer.Close, Deadline);
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
         }
         else
         {
-            await using AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             await TestTimeout.Run(() => producer.Close(), Deadline);
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
         }
@@ -85,7 +89,8 @@ public sealed class PublicProducerCloseWithTimeoutTests
     {
         const int maxBlockMs = 60000;
         string topic = Topic("timed-close");
-        using KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+        KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         Task<Exception?>[] sends = new Task<Exception?>[Senders];
         for (int i = 0; i < Senders; i++)
         {
@@ -120,7 +125,8 @@ public sealed class PublicProducerCloseWithTimeoutTests
         string topic = Topic("mock-negative-close");
         if (flavor == SyncFlavor)
         {
-            using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset);
 
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
@@ -129,8 +135,9 @@ public sealed class PublicProducerCloseWithTimeoutTests
         }
         else
         {
-            await using AsyncMockProducer<byte[], byte[]> producer =
+            AsyncMockProducer<byte[], byte[]> producer =
                 new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => producer.Send(Record(topic)).AsTask(), Deadline);
             Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset);
 

@@ -104,7 +104,10 @@ public sealed class NativeAbiConformanceTests
             delegateParameters.SetEquals(check.Delegates),
             "delegates not reached: " + string.Join(", ", delegateParameters.Except(check.Delegates).Select(AbiCheck.Name)));
 
-        HashSet<Type> structParameters = new HashSet<Type>(parameterTypes.Where(type => type.IsValueType && !type.IsPrimitive && !type.IsEnum));
+        HashSet<Type> structParameters = new HashSet<Type>(
+            parameterTypes
+                .Concat(imports.Select(import => import.ReturnType))
+                .Where(type => type.IsValueType && !type.IsPrimitive && !type.IsEnum && type != typeof(void)));
         Assert.True(
             structParameters.SetEquals(check.Structs),
             "structs not reached: " + string.Join(", ", structParameters.Except(check.Structs).Select(AbiCheck.Name)));

@@ -35,8 +35,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     [Fact]
     public async Task AsyncMockProducer_SendWithCallback_RoundTrips()
     {
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         RecordMetadata metadata = default!;
@@ -59,8 +60,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     [Fact]
     public void MockProducer_SendWithCallback_RoundTrips()
     {
-        using MockProducer<byte[], byte[]> producer =
+        MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         RecordMetadata metadata = default!;
@@ -81,8 +83,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     [Fact]
     public async Task AsyncMockProducer_SendWithCallback_FailurePath_DeliversPlaceholderMetadata()
     {
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -109,10 +112,12 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
         Dictionary<string, string> config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
 
-        using AsyncKafkaProducer<byte[], byte[]> asyncProducer =
+        AsyncKafkaProducer<byte[], byte[]> asyncProducer =
             new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
-        using KafkaProducer<byte[], byte[]> syncProducer =
+        using IDisposable asyncProducerDisposal = TestTimeout.Disposal(asyncProducer);
+        KafkaProducer<byte[], byte[]> syncProducer =
             new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable syncProducerDisposal = TestTimeout.Disposal(syncProducer);
 
         Assert.NotNull(typeof(AsyncKafkaProducer<byte[], byte[]>).GetMethod(
             "Send",

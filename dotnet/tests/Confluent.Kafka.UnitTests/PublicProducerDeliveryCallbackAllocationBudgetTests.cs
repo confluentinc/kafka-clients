@@ -64,8 +64,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
 
@@ -93,8 +94,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
         await Warmup(producer, value, key, callback);
@@ -135,8 +137,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, smallValue, key, callback);
 
@@ -176,8 +179,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback);
 

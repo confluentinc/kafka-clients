@@ -18,24 +18,18 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The result of a poll — an owned, immutable collection of
-/// <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET realization of Java's generic
-/// <c>org.apache.kafka.clients.consumer.ConsumerRecords&lt;K, V&gt;</c>. Each record's key /
-/// value is the deserialized <typeparamref name="TKey"/> / <typeparamref name="TValue"/>;
-/// the topic / headers are copied out of the (now-destroyed) native batch
-/// (ffi-marshalling.md §6.4), so this holds only owned managed values: there is no native
-/// handle, no <see cref="System.IDisposable"/>, and nothing to keep alive. An empty poll
-/// yields a non-null instance with <see cref="Count"/> <c>== 0</c> — success, not failure.
+/// The records one poll returned, Java's <c>org.apache.kafka.clients.consumer.ConsumerRecords&lt;K, V&gt;</c>.
 /// </summary>
+/// <remarks>
+/// It holds owned values only, so it needs no disposal. An empty poll returns an empty instance, not
+/// <see langword="null"/>.
+/// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
 /// <typeparam name="TValue">The deserialized value type.</typeparam>
 public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<ConsumerRecord<TKey, TValue>>
 {
     private readonly IReadOnlyList<ConsumerRecord<TKey, TValue>> _records;
 
-    /// <summary>
-    /// Initializes the collection from the owned records produced by the copy-out.
-    /// </summary>
     internal ConsumerRecords(IReadOnlyList<ConsumerRecord<TKey, TValue>> records)
     {
         _records = records;

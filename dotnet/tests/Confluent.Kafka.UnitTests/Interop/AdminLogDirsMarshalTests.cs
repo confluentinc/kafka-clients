@@ -88,7 +88,8 @@ public sealed class AdminLogDirsMarshalTests
     [Fact]
     public async Task TheLogDirTree_IsCopiedOut_AndSurvivesTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
@@ -137,7 +138,8 @@ public sealed class AdminLogDirsMarshalTests
     [Fact]
     public async Task TheReplicaInfo_IsCopiedOut_AndSurvivesTheRootsDestroy()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
@@ -192,7 +194,8 @@ public sealed class AdminLogDirsMarshalTests
     [Fact]
     public async Task PerReplicaError_IsOwned_AndIsConsumedByTheCallback()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);

@@ -164,7 +164,8 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void DuplicateUsers_SendTwoRows_ButOneAwaitable()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
@@ -483,7 +484,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static Captured CaptureAlter(params UserScramCredentialAlteration[] alterations)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Captured captured = new Captured();
         AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
@@ -536,7 +538,8 @@ public sealed class AdminP7SubmitArgumentTests
     private static (int Count, IReadOnlyList<string?> Users, int TimeoutMs) CaptureDescribeUsers(
         IReadOnlyCollection<string>? users, DescribeUserScramCredentialsOptions? options = null)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         int count = 0;
         int timeout = 0;
@@ -561,7 +564,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static CapturedCreateToken CaptureCreateToken(CreateDelegationTokenOptions options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedCreateToken captured = new CapturedCreateToken();
         AsyncCreateDelegationTokenResult.From(admin.CreateDelegationToken(
@@ -587,7 +591,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static (int Length, byte[] Bytes, long Period) CaptureRenew(byte[] hmac, long periodMs)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         int length = -1;
         byte[] bytes = Array.Empty<byte>();
@@ -612,7 +617,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static (int Length, byte[] Bytes, long Period) CaptureExpire(byte[] hmac, long periodMs)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         int length = -1;
         byte[] bytes = Array.Empty<byte>();
@@ -637,7 +643,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static CapturedDescribeTokens CaptureDescribeTokens(DescribeDelegationTokenOptions options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedDescribeTokens captured = new CapturedDescribeTokens();
         AsyncDescribeDelegationTokenResult.From(admin.DescribeDelegationToken(
@@ -658,7 +665,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static (bool HasNodeId, int NodeId) CaptureDescribeFeatures(DescribeFeaturesOptions options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         bool hasNodeId = false;
         int node = -1;
@@ -681,7 +689,8 @@ public sealed class AdminP7SubmitArgumentTests
     private static CapturedUpdateFeatures CaptureUpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> updates, UpdateFeaturesOptions options)
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         CapturedUpdateFeatures captured = new CapturedUpdateFeatures();
         AsyncUpdateFeaturesResult.From(admin.UpdateFeatures(

@@ -43,7 +43,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task AbortTransaction_FaultsWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.AbortTransaction(
@@ -55,7 +56,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void AbortTransaction_RejectsANullSpec()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.AbortTransaction(null!));
     }
@@ -68,7 +70,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void AbortTransaction_RejectsADefaultTopicPartition()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException error = Assert.Throws<ArgumentException>(
             () => admin.AbortTransaction(new AbortTransactionSpec(default, 1L, 1, 1)));
@@ -84,7 +87,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void AbortTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.AbortTransaction(
@@ -96,7 +100,7 @@ public sealed class PublicAdminP8Tests
     public void AbortTransaction_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.AbortTransaction(
@@ -108,7 +112,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ForceTerminateTransaction_FaultsWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.ForceTerminateTransaction("txn-a").Result().Get());
@@ -123,7 +128,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void ForceTerminateTransaction_RejectsANullId()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(
             () => admin.ForceTerminateTransaction(null!));
@@ -139,7 +145,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void ForceTerminateTransaction_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.ForceTerminateTransaction(
@@ -150,7 +157,7 @@ public sealed class PublicAdminP8Tests
     public void ForceTerminateTransaction_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ForceTerminateTransaction("txn-a"));
     }
@@ -164,7 +171,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_FaultsEveryIdWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
 
@@ -194,7 +202,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_EmptyBatch_IsAnEmptySuccess()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncFenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
 
@@ -206,7 +215,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_RepeatedId_CollapsesToOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
@@ -221,7 +231,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_UnrequestedId_ThrowsJavasMessageSynchronously()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a" });
 
@@ -252,7 +263,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void FenceProducers_RejectsANullCollectionOrNullElement()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.FenceProducers(null!));
 
@@ -269,7 +281,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void FenceProducers_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.FenceProducers(
@@ -280,7 +293,7 @@ public sealed class PublicAdminP8Tests
     public void FenceProducers_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.FenceProducers(new[] { "txn-a" }));
     }
@@ -294,7 +307,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeTransactions_FaultsEveryIdWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-b", "txn-a" });
 
@@ -314,7 +328,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeTransactions_EmptyBatch_IsAnEmptySuccess()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Empty(await admin.DescribeTransactions(Array.Empty<string>()).All().Get());
     }
@@ -326,7 +341,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeTransactions_UnrequestedId_ThrowsJavasMessageSynchronously()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-a" });
 
@@ -350,7 +366,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void DescribeTransactions_RejectsANullCollectionOrNullElement()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeTransactions(null!));
 
@@ -367,7 +384,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void DescribeTransactions_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.DescribeTransactions(
@@ -378,7 +396,7 @@ public sealed class PublicAdminP8Tests
     public void DescribeTransactions_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.DescribeTransactions(new[] { "txn-a" }));
@@ -393,7 +411,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_FaultsEveryPartitionWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TopicPartition[] requested =
         {
@@ -418,7 +437,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_EmptyBatch_IsAnEmptySuccess()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Empty(await admin.DescribeProducers(Array.Empty<TopicPartition>()).All().Get());
     }
@@ -427,7 +447,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_RepeatedPartition_CollapsesToOneEntry()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0), new TopicPartition("alpha", 0) });
@@ -449,7 +470,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_UnrequestedPartition_ThrowsJavasMessageSynchronously()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) });
@@ -473,7 +495,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void DescribeProducers_RejectsANullCollectionOrANullTopic()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeProducers(null!));
 
@@ -490,7 +513,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void DescribeProducers_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.DescribeProducers(
@@ -505,7 +529,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_NegativeBrokerId_IsAccepted()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) },
@@ -518,7 +543,7 @@ public sealed class PublicAdminP8Tests
     public void DescribeProducers_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.DescribeProducers(new[] { new TopicPartition("alpha", 0) }));
@@ -541,7 +566,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ListTransactions_FailsEveryViewWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result = admin.ListTransactions();
 
@@ -554,7 +580,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ListTransactions_WithEveryFilter_FailsTheWholeCall()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result = admin.ListTransactions(
             new ListTransactionsOptions
@@ -576,7 +603,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public void ListTransactions_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
             () => admin.ListTransactions(new ListTransactionsOptions { TimeoutMs = -1 })));
@@ -589,7 +617,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ListTransactions_NegativeDuration_IsAccepted()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result =
             admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
@@ -601,7 +630,7 @@ public sealed class PublicAdminP8Tests
     public void ListTransactions_AfterClose_Throws()
     {
         MockAdminClient admin = new MockAdminClient();
-        admin.Dispose();
+        TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ListTransactions());
     }
@@ -613,7 +642,8 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ResultHandleLessRpcs_SettleBeforeDispose()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Task abort = admin.AbortTransaction(
             new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)).All().Get();

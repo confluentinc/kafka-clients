@@ -98,7 +98,8 @@ public sealed class AdminP14SyncStarvationTests
     [Fact]
     public void CreateTopics_OnAStarvedThreadPool_TheSyncGetsReturn_AndTheAsyncControlDoesNot()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         NativeAdminClient control = NativeAdminClient.CreateMock(1);
 
         StarvedPool pool = new StarvedPool();

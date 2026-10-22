@@ -127,7 +127,8 @@ public sealed class AdminOperationLifetimeTests
     [Fact]
     public async Task TopLevelSubmitFailure_FaultsEveryPerKeyTask()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr capturedUserData = IntPtr.Zero;
         AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
@@ -186,7 +187,8 @@ public sealed class AdminOperationLifetimeTests
     [Fact]
     public async Task CallbackOnTheSubmittingThread_DoesNotRunTheContinuationInline()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr capturedUserData = IntPtr.Zero;
         AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
@@ -234,7 +236,8 @@ public sealed class AdminOperationLifetimeTests
     [Fact]
     public void AggressiveGcDuringAnInFlightOperation_CollectsNothingNativeStillHolds()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IntPtr capturedUserData = IntPtr.Zero;
         AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(

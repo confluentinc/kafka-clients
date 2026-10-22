@@ -363,9 +363,8 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
                 }
                 else
                 {
-                    // A sync call in both flavours: it only initiates the commit, whose failure
-                    // arrives through onCommit on the dispatcher thread.
-                    consumer.CommitAsync(onCommit);
+                    // Only initiates the commit; its failure arrives through onCommit.
+                    await consumer.CommitAsync(onCommit).ConfigureAwait(false);
                 }
             }
             catch (Exception e)
@@ -388,7 +387,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
     {
         try
         {
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed =
+            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await consumer.Committed(consumer.Assignment(), CancellationToken.None).ConfigureAwait(false);
             ChaosEvents.EmitCommitted(committed, workload.Emit);
         }

@@ -25,6 +25,8 @@ namespace Confluent.Kafka;
 /// <remarks>A failed precondition throws the standard .NET exception instead.</remarks>
 public class KafkaException : Exception
 {
+    private const int UnknownServerError = -1;
+
     private const int LocalConcurrentModification = -2;
 
     private const int LocalIllegalArgument = -3;
@@ -90,6 +92,12 @@ public class KafkaException : Exception
     private static string? CauseMessage(Exception? cause) =>
         cause is null ? null : cause.GetType().FullName + ": " + cause.Message;
 
+    internal static KafkaException WrapAtPoll(Exception cause) =>
+        cause as KafkaException ?? new KafkaException(UnknownServerError, CauseMessage(cause), false, cause);
+
+    internal static KafkaException WrapAtClose(Exception cause) =>
+        new KafkaException(UnknownServerError, "Failed to close kafka consumer", false, cause);
+
     internal static KafkaException? FromHandle(IntPtr error)
     {
         if (error == IntPtr.Zero)
@@ -153,6 +161,13 @@ public class KafkaException : Exception
             ThrowIfFfiFailed(ref outErr);
             Exception? inner = FromFfiError(source, owned: false);
 
+            // A core error that wraps a callback's exception ("LocalCallbackError: <message>") is Java's
+            // new KafkaException(t): its message is t.toString(), and a KafkaException t is thrown as it is.
+            if (inner is not null && WrapsItsSource(message, source))
+            {
+                return inner as KafkaException ?? new KafkaException(code, CauseMessage(inner), isRetriable, inner);
+            }
+
             return code switch
             {
                 LocalConcurrentModification or LocalIllegalState => new InvalidOperationException(message, inner),
@@ -168,6 +183,19 @@ public class KafkaException : Exception
                 NativeMethods.ErrorDestroy(error);
             }
         }
+    }
+
+    private static bool WrapsItsSource(string? message, IntPtr source)
+    {
+        if (ManagedExceptionCarrier.Carried(source) is null)
+        {
+            return false;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        string? sourceMessage = Utf8Marshal.PtrToString(NativeMethods.ErrorMessage(source, ref outErr));
+        ThrowIfFfiFailed(ref outErr);
+        return message == "LocalCallbackError: " + sourceMessage;
     }
 
     internal static void ThrowIfFfiFailed(ref IntPtr outErr)

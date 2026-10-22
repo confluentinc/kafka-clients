@@ -121,7 +121,7 @@ which **remains async-only**. It is *un-deferred in the .NET binding only*: the
 
   - **Why (binding layer):** Java's `org.apache.kafka.clients.consumer.Consumer`
     is **synchronous** — a blocking `poll` / `commitSync`. A binding's job is to
-    restore the Java *shape* (`bindings/CLAUDE.md §2`), so the most Java-faithful
+    restore the Java *shape* (`dotnet/.claude/rules/bindings.md` §1.2), so the most Java-faithful
     surface is synchronous; .NET users expect a blocking `Poll`. The async
     surface stays too (both are siblings over one native consumer).
   - **How it is implemented — the distinction that matters:** the .NET sync
@@ -135,10 +135,14 @@ which **remains async-only**. It is *un-deferred in the .NET binding only*: the
     objections do **not** apply here: (a) the deadlock concern was about calling
     `block_on` on the *caller's* current-thread runtime — here the parking is on
     the *core's* runtime, not the caller's; (b) the "forces every user trait sync"
-    concern does not apply — the binding is bytes-only (no user-supplied
-    `Deserializer` / listener trait at this layer). This is the shipped
-    `Seek` / `CurrentLag` / `EnforceRebalance` sync-op precedent, generalized to
-    the full core loop.
+    concern does not apply — the deserializer runs in managed code above the ABI,
+    and listener and commit-callback methods cross it as C function pointers that
+    report through `kafka_consumer_Consumer__set_callback_result` (BH:3668-3693,
+    BH:3778-3792 at `3f8a5bc6`), so the async consumer also takes `Task`-returning
+    ones (ledgers 35 and 47). This generalizes the shipped `EnforceRebalance`
+    sync op to the full core loop; since M19/P1 `Seek` and `CurrentLag` are
+    blocking members on `IConsumer` and `Task`s on `IAsyncConsumer` (decision 22,
+    ledger 103).
   - **Scope:** this amendment governs the **binding layer only**. It does not
     reintroduce a sync facade into the Rust core, and it does not change §1's
     guidance for the Rust `AsyncKafkaConsumer` API. A sync facade in *other*

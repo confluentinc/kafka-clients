@@ -90,8 +90,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task CreateTopics_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         NewTopic[] request = { new NewTopic("diff-ok", 3, 1), new NewTopic("diff-bad", 1, 5) };
 
         CreateTopicsResult syncResult = sync.CreateTopics(request);
@@ -145,8 +147,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteTopics_ByNames_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-a", 1, 1), new NewTopic("diff-b", 1, 1));
 
         string[] request = { "diff-a", "diff-missing" };
@@ -190,8 +194,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteTopics_ByIds_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         (Uuid syncId, Uuid asyncId) = await Seed(sync, async, new NewTopic("diff-c", 1, 1));
 
         DeleteTopicsResult syncResult = sync.DeleteTopics(TopicCollection.OfTopicIds(new[] { syncId, s_missingId }));
@@ -227,8 +233,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeTopics_ByNames_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-d", 2, 1));
 
         string[] request = { "diff-d", "diff-nope" };
@@ -287,8 +295,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeTopics_ByIds_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         (Uuid syncId, Uuid asyncId) = await Seed(sync, async, new NewTopic("diff-e", 1, 1));
 
         DescribeTopicsResult syncResult = sync.DescribeTopics(TopicCollection.OfTopicIds(new[] { syncId, s_missingId }));
@@ -343,8 +353,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListTopics_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-f", 1, 1), new NewTopic("diff-g", 2, 1));
 
         ListTopicsResult syncResult = sync.ListTopics();
@@ -383,8 +395,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task CreatePartitions_OnBothMocks_FailsAlike_NotImplementedYet()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-h", 1, 1));
         Dictionary<string, NewPartitions> request = new Dictionary<string, NewPartitions>(StringComparer.Ordinal)
         {
@@ -413,8 +427,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteRecords_OnBothMocks_FailsAlike_NotImplementedYet_AndAnEmptyRequestSucceeds()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-i", 1, 1));
         TopicPartition partition = new TopicPartition("diff-i", 0);
         Dictionary<TopicPartition, RecordsToDelete> request = new Dictionary<TopicPartition, RecordsToDelete>
@@ -451,8 +467,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeCluster_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(3);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        MockAdminClient sync = new MockAdminClient(3);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         DescribeClusterOptions options = new DescribeClusterOptions { IncludeAuthorizedOperations = true };
 
         DescribeClusterResult syncResult = sync.DescribeCluster(options);
@@ -491,8 +509,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListConfigResources_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-j", 1, 1));
 
         IReadOnlyCollection<ConfigResource> topics = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
@@ -519,8 +539,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeConfigs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         NewTopic topic = new NewTopic("diff-k", 1, 1)
         {
             Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
@@ -574,8 +596,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task IncrementalAlterConfigs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-l", 1, 1));
 
         ConfigResource present = new ConfigResource(ConfigResourceType.Topic, "diff-l");
@@ -618,8 +642,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-m", 2, 1));
         int[] request = { 0, 5 };
 
@@ -665,8 +691,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AlterReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-n", 2, 1));
 
         TopicPartitionReplica moved = new TopicPartitionReplica("diff-n", 0, 0);
@@ -718,8 +746,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-o", 1, 1));
 
         TopicPartitionReplica atRest = new TopicPartitionReplica("diff-o", 0, 0);
@@ -759,8 +789,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void ClusterConfigsLogDirsGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "diff-p");
         TopicPartitionReplica replica = new TopicPartitionReplica("diff-p", 0, 0);
 
@@ -793,8 +825,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void TopicFamilyGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         AssertThrowAlike(() => sync.DeleteTopics((TopicCollection)null!), () => async.DeleteTopics((TopicCollection)null!));
         AssertThrowAlike(
@@ -817,8 +851,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ElectLeaders_OnBothMocks_FailsAlike_NotImplementedYet()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         IReadOnlyCollection<TopicPartition>?[] selections =
         {
             new[] { new TopicPartition("diff-q", 0) },
@@ -851,8 +887,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AlterPartitionReassignments_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(3);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        MockAdminClient sync = new MockAdminClient(3);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-r", 2, 1));
 
         TopicPartition reassigned = new TopicPartition("diff-r", 0);
@@ -903,8 +941,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListPartitionReassignments_WithASelection_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(3);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        MockAdminClient sync = new MockAdminClient(3);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition reassigned = new TopicPartition("diff-s", 0);
         TopicPartition quiet = new TopicPartition("diff-s", 1);
         await Reassign(sync, async, new NewTopic("diff-s", 2, 2), reassigned, 0, 2);
@@ -943,8 +983,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListPartitionReassignments_OptionsOnly_OnBothMocks_ListsEveryReassignment()
     {
-        using MockAdminClient sync = new MockAdminClient(3);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        MockAdminClient sync = new MockAdminClient(3);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition reassigned = new TopicPartition("diff-t", 0);
         await Reassign(sync, async, new NewTopic("diff-t", 1, 2), reassigned, 1, 2);
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions();
@@ -977,8 +1019,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListOffsets_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition earliest = new TopicPartition("diff-u", 0);
         TopicPartition latest = new TopicPartition("diff-u", 1);
         TopicPartition byTime = new TopicPartition("diff-u", 2);
@@ -1041,8 +1085,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void ElectionsReassignmentsOffsetsGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition nullTopic = default;
         TopicPartition partition = new TopicPartition("diff-v", 0);
 
@@ -1077,8 +1123,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListGroups_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await SeedGroups(sync, async, "diff-w-b", "diff-w-a");
 
         ListGroupsResult syncResult = sync.ListGroups();
@@ -1114,8 +1162,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeConsumerGroups_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-x-b", "diff-x-a" };
 
         DescribeConsumerGroupsResult syncResult = sync.DescribeConsumerGroups(groups);
@@ -1146,8 +1196,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeClassicGroups_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-xc-b", "diff-xc-a" };
 
         DescribeClassicGroupsResult syncResult = sync.DescribeClassicGroups(groups);
@@ -1178,8 +1230,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListConsumerGroupOffsets_ByGroupId_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition("diff-y", 1)] = 9L,
@@ -1237,8 +1291,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListConsumerGroupOffsets_BySpecs_OnBothMocks_GivesEqualOutcomes()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition selected = new TopicPartition("diff-z", 0);
         Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
         {
@@ -1301,8 +1357,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteConsumerGroups_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-aa-b", "diff-aa-a" };
 
         DeleteConsumerGroupsResult syncResult = sync.DeleteConsumerGroups(groups);
@@ -1334,8 +1392,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         MemberToRemove[] members = { new MemberToRemove("diff-ab-2"), new MemberToRemove("diff-ab-1") };
 
         RemoveMembersFromConsumerGroupOptions named = new RemoveMembersFromConsumerGroupOptions(members);
@@ -1389,8 +1449,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AlterConsumerGroupOffsets_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition partition = new TopicPartition("diff-ac", 0);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
@@ -1423,8 +1485,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteConsumerGroupOffsets_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition partition = new TopicPartition("diff-ad", 0);
 
         DeleteConsumerGroupOffsetsResult syncResult = sync.DeleteConsumerGroupOffsets("diff-ad-group", new[] { partition });
@@ -1456,8 +1520,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void GroupsGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition nullTopic = default;
         TopicPartition partition = new TopicPartition("diff-ae", 0);
         string?[] nullGroup = { "diff-ae-group", null };
@@ -1545,8 +1611,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task CreateAcls_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBinding[] bindings = { Acl("diff-af-b", "User:bob"), Acl("diff-af-a", "User:alice") };
         AclBinding[] requested = { bindings[0], bindings[1], Acl("diff-af-b", "User:bob") };
 
@@ -1577,8 +1645,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DeleteAcls_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBindingFilter[] filters = { AclFilter("diff-ag-b"), AclFilter("diff-ag-a") };
         AclBindingFilter[] requested = { filters[0], filters[1], AclFilter("diff-ag-b") };
 
@@ -1608,8 +1678,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeAcls_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBindingFilter filter = AclFilter("diff-ah");
 
         DescribeAclsResult syncResult = sync.DescribeAcls(filter);
@@ -1628,8 +1700,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeClientQuotas_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ClientQuotaFilter filter = ClientQuotaFilter.ContainsOnly(
             new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff-ai") });
 
@@ -1651,8 +1725,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AlterClientQuotas_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ClientQuotaEntity[] entities = { QuotaEntity("diff-aj"), QuotaEntity(null) };
         ClientQuotaAlteration[] alterations =
         {
@@ -1689,8 +1765,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void AclsAndQuotasGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBinding?[] nullBinding = { Acl("diff-ak", "User:alice"), null };
         AclBinding[] nulBinding = { Acl("diff\0ak", "User:alice") };
         AclBindingFilter?[] nullFilter = { AclFilter("diff-ak"), null };
@@ -1744,8 +1822,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeUserScramCredentials_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] users = { "diff-al-alice", "diff-al-bob" };
 
         DescribeUserScramCredentialsResult syncResult = sync.DescribeUserScramCredentials(users);
@@ -1774,8 +1854,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AlterUserScramCredentials_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] users = { "diff-am-bob", "diff-am-alice" };
         UserScramCredentialAlteration[] alterations =
         {
@@ -1812,8 +1894,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task CreateDelegationToken_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         object? created = await Agree(
             FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-an-alice", "diff-an-bob")).DelegationToken()),
@@ -1839,8 +1923,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task RenewDelegationToken_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
         byte[] asyncMac =
             (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
@@ -1868,8 +1954,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ExpireDelegationToken_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
         byte[] asyncMac =
             (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
@@ -1901,8 +1989,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeDelegationToken_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         foreach (string renewer in new[] { "diff-aq-alice", "diff-aq-bob" })
         {
             _ = await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers(renewer)).DelegationToken()));
@@ -1926,8 +2016,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeFeatures_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         Dictionary<string, (short Level, short MinSupported, short MaxSupported)> levels =
             new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)
             {
@@ -1955,8 +2047,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task UpdateFeatures_OnBothMocks_Agree()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         // One key, so the core mock's first-failure-aborts-the-batch is not ordered by its map.
         Dictionary<string, FeatureUpdate> rejected = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
@@ -2010,8 +2104,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void ScramTokensAndFeaturesGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nulUser = { "diff\0ar" };
         UserScramCredentialAlteration?[] nullAlteration =
             { new UserScramCredentialDeletion("diff-ar", ScramMechanism.ScramSha256), null };
@@ -2075,8 +2171,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task FenceProducers_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] ids = { "diff-fp-b", "diff-fp-a" };
         string[] requested = { ids[0], ids[1], ids[0] };
 
@@ -2121,8 +2219,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeTransactions_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] ids = { "diff-dt-b", "diff-dt-a", "diff-dt-b" };
 
         DescribeTransactionsResult syncResult = sync.DescribeTransactions(ids);
@@ -2155,8 +2255,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task DescribeProducers_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition[] partitions =
         {
             new TopicPartition("diff-dp", 1), new TopicPartition("diff-dp", 0), new TopicPartition("diff-dp", 1),
@@ -2192,8 +2294,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ListTransactions_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ListTransactionsOptions filtered = new ListTransactionsOptions
         {
             FilteredStates = new[] { TransactionState.Ongoing },
@@ -2228,8 +2332,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task AbortTransaction_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AbortTransactionSpec spec = new AbortTransactionSpec(new TopicPartition("diff-at", 3), 91_234L, 7, 42);
 
         AssertKafka(
@@ -2246,8 +2352,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public async Task ForceTerminateTransaction_OnBothMocks_FailsAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         AssertKafka(
             UnsupportedVersionCode,
@@ -2267,8 +2375,10 @@ public sealed class PublicAdminP14DifferentialTests
     [Fact]
     public void ProducersAndTransactionsGuards_OnBothMocks_ThrowAlike()
     {
-        using MockAdminClient sync = new MockAdminClient(1);
-        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MockAdminClient sync = new MockAdminClient(1);
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nullId = { "diff-pg", null! };
         string[] nulId = { "diff\0pg" };
         TopicPartition[] nullTopic = { new TopicPartition("diff-pg", 0), default };

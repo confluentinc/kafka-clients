@@ -45,7 +45,8 @@ public sealed class PublicProducerControlOperationsTests
         ProbeCallback callback = new ProbeCallback((_, _) => { });
         if (flavor == SyncFlavor)
         {
-            using KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+            KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             Task<KafkaFuture<RecordMetadata>> send = Task.Factory.StartNew(
                 () => producer.Send(Record(topic), callback),
                 CancellationToken.None,
@@ -62,7 +63,8 @@ public sealed class PublicProducerControlOperationsTests
         }
         else
         {
-            await using AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             Task<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(Record(topic), callback).AsTask();
             await Task.Delay(Settle);
             Assert.False(stage.IsCompleted, "the send did not wait for metadata");
@@ -93,7 +95,8 @@ public sealed class PublicProducerControlOperationsTests
         KafkaException failed;
         if (flavor == SyncFlavor)
         {
-            using KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+            KafkaProducer<byte[], byte[]> producer = Sync(maxBlockMs);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             Task send = Task.Factory.StartNew(
                 () => producer.Send(Record(topic), callback),
                 CancellationToken.None,
@@ -118,7 +121,8 @@ public sealed class PublicProducerControlOperationsTests
         }
         else
         {
-            await using AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             Task<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(Record(topic), callback).AsTask();
             await Task.Delay(Settle);
             Assert.False(stage.IsCompleted, "the send did not wait for metadata");

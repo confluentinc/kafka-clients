@@ -170,7 +170,8 @@ public sealed class AdminP9CountdownTests
     [Fact]
     public async Task VoidCountdown_FaultsAnUnansweredKeyAtZero()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         SafeAdminHandle handle = admin.Handle;
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
@@ -196,7 +197,8 @@ public sealed class AdminP9CountdownTests
     [Fact]
     public async Task PerKeyCompletion_IsolatesOneKeysMarshallingFailure()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KeyedAdminOperation<string, long> operation = new KeyedAdminOperation<string, long>(
             "listOffsets", new[] { "good", "bad", "failed" }, StringComparer.Ordinal, AdminFlavour.Async);

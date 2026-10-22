@@ -19,15 +19,10 @@ using System.Reflection;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
-
 /// <summary>
-/// Unit tests for the two new public value types <see cref="OffsetAndMetadata"/> /
-/// <see cref="OffsetAndTimestamp"/> (M5/P4, PLAN §1). Their <c>internal</c> constructors are
-/// reachable from the test project via <c>InternalsVisibleTo</c> — this proves the field
-/// storage, the <c>int?</c> <c>LeaderEpoch</c> mapping (present vs absent) at the value level
-/// (the non-empty container path that drives these from native is not reachable broker-free
-/// — see <c>OffsetMapMarshalTests</c>), the non-null <c>Metadata</c> contract, and the debug
-/// <c>ToString</c>.
+/// <see cref="OffsetAndMetadata"/> and <see cref="OffsetAndTimestamp"/>: their fields, the leader epoch, value
+/// equality and the <c>ToString</c> forms. A negative leader epoch is absent, as Java's <c>leaderEpoch()</c> reports
+/// it: .NET has no raw accessor, so the constructor normalises it.
 /// </summary>
 public sealed class PublicConsumerOffsetValueTypeTests
 {
@@ -48,7 +43,7 @@ public sealed class PublicConsumerOffsetValueTypeTests
         OffsetAndMetadata value = new OffsetAndMetadata(7, string.Empty, null);
 
         Assert.Equal(7, value.Offset);
-        Assert.Equal(string.Empty, value.Metadata); // never null (Java default "")
+        Assert.Equal(string.Empty, value.Metadata);
         Assert.Null(value.LeaderEpoch);
     }
 
@@ -63,13 +58,6 @@ public sealed class PublicConsumerOffsetValueTypeTests
             new OffsetAndMetadata(7, string.Empty, null).ToString());
     }
 
-    /// <summary>
-    /// G5-3: a negative leader epoch is absent. Java stores the raw value but its
-    /// <c>leaderEpoch()</c> getter reports a null or negative one as <c>Optional.empty()</c>
-    /// (<c>OffsetAndMetadata.java:98-101</c>), and its <c>toString</c> prints <c>null</c> for it
-    /// (<c>:123</c>); .NET has no raw accessor, so the constructor normalises it.
-    /// </summary>
-    /// <param name="epoch">A negative epoch.</param>
     [Theory]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
@@ -80,17 +68,11 @@ public sealed class PublicConsumerOffsetValueTypeTests
         Assert.Null(value.LeaderEpoch);
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=null, metadata='m'}", value.ToString());
 
-        // Zero is the boundary Java keeps: "leaderEpoch < 0" is the only rejection.
         OffsetAndMetadata zero = new OffsetAndMetadata(5, "m", 0);
         Assert.Equal(0, zero.LeaderEpoch);
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=0, metadata='m'}", zero.ToString());
     }
 
-    /// <summary>
-    /// G5-2: value equality over the offset, the metadata and the <em>normalised</em> leader
-    /// epoch — Java's <c>equals</c> / <c>hashCode</c> (<c>OffsetAndMetadata.java:105-116</c>),
-    /// which compare <c>leaderEpoch()</c>, so an epoch of <c>-1</c> equals an absent one.
-    /// </summary>
     [Fact]
     public void G5_2_OffsetAndMetadata_HasValueEquality()
     {
@@ -102,13 +84,11 @@ public sealed class PublicConsumerOffsetValueTypeTests
         Assert.True(negative.Equals(absent));
         Assert.Equal(absent.GetHashCode(), negative.GetHashCode());
 
-        // A null metadata is Java's "" (Objects.requireNonNullElse), so the two are equal.
         OffsetAndMetadata nullMetadata = new OffsetAndMetadata(5, null, 3);
         OffsetAndMetadata emptyMetadata = new OffsetAndMetadata(5, string.Empty, 3);
         Assert.True(nullMetadata.Equals(emptyMetadata));
         Assert.Equal(nullMetadata.GetHashCode(), emptyMetadata.GetHashCode());
 
-        // Each field on its own makes the two unequal.
         OffsetAndMetadata baseline = new OffsetAndMetadata(5, "m", 3);
         Assert.True(baseline.Equals(new OffsetAndMetadata(5, "m", 3)));
         Assert.Equal(baseline.GetHashCode(), new OffsetAndMetadata(5, "m", 3).GetHashCode());
@@ -120,11 +100,8 @@ public sealed class PublicConsumerOffsetValueTypeTests
         Assert.False(baseline.Equals((object?)null));
         Assert.False(baseline.Equals("OffsetAndMetadata"));
 
-        // The hash is stable for one instance.
         Assert.Equal(baseline.GetHashCode(), baseline.GetHashCode());
 
-        // Reflection pins the shape: IEquatable<T>, a typed Equals, and no operators (the
-        // MemberToRemove / RecordsToDelete precedent; Java has none either).
         Type type = typeof(OffsetAndMetadata);
         Assert.Contains(typeof(IEquatable<OffsetAndMetadata>), type.GetInterfaces());
         MethodInfo typed = Assert.Single(

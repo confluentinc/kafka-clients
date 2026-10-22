@@ -46,7 +46,8 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task AlreadyCanceledToken_ThrowsSynchronously_AndSendsNothing(string client, string overload)
     {
-        using IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
@@ -68,7 +69,8 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task NullRecord_ThrowsSynchronously(string client, string overload)
     {
-        using IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
@@ -83,7 +85,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     public void Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
     {
         IAsyncProducer<byte[], byte[]> producer = Create(Real);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
@@ -99,7 +101,8 @@ public sealed class PublicProducerSendSynchronousThrowTests
     public void SerializerThrows_RealClient_ThrowsSynchronously(string overload)
     {
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
-        using IAsyncProducer<byte[], byte[]> producer = Create(Real, throwing);
+        IAsyncProducer<byte[], byte[]> producer = Create(Real, throwing);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         SerializationException error = Assert.Throws<SerializationException>(
@@ -128,7 +131,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         }
         finally
         {
-            producer.Dispose();
+            TestTimeout.Dispose(producer);
         }
     }
 
@@ -138,7 +141,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         // Unreachable through a public client (each checks the closed state first), so this is the only guard on
         // SendViaPump's own check staying synchronous.
         NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         Assert.Throws<ObjectDisposedException>(
             () => { _ = producer.SendViaPump(SerializedRecord(), callback: null); });

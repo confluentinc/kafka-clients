@@ -35,8 +35,9 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public void Sync_TypedRoundTrip_StringLong_Succeeds()
     {
-        using MockProducer<string, long> producer =
+        MockProducer<string, long> producer =
             new MockProducer<string, long>(Serdes.String, Serdes.Int64);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
@@ -52,8 +53,9 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public async Task Async_TypedRoundTrip_StringLong_Succeeds()
     {
-        await using AsyncMockProducer<string, long> producer =
+        AsyncMockProducer<string, long> producer =
             new AsyncMockProducer<string, long>(Serdes.String, Serdes.Int64);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(
@@ -70,8 +72,9 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_TypedRoundTrip_ByteArray_Succeeds()
     {
         // <byte[], byte[]> with Serdes.ByteArray is the bytes surface.
-        using MockProducer<byte[], byte[]> producer =
+        MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
@@ -88,8 +91,9 @@ public sealed class PublicProducerTypedSendTests
     {
         RecordingSerializer<string> keySer = new RecordingSerializer<string>(Serdes.String);
         RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
-        using MockProducer<string, string> producer =
+        MockProducer<string, string> producer =
             new MockProducer<string, string>(keySer, valueSer);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // The serializer is invoked on a null key and value, as Java's KafkaProducer does; null bytes are absent.
         RecordMetadata metadata = null!;
@@ -108,8 +112,9 @@ public sealed class PublicProducerTypedSendTests
     public async Task Async_NullValue_InvokesSerializer_ThenSends()
     {
         RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
-        await using AsyncMockProducer<string, string> producer =
+        AsyncMockProducer<string, string> producer =
             new AsyncMockProducer<string, string>(Serdes.String, valueSer);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         await TestTimeout.Run(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: null, key: "k")).Delivery(),
@@ -124,8 +129,9 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_EmptyValue_InvokesSerializer_ThenSends()
     {
         RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
-        using MockProducer<string, string> producer =
+        MockProducer<string, string> producer =
             new MockProducer<string, string>(Serdes.String, valueSer);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // An empty string serializes to a present, empty byte[], distinct from absent.
         TestTimeout.Run(
@@ -141,8 +147,9 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_ValueTypeTombstone_NullDistinctFromDefault()
     {
         NullableInt64Serializer valueSer = new NullableInt64Serializer();
-        using MockProducer<string, long?> producer =
+        MockProducer<string, long?> producer =
             new MockProducer<string, long?>(Serdes.String, valueSer);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // A null long? is a tombstone and a present 0L a value; the serializer is invoked for both.
         TestTimeout.Run(
@@ -160,8 +167,9 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_ValueSerializerThrows_ThrowsSerializationExceptionSynchronously()
     {
         ThrowingSerializer<string> valueSer = new ThrowingSerializer<string>();
-        using MockProducer<string, string> producer =
+        MockProducer<string, string> producer =
             new MockProducer<string, string>(Serdes.String, valueSer);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         SerializationException ex = Assert.Throws<SerializationException>(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")));
@@ -179,8 +187,9 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_KeySerializerThrows_MessageMentionsKey()
     {
         ThrowingSerializer<string> keySer = new ThrowingSerializer<string>();
-        using MockProducer<string, string> producer =
+        MockProducer<string, string> producer =
             new MockProducer<string, string>(keySer, Serdes.String);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         SerializationException ex = Assert.Throws<SerializationException>(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")));
@@ -194,8 +203,9 @@ public sealed class PublicProducerTypedSendTests
     public void Async_ValueSerializerThrows_ThrowsSynchronouslyBeforeReturningTask()
     {
         ThrowingSerializer<string> valueSer = new ThrowingSerializer<string>();
-        using AsyncMockProducer<string, string> producer =
+        AsyncMockProducer<string, string> producer =
             new AsyncMockProducer<string, string>(Serdes.String, valueSer);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // The async Send serializes before it returns, so the wrap leaves the call (Assert.Throws, not ThrowsAsync);
         // the statement lambda binds Action, not the obsolete Func<Task>.

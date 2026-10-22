@@ -76,7 +76,8 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithANegativeTimeout_ThrowsBeforeAnyNativeCall()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentOutOfRangeException failure = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => admin.Close(TimeSpan.FromMilliseconds(-1)));
@@ -133,7 +134,8 @@ public sealed class PublicAdminTeardownTests
             {
                 for (int i = 0; i < 25; i++)
                 {
-                    using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+                    AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+                    using IDisposable adminDisposal = TestTimeout.Disposal(admin);
                     AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic($"churn-{i}", 1, 1) });
                     result.All().Get().GetAwaiter().GetResult();
                 }

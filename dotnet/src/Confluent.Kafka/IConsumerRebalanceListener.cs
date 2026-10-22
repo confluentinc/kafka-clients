@@ -17,63 +17,43 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A callback set invoked when the set of partitions assigned to the consumer changes —
-/// the C# realization of Java's
-/// <c>org.apache.kafka.clients.consumer.ConsumerRebalanceListener</c>. Pass an
-/// implementation to <see cref="IConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener)"/>
+/// The callbacks run when the partitions assigned to the consumer change, Java's
+/// <c>org.apache.kafka.clients.consumer.ConsumerRebalanceListener</c>. Pass an implementation to
+/// <see cref="IConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener)"/>
 /// or <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The methods are synchronous, not <see cref="System.Threading.Tasks.Task"/>-returning
-/// (declared divergence D1).</b> The ABI callback is a synchronous C function pointer
-/// returning <c>kafka_common_Error_t*</c>, and the rebalance blocks until it returns
-/// (header, <c>kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t</c>).
-/// <c>dotnet/CLAUDE.md</c> §3's "(async)" row describes the <em>Rust core's</em> trait,
-/// which the C ABI flattens (<c>dotnet/.claude/rules/bindings.md</c> §1.2); restoring "blocks until it returns"
-/// faithfully in C# means a sync method. Settled as roadmap Q6. An async listener would have to be
-/// blocked on from the dispatcher thread, which is the documented deadlock source both Python
-/// reference servers avoid by using plain sync methods.
+/// The rebalance, and the operation that triggered it, wait until each method returns. On
+/// <see cref="IConsumer{TKey, TValue}"/> the methods run on the calling thread, inside the blocking call that
+/// triggered them; on <see cref="IAsyncConsumer{TKey, TValue}"/> they run on the consumer's drain thread,
+/// <c>confluent-kafka-consumer-pump</c>, one at a time. <see cref="IAsyncConsumerRebalanceListener"/> is the
+/// asynchronous form, for <see cref="IAsyncConsumer{TKey, TValue}"/> only.
 /// </para>
 /// <para>
-/// <b>Callbacks run on the core's callback-dispatcher thread, not the caller's task
-/// (declared divergence D3).</b> <c>consumer-threading.md</c> §31's caller's-task model is
-/// the Rust core's contract; the C ABI flattens it. Python documents the identical
-/// divergence (<c>consumer.py:977-981</c>). The dispatcher never runs two callbacks of the
-/// same consumer concurrently, and the rebalance — and the operation that triggered it —
-/// does not proceed until the callback returns.
+/// A listener can call back into its own consumer, as a Java listener calls the consumer it
+/// captured. A call the <see cref="ConsumerHandle"/> has goes to the consumer's own handle and blocks;
+/// a waiting call it lacks (<c>Poll</c>, <c>Subscribe</c>, <c>Unsubscribe</c>, <c>Assign</c>,
+/// <c>PartitionsFor</c>, <c>ListTopics</c>, and the timed <c>Commit</c>, <c>Committed</c>,
+/// <c>BeginningOffsets</c>, <c>EndOffsets</c> and <c>OffsetsForTimes</c>) throws
+/// <see cref="System.InvalidOperationException"/> at once, and so does <c>Close</c>, which leaves the consumer
+/// open. On a mock consumer the handle has only the commits, <c>CurrentLag</c>, <c>Assignment</c> and
+/// <c>Paused</c>, and another routed call throws <see cref="KafkaException"/>. A thread the listener starts is
+/// not inside the listener.
 /// </para>
 /// <para>
-/// <b>A listener must not call back into its own consumer.</b> The plain consumer API is
-/// rejected with a <see cref="KafkaException"/> (ConcurrentModification) while the
-/// application thread driving the rebalance holds the core's access guard. The sanctioned
-/// reentrancy path is <see cref="ConsumerHandle"/> (Java gets the equivalent for free by
-/// running the callback on the polling thread), obtained from
-/// <see cref="IConsumerCommon.Handle"/> and <b>shipped since M9/P8</b>: capture one before
-/// subscribing and use it from inside the callback, where the consumer's own API is not
-/// available.
+/// An exception a method throws never unwinds into native code: it propagates out of the consumer call that ran
+/// the listener, as a Java listener's does.
 /// </para>
 /// <para>
-/// <b>Throwing is meaningful.</b> An exception thrown by a listener method is caught at the
-/// interop boundary (it is never allowed to unwind into native code) and converted into the
-/// error the Rust core sees, so it propagates out of the operation that triggered the
-/// rebalance as a <see cref="KafkaException"/> carrying the exception's message. This
-/// mirrors a Java listener throwing.
+/// A listener is bound to a subscription and fires many times. A replacing subscribe, a listener-less one
+/// included, releases it, as does disposing the consumer; <c>Unsubscribe()</c> and <c>Close()</c> keep it, as
+/// Java's <c>SubscriptionState.unsubscribe()</c> does.
 /// </para>
 /// <para>
-/// <b>Registration lifetime.</b> A listener is bound to a <em>subscription</em>, not to one
-/// operation, and fires many times. The registration is released by a <b>replacing</b>
-/// subscribe (including a listener-less one) or by disposing the consumer; it is
-/// deliberately <b>not</b> released by <c>Unsubscribe()</c> or <c>Close()</c>, matching
-/// Java's <c>SubscriptionState.unsubscribe()</c>.
-/// </para>
-/// <para>
-/// <b>Why three required methods.</b> Java gives <c>onPartitionsLost</c> a default
-/// implementation that delegates to <c>onPartitionsRevoked</c>. C# default interface methods
-/// require .NET Standard 2.1 / C# 8, above this binding's netstandard2.0 floor, so the
-/// default cannot live on the interface. Derive from
-/// <see cref="ConsumerRebalanceListenerBase"/> to get Java's default behaviour; implement
-/// this interface directly to be explicit about all three.
+/// Java's <c>onPartitionsLost</c> defaults to <c>onPartitionsRevoked</c>. A C# default interface method needs
+/// .NET Standard 2.1, above this binding's netstandard2.0 floor, so the default lives on
+/// <see cref="ConsumerRebalanceListenerBase"/>.
 /// </para>
 /// </remarks>
 public interface IConsumerRebalanceListener

@@ -70,7 +70,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BrokerLogger)]
     public async Task RealClient_DescribeConfigs_FailsEveryResource(ConfigResourceType brokerType)
     {
-        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -87,7 +88,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BrokerLogger)]
     public async Task RealClient_IncrementalAlterConfigs_FailsEveryResource(ConfigResourceType brokerType)
     {
-        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -105,7 +107,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_DescribeConfigs_Broker_FailsOnlyThatResource()
     {
-        using AsyncMockAdminClient admin = await NewMockWithTopic();
+        AsyncMockAdminClient admin = await NewMockWithTopic();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -123,7 +126,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_DescribeConfigs_BrokerLogger_IsRefused_AndTheTopicIsDescribed()
     {
-        using AsyncMockAdminClient admin = await NewMockWithTopic();
+        AsyncMockAdminClient admin = await NewMockWithTopic();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -137,7 +141,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_Broker_FailsOnlyThatResource()
     {
-        using AsyncMockAdminClient admin = await NewMockWithTopic();
+        AsyncMockAdminClient admin = await NewMockWithTopic();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -151,7 +156,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_BrokerLogger_IsRefused_AndTheTopicIsAltered()
     {
-        using AsyncMockAdminClient admin = await NewMockWithTopic();
+        AsyncMockAdminClient admin = await NewMockWithTopic();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 

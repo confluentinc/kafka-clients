@@ -40,18 +40,23 @@ public sealed class Utf8RoundTripTests
             ["group.id"] = groupId,
         };
 
-        using NativeConsumer consumer = NativeConsumer.Create(config);
+        NativeConsumer consumer = NativeConsumer.Create(config);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        IntPtr meta = NativeMethods.ConsumerGroupMetadata(consumer.Handle);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr meta = NativeMethods.ConsumerGroupMetadata(consumer.Handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
         Assert.NotEqual(IntPtr.Zero, meta);
         try
         {
-            string? readBack = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(meta));
+            string? readBack = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupId(meta, ref outErr));
+            KafkaException.ThrowIfFfiFailed(ref outErr);
             Assert.Equal(groupId, readBack);
         }
         finally
         {
-            NativeMethods.ConsumerGroupMetadataDestroy(meta);
+            NativeMethods.ConsumerGroupMetadataDestroy(meta, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
         }
     }
 }

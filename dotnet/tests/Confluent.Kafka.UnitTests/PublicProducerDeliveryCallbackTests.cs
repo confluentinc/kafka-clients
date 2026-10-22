@@ -50,7 +50,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public async Task Success_DeliversTheRealMetadata(string flavor)
     {
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         RecordMetadata returned = await WithTimeout(producer.Send(
@@ -77,7 +78,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // A non-ASCII topic guards the UTF-8 copy-out of the native metadata.
         const string NonAscii = "livraison-主题-ünîcödé-🚚";
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         await WithTimeout(producer.Send(
@@ -94,7 +96,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public async Task ExactlyOnce_OneRecord_InvokesTheCallbackExactlyOnce(string flavor)
     {
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         await WithTimeout(producer.Send(
@@ -111,7 +114,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Records sent without awaiting each fire their own callback once.
         const int RecordCount = 16;
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback shared = new RecordingDeliveryCallback();
         RecordingDeliveryCallback[] perRecord = Enumerable.Range(0, RecordCount)
             .Select(_ => new RecordingDeliveryCallback())
@@ -143,8 +147,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Java completes the future after the callbacks run. The probe is the send task's state seen from inside the
         // callback; comparing continuation order would race RunContinuationsAsynchronously.
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
         Task<RecordMetadata> sendTask = producer.Send(
@@ -164,8 +169,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task Ordering_Sync_CallbackRunsBeforeSendReturns()
     {
         // The sync probe: the callback has run, on the completion thread, by the time the blocking Get returns.
-        using MockProducer<byte[], byte[]> producer =
+        MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         bool invokedAtReturn = false;
@@ -194,8 +200,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task Ordering_Sync_CallbackRunsBeforeSendThrows()
     {
         // On failure too, the callback runs, on the completion thread, before Get throws.
-        using MockProducer<byte[], byte[]> producer =
+        MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         bool invokedAtThrow = false;
@@ -230,7 +237,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public async Task Failure_DeliversPlaceholderMetadataAndTheException(string flavor)
     {
-        using Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -267,7 +275,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Java's MockProducer picks partition 0 for a topic its cluster does not know, and its failure
         // placeholder keeps that partition.
-        using Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -289,7 +298,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async, OtherError)]
     public async Task ErrorNext_TheSameInstanceReachesTheCallbackAndTheFuture(string flavor, string kind)
     {
-        using Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Exception injected = kind == KafkaError
             ? new KafkaException(2, "the injected instance", isRetriable: true)
@@ -314,7 +324,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Java's doSend rethrows a closed-producer error without running the callback.
         Flavor producer = Flavor.Create(flavor);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
@@ -331,7 +341,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Java's doSend rethrows a SerializationException without running the callback.
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
-        using Flavor producer = Flavor.Create(flavor, valueSerializer: throwing);
+        Flavor producer = Flavor.Create(flavor, valueSerializer: throwing);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         SerializationException error = Assert.Throws<SerializationException>(() => producer.SendInline(
@@ -349,7 +360,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public void NoCallback_OnSynchronousThrow_NullRecord(string flavor)
     {
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         // ArgumentNullException(nameof(record)) sets no custom message → ParamName is the contract.
@@ -366,7 +378,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task ThrowingCallback_IsSwallowed_AndTheSendStillSucceeds(string flavor)
     {
         // Java logs and swallows a throwing callback: the send is unaffected, and a second send still completes.
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ThrowingDeliveryCallback throwing = new ThrowingDeliveryCallback("boom-callback");
 
         RecordMetadata first = await WithTimeout(producer.Send(
@@ -391,7 +404,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // Every record carries a throwing callback, and every send still resolves: one bug must not fail N sends.
         const int RecordCount = 8;
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ThrowingDeliveryCallback throwing = new ThrowingDeliveryCallback("boom-batch");
 
         List<Task<RecordMetadata>> sends = new List<Task<RecordMetadata>>(RecordCount);
@@ -420,7 +434,8 @@ public sealed class PublicProducerDeliveryCallbackTests
         Trace.Listeners.Add(listener);
         try
         {
-            using Flavor producer = Flavor.Create(flavor);
+            Flavor producer = Flavor.Create(flavor);
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             await WithTimeout(producer.Send(
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
                 new ThrowingDeliveryCallback(marker)));
@@ -443,7 +458,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task Callback_MaySendAgainFromInsideItself(string flavor)
     {
         // Retrying from inside the callback, the canonical use, must not deadlock on either flavor.
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ReentrantDeliveryCallback reentrant = new ReentrantDeliveryCallback(
             () => producer.Send(
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("retry"), partition: 1),
@@ -472,8 +488,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     public async Task Cancellation_Async_CallbackStillFiresAfterAGetWaitWasCanceled()
     {
         // A token that ends the caller's Get wait leaves the record and its callback alone.
-        using AsyncMockProducer<byte[], byte[]> producer =
+        AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
@@ -505,7 +522,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public void NullCallback_ThrowsArgumentNullException(string flavor)
     {
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // ArgumentNullException(nameof(callback)) sets no custom message, so ParamName is the contract.
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => producer.SendInline(
@@ -520,7 +538,8 @@ public sealed class PublicProducerDeliveryCallbackTests
     public void NullRecord_IsReportedBeforeANullCallback(string flavor)
     {
         // Java's precondition order: the record, then the callback, then the closed check.
-        using Flavor producer = Flavor.Create(flavor);
+        Flavor producer = Flavor.Create(flavor);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         ArgumentNullException error =
             Assert.Throws<ArgumentNullException>(() => producer.SendInline(null!, callback: null));
@@ -534,7 +553,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The argument guards precede the closed check.
         Flavor producer = Flavor.Create(flavor);
-        producer.Dispose();
+        TestTimeout.Dispose(producer);
 
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => producer.SendInline(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback: null));

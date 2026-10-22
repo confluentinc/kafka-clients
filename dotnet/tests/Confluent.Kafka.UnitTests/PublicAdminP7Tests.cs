@@ -61,7 +61,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task CreateDelegationToken_ReturnsATokenWithItsMetadata()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await admin.CreateDelegationToken(
             new CreateDelegationTokenOptions
@@ -85,7 +86,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeDelegationToken_ReturnsEveryTokenWhenUnfiltered()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken first = await Create(admin, "alice");
         DelegationToken second = await Create(admin, "bob");
@@ -105,7 +107,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task RenewAndExpire_MatchTheTokenByItsMac()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await Create(admin, "alice");
 
@@ -125,7 +128,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task RenewDelegationToken_UnknownMacFaultsTheTask()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await Assert.ThrowsAsync<KafkaException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
@@ -142,7 +146,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeFeatures_ReturnsBothTablesAndTheEpoch()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
@@ -169,7 +174,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task UpdateFeatures_SurfacesTheRejectionOnEveryKey()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
@@ -199,7 +205,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task G6_1_UpdateFeatures_MockAcceptsAnEmptyMap()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result =
             admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
@@ -219,8 +226,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap()
     {
-        using KafkaAdminClient admin = new KafkaAdminClient(
+        KafkaAdminClient admin = new KafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
@@ -239,7 +247,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void G6_9_UpdateFeatures_ANullName_GetsTheBlankNameMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = new MockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(
@@ -272,8 +281,9 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public void UpdateFeatures_RejectsABlankFeatureName(string feature)
     {
-        using KafkaAdminClient admin = new KafkaAdminClient(
+        KafkaAdminClient admin = new KafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(
@@ -292,7 +302,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void UpdateFeatures_AcceptsANameWithInteriorWhitespace()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
@@ -319,7 +330,8 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public async Task G6_1_UpdateFeatures_MockAcceptsABlankFeatureName(string feature)
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
@@ -348,7 +360,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task UpdateFeatures_WalksEveryKey_OnTheSuccessPath()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
@@ -382,7 +395,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
@@ -398,7 +412,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_ARepeatedUser_IsSent_AndFaultsWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
@@ -412,7 +427,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task AlterUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.AlterUserScramCredentials(
@@ -428,7 +444,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_FailureReachesEveryAccessor()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
@@ -546,7 +563,8 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DelegationTokenToString_MasksTheMac()
     {
-        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await Create(admin, "alice");
         string text = token.ToString();
