@@ -35,6 +35,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
+use crate::consumer::internals::NodeStatus;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 use crate::consumer::internals::metrics::AsyncConsumerMetrics;
@@ -573,6 +574,14 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         &self.client
     }
 
+    /// Visible-for-testing mutable accessor for the underlying client, so a
+    /// test can build a sent `MockClient` request's builder (which needs
+    /// `&mut`) and inspect it — Java's `ArgumentCaptor` on `doSend`.
+    #[cfg(test)]
+    pub(crate) fn client_for_test_mut(&mut self) -> &mut K {
+        &mut self.client
+    }
+
     /// Visible-for-testing mutable accessor (matches Java's
     /// `unsentRequests()` semantics: tests can `poll()` / `iterator()`).
     pub(crate) fn unsent_requests_mut(&mut self) -> &mut VecDeque<UnsentRequest> {
@@ -952,6 +961,19 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         } else {
             self.metadata_error = Some(err);
         }
+    }
+}
+
+/// The delegate's live connection state, read by the fetch manager while the
+/// bg task holds the delegate (Java's `FetchRequestManager.isUnavailable` /
+/// `maybeThrowAuthFailure`, which call these two delegate methods).
+impl<K: KafkaClient + Send> NodeStatus for NetworkClientDelegate<K> {
+    fn is_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
+        NetworkClientDelegate::is_unavailable(self, node, current_time_ms)
+    }
+
+    fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
+        NetworkClientDelegate::maybe_return_auth_failure(self, node)
     }
 }
 

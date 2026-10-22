@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `FetchRequestManager` — implements the `RequestManager` interface for
-//! the fetch loop, composing [`AbstractFetch`] (Phase 7a).
+//! `FetchRequestManager` — the fetch loop's request manager, composing
+//! [`AbstractFetch`] (Phase 7a).
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.FetchRequestManager`.
@@ -25,6 +25,15 @@
 //! field, mirroring the Phase 7a design decision. This avoids the
 //! lifetime/dispatch issues that come with translating Java inheritance
 //! to Rust trait objects.
+//!
+//! Java's `implements RequestManager` is translated as the inherent
+//! methods [`FetchRequestManager::poll`], [`FetchRequestManager::poll_on_close`]
+//! and [`FetchRequestManager::maximum_time_to_wait`], not as an impl of the
+//! `RequestManager` trait: `poll` / `poll_on_close` read the bg task's
+//! `NetworkClientDelegate` through [`NodeStatus`], which the trait's
+//! signature cannot carry. `RequestManagers::entries` therefore skips the
+//! fetch slot, and `ConsumerNetworkThread` drives these three methods
+//! directly (in `run_once` and `cleanup`).
 
 #![expect(dead_code)]
 
@@ -43,23 +52,75 @@ use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchConfig;
 use crate::consumer::internals::FetchMetricsManager;
-use crate::consumer::internals::RequestManager;
 use crate::consumer::internals::SubscriptionState;
 use crate::consumer::internals::{PollResult, UnsentRequest};
 use crate::fetch_session_handler::FetchSessionRequestData;
 
-/// Callback that supplies the "is this node currently unreachable due to
-/// reconnect backoff?" predicate.
+/// The connection state the fetch manager reads for a fetch target: Java's
+/// two abstract `AbstractFetch` hooks, which `FetchRequestManager` implements
+/// by delegating to its `NetworkClientDelegate` field
+/// (`FetchRequestManager.isUnavailable` / `maybeThrowAuthFailure`).
 ///
-/// Phase 7b's [`FetchRequestManager`] receives this from the bg task at
-/// `RequestManager::poll` time (the bg task can read
-/// `NetworkClientDelegate::is_unavailable`). The callback owns no
-/// borrowed state to keep the type bounds simple.
-pub(crate) type IsUnavailableFn = Arc<dyn Fn(&Node) -> bool + Send + Sync + 'static>;
+/// Rust-only trait (no Java counterpart, DoD #7). The Rust fetch manager
+/// cannot hold the delegate: the bg task owns it behind a `tokio` mutex and
+/// keeps that guard for the whole `run_once` iteration, so the manager could
+/// neither lock it nor keep a reference to it. The bg task instead hands the
+/// delegate it already holds to [`FetchRequestManager::poll`] /
+/// [`FetchRequestManager::poll_on_close`] as a `&impl NodeStatus`, which
+/// gives the manager the delegate's live view, as Java's field does.
+/// [`crate::consumer::internals::NetworkClientDelegate`] is the production
+/// implementation; unit tests that build no network client supply a fake.
+pub(crate) trait NodeStatus {
+    /// Java's `NetworkClientDelegate.isUnavailable(Node)`: the node is
+    /// disconnected and inside its reconnect backoff window
+    /// (`NetworkClientUtils.isUnavailable`). Java reads the delegate's `Time`;
+    /// the caller passes the consumer's time here.
+    fn is_unavailable(&self, node: &Node, current_time_ms: i64) -> bool;
 
-/// Callback that returns `Err(...)` when the node has a pending
-/// authentication failure (Java's `maybeThrowAuthFailure`).
-pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), Error> + Send + Sync + 'static>;
+    /// Java's `NetworkClientDelegate.maybeThrowAuthFailure(Node)`: the
+    /// authentication failure cached for the node's connection, if any.
+    fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error>;
+}
+
+/// Test stand-in for the bg task's `NetworkClientDelegate` in unit tests that
+/// build no network client: the two [`NodeStatus`] answers come from the
+/// supplied closures (Java's tests drive `client.backoff(node, ms)` and
+/// `client.authenticationFailed(node, ms)` on a `MockClient` instead).
+#[cfg(test)]
+pub(crate) struct TestNodeStatus {
+    is_unavailable: Box<dyn Fn(&Node) -> bool + Send + Sync>,
+    auth_failure: TestAuthFailureFn,
+}
+
+/// [`TestNodeStatus`]'s `maybe_return_auth_failure` answer.
+#[cfg(test)]
+type TestAuthFailureFn = Box<dyn Fn(&Node) -> Result<(), Error> + Send + Sync>;
+
+#[cfg(test)]
+impl TestNodeStatus {
+    /// Every node connected (or connectable) and no authentication failure.
+    pub(crate) fn all_available() -> Self {
+        Self::new(|_| false, |_| Ok(()))
+    }
+
+    pub(crate) fn new(
+        is_unavailable: impl Fn(&Node) -> bool + Send + Sync + 'static,
+        auth_failure: impl Fn(&Node) -> Result<(), Error> + Send + Sync + 'static,
+    ) -> Self {
+        Self { is_unavailable: Box::new(is_unavailable), auth_failure: Box::new(auth_failure) }
+    }
+}
+
+#[cfg(test)]
+impl NodeStatus for TestNodeStatus {
+    fn is_unavailable(&self, node: &Node, _current_time_ms: i64) -> bool {
+        (self.is_unavailable)(node)
+    }
+
+    fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
+        (self.auth_failure)(node)
+    }
+}
 
 /// Envelope for routing a fetch-request completion (or its
 /// transport-level failure) from the spawned response forwarder back
@@ -110,7 +171,7 @@ pub(crate) enum PendingFetchCompletion {
 }
 
 /// `FetchRequestManager` — owns an [`AbstractFetch`] and produces fetch
-/// `UnsentRequest`s in response to `RequestManager::poll`.
+/// `UnsentRequest`s in response to [`Self::poll`].
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager")]
 pub(crate) struct FetchRequestManager {
     /// Shared state with the Phase 10 bg task (`AbstractFetch` from 7a).
@@ -122,13 +183,6 @@ pub(crate) struct FetchRequestManager {
     /// this via `whenComplete` chaining; Rust collects them in a single
     /// slot and resolves them in one shot).
     pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), Error>>>>,
-    /// Node-availability callbacks supplied by the consumer bg task. They
-    /// are stored as `Arc<dyn Fn>` so the bg task can plug in
-    /// [`crate::consumer::internals::NetworkClientDelegate`]
-    /// indirectly without `FetchRequestManager` holding a direct
-    /// reference to the delegate.
-    is_unavailable: IsUnavailableFn,
-    maybe_throw_auth_failure: MaybeAuthFailureFn,
     /// Cloned into each spawned response forwarder so the forwarder can
     /// route the fetch response back through `poll(now)`'s drain step.
     /// See [`PendingFetchCompletion`] for the rationale.
@@ -156,30 +210,24 @@ pub(crate) struct FetchRequestManager {
     /// the production path installs the real one via
     /// [`Self::set_completion_notify`].
     completion_notify: Arc<Notify>,
-    /// `retry.backoff.ms`: the bound [`RequestManager::maximum_time_to_wait`]
+    /// `retry.backoff.ms`: the bound [`Self::maximum_time_to_wait`]
     /// puts on the application thread's wait while no fetch is in flight.
     /// Java: `private final long retryBackoffMs` (KAFKA-20854).
     retry_backoff_ms: i64,
+    /// Test-only tally of the fetch requests built per node by `poll`.
+    #[cfg(test)]
+    fetch_requests_built: std::collections::HashMap<i32, u64>,
 }
 
 impl FetchRequestManager {
-    /// Always-available stub for [`IsUnavailableFn`]: every node is
-    /// reachable. Used by tests and as a default when no delegate is wired.
-    pub(crate) fn always_available() -> IsUnavailableFn {
-        Arc::new(|_| false)
-    }
-
-    /// No-op stub for [`MaybeAuthFailureFn`].
-    pub(crate) fn no_auth_failure() -> MaybeAuthFailureFn {
-        Arc::new(|_| Ok(()))
-    }
-
     /// Constructs a `FetchRequestManager` from explicit dependencies.
     ///
     /// Translates the 10-arg Java constructor. Drops the `LogContext` (we use
     /// the `log` crate). Phase M3 plumbs the `FetchMetricsManager` (dropped by
     /// Phase 7a); Phase 37 re-introduced `ApiVersions`; KAFKA-20854 added
-    /// `retry_backoff_ms`.
+    /// `retry_backoff_ms`. Java's `NetworkClientDelegate` argument is not
+    /// stored: the bg task passes it to every [`Self::poll`] /
+    /// [`Self::poll_on_close`] call instead (see [`NodeStatus`]).
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#FetchRequestManager")]
     pub(crate) fn new(
@@ -188,8 +236,6 @@ impl FetchRequestManager {
         fetch_config: FetchConfig,
         fetch_buffer: Arc<FetchBuffer>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
-        is_unavailable: IsUnavailableFn,
-        maybe_throw_auth_failure: MaybeAuthFailureFn,
         api_versions: Arc<crate::ApiVersions>,
         metrics_manager: Arc<FetchMetricsManager>,
         retry_backoff_ms: i64,
@@ -206,13 +252,36 @@ impl FetchRequestManager {
                 metrics_manager,
             ),
             pending_fetch_requests: None,
-            is_unavailable,
-            maybe_throw_auth_failure,
             pending_completion_tx,
             pending_completion_rx,
             completion_notify: Arc::new(Notify::new()),
             retry_backoff_ms,
+            #[cfg(test)]
+            fetch_requests_built: std::collections::HashMap::new(),
         }
+    }
+
+    /// Wakes the bg task's network poll (the same `Notify` the response
+    /// forwarders poke, see [`Self::completion_notify`]), so the next
+    /// `run_once` polls this manager promptly.
+    ///
+    /// For callers of [`Self::create_fetch_requests`] that run off the bg
+    /// task. Java calls `createFetchRequests()` on the network thread, inside
+    /// `ApplicationEventProcessor.process(AsyncPollEvent)`, so the same
+    /// `runOnce` polls the manager and completes (or fails) the future. The
+    /// Rust `AsyncPoll` continuation runs on a spawned task: without this wake
+    /// the request waits until something else wakes the bg task, and the
+    /// application's `poll()` has usually given up on the event by then
+    /// (`maybeClearPreviousInflightPoll` clears an expired event), so an error
+    /// such as a leader's cached authentication failure never reaches it.
+    pub(crate) fn wake_background_task(&self) {
+        self.completion_notify.notify_one();
+    }
+
+    /// Test seam: how many fetch requests `poll` has built for `node_id`.
+    #[cfg(test)]
+    pub(crate) fn fetch_requests_built_for_test(&self, node_id: i32) -> u64 {
+        self.fetch_requests_built.get(&node_id).copied().unwrap_or(0)
     }
 
     /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
@@ -272,7 +341,7 @@ impl FetchRequestManager {
     /// `for_close = true` switches `prepare_fetch_requests` for
     /// `prepare_close_fetch_session_requests` (`poll_on_close` path).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#pollInternal")]
-    fn poll_internal(&mut self, current_time_ms: i64, for_close: bool) -> PollResult {
+    fn poll_internal(&mut self, node_status: &impl NodeStatus, current_time_ms: i64, for_close: bool) -> PollResult {
         // Java's `pendingFetchRequestFuture` semantics: take the whole
         // slot out atomically; all callers' acks resolve together with
         // a single result.
@@ -292,19 +361,17 @@ impl FetchRequestManager {
             // skip).
             for node_id in self.abstract_fetch.session_handler_ids() {
                 if let Some(node) = cluster.node_by_id(node_id)
-                    && !(self.is_unavailable)(node)
+                    && !node_status.is_unavailable(node, current_time_ms)
                 {
                     nodes_by_id.insert(node_id, node.clone());
                 }
             }
             self.abstract_fetch.prepare_close_fetch_session_requests(&nodes_by_id)
         } else {
-            let is_unavailable = self.is_unavailable.clone();
-            let maybe_throw_auth_failure = self.maybe_throw_auth_failure.clone();
             match self.abstract_fetch.prepare_fetch_requests(
                 current_time_ms,
-                move |n| is_unavailable(n),
-                move |n| maybe_throw_auth_failure(n),
+                |n| node_status.is_unavailable(n, current_time_ms),
+                |n| node_status.maybe_return_auth_failure(n),
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -317,7 +384,7 @@ impl FetchRequestManager {
                     // keeping only the message) would discard the class, the
                     // error code and the source — turning a fatal
                     // `SASL_AUTHENTICATION_FAILED` from
-                    // `maybe_throw_auth_failure` into something for which
+                    // `maybe_return_auth_failure` into something for which
                     // `is_authentication_error()`, `is_api_error()` and
                     // `is_kafka_error()` all answer false, i.e. a fatal
                     // authentication failure presented as client misuse.
@@ -373,6 +440,10 @@ impl FetchRequestManager {
         let prepared = prepared.into_requests();
         let mut requests: Vec<UnsentRequest> = Vec::with_capacity(prepared.len());
         for (_node_id, (target_node, request_data)) in prepared {
+            #[cfg(test)]
+            if !for_close {
+                *self.fetch_requests_built.entry(target_node.id()).or_insert(0) += 1;
+            }
             let builder = self.abstract_fetch.create_fetch_request(&target_node, &request_data);
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(target_node.clone()));
 
@@ -439,8 +510,7 @@ impl FetchRequestManager {
 
     /// Drains the [`PendingFetchCompletion`] mpsc channel into
     /// `AbstractFetch::handle_fetch_*` / `handle_close_fetch_session_*`.
-    /// Called at the top of [`RequestManager::poll`] and
-    /// [`RequestManager::poll_on_close`].
+    /// Called at the top of [`Self::poll`] and [`Self::poll_on_close`].
     ///
     /// Java reference: the `whenComplete` lambda body on
     /// `AbstractFetch.createFetchRequest` — `handleFetchSuccess(...)` /
@@ -502,24 +572,37 @@ impl FetchRequestManager {
     }
 }
 
-impl RequestManager for FetchRequestManager {
+/// Java's `RequestManager` methods. The Rust `FetchRequestManager` does not
+/// implement the [`RequestManager`](crate::consumer::internals::RequestManager) trait: its `poll` / `pollOnClose` read the
+/// delegate's connection state ([`NodeStatus`]), which the trait's signature
+/// cannot carry, so `RequestManagers::entries` skips the fetch slot and the bg
+/// task drives these methods directly, as it does the coordinator and commit
+/// managers. Java's `signalClose` is not overridden by `FetchRequestManager`
+/// (the interface default is a no-op), so it has no counterpart here.
+impl FetchRequestManager {
     /// Translates Java's
     /// `PollResult poll(long currentTimeMs)` — produces the fetch
     /// requests for the next round, if any pending
     /// `CreateFetchRequestsEvent` ack is outstanding.
-    fn poll(&mut self, current_time_ms: i64) -> PollResult {
+    ///
+    /// `node_status` is the bg task's `NetworkClientDelegate` (Java's
+    /// `networkClientDelegate` field): nodes in reconnect backoff are skipped
+    /// and a cached authentication failure fails the pending acks.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#poll")]
+    pub(crate) fn poll(&mut self, node_status: &impl NodeStatus, current_time_ms: i64) -> PollResult {
         // 0. Drain any pending fetch completions from prior spawned
         // forwarders. State-update happens before request-building so
         // the next `prepare_fetch_requests` observes the
         // post-completion `nodes_with_pending_fetch_requests` set.
         self.drain_pending_completions();
-        self.poll_internal(current_time_ms, false)
+        self.poll_internal(node_status, current_time_ms, false)
     }
 
     /// Translates Java's
     /// `PollResult pollOnClose(long currentTimeMs)` — produces the
-    /// close-fetch-session requests.
-    fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
+    /// close-fetch-session requests, skipping unavailable nodes.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#pollOnClose")]
+    pub(crate) fn poll_on_close(&mut self, node_status: &impl NodeStatus, current_time_ms: i64) -> PollResult {
         // Drain any pending completions one last time so close paths
         // observe the post-completion state.
         self.drain_pending_completions();
@@ -527,7 +610,7 @@ impl RequestManager for FetchRequestManager {
         // pollInternal has something to satisfy.
         let (tx, _rx) = oneshot::channel();
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
-        self.poll_internal(current_time_ms, true)
+        self.poll_internal(node_status, current_time_ms, true)
     }
 
     /// If any request is in flight, its completion will wake the application
@@ -545,17 +628,12 @@ impl RequestManager for FetchRequestManager {
     /// flight here for one iteration — harmless, since that drain is what wakes
     /// the buffer the application task is waiting on.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#maximumTimeToWait")]
-    fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+    pub(crate) fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
         if self.abstract_fetch.nodes_with_pending_fetch_requests.is_empty() {
             self.retry_backoff_ms
         } else {
             i64::MAX
         }
-    }
-
-    fn signal_close(&mut self) {
-        // Java's `signalClose` is a no-op for the fetch manager
-        // (close-mode wiring is gated on `pollOnClose`).
     }
 }
 
@@ -623,8 +701,6 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            FetchRequestManager::always_available(),
-            FetchRequestManager::no_auth_failure(),
             Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
             RETRY_BACKOFF_MS,
@@ -641,7 +717,7 @@ mod tests {
     #[test]
     fn test_poll_no_pending_returns_empty() {
         let mut mgr = make_manager();
-        let result = mgr.poll(100);
+        let result = mgr.poll(&TestNodeStatus::all_available(), 100);
         assert!(result.unsent_requests.is_empty());
         assert_eq!(PollResult::WAIT_FOREVER, result.time_until_next_poll_ms);
     }
@@ -653,7 +729,7 @@ mod tests {
     async fn test_poll_empty_partitions_completes_ack() {
         let mut mgr = make_manager();
         let rx = mgr.create_fetch_requests();
-        let result = mgr.poll(100);
+        let result = mgr.poll(&TestNodeStatus::all_available(), 100);
         assert!(result.unsent_requests.is_empty());
         // The ack should have been completed Ok(()).
         let received = rx.await.expect("ack receiver");
@@ -674,7 +750,7 @@ mod tests {
         // Simulate an in-flight fetch to node 1.
         mgr.abstract_fetch.nodes_with_pending_fetch_requests.insert(1);
         let rx = mgr.create_fetch_requests();
-        let _ = mgr.poll(100);
+        let _ = mgr.poll(&TestNodeStatus::all_available(), 100);
         assert!(rx.await.expect("ack receiver").is_ok());
         // The buffer must NOT have been woken: `await_wakeup` blocks for
         // ~the full timeout rather than returning immediately.
@@ -702,7 +778,7 @@ mod tests {
 
         // Simulate a network thread cycle that finds nothing to fetch.
         let rx = mgr.create_fetch_requests();
-        let result = mgr.poll(100);
+        let result = mgr.poll(&TestNodeStatus::all_available(), 100);
         assert_eq!(0, result.unsent_requests.len());
         assert!(rx.await.expect("ack receiver").is_ok());
 
@@ -736,7 +812,7 @@ mod tests {
         mgr.enqueue_create_fetch_requests(tx2);
 
         // ONE poll satisfies BOTH (Java's single-slot semantics).
-        let _ = mgr.poll(0);
+        let _ = mgr.poll(&TestNodeStatus::all_available(), 0);
         assert!(rx1.await.unwrap().is_ok());
         assert!(rx2.await.unwrap().is_ok());
     }
@@ -746,7 +822,7 @@ mod tests {
     #[test]
     fn test_poll_on_close_with_no_sessions() {
         let mut mgr = make_manager();
-        let result = mgr.poll_on_close(100);
+        let result = mgr.poll_on_close(&TestNodeStatus::all_available(), 100);
         assert!(result.unsent_requests.is_empty());
     }
 
@@ -765,14 +841,6 @@ mod tests {
         assert!(err.message().contains("FetchRequestManager dropped"));
     }
 
-    /// `signal_close` is a no-op (Java parity).
-    #[test]
-    fn test_signal_close_is_noop() {
-        let mut mgr = make_manager();
-        mgr.signal_close();
-        // No state to assert — the contract is "doesn't panic".
-    }
-
     /// `abstract_fetch` accessors return the underlying composed
     /// `AbstractFetch` for the Phase 10 bg task to feed responses into.
     #[test]
@@ -787,7 +855,7 @@ mod tests {
     fn test_poll_no_fetchable_partitions() {
         let mut mgr = make_manager();
         let _rx = mgr.create_fetch_requests();
-        let result = mgr.poll(100);
+        let result = mgr.poll(&TestNodeStatus::all_available(), 100);
         assert!(result.unsent_requests.is_empty());
     }
 
@@ -799,7 +867,7 @@ mod tests {
         let mut mgr = make_manager();
         let (tx, rx) = oneshot::channel();
         mgr.enqueue_create_fetch_requests(tx);
-        let _ = mgr.poll(0);
+        let _ = mgr.poll(&TestNodeStatus::all_available(), 0);
         let received = rx.await.expect("ack receiver");
         assert!(received.is_ok());
     }
@@ -891,7 +959,7 @@ mod tests {
 
         // `poll_on_close` builds a close-fetch-session request for the
         // session-holding node.
-        let result = mgr.poll_on_close(100);
+        let result = mgr.poll_on_close(&TestNodeStatus::all_available(), 100);
         assert_eq!(1, result.unsent_requests.len(), "expected one close-fetch-session request");
         let unsent = result.unsent_requests.into_iter().next().unwrap();
 
@@ -913,7 +981,7 @@ mod tests {
         // `poll` keeps the loop drain-only.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         loop {
-            let _ = mgr.poll(200);
+            let _ = mgr.poll(&TestNodeStatus::all_available(), 200);
             if !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0) {
                 break;
             }
@@ -943,7 +1011,7 @@ mod tests {
         let _ = mgr.abstract_fetch.session_handler_or_create(0);
         mgr.abstract_fetch.nodes_with_pending_fetch_requests.insert(0);
 
-        let result = mgr.poll_on_close(100);
+        let result = mgr.poll_on_close(&TestNodeStatus::all_available(), 100);
         assert_eq!(1, result.unsent_requests.len());
         let unsent = result.unsent_requests.into_iter().next().unwrap();
 
@@ -960,7 +1028,7 @@ mod tests {
         // test for why we use `poll` not `poll_on_close` here.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         loop {
-            let _ = mgr.poll(200);
+            let _ = mgr.poll(&TestNodeStatus::all_available(), 200);
             if !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0) {
                 break;
             }
@@ -1015,7 +1083,7 @@ mod round_trip {
     /// Java `FetchRequestManagerTest.retryBackoffMs`.
     const RETRY_BACKOFF_MS: i64 = 100;
     use crate::common::requests::FetchMetadata;
-    use crate::consumer::internals::{RequestManager, UnsentRequest};
+    use crate::consumer::internals::UnsentRequest;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
@@ -1047,7 +1115,7 @@ mod round_trip {
     };
     use crate::metadata::LeaderAndEpoch;
 
-    use super::FetchRequestManager;
+    use super::TestNodeStatus;
 
     const TOPIC: &str = "test";
     const VALID_LEADER_EPOCH: i32 = 0;
@@ -1509,6 +1577,9 @@ mod round_trip {
         fetch_buffer: Arc<FetchBuffer>,
         fetch_config: FetchConfig,
         topic_ids: HashMap<String, Uuid>,
+        /// What `poll` reads for each node (the bg task's delegate in
+        /// production); every node available unless a test changes it.
+        node_status: TestNodeStatus,
     }
 
     impl RoundTrip {
@@ -1546,8 +1617,6 @@ mod round_trip {
                 fetch_config.clone(),
                 fetch_buffer.clone(),
                 Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-                FetchRequestManager::always_available(),
-                FetchRequestManager::no_auth_failure(),
                 api_versions.clone(),
                 FetchMetricsManager::for_test(),
                 RETRY_BACKOFF_MS,
@@ -1560,6 +1629,7 @@ mod round_trip {
                 fetch_buffer,
                 fetch_config,
                 topic_ids,
+                node_status: TestNodeStatus::all_available(),
             };
             rt.seed_metadata(num_nodes, &HashMap::from([(TOPIC.to_string(), 4)]));
             rt
@@ -1911,13 +1981,13 @@ mod round_trip {
         /// keeps them alive while the fetch must stay in flight.
         fn send_fetches(&mut self, now_ms: i64) -> Vec<UnsentRequest> {
             let _ack = self.mgr.create_fetch_requests();
-            self.mgr.poll(now_ms).unsent_requests
+            self.mgr.poll(&self.node_status, now_ms).unsent_requests
         }
 
         /// Java's `client.backoff(node, ms)`: every node reads as inside its
         /// reconnect backoff window while `flag` is set.
         fn set_unavailable(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
-            self.mgr.is_unavailable = Arc::new(move |_| flag.load(std::sync::atomic::Ordering::SeqCst));
+            self.node_status = TestNodeStatus::new(move |_| flag.load(std::sync::atomic::Ordering::SeqCst), |_| Ok(()));
         }
 
         /// Java's `awaitWakeup(time.timer(0))`: consume any pending wakeup.
@@ -2694,17 +2764,19 @@ mod round_trip {
             cause,
         ));
         let auth_error_for_closure = auth_error.clone();
-        rt.mgr.is_unavailable = Arc::new(move |n: &Node| n.id() == unavailable_node_id);
-        rt.mgr.maybe_throw_auth_failure = Arc::new(move |n: &Node| {
-            if n.id() == unavailable_node_id {
-                Err(auth_error_for_closure.clone())
-            } else {
-                Ok(())
-            }
-        });
+        rt.node_status = TestNodeStatus::new(
+            move |n: &Node| n.id() == unavailable_node_id,
+            move |n: &Node| {
+                if n.id() == unavailable_node_id {
+                    Err(auth_error_for_closure.clone())
+                } else {
+                    Ok(())
+                }
+            },
+        );
 
         let mut ack = rt.mgr.create_fetch_requests();
-        let poll_result = crate::consumer::internals::RequestManager::poll(&mut rt.mgr, 0);
+        let poll_result = rt.mgr.poll(&rt.node_status, 0);
         assert!(
             poll_result.unsent_requests.is_empty(),
             "Java returns PollResult.EMPTY so the other request managers keep polling"
@@ -2736,6 +2808,55 @@ mod round_trip {
             "the cause must survive — rebuilding the error dropped it: {err:?}"
         );
         let _ = topic_id;
+    }
+
+    /// Translated from `FetchRequestManagerTest.testPollWithCreateFetchRequestsError`.
+    /// Java's `TestableFetchRequestManager` reports every node unavailable
+    /// while an `AuthenticationException` is set and throws it (once) from
+    /// `maybeThrowAuthFailure`; `poll` must not throw and the pending
+    /// `createFetchRequests` future fails with it. Here the cluster has a
+    /// single node, so every node is unavailable: the Rust-only "all nodes
+    /// unfetchable" short-circuit in `prepare_fetch_requests` used to return
+    /// empty before the auth check, and the future completed successfully.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPollWithCreateFetchRequestsError"
+    )]
+    fn test_poll_with_create_fetch_requests_error() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let authentication_error = Arc::new(Mutex::new(Some(Error::Authentication(
+            crate::common::errors::AuthenticationError::new("Intentional error"),
+        ))));
+        let unavailable_while_set = Arc::clone(&authentication_error);
+        let thrown_once = Arc::clone(&authentication_error);
+        rt.node_status = TestNodeStatus::new(
+            move |_| unavailable_while_set.lock().unwrap().is_some(),
+            move |_| match thrown_once.lock().unwrap().take() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            },
+        );
+
+        let mut future = rt.mgr.create_fetch_requests();
+        assert!(
+            future.try_recv().is_err(),
+            "the future is not done before the manager is polled"
+        );
+
+        // `assertDoesNotThrow(() -> sendFetches(false))`.
+        let requests = rt.send_fetches(0);
+        assert!(requests.is_empty(), "Java returns PollResult.EMPTY");
+
+        // `assertFutureThrows(AuthenticationException.class, future)`.
+        let err = future
+            .try_recv()
+            .expect("the pending createFetchRequests future must be completed")
+            .expect_err("the future must fail with the authentication error");
+        assert!(matches!(err, Error::Authentication(_)), "an AuthenticationException: {err:?}");
+        assert_eq!("Intentional error", err.message());
     }
 
     /// Translated from `FetchRequestManagerTest.testFetchSkipsBlackedOutNodes`:
@@ -3748,8 +3869,6 @@ mod round_trip {
             fetch_config.clone(),
             fetch_buffer.clone(),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            FetchRequestManager::always_available(),
-            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
             RETRY_BACKOFF_MS,
@@ -3762,6 +3881,7 @@ mod round_trip {
             fetch_buffer,
             fetch_config,
             topic_ids: ids,
+            node_status: TestNodeStatus::all_available(),
         };
         rt.seed_metadata(1, &HashMap::from([(TOPIC.to_string(), 4)]));
         {
@@ -3885,8 +4005,6 @@ mod round_trip {
             fetch_config.clone(),
             fetch_buffer.clone(),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            FetchRequestManager::always_available(),
-            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
             RETRY_BACKOFF_MS,
@@ -3899,6 +4017,7 @@ mod round_trip {
             fetch_buffer,
             fetch_config,
             topic_ids: ids,
+            node_status: TestNodeStatus::all_available(),
         };
         rt.seed_metadata(1, &HashMap::from([(TOPIC.to_string(), 4)]));
         rt.assign_and_seek(&[tp(0)]);
@@ -4241,8 +4360,6 @@ mod round_trip {
             fetch_config.clone(),
             fetch_buffer.clone(),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            FetchRequestManager::always_available(),
-            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
             RETRY_BACKOFF_MS,
@@ -4255,6 +4372,7 @@ mod round_trip {
             fetch_buffer,
             fetch_config,
             topic_ids: ids,
+            node_status: TestNodeStatus::all_available(),
         };
         // 2 nodes so tp0 and tp1 have different leaders.
         rt.seed_metadata(2, &HashMap::from([(TOPIC.to_string(), 4)]));

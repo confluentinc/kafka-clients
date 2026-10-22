@@ -703,9 +703,8 @@ impl AbstractFetch {
     ///   start; the caller does the same and passes it in.
     ///
     /// The closures avoid coupling `AbstractFetch` to
-    /// `NetworkClientDelegate` (which it does not own — Phase 7b's
-    /// `FetchRequestManager` owns the delegate and supplies the
-    /// closures).
+    /// `NetworkClientDelegate`: `FetchRequestManager::poll` builds them over
+    /// the delegate the bg task lends it (`NodeStatus`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#prepareFetchRequests")]
     pub(crate) fn prepare_fetch_requests(
         &mut self,
@@ -727,12 +726,12 @@ impl AbstractFetch {
         // broker), so the full computation below (SubscriptionState lock +
         // fetchable scan + buffered-nodes + per-partition node resolution) runs
         // only to return an empty map because every partition's node is skipped
-        // (already in `nodes_with_pending_fetch_requests` or unavailable). This
-        // up-front check short-circuits that wasted work.
+        // (already in `nodes_with_pending_fetch_requests`). This up-front check
+        // short-circuits that wasted work.
         //
         // STATELESS short-circuit, NOT a cache: it returns empty only when it is
         // genuinely true right now that no node can be fetched (every node is
-        // pending or unavailable). The moment a fetch response frees a node
+        // pending). The moment a fetch response frees a node
         // (removes it from `nodes_with_pending_fetch_requests`), the next call
         // passes this check and issues normally — no partition can be stranded.
         //
@@ -748,10 +747,20 @@ impl AbstractFetch {
         // buffered = fetchable, so "all buffered" means "none fetchable"). An
         // empty node list is the bootstrapping case (KIP-909): `false`, so the
         // caller stays parked instead of spinning on immediate wakeups.
+        //
+        // Only nodes with an in-flight fetch count as unfetchable here, not
+        // nodes that `is_unavailable`. Java has no such early return and calls
+        // `maybeThrowAuthFailure(node)` for every partition whose leader
+        // `isUnavailable`; skipping unavailable nodes here would hide a cached
+        // authentication failure (a consumer whose only leader failed SASL
+        // authentication never reported it). A node in reconnect backoff is
+        // rare, so the full computation below handles it as Java does; it
+        // reaches the same empty result and `can_wake` value when no
+        // authentication failure is cached.
         let nodes = cluster.nodes();
         let all_nodes_unfetchable = nodes
             .iter()
-            .all(|node| self.nodes_with_pending_fetch_requests.contains(&node.id()) || is_unavailable(node));
+            .all(|node| self.nodes_with_pending_fetch_requests.contains(&node.id()));
         if all_nodes_unfetchable {
             let buffered = self.fetch_buffer.buffered_partitions();
             let can_wake = !buffered.is_empty() && {
@@ -1372,32 +1381,56 @@ mod tests {
         assert!(af.pending_fetch_node_ids().contains(&0));
     }
 
-    /// Fix #2 — when every cluster node is `is_unavailable`, the short-circuit
-    /// returns empty (no node can be fetched right now). Also a freshness check:
-    /// it is a pure short-circuit, not a cache.
+    /// When the leader of every fetchable partition is `is_unavailable`
+    /// (reconnect backoff) and no authentication failure is cached, the
+    /// preparation returns empty and does not wake the buffer. Unavailable
+    /// nodes go through the full computation, not the Phase-26 short-circuit
+    /// (which only counts nodes with an in-flight fetch): Java's
+    /// `AbstractFetch.prepareFetchRequests` asks `isUnavailable(node)` for
+    /// each fetchable partition, so the availability check must run here.
     #[test]
     fn test_prepare_fetch_requests_all_nodes_unavailable_returns_empty() {
-        let subs = make_subscriptions();
-        let metadata = make_consumer_metadata(subs.clone());
-        bootstrap_nodes(&metadata, "topic-a", 2, 2);
-        let mut af = AbstractFetch::new(
-            metadata,
-            subs,
-            make_fetch_config(),
-            Arc::new(FetchBuffer::new()),
-            Arc::new(BufferSupplier::create()),
-            Arc::new(crate::ApiVersions::new()),
-            FetchMetricsManager::for_test(),
-        );
-        // No node is pending, but every node is unavailable.
-        let all_unavailable = |_: &Node| true;
+        let (mut af, _buffer) = positioned_abstract_fetch();
+        let availability_checks = std::cell::Cell::new(0);
+        let all_unavailable = |_: &Node| {
+            availability_checks.set(availability_checks.get() + 1);
+            true
+        };
         let no_auth_err = |_: &Node| Ok(());
         let result = af.prepare_fetch_requests(100, all_unavailable, no_auth_err).unwrap();
-        assert!(
-            result.requests().is_empty(),
-            "all nodes unavailable must short-circuit to an empty map"
-        );
+        assert!(result.requests().is_empty(), "all nodes unavailable must return an empty map");
         assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
+        assert_eq!(
+            2,
+            availability_checks.get(),
+            "Java's prepareFetchRequests checks isUnavailable(node) for each of the two fetchable partitions"
+        );
+    }
+
+    /// The case the Phase-26 short-circuit used to hide: the only node is
+    /// unavailable and its connection has a cached authentication failure.
+    /// Java's `AbstractFetch.prepareFetchRequests` calls
+    /// `maybeThrowAuthFailure(node)` once `isUnavailable(node)` holds, so the
+    /// error is returned unchanged (class and message), not an empty result.
+    #[test]
+    fn test_prepare_fetch_requests_unavailable_node_returns_cached_auth_failure() {
+        let (mut af, _buffer) = positioned_abstract_fetch();
+        let Err(err) = af.prepare_fetch_requests(
+            100,
+            |_| true,
+            |_| {
+                Err(crate::common::Error::Authentication(
+                    crate::common::errors::AuthenticationError::new("Intentional error"),
+                ))
+            },
+        ) else {
+            panic!("Java's maybeThrowAuthFailure throws for an unavailable node with a cached failure");
+        };
+        assert!(
+            matches!(err, crate::common::Error::Authentication(_)),
+            "an AuthenticationException: {err:?}"
+        );
+        assert_eq!("Intentional error", err.message());
     }
 
     /// Fix #2 — no partition is stranded: once a node is freed from the pending
@@ -1530,9 +1563,11 @@ mod tests {
         assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
     }
 
-    /// The Phase-26 all-nodes-unfetchable short-circuit reports exactly what
-    /// the full computation would: `true` when everything fetchable is
-    /// buffered, `false` when an unbuffered fetchable partition remains.
+    /// The Phase-26 all-nodes-pending short-circuit reports exactly what the
+    /// full computation would: `true` when everything fetchable is buffered,
+    /// `false` when an unbuffered fetchable partition remains. The last case
+    /// (node unavailable, nothing in flight) does not take the short-circuit;
+    /// it pins that the full computation returns the same `false`.
     #[test]
     fn test_prepare_fetch_requests_short_circuit_agrees_with_full_computation() {
         // All fetchable partitions buffered, the only node in flight.

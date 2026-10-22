@@ -6456,4 +6456,104 @@ mod tests {
         assert!(mgr.abstract_mm.subscriptions.lock().unwrap().subscription().is_empty());
         assert_eq!(mgr.state(), MemberState::Stale);
     }
+
+    // ─── Background-loop wakes for the pre-rebalance auto-commit ───
+    //
+    // Java runs `maybeReconcile(true)` for an `AsyncPollEvent` on the network
+    // thread inside `ConsumerNetworkThread.runOnce()`
+    // (`ApplicationEventProcessor.process(AsyncPollEvent)`), before that
+    // `runOnce` polls the request managers, so the pre-rebalance auto-commit
+    // that `signalReconciliationStarted()` queues
+    // (`CommitRequestManager.maybeAutoCommitSyncBeforeRebalance`) is sent in
+    // the same iteration, and its `whenComplete` continuation runs inside
+    // `client.poll` when the response is read. Rust runs the same
+    // `reconcile(.., true)` from the `tokio::spawn`ed AsyncPoll task, after
+    // the loop has already polled the commit manager and while it is parked in
+    // its network poll; the loop parks on the `Notify` production wires into
+    // `CommitRequestManager::set_completion_notify`, so a queued request or a
+    // resolved commit that does not poke it waits for the poll timeout
+    // (`MAX_POLL_TIMEOUT_MS`, 5 s) or an unrelated wake.
+
+    /// A member that owns `topic1-0` with a consumed offset and receives an
+    /// empty assignment, with a real commit manager whose completion `Notify`
+    /// is the returned one (as production wires `event_notify`).
+    fn member_revoking_with_consumed_offset() -> (Arc<ConsumerMembershipManager>, Arc<tokio::sync::Notify>) {
+        let (mgr, _rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        mgr.commit_request_manager
+            .as_ref()
+            .expect("commit manager present")
+            .set_completion_notify(Arc::clone(&notify));
+        (Arc::new(mgr), notify)
+    }
+
+    /// The pre-rebalance auto-commit queued from the AsyncPoll task must wake
+    /// the background loop, so it is sent at once as Java sends it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_rebalance_queued_from_async_poll_wakes_background_task() {
+        let (mgr, notify) = member_revoking_with_consumed_offset();
+        // As `process_async_poll` does: `reconcile(poll_time_ms, true)` on a
+        // spawned task.
+        let m = Arc::clone(&mgr);
+        tokio::spawn(async move { m.reconcile(0, true).await })
+            .await
+            .expect("reconcile task")
+            .expect("reconcile");
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        assert_eq!(
+            commit_mgr.unsent_offset_commits_len_for_test(),
+            1,
+            "the reconcile must queue the pre-rebalance auto-commit"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect(
+                "queuing the pre-rebalance OffsetCommit from the spawned AsyncPoll task did not wake the background \
+             loop, so the request waits for the network poll timeout; Java sends it in the runOnce that \
+             processes the AsyncPollEvent",
+            );
+    }
+
+    /// When the pre-rebalance auto-commit resolves, the background loop must
+    /// be woken to resume the parked reconciliation (`drive_pending_reconcile`),
+    /// as Java's `commitResult.whenComplete(...)` resumes it inside
+    /// `client.poll` (`AbstractMembershipManager.java:967`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_rebalance_completion_wakes_background_task() {
+        let (mgr, notify) = member_revoking_with_consumed_offset();
+        let m = Arc::clone(&mgr);
+        tokio::spawn(async move { m.reconcile(0, true).await })
+            .await
+            .expect("reconcile task")
+            .expect("reconcile");
+        assert!(reconciliation_in_progress(&mgr), "the reconcile parks on the commit");
+        // Drop a wake left by the enqueue, if any, so only the completion's
+        // own wake can satisfy the wait below.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), notify.notified()).await;
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), woken).await.expect(
+            "the resolved pre-rebalance auto-commit did not wake the background loop, so the parked \
+             reconciliation (onPartitionsRevoked enqueue) waits for the network poll timeout; Java resumes it \
+             from the commit future's whenComplete inside client.poll",
+        );
+    }
 }
