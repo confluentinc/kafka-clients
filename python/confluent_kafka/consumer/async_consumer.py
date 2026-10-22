@@ -197,9 +197,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         this consumer. A failure of the call itself (``InvalidGroupIdError``, a
         timeout waiting for the offsets, the exception of a queued commit
         callback it runs) is raised from it, as Java's ``commitAsync`` throws
-        it. While it waits, the core may deliver a queued listener callback
-        (``consumer-threading.md`` §31), which runs on the event loop inside
-        this call; an ``async def`` method is awaited there before it returns.
+        it. As in Java, it delivers no rebalance listener callback and raises
+        no background error: those are delivered only by ``poll()`` and
+        ``unsubscribe()``.
 
         The callback may be ``async def``: it is awaited on the event loop,
         inside the call that delivers it (``poll()``, ``commit()``,

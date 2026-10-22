@@ -204,9 +204,13 @@ rewritten in this form.
   `OffsetCommitCallback`; `offsets` is `None` when the commit failed and for
   an explicit empty `offsets`, as Java passes `null`.
 - The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
-  on the caller's thread, inside the call that delivers them (`poll()`,
-  `commit()`, `commit_nowait()`, `unsubscribe()`, `close()`, …), and the
-  rebalance does not advance until the listener returns. A listener may call
+  on the caller's thread, inside the call that delivers them, and the
+  rebalance does not advance until the listener returns. As in Java,
+  listener methods and background errors are delivered only by `poll()` and
+  `unsubscribe()` (and `close()` revokes or loses the group assignment through
+  the listener); the `commit_nowait()` callback runs inside a later `poll()`,
+  `commit()`, `commit_nowait()` or `close()`; `commit()` and
+  `commit_nowait()` deliver no listener method. A listener may call
   back into its consumer (`commit()`, `seek()`, `position()`, …); on
   `AsyncKafkaConsumer` those calls block the event loop for their duration.
   On `AsyncKafkaConsumer` a listener method may be `async def`; it is awaited
