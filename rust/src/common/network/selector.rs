@@ -75,6 +75,8 @@ struct PendingConnect {
     connect: Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>,
     /// The hostname of the remote peer (used for TLS SNI and hostname verification).
     peer_host: String,
+    /// The address being connected to, kept for the `NOT_CONNECTED` state of a failed connect.
+    address: SocketAddr,
 }
 
 /// The waker handed to pending connects: a finished handshake pokes the selector's `Notify`, so a
@@ -102,6 +104,14 @@ impl Wake for ConnectWaker {
 #[deny(dead_code)]
 fn channel_build_failure_message(id: &str, cause: &io::Error) -> String {
     format!("Error connecting to node {id}: {cause}")
+}
+
+/// The state of a channel whose connect failed after `connect()` returned. Java's
+/// `KafkaChannel.disconnect()` upgrades `NOT_CONNECTED` with the remote address captured in
+/// `finishConnect()`, which `NetworkClient` prints in its "could not be established" WARN; no
+/// channel exists here to do it, so the state is built with the address `connect()` was given.
+fn not_connected_state(address: SocketAddr) -> ChannelState {
+    ChannelState::with_remote_address(channel_state::State::NotConnected, &address.to_string())
 }
 
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
@@ -544,7 +554,7 @@ impl Selector {
                 // debug when it closes the channel.
                 Err(e) => {
                     kafka_debug!(self.log_context, "Connection {} failed to connect: {}", id, e);
-                    self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+                    self.disconnected.insert(id.to_string(), not_connected_state(pending.address));
                 },
                 Ok(stream) => match self.register_connected(&id, stream, &pending.peer_host) {
                     Ok(()) => any_registered = true,
@@ -552,7 +562,7 @@ impl Selector {
                     // `NetworkClient.initiateConnect`, which logs it at warn with its cause.
                     Err(e) => {
                         kafka_warn!(self.log_context, "{}", channel_build_failure_message(&id, &e));
-                        self.disconnected.insert(id.to_string(), ChannelState::NOT_CONNECTED.clone());
+                        self.disconnected.insert(id.to_string(), not_connected_state(pending.address));
                     },
                 },
             }
@@ -1298,7 +1308,7 @@ impl Selectable for Selector {
         match connect.as_mut().poll(&mut cx) {
             Poll::Pending => {
                 self.pending_connects
-                    .insert(id, PendingConnect { connect, peer_host: peer_host.to_string() });
+                    .insert(id, PendingConnect { connect, peer_host: peer_host.to_string(), address });
                 Ok(())
             },
             Poll::Ready(result) => self.register_connected(&id, result?, peer_host),
@@ -2709,6 +2719,7 @@ mod tests {
             PendingConnect {
                 connect: Box::pin(async move { handshake.await.expect("the handshake task panicked") }),
                 peer_host: "localhost".to_string(),
+                address: addr,
             },
         );
 
@@ -2769,8 +2780,10 @@ mod tests {
             }
         }
 
+        // Java's `KafkaChannel.disconnect()` upgrades `NOT_CONNECTED` with the remote address
+        // captured in `finishConnect()`, and `NetworkClient` prints it in its WARN.
         assert_eq!(
-            ChannelState::NOT_CONNECTED,
+            ChannelState::with_remote_address(channel_state::State::NotConnected, &addr.to_string()),
             *selector.disconnected().get("0").expect("the failure is reported")
         );
         let cause = io::Error::other("channel builder exploded");
@@ -2855,7 +2868,7 @@ mod tests {
             }
         }
         assert_eq!(
-            ChannelState::NOT_CONNECTED,
+            ChannelState::with_remote_address(channel_state::State::NotConnected, &addr.to_string()),
             *selector.disconnected().get("0").expect("the refused connection is reported")
         );
         assert!(!selector.is_channel_ready("0"));
