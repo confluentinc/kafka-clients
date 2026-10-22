@@ -41,9 +41,6 @@ use std::sync::Arc;
 
 use tokio::net::TcpStream;
 
-/// The only SASL mechanism the client authenticator implements.
-const SASL_PLAIN_MECHANISM: &str = "PLAIN";
-
 /// SASL channel builder that creates channels with SASL authentication.
 ///
 /// For `SASL_PLAINTEXT`, creates a `PlaintextTransportLayer` paired with a
@@ -122,12 +119,13 @@ impl SaslChannelBuilder {
         // The authenticator builds only the PLAIN token (RFC 4616). Java picks a
         // `SaslClient` per mechanism; without SCRAM, GSSAPI and OAUTHBEARER clients, running
         // them through PLAIN would send the cleartext password under the wrong mechanism.
-        if sasl_config.mechanism != SASL_PLAIN_MECHANISM {
+        if sasl_config.mechanism != SaslConfigs::PLAIN_MECHANISM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "SASL mechanism '{}' is not supported by this client: only {SASL_PLAIN_MECHANISM} is implemented",
-                    sasl_config.mechanism
+                    "SASL mechanism '{}' is not supported by this client: only {} is implemented",
+                    sasl_config.mechanism,
+                    SaslConfigs::PLAIN_MECHANISM
                 ),
             ));
         }
