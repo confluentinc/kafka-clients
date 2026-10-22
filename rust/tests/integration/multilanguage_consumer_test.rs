@@ -1150,12 +1150,26 @@ async fn close_with_leave_group_hands_over_partitions<F: ConsumerBackendFactory>
     observer.close().await.expect("close observer");
 }
 
-/// `close(CloseOptions.groupMembershipOperation(REMAIN_IN_GROUP))` on a dynamic
-/// member sends no leave heartbeat (`ConsumerMembershipManager.isLeavingGroup`
-/// is false for it), so the coordinator keeps the member and its partition
-/// until the session timeout (45 s) expires: the other member stays on one
-/// partition throughout an observation window well below that.
-async fn close_with_remain_in_group_keeps_the_member<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+/// `close(CloseOptions.groupMembershipOperation(REMAIN_IN_GROUP))` on a
+/// dynamic member still leaves the group in Java 4.4, so the coordinator hands
+/// its partition to the remaining member at that member's next heartbeat, just
+/// as for LEAVE_GROUP. `AbstractMembershipManager.leaveGroupOnClose` calls
+/// `leaveGroup(false)`, which reaches `transitionToSendingLeaveGroup`: that sets
+/// the epoch to `ConsumerMembershipManager.leaveGroupEpoch` (-1 for a dynamic
+/// member) and moves to LEAVING. `ConsumerHeartbeatRequestManager.
+/// shouldSendLeaveHeartbeatNow` returns false and logs "No leave heartbeat will
+/// be sent", but that is misleading: `AbstractHeartbeatRequestManager.poll`
+/// Case 2 (`AbstractMembershipManager.shouldHeartbeatNow` is true in LEAVING,
+/// no request in flight) still sends the heartbeat with epoch -1, and its
+/// response completes the leave. Java's own
+/// `ConsumerHeartbeatRequestManagerTest.testPollOnLeaving` mocks the
+/// membership manager, so Case 2 is never exercised there. Checked against
+/// kafka-clients 4.4.0-rc4: close returns in about 20 ms after that heartbeat
+/// and the other member owns both partitions about 5 s later.
+async fn close_with_remain_in_group_of_a_dynamic_member_leaves_the_group<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let topic = ctx.topic("ml_close_remain");
     let group = format!("{topic}-grp");
     let (mut under_test, mut observer) = two_member_group(ctx, factory, &topic, &group).await;
@@ -1166,17 +1180,16 @@ async fn close_with_remain_in_group_keeps_the_member<F: ConsumerBackendFactory>(
         )
         .await
         .expect("close with REMAIN_IN_GROUP");
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(10) {
-        observer.poll(Duration::from_millis(500)).await.expect("observer poll");
-        assert_eq!(
-            observer.assignment().len(),
-            1,
-            "{} backend: a REMAIN_IN_GROUP close keeps the member, so its partition is not reassigned \
-             before the session timeout",
-            factory.name()
-        );
-    }
+    // Well above one heartbeat interval (5 s), well below the 45 s session
+    // timeout that would hand the partition over had the member stayed.
+    let assignment = poll_until_assigned(&mut observer, 2, Duration::from_secs(20)).await;
+    assert_eq!(
+        assignment.len(),
+        2,
+        "{} backend: a dynamic member closed with REMAIN_IN_GROUP still sends the epoch -1 heartbeat (Java 4.4), \
+         so the other member owns both partitions before the session timeout, got {assignment:?}",
+        factory.name()
+    );
 
     observer.close().await.expect("close observer");
 }
@@ -1344,8 +1357,8 @@ multilanguage_consumer_test!(
     close_with_leave_group_hands_over_partitions
 );
 multilanguage_consumer_test!(
-    test_ml_close_with_remain_in_group_keeps_the_member,
-    close_with_remain_in_group_keeps_the_member
+    test_ml_close_with_remain_in_group_of_a_dynamic_member_leaves_the_group,
+    close_with_remain_in_group_of_a_dynamic_member_leaves_the_group
 );
 multilanguage_consumer_test!(test_ml_wakeup_breaks_a_blocking_poll, wakeup_breaks_a_blocking_poll);
 multilanguage_consumer_test!(
