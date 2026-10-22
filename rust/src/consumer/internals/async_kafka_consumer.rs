@@ -5139,9 +5139,13 @@ where
     ///     processed the event, so the member never leaves the group.
     ///   - Deliberate deviation: Java has no bound at all, so a network
     ///     thread stuck inside one iteration hangs `close()`. Here the wait
-    ///     gives up at `deadline_ms + request.timeout.ms` with an
-    ///     `Error::Timeout`. With a healthy bg loop the reaper completes the
-    ///     event first, so the backstop changes nothing there.
+    ///     gives up with an `Error::Timeout` at
+    ///     `max(deadline_ms, submission time) + max(request.timeout.ms, 100 ms)`.
+    ///     It is measured from the submission at the latest, and its grace is
+    ///     never zero, so it cannot already be expired when the event is
+    ///     enqueued (a long revoked/lost listener, or `request.timeout.ms=0`).
+    ///     With a healthy bg loop the reaper completes the event first, so
+    ///     the backstop changes nothing there.
     ///
     /// Returns `Ok(None)` when the bg task dropped the completion sender
     /// without completing it (it has shut down): there is nothing left to
@@ -5155,9 +5159,20 @@ where
     ) -> Result<Option<T>, Error> {
         use tokio::sync::oneshot::error::TryRecvError;
 
+        // Smallest grace the backstop gives the bg task after submission, used
+        // when `request.timeout.ms` is below it (it may be 0): one full
+        // 100 ms wait slice of the loop below. `add` wakes the bg task, so a
+        // healthy loop processes the event well within it.
+        const MIN_BACKSTOP_GRACE_MS: i64 = 100;
+
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
-        let backstop_deadline_ms = deadline_ms.saturating_add(self.config.request_timeout_ms() as i64);
+        // The event keeps `deadline_ms` (the reaper expires it there, as
+        // Java's does); only the backstop is measured from the submission, so
+        // it is never already expired when the steps before this one (a
+        // revoked/lost listener, the auto-commit) used up the close timeout.
+        let grace_ms = std::cmp::max(self.config.request_timeout_ms() as i64, MIN_BACKSTOP_GRACE_MS);
+        let backstop_deadline_ms = std::cmp::max(deadline_ms, now_ms).saturating_add(grace_ms);
         loop {
             let had_events = self
                 .process_background_events_inner(
@@ -14031,8 +14046,8 @@ mod tests {
     /// Deliberate deviation from Java (whose wait is unbounded): if the bg
     /// task is alive but never completes `LeaveGroupOnClose` — its reaper
     /// would otherwise expire it at the event deadline — `close()` gives up at
-    /// the event deadline + `request.timeout.ms` and proceeds, instead of
-    /// hanging.
+    /// the event deadline (here already passed, so the submission time) +
+    /// `request.timeout.ms` and proceeds, instead of hanging.
     #[tokio::test]
     async fn close_leave_group_wait_gives_up_at_deadline_plus_request_timeout() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
@@ -14065,6 +14080,109 @@ mod tests {
             "the backstop must bound the wait at about deadline + request.timeout.ms; took {elapsed:?}"
         );
         assert!(handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+    }
+
+    /// Runs `close(Duration::ZERO)` against a fake bg task that processes
+    /// `LeaveGroupOnClose` one ~20 ms "iteration" after it is enqueued, and
+    /// returns `Some(signalled?)` as seen when it processed the event (`None`
+    /// when it never processed it).
+    async fn close_with_zero_timeout_and_slow_bg(
+        mut consumer: AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+        handles: ConsumerTestHandles,
+    ) -> Option<bool> {
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        let signalled_at_processing: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_processing = Arc::clone(&signalled_at_processing);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_processing = Arc::clone(&at_processing);
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                at_processing
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete_with_error(Error::timeout("LeaveGroupOnClose was 20 ms past its expiration"));
+            }
+        });
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: an expired leave only logs a warning, as in Java");
+        drainer.abort();
+        assert!(
+            handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0,
+            "close must still signal the bg task to shut down"
+        );
+        *signalled_at_processing.lock().unwrap()
+    }
+
+    /// Review fix (PR #263): the close backstop is measured from the moment
+    /// `LeaveGroupOnClose` is submitted, so a revoked listener that ran past
+    /// close timeout + `request.timeout.ms` cannot leave it already expired.
+    /// Here `close(Duration::ZERO)` with `request.timeout.ms=300` first runs a
+    /// 400 ms `on_partitions_revoked`. Java: `leaveGroupOnClose`'s `addAndGet`
+    /// waits on an unbounded `ConsumerUtils.getResult(future)`, so the network
+    /// thread always processes the event (member -> LEAVING) before
+    /// `applicationEventHandler.close(..)` stops it.
+    #[tokio::test]
+    async fn close_waits_for_leave_group_on_close_after_a_listener_outlasting_the_backstop() {
+        use async_trait::async_trait;
+
+        struct SlowRevokeListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for SlowRevokeListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 300;
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::new(SlowRevokeListener) as Arc<dyn ConsumerRebalanceListener>);
+        let notifier = consumer.state_notifier();
+        notifier.on_group_assignment_updated(&HashSet::from([TopicPartition::new("t".to_string(), 0)]));
+        notifier.on_member_epoch_updated(Some(5), "member-1");
+
+        let started = std::time::Instant::now();
+        let signalled = close_with_zero_timeout_and_slow_bg(consumer, handles).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "the revoked listener must have run before the leave; took {elapsed:?}"
+        );
+        assert_eq!(
+            signalled,
+            Some(false),
+            "Java: close blocks in addAndGet(LeaveGroupOnCloseEvent) until the network thread has \
+             processed the event, however long the revoked listener ran; Rust must not give up on a \
+             backstop that expired before the event was submitted (Some(true) = shut down first, \
+             None = never processed)"
+        );
+    }
+
+    /// Review fix (PR #263): `request.timeout.ms=0` (accepted, `atLeast(0)`)
+    /// with `close(Duration::ZERO)` still waits for the bg task to process
+    /// `LeaveGroupOnClose`: the backstop's grace period is positive even when
+    /// `request.timeout.ms` is zero. Java: `addAndGet` waits on an unbounded
+    /// `ConsumerUtils.getResult(future)`.
+    #[tokio::test]
+    async fn close_waits_for_leave_group_on_close_with_zero_request_timeout() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 0;
+        let signalled = close_with_zero_timeout_and_slow_bg(consumer, handles).await;
+        assert_eq!(
+            signalled,
+            Some(false),
+            "Java: close blocks in addAndGet(LeaveGroupOnCloseEvent) until the network thread has \
+             processed the event, even with request.timeout.ms=0; Rust must not give up on a \
+             zero-length backstop (Some(true) = shut down first, None = never processed)"
+        );
     }
 
     /// The bg task drops `LeaveGroupOnClose`'s completion sender without
