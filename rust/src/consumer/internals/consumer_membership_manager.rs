@@ -142,11 +142,12 @@ pub(crate) struct ConsumerMembershipManager {
     /// `PREPARE_LEAVING` for it. Java chains `clearAssignmentAndLeaveGroup()`
     /// on that callback's future with `whenComplete`, which runs on the
     /// network thread when the callback-completed event is processed — i.e.
-    /// serialized with the heartbeat manager's poll. The bg loop reproduces
-    /// that by driving this slot right after it drains the application
-    /// events, before any request manager polls
-    /// ([`Self::drive_pending_leave_callback`]), so `PREPARE_LEAVING ->
-    /// LEAVING` can never land in the middle of a heartbeat build.
+    /// serialized with the heartbeat manager's poll. The app side returns
+    /// this ack inside that same event, and the processor drives this slot
+    /// when it reaches it ([`Self::consumer_rebalance_listener_callback_completed`]),
+    /// before any request manager polls, so `PREPARE_LEAVING -> LEAVING`
+    /// keeps the event's queue position and can never land in the middle of
+    /// a heartbeat build.
     pending_leave_callback: Mutex<Option<LeaveCallbackAck>>,
     /// Lock-free mirror of `pending_leave_callback.is_some()`, so the
     /// steady-state bg loop pays one atomic load.
@@ -1835,8 +1836,15 @@ impl ConsumerMembershipManager {
         } else {
             ConsumerRebalanceListenerMethodName::OnPartitionsLost
         };
-        self.abstract_mm
-            .enqueue_rebalance_callback(method, dropped_partitions, current_time_ms)
+        // The ack travels back through the application-event queue (Java's
+        // `ConsumerRebalanceListenerCallbackCompletedEvent`), so the step
+        // chained on it runs after every event the listener submitted.
+        self.abstract_mm.enqueue_rebalance_callback_with_ack_through_application_events(
+            method,
+            dropped_partitions,
+            true,
+            current_time_ms,
+        )
     }
 
     /// Transition to `PREPARE_LEAVING`, then to `LEAVING` once the assignment
@@ -2039,12 +2047,21 @@ impl ConsumerMembershipManager {
     /// or succeeded. While the ack is pending this is a no-op (`try_recv`, no
     /// await), so the bg loop keeps spinning (§31).
     ///
-    /// Driven by the bg loop right after it drains the application events and
-    /// before the request managers poll — where Java runs the `whenComplete`
-    /// (on the network thread, while processing the callback-completed
-    /// event) — so the heartbeat manager's poll in the same iteration builds
-    /// the leave heartbeat. The app side's ack already pokes the bg task
-    /// (§31 step 4), so no extra wake is needed.
+    /// The app side returns the ack inside a
+    /// `ConsumerRebalanceListenerCallbackCompleted` application event, and
+    /// the processor drives this right after completing it
+    /// ([`Self::consumer_rebalance_listener_callback_completed`]) — where
+    /// Java runs the `whenComplete`, on the network thread while processing
+    /// the callback-completed event. That is in Phase 1 of `run_once`, before
+    /// the request managers poll, so the heartbeat manager's poll in the same
+    /// iteration builds the leave heartbeat. The bg loop also drives it
+    /// around each drained event, which only matters for an ack dropped with
+    /// no completed event to carry it (the callback event was dropped before
+    /// the app ran the listener, or processing the completed event panicked):
+    /// the ack then reads as closed. An error-completed ack — e.g. the
+    /// interrupt error sent when the caller's future was dropped mid-listener
+    /// — still clears the assignment and leaves, as Java's `whenComplete`
+    /// does on error.
     pub(crate) fn drive_pending_leave_callback(&self) -> Result<(), Error> {
         let pending = {
             let mut guard = match self.pending_leave_callback.lock() {
@@ -2085,6 +2102,49 @@ impl ConsumerMembershipManager {
         // Clear the assignment, no matter if the callback execution failed or
         // succeeded.
         self.clear_assignment_and_leave_group()
+    }
+
+    /// Java: `ConsumerMembershipManager.consumerRebalanceListenerCallbackCompleted(event)`.
+    ///
+    /// Run by the application-event processor when it reaches the
+    /// `ConsumerRebalanceListenerCallbackCompleted` event the app side
+    /// enqueued after a leave's release callback returned. Completes the
+    /// callback's future (`ack`) and then runs the step Java chains on it
+    /// with `whenComplete` ([`Self::drive_pending_leave_callback`]), so the
+    /// leave's `clearAssignmentAndLeaveGroup()` takes effect at the event's
+    /// position in the queue: after every event the listener submitted
+    /// before it returned, even one whose wait it abandoned, and before any
+    /// event the app submitted afterwards.
+    ///
+    /// When `ack` is not the pending leave's (an older leave's callback
+    /// whose slot a later leave replaced), the send finds the receiver gone
+    /// and the drive leaves the current leave's ack waiting.
+    pub(crate) fn consumer_rebalance_listener_callback_completed(
+        &self,
+        method_name: ConsumerRebalanceListenerMethodName,
+        error: Option<Error>,
+        ack: oneshot::Sender<Result<(), Error>>,
+    ) -> Result<(), Error> {
+        let result = match error {
+            Some(e) => {
+                log::warn!(
+                    "The {} method completed with an error ({}); signaling to continue to the next phase of \
+                     rebalance",
+                    method_name.fully_qualified_method_name(),
+                    e
+                );
+                Err(e)
+            },
+            None => {
+                log::debug!(
+                    "The {} method completed successfully; signaling to continue to the next phase of rebalance",
+                    method_name.fully_qualified_method_name()
+                );
+                Ok(())
+            },
+        };
+        let _ = ack.send(result);
+        self.drive_pending_leave_callback()
     }
 
     /// Java: `AbstractMembershipManager.clearAssignmentAndLeaveGroup()`.
@@ -3509,7 +3569,7 @@ mod tests {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
             // Revoke / lost path (AK 4.3.1: `PartitionsRemovedEvent`).
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
@@ -3684,7 +3744,7 @@ mod tests {
 
         let env = rx.recv().await.expect("revoked event");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack.send(Ok(())).unwrap();
@@ -4056,7 +4116,7 @@ mod tests {
         // Revoke callback enqueued (topic1-0) once the commit resolves.
         let env = rx.recv().await.expect("onPartitionsRevoked after the commit resolves");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, HashSet::from([tp("topic1", 0)]));
@@ -5114,7 +5174,7 @@ mod tests {
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("revoked event");
         let _stuck_ack = match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack
@@ -5415,7 +5475,7 @@ mod tests {
     ) {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
@@ -6964,7 +7024,7 @@ mod tests {
         // Capture the callback-needed event WITHOUT acking it yet.
         let env = rx.recv().await.expect("expected onPartitionsLost callback-needed event");
         let ack = match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, [owned.clone()].into_iter().collect::<HashSet<_>>());

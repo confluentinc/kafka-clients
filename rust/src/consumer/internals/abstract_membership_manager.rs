@@ -1061,6 +1061,21 @@ impl AbstractMembershipManager {
         partitions: Vec<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
+        self.enqueue_rebalance_callback_with_ack_through_application_events(method, partitions, false, current_time_ms)
+    }
+
+    /// [`Self::enqueue_rebalance_callback`] for the callback a leave
+    /// enqueues, with `ack_through_application_events` set on the event
+    /// (see [`BackgroundEvent::PartitionsRemoved`]): the app side returns the
+    /// ack through the application-event queue, so it takes effect in FIFO
+    /// order with the events the listener submitted.
+    pub(crate) fn enqueue_rebalance_callback_with_ack_through_application_events(
+        &self,
+        method: ConsumerRebalanceListenerMethodName,
+        partitions: Vec<TopicPartition>,
+        ack_through_application_events: bool,
+        current_time_ms: i64,
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
         let listener_present = {
             let subs = match self.subscriptions.lock() {
                 Ok(g) => g,
@@ -1073,7 +1088,12 @@ impl AbstractMembershipManager {
         }
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
+        let event = BackgroundEvent::PartitionsRemoved {
+            method_name: method,
+            partitions,
+            ack: ack_tx,
+            ack_through_application_events,
+        };
         self.background_event_handler.add(event, current_time_ms)?;
         Ok(Some(ack_rx))
     }

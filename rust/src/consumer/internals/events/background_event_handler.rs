@@ -159,6 +159,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 10,
             )
@@ -166,7 +167,7 @@ mod tests {
 
         let env = rx.recv().await.expect("got envelope");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions, vec![TopicPartition::new("t".to_string(), 0)]);
                 ack.send(Ok(())).expect("ack ok");

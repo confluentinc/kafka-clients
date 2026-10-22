@@ -545,57 +545,50 @@ impl ApplicationEventProcessor {
 
     /// Java: `process(ConsumerRebalanceListenerCallbackCompletedEvent)`.
     ///
-    /// # §31 translation deviation
-    ///
     /// Java models the listener handshake as a *pair* of events: the bg
     /// task enqueues `PartitionsRemovedEvent` / `PartitionsAssignedEvent`
     /// on the background-events queue (AK 4.3.1, KAFKA-20106; formerly the
     /// single `ConsumerRebalanceListenerCallbackNeededEvent`), and after
     /// invoking the listener the app side enqueues a *separate*
     /// `ConsumerRebalanceListenerCallbackCompletedEvent` back to the bg
-    /// task; the processor's body (this method, Java side) then completes
-    /// the future the membership manager is waiting on.
+    /// task, whose processing completes the future the membership manager
+    /// chained its next step on.
     ///
-    /// The Rust translation collapses the round-trip by embedding a
-    /// `tokio::sync::oneshot::Sender<Result<(), Error>>` directly in
-    /// `BackgroundEvent::PartitionsRemoved` / `BackgroundEvent::PartitionsAssigned`
-    /// (see `AbstractMembershipManager::enqueue_rebalance_callback` /
-    /// `enqueue_partitions_assigned_event`). The membership manager holds
-    /// the receiver as cross-iteration state; the app side completes the ack
-    /// by sending on the embedded sender. No second event is required.
+    /// # §31 translation deviation
     ///
-    /// As a result, this arm has no work to perform in Rust. We still
-    /// match Java's diagnostic: if a `Completed` event reaches the
-    /// processor without a heartbeat manager present, log the same
-    /// warning so the failure mode is observable in tests / logs.
-    /// The event variant remains in [`ApplicationEvent`] both to keep
-    /// the Java parity surface visible to readers and to leave room for
-    /// future diagnostics (e.g. tracing the original Java event lifecycle).
+    /// The reconcile and release callbacks collapse the round-trip: the app
+    /// sends the result on the `tokio::sync::oneshot::Sender` embedded in
+    /// `BackgroundEvent::PartitionsRemoved` / `PartitionsAssigned` (see
+    /// `AbstractMembershipManager::enqueue_rebalance_callback` /
+    /// `enqueue_partitions_assigned_event`), and the membership manager
+    /// `try_recv`s it each iteration. Only the callback a leave enqueued
+    /// comes back through this event, carrying that sender as `ack`, so the
+    /// leave's next step keeps the event's queue position (Java's FIFO).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
         method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
         error: Option<Error>,
+        ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
     ) {
-        let _ = error;
-        let rm_guard = self.lock_request_managers();
-        if rm_guard.consumer_heartbeat.is_none() {
+        // Resolve the membership manager under a brief lock and release it
+        // before calling in, as `process_unsubscribe` does.
+        let membership_arc = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        let Some(mm) = membership_arc else {
             log::warn!(
                 "An internal error occurred; the group membership manager was not present, so the notification of the {} callback execution could not be sent",
                 method_name.fully_qualified_method_name()
             );
             return;
+        };
+        if let Err(e) = mm.consumer_rebalance_listener_callback_completed(method_name, error, ack) {
+            log::warn!("Failed to transition to send the leave group heartbeat: {}", e);
         }
-        // Rust's embedded-sender pattern (see method doc above) already
-        // resolves the membership manager's `ack_rx`. No further action
-        // here. Java's body would call
-        // `membershipManager.consumerRebalanceListenerCallbackCompleted(event)`,
-        // which completes a future the reconcile loop awaits — Rust's
-        // reconcile awaits the embedded `ack_rx` directly, so this
-        // method is intentionally empty.
-        log::trace!(
-            "ConsumerRebalanceListenerCallbackCompleted({}) observed; ack already delivered via embedded oneshot sender",
-            method_name.fully_qualified_method_name()
-        );
     }
 
     // -------------------------------------------------------------------
@@ -1553,8 +1546,8 @@ impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
             ApplicationEvent::UpdatePatternSubscription { handle } => {
                 self.process_update_pattern_subscription(handle);
             },
-            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error } => {
-                self.process_consumer_rebalance_listener_callback_completed(method_name, error);
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                self.process_consumer_rebalance_listener_callback_completed(method_name, error, ack);
             },
 
             // ───── Async-dispatch arms (commit 5/N) ─────
@@ -2329,10 +2322,12 @@ mod tests {
         fx.processor.process(ApplicationEvent::StopFindCoordinatorOnClose);
         fx.processor.process(ApplicationEvent::NewTopicsMetadataUpdate);
         // ConsumerRebalanceListenerCallbackCompleted is logged, no panic.
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
         fx.processor
             .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 error: None,
+                ack,
             });
     }
 
@@ -2763,18 +2758,47 @@ mod tests {
         );
     }
 
-    /// `ConsumerRebalanceListenerCallbackCompleted` is a no-op in Rust
-    /// (the §31 embedded-oneshot pattern resolves the ack directly). Verify
-    /// the dispatch table accepts the event without panicking.
+    /// Without a heartbeat manager, `ConsumerRebalanceListenerCallbackCompleted`
+    /// only logs Java's warning and leaves the callback's future
+    /// uncompleted, as Java's `process(ConsumerRebalanceListenerCallbackCompletedEvent)`
+    /// returns early when `consumerHeartbeatRequestManager` is empty.
     #[test]
-    fn rebalance_listener_callback_completed_is_noop() {
-        let mut fx = setup_processor(true);
+    fn rebalance_listener_callback_completed_without_membership_leaves_future_uncompleted() {
+        let mut fx = setup_processor(false);
+        let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
         fx.processor
             .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 error: None,
+                ack,
             });
-        // No assertion: the test passes if no panic.
+        assert!(
+            matches!(ack_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+            "no membership manager: the future is never completed"
+        );
+    }
+
+    /// With a membership manager, `ConsumerRebalanceListenerCallbackCompleted`
+    /// completes the callback's future with the event's error, as Java's
+    /// `ConsumerMembershipManager.consumerRebalanceListenerCallbackCompleted`
+    /// calls `future.completeExceptionally(e)`.
+    #[test]
+    fn rebalance_listener_callback_completed_completes_the_future_with_the_error() {
+        let mut fx = setup_processor(true);
+        let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
+        fx.processor
+            .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                error: Some(Error::kafka_message("User rebalance callback throws an error")),
+                ack,
+            });
+        match ack_rx.try_recv() {
+            Ok(Err(e)) => assert_eq!(
+                e.to_string(),
+                Error::kafka_message("User rebalance callback throws an error").to_string()
+            ),
+            other => panic!("expected the future completed with the error, got {other:?}"),
+        }
     }
 
     // ===================================================================
@@ -3109,13 +3133,14 @@ mod tests {
     /// With an assignment to release and a listener registered, the
     /// Unsubscribe event leaves the member in PREPARE_LEAVING with the §31
     /// callback enqueued (synchronously, as Java enqueues it inside
-    /// `process`). The bg task does not wait for the ack, and the ack alone
-    /// changes nothing: the move to LEAVING happens only when the bg loop
-    /// drives the stored ack (`drive_pending_leave_callback`), serialized
-    /// with the heartbeat poll as Java's `whenComplete` on the network
-    /// thread is. The event still completes only on the leave response.
+    /// `process`). The bg task does not wait for the ack: the move to LEAVING
+    /// happens when the processor reaches the
+    /// `ConsumerRebalanceListenerCallbackCompleted` event carrying it, as
+    /// Java's `whenComplete` runs on the network thread while processing
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent`. The event still
+    /// completes only on the leave response.
     #[tokio::test(flavor = "current_thread")]
-    async fn unsubscribe_with_callback_leaves_when_bg_loop_drives_the_ack() {
+    async fn unsubscribe_with_callback_leaves_when_the_callback_completed_event_is_processed() {
         use crate::consumer::ConsumerRebalanceListener;
         use crate::consumer::internals::MemberState;
         use crate::consumer::internals::events::BackgroundEvent;
@@ -3150,23 +3175,33 @@ mod tests {
             "the member waits in PREPARE_LEAVING for the revoked callback"
         );
         let ack = match bg_rx.try_recv().expect("the revoked callback is enqueued synchronously").event {
-            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, ack_through_application_events } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions, vec![tp("topic1", 0)]);
+                assert!(
+                    ack_through_application_events,
+                    "a leave's callback returns through the application-event queue"
+                );
                 ack
             },
             other => panic!("unexpected event: {other:?}"),
         };
 
         assert!(mm.has_pending_leave_callback());
-        ack.send(Ok(())).unwrap();
         settle().await;
         assert_eq!(
             mm.state(),
             MemberState::PrepareLeaving,
-            "the ack must not move the member off the bg loop"
+            "nothing moves the member until the callback-completed event is processed"
         );
-        mm.drive_pending_leave_callback().unwrap();
+        // The app returns the ack inside the callback-completed event; its
+        // processing completes the future and runs the leave's next step.
+        fx.processor
+            .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                error: None,
+                ack,
+            });
         assert_eq!(mm.state(), MemberState::Leaving);
         assert!(!mm.has_pending_leave_callback());
         assert!(rx.try_recv().is_err(), "still waiting for the leave heartbeat response");

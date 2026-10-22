@@ -58,6 +58,21 @@ pub(crate) enum BackgroundEvent {
         /// listener, sends the result here. The bg task awaits this
         /// receiver before advancing the membership-state machine.
         ack: oneshot::Sender<Result<(), Error>>,
+        /// How the app side returns `ack`. `true` for the callback a leave
+        /// enqueued (`ConsumerMembershipManager::signal_member_leaving_group`):
+        /// the app moves `ack` into an
+        /// [`ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted`](super::ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted)
+        /// on the application-event queue, as Java does for every callback,
+        /// so the leave's `clearAssignmentAndLeaveGroup()` runs in FIFO order
+        /// with the events the listener submitted before it returned. `false`
+        /// for the reconcile and release callbacks: the app sends on `ack`
+        /// directly.
+        ///
+        /// DoD §7: Java's `PartitionsRemovedEvent` has no such field because
+        /// Java returns every callback through the queue. The flag exists
+        /// only while the reconcile and release acks still use the direct
+        /// send, which skips the queue order.
+        ack_through_application_events: bool,
     },
     /// `PartitionsAssignedEvent` (AK 4.3.1, KAFKA-20106) — bg → app half of
     /// the **assign** path. Sent by `signal_partitions_assigned` at the end
@@ -154,6 +169,7 @@ mod tests {
             method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             partitions: vec![TopicPartition::new("t".to_string(), 0)],
             ack: tx,
+            ack_through_application_events: false,
         };
         assert_eq!(ev.type_name(), "PartitionsRemoved");
     }

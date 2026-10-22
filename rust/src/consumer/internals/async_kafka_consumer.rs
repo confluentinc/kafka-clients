@@ -2452,6 +2452,112 @@ impl AsyncCommitState {
     }
 }
 
+/// Return the result of a `PartitionsRemoved` callback to the background
+/// task — the notify half of Java's
+/// `AsyncKafkaConsumer.invokeRebalanceCallbackAndNotifyBackgroundThread`.
+///
+/// With `ack_through_application_events` (the callback a leave enqueued),
+/// the ack goes back inside a `ConsumerRebalanceListenerCallbackCompleted`
+/// application event, as Java's
+/// `applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(...))`
+/// does: the background task then applies it after every event enqueued
+/// before it — including one the listener submitted and stopped waiting
+/// for — and before every event enqueued after it. Sending on `ack`
+/// directly would let the background task see the result before such an
+/// earlier, still-queued event. `add` wakes the background task. If the
+/// background task is gone, the event (and the ack in it) is dropped.
+///
+/// Otherwise (the reconcile and release callbacks) the result is sent on
+/// `ack` directly and the background task is woken through the
+/// application-event `Notify` (§31 step 4): never through the user-facing
+/// wakeup trigger, which would make the caller's next blocking call return
+/// a spurious `Wakeup`.
+pub(crate) fn notify_background_task_of_rebalance_callback(
+    application_event_handler: &ApplicationEventHandler,
+    method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
+    ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    ack_through_application_events: bool,
+    result: Result<(), Error>,
+    now_ms: i64,
+) {
+    if ack_through_application_events {
+        let _ = application_event_handler.add(
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error: result.err(), ack },
+            now_ms,
+        );
+    } else {
+        let _ = ack.send(result);
+        application_event_handler.wake_background_task();
+    }
+}
+
+/// Owns a `PartitionsRemoved` callback's ack while the app side runs the
+/// listener, so a leave's ack is still returned through the application-event
+/// queue if the caller's future is dropped mid-listener.
+///
+/// DoD §7: no Java counterpart. A Java app thread cannot be cancelled in the
+/// middle of a callback; the closest case is a listener cut short by a
+/// `WakeupException` / `InterruptException`, which
+/// `ConsumerRebalanceListenerInvoker` rethrows and
+/// `AsyncKafkaConsumer.invokeRebalanceCallbacks` catches into the event's
+/// error. `invokeRebalanceCallbackAndNotifyBackgroundThread` then still
+/// enqueues the `ConsumerRebalanceListenerCallbackCompletedEvent` behind
+/// everything the listener had enqueued. A Rust future dropped while the
+/// listener awaits would otherwise drop the ack unsent, and the background
+/// task would apply the leave ahead of the listener's still-queued ops (a
+/// revocation `commit_sync()` would then commit nothing). On drop this guard
+/// enqueues the completed event with an [`Error::Interrupt`], the error Java
+/// carries for an interrupted callback. `ApplicationEventHandler::add` is
+/// sync and never blocks, so it is safe to call from `Drop`.
+///
+/// Only a leave's ack (`ack_through_application_events`) is returned on
+/// drop; a reconcile or release ack is dropped unsent, as before.
+struct PartitionsRemovedAckGuard {
+    application_event_handler: Arc<ApplicationEventHandler>,
+    time: Arc<dyn Time>,
+    method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
+    ack: Option<tokio::sync::oneshot::Sender<Result<(), Error>>>,
+    ack_through_application_events: bool,
+}
+
+impl PartitionsRemovedAckGuard {
+    /// Returns the listener's `result` through
+    /// [`notify_background_task_of_rebalance_callback`].
+    fn complete(mut self, result: Result<(), Error>) {
+        if let Some(ack) = self.ack.take() {
+            notify_background_task_of_rebalance_callback(
+                &self.application_event_handler,
+                self.method_name,
+                ack,
+                self.ack_through_application_events,
+                result,
+                self.time.milliseconds(),
+            );
+        }
+    }
+}
+
+impl Drop for PartitionsRemovedAckGuard {
+    fn drop(&mut self) {
+        if !self.ack_through_application_events {
+            return;
+        }
+        if let Some(ack) = self.ack.take() {
+            notify_background_task_of_rebalance_callback(
+                &self.application_event_handler,
+                self.method_name,
+                ack,
+                true,
+                Err(Error::Interrupt(crate::common::errors::InterruptError::new(format!(
+                    "The {} callback was interrupted: the call running it was cancelled",
+                    self.method_name.fully_qualified_method_name()
+                )))),
+                self.time.milliseconds(),
+            );
+        }
+    }
+}
+
 /// Format a slice of [`TopicPartition`] in Java's `Set.toString()`
 /// shape: `[topic-0, topic-1]`. Used in user-facing error messages
 /// where Java would format a `Set<TopicPartition>` directly
@@ -4597,7 +4703,9 @@ where
                 BackgroundEvent::Error { error } => {
                     Self::record_first_error(&mut first_error, error);
                 },
-                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } if skip_rebalance_callback => {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, ack_through_application_events }
+                    if skip_rebalance_callback =>
+                {
                     // Close path: do NOT invoke the user listener. Java never
                     // invokes reconcile-queued callbacks during `close()` —
                     // close runs rebalance callbacks only via
@@ -4614,12 +4722,17 @@ where
                     // has no equivalent dependency because its KIP-848
                     // reconcile chains via `CompletableFuture` and never parks
                     // the bg thread on the ack.
-                    let _ = method_name;
                     let _ = partitions;
-                    let _ = ack.send(Ok(()));
-                    self.application_event_handler.wake_background_task();
+                    notify_background_task_of_rebalance_callback(
+                        &self.application_event_handler,
+                        method_name,
+                        ack,
+                        ack_through_application_events,
+                        Ok(()),
+                        self.time.milliseconds(),
+                    );
                 },
-                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, ack_through_application_events } => {
                     // AK 4.3.1 (KAFKA-20106): `process(PartitionsRemovedEvent)`
                     // → `invokeRebalanceCallbackAndNotifyBackgroundThread`.
                     // `method_name` is `ON_PARTITIONS_REVOKED` or
@@ -4630,6 +4743,17 @@ where
                     // `rebalance_listener` lock is separate from
                     // `SubscriptionState`, so no recursive lock concern.
                     let listener = self.rebalance_listener.lock().unwrap().clone();
+
+                    // Holds the ack across the listener `.await`, so a leave's
+                    // ack still goes back behind the listener's ops if this
+                    // future is dropped mid-listener.
+                    let ack_guard = PartitionsRemovedAckGuard {
+                        application_event_handler: Arc::clone(&self.application_event_handler),
+                        time: Arc::clone(&self.time),
+                        method_name,
+                        ack: Some(ack),
+                        ack_through_application_events,
+                    };
 
                     // The listener may call back into the consumer through
                     // its `ConsumerHandle` (Java: the same thread re-enters
@@ -4671,19 +4795,18 @@ where
                         )
                     });
 
-                    let send_result = result.clone();
-                    let _ = ack.send(send_result);
-
-                    // Phase 41b: poke the bg-task wakeup `Notify` so the
-                    // bg loop wakes promptly and `try_recv`s this ack on
-                    // its next `reconcile` entry — rather than waiting out
-                    // the selector poll timeout. This reuses the existing
-                    // application-event wakeup primitive (Java's
-                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
-                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
-                    // Perf Contract item 2).
+                    // Return the result and poke the bg-task wakeup
+                    // `Notify` (Phase 41b) so the bg loop wakes promptly and
+                    // `try_recv`s this ack on its next `reconcile` entry —
+                    // rather than waiting out the selector poll timeout. This
+                    // reuses the existing application-event wakeup primitive
+                    // (Java's `wakeupNetworkThread()` → `Selector.wakeup()`
+                    // analog); it does NOT shrink `poll_wait_time_ms` (no
+                    // busy-spin — Perf Contract item 2). A leave's callback
+                    // returns through the application-event queue instead,
+                    // whose `add` wakes the loop the same way.
                     //
-                    // This MUST be the application-event notify, NOT
+                    // The wake MUST be the application-event notify, NOT
                     // `network_thread_close.wakeup()` / `wakeup_trigger.wakeup()`.
                     // Those cancel the wakeup token, which is Java's
                     // `KafkaConsumer.wakeup()` — it arms a user-visible
@@ -4695,7 +4818,7 @@ where
                     // reach the selector through `run_once`'s `select!`, so
                     // this wakes the loop just as promptly with no
                     // user-visible side effect.
-                    self.application_event_handler.wake_background_task();
+                    ack_guard.complete(result.clone());
 
                     if let Err(err) = result {
                         Self::record_first_error(&mut first_error, err);
@@ -8177,6 +8300,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![tp.clone()],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -8253,6 +8377,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![known.clone(), unknown],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -8269,6 +8394,202 @@ mod tests {
         let err = handle.current_lag(&known).await.expect_err("outside the listener");
         assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
         completer.abort();
+    }
+
+    /// PR #263 review (Copilot): a leave's `on_partitions_revoked` returns its
+    /// ack through the application-event queue, behind every event the
+    /// listener submitted — here a `ConsumerHandle` seek whose wait the
+    /// listener abandoned with `tokio::time::timeout` — as Java's
+    /// `invokeRebalanceCallbackAndNotifyBackgroundThread` enqueues
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` after the listener
+    /// returns. The ack is not sent directly, which would let the bg task
+    /// apply the leave before the still-queued seek. A reconcile or release
+    /// callback still gets its ack directly, with nothing enqueued.
+    #[tokio::test]
+    async fn leave_callback_ack_is_enqueued_after_events_the_listener_submitted() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct AbandoningListener {
+            handle: ConsumerHandle,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for AbandoningListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                // The seek is enqueued on the first poll; the zero timeout
+                // then abandons the wait with the event still queued.
+                let wait =
+                    tokio::time::timeout(Duration::ZERO, self.handle.seek_with_offset(partitions[0].clone(), 42));
+                assert!(wait.await.is_err(), "the listener stopped waiting for the seek");
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let listener = Arc::new(AbandoningListener { handle: consumer.handle() });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        let send_callback = |ack_through_application_events: bool| {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![tp.clone()],
+                        ack: ack_tx,
+                        ack_through_application_events,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("bg event sent");
+            ack_rx
+        };
+
+        // A leave's callback.
+        let mut ack_rx = send_callback(true);
+        consumer.process_background_events().await.expect("listener ran");
+        assert!(
+            matches!(ack_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "a leave's ack must not be sent directly"
+        );
+        match app_event_rx.try_recv().expect("the listener's seek is queued").event {
+            ApplicationEvent::SeekUnvalidated { partition, offset, .. } => {
+                assert_eq!((partition, offset), (tp.clone(), 42));
+            },
+            other => panic!("expected the listener's seek first, got {}", other.type_name()),
+        }
+        match app_event_rx.try_recv().expect("the callback-completed event is queued").event {
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert!(error.is_none(), "the listener returned Ok");
+                // The processor completes the carried future.
+                ack.send(Ok(())).expect("receiver alive");
+                assert!(matches!(ack_rx.try_recv(), Ok(Ok(()))), "the event carries this callback's ack");
+            },
+            other => panic!(
+                "expected the callback-completed event after the seek, got {}",
+                other.type_name()
+            ),
+        }
+        assert!(app_event_rx.try_recv().is_err(), "nothing else queued");
+
+        // A reconcile / release callback: the ack is sent directly.
+        let mut ack_rx = send_callback(false);
+        consumer.process_background_events().await.expect("listener ran");
+        assert!(matches!(ack_rx.try_recv(), Ok(Ok(()))), "the ack is sent directly");
+        assert!(
+            matches!(
+                app_event_rx.try_recv().expect("the listener's seek is queued").event,
+                ApplicationEvent::SeekUnvalidated { .. }
+            ),
+            "only the listener's seek is queued"
+        );
+        assert!(app_event_rx.try_recv().is_err(), "no callback-completed event for a direct ack");
+    }
+
+    /// PR #263 review (Critic pr2-c2 finding 1): when the caller's future is
+    /// dropped while a leave's `on_partitions_revoked` is still running, the
+    /// ack is not dropped unsent: the callback-completed event is still
+    /// enqueued behind the op the listener had submitted, carrying an
+    /// `Error::Interrupt`. Java's analog is a listener cut short by an
+    /// `InterruptException`, which `AsyncKafkaConsumer.invokeRebalanceCallbacks`
+    /// catches into the event's error before
+    /// `invokeRebalanceCallbackAndNotifyBackgroundThread` enqueues the
+    /// completed event. Without it the bg task would see a closed ack and
+    /// apply the leave ahead of the listener's still-queued seek.
+    #[tokio::test]
+    async fn leave_callback_ack_is_enqueued_after_the_listener_ops_when_the_caller_is_cancelled() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::future::Future;
+        use std::task::Poll;
+        use tokio::sync::oneshot;
+
+        struct SeekingListener {
+            handle: ConsumerHandle,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for SeekingListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                // Nothing completes the seek, so the listener is still
+                // awaiting it when the caller's future is dropped.
+                self.handle.seek_with_offset(partitions[0].clone(), 42).await
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let listener = Arc::new(SeekingListener { handle: consumer.handle() });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let (ack_tx, mut ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![tp.clone()],
+                    ack: ack_tx,
+                    ack_through_application_events: true,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+
+        // Poll the caller's future once — far enough for the listener to
+        // submit its seek and park on it — then drop it.
+        {
+            let mut drain = Box::pin(consumer.process_background_events());
+            std::future::poll_fn(|cx| {
+                assert!(drain.as_mut().poll(cx).is_pending(), "the listener is waiting on its seek");
+                Poll::Ready(())
+            })
+            .await;
+        }
+
+        match app_event_rx.try_recv().expect("the listener's seek is queued").event {
+            ApplicationEvent::SeekUnvalidated { partition, offset, .. } => {
+                assert_eq!((partition, offset), (tp.clone(), 42));
+            },
+            other => panic!("expected the listener's seek first, got {}", other.type_name()),
+        }
+        match app_event_rx
+            .try_recv()
+            .expect("the callback-completed event is still queued after the cancelled callback")
+            .event
+        {
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                let error = error.expect("a cancelled callback completes with an error");
+                assert!(
+                    error.is_interrupt_error(),
+                    "Java's error for an interrupted callback, got {error:?}"
+                );
+                assert_eq!(
+                    error.to_string(),
+                    Error::Interrupt(crate::common::errors::InterruptError::new(
+                        "The ConsumerRebalanceListener.onPartitionsRevoked callback was interrupted: the call \
+                         running it was cancelled"
+                    ))
+                    .to_string()
+                );
+                ack.send(Err(error)).expect("receiver alive");
+                assert!(matches!(ack_rx.try_recv(), Ok(Err(_))), "the event carries this callback's ack");
+            },
+            other => panic!(
+                "expected the callback-completed event after the seek, got {}",
+                other.type_name()
+            ),
+        }
+        assert!(app_event_rx.try_recv().is_err(), "nothing else queued");
     }
 
     /// An `OffsetCommitCallback` drained by the consumer's own `commit()`
@@ -9335,6 +9656,7 @@ mod tests {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
+                        ack_through_application_events: false,
                     },
                     enqueued_ms: 0,
                 })
@@ -9984,6 +10306,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10035,6 +10358,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10113,6 +10437,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10170,6 +10495,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10598,6 +10924,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: Vec::new(),
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms,
         };
@@ -10965,6 +11292,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -11022,6 +11350,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -11474,6 +11803,7 @@ mod tests {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
+                        ack_through_application_events: false,
                     },
                     enqueued_ms: 0,
                 })
@@ -11604,6 +11934,7 @@ mod tests {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
+                        ack_through_application_events: false,
                     },
                     enqueued_ms: 0,
                 })
@@ -11691,6 +12022,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
