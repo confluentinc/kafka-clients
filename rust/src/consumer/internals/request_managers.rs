@@ -295,9 +295,12 @@ impl RequestManagers {
 
     /// Idempotent close. Subsequent calls are no-ops.
     ///
-    /// Java: `close()`. Java additionally invokes `closeQuietly` on
-    /// every manager that implements `Closeable`; in Rust no manager
-    /// implements an explicit close trait at this point.
+    /// Java: `close()`, which calls `closeQuietly` on every entry that
+    /// implements `Closeable`. Among the consumer's managers that is only the
+    /// fetch manager (`FetchRequestManager extends AbstractFetch implements
+    /// Closeable`), so this closes it: `AbstractFetch.close()` closes the
+    /// fetch buffer and the decompression buffer supplier. The Rust close is
+    /// infallible, so `closeQuietly`'s log-and-continue has nothing to catch.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
@@ -306,6 +309,9 @@ impl RequestManagers {
         }
         log::debug!("Closing RequestManagers");
         self.closed = true;
+        if let Some(fetch) = self.fetch.as_mut() {
+            fetch.abstract_fetch_mut().close();
+        }
         log::debug!("RequestManagers has been closed");
     }
 
@@ -490,6 +496,30 @@ mod tests {
         // Second call is a no-op.
         rm.close();
         assert!(rm.is_closed());
+    }
+
+    /// Java's `RequestManagers.close()` closes every `Closeable` entry, so
+    /// the fetch manager's `AbstractFetch.close()` runs and closes its fetch
+    /// buffer, dropping any buffered data.
+    #[test]
+    fn close_closes_the_fetch_manager() {
+        let mut rm = RequestManagers::new(None, None, None, None, None, None, Some(fetch_manager()));
+        let fetch_buffer =
+            std::sync::Arc::clone(&rm.fetch.as_ref().expect("fetch manager").abstract_fetch().fetch_buffer);
+        fetch_buffer.add(crate::consumer::internals::CompletedFetch::new(
+            crate::common::TopicPartition::new("t".to_string(), 0),
+            crate::fetch_response_data::PartitionData::new(),
+        ));
+        assert!(!fetch_buffer.is_empty());
+        rm.close();
+        assert!(
+            rm.fetch.as_ref().expect("fetch manager").abstract_fetch().closed,
+            "Java's RequestManagers.close closes the fetch manager (AbstractFetch.close)"
+        );
+        assert!(
+            fetch_buffer.is_empty(),
+            "Java's AbstractFetch.close closes the fetch buffer, which drops its buffered data"
+        );
     }
 
     /// Verifies that `entries()` returns managers in the same order on

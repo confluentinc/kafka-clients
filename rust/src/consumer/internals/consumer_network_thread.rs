@@ -3597,6 +3597,54 @@ mod tests {
         );
     }
 
+    /// Java's `ConsumerNetworkThread.cleanup` ends with
+    /// `closeQuietly(requestManagers, ...)`, after the final network poll, and
+    /// `RequestManagers.close` closes every `Closeable` entry: the fetch
+    /// manager's `AbstractFetch.close` closes the fetch buffer (dropping its
+    /// buffered data) and the decompression buffer supplier. The request
+    /// managers are shared with the application side, so their `Drop` does not
+    /// stand in for this close.
+    #[tokio::test]
+    async fn cleanup_closes_the_fetch_manager() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, _leader, _topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        let fetch_buffer = Arc::clone(&fetch.abstract_fetch().fetch_buffer);
+        fetch_buffer.add(crate::consumer::internals::CompletedFetch::new(
+            tp,
+            crate::fetch_response_data::PartitionData::new(),
+        ));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let (mut thread, _delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        let rm_guard = request_managers.lock().unwrap();
+        assert!(rm_guard.is_closed());
+        assert!(
+            rm_guard.fetch.as_ref().expect("fetch manager").abstract_fetch().closed,
+            "Java's cleanup closes the request managers, and with them the fetch manager (AbstractFetch.close)"
+        );
+        assert!(
+            fetch_buffer.is_empty(),
+            "Java's AbstractFetch.close closes the fetch buffer, which drops its buffered data"
+        );
+    }
+
     /// Audit finding C4-01 / KAFKA-18641, through the real `run_once`: the
     /// background loop never starts the interval auto-commit on its own (Java's
     /// `CommitRequestManager.poll` only drains queued requests), so records
