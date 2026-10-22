@@ -6497,6 +6497,69 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Leaving);
     }
 
+    /// A second leave after an invalid-epoch response took the leave future
+    /// while the member is PREPARE_LEAVING waits for the ongoing leave.
+    ///
+    /// Deviation from Java 4.4 pinned here: `onHeartbeatSuccess` completes and
+    /// clears `leaveGroupInProgress` but leaves the member PREPARE_LEAVING, so
+    /// the second `AbstractMembershipManager.leaveGroup(boolean)` takes its
+    /// "already leaving" branch and `leaveGroupInProgress.get()` throws
+    /// `NoSuchElementException`. `ConsumerNetworkThread.processApplicationEvents`
+    /// then fails the event with it and the second `unsubscribe()` throws a
+    /// `KafkaException`. Rust instead registers a fresh leave future: the
+    /// second leave does not fail and completes when the ongoing leave ends
+    /// (here, on the response to the leave heartbeat).
+    #[tokio::test]
+    async fn second_leave_after_invalid_epoch_response_while_prepare_leaving_waits_for_ongoing_leave() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_with_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        let (first_leave, continuation) = leave_group(&mgr);
+        assert!(continuation, "a release callback was enqueued");
+        let env = rx.recv().await.expect("release callback event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // The invalid-epoch response takes and completes the leave future;
+        // the member stays PREPARE_LEAVING.
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_leave_completed_successfully(&first_leave);
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Second leave (a second `unsubscribe()`): Java fails it with
+        // NoSuchElementException; Rust returns a fresh future.
+        let second_leave = mgr
+            .leave_group(0)
+            .expect("Rust deviation from Java 4.4: the second leave does not fail");
+        assert!(rx.try_recv().is_err(), "the second leave enqueues no callback");
+        assert!(mgr.has_pending_leave_callback(), "the first leave's callback is still pending");
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert!(
+            !second_leave.is_done(),
+            "the second leave gets a fresh future that waits for the ongoing leave"
+        );
+
+        // The ongoing leave goes on: the callback completes, the leave
+        // heartbeat is sent, and its response completes the second leave.
+        stuck_ack.send(Ok(())).unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(!second_leave.is_done(), "still waiting for the leave heartbeat");
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(!second_leave.is_done(), "still waiting for the leave heartbeat's response");
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_send_leave_completed(&mgr, &second_leave);
+    }
+
     /// Translated from
     /// `ConsumerMembershipManagerTest#testIgnoreHeartbeatResponseWhenNotInGroup`.
     /// A heartbeat response received while the member is not in the group
