@@ -190,20 +190,18 @@ def test_close_with_group_membership_operation(kafka_broker: Any, mode: str,
             await aw(stays.subscribe(topics=[topic]))
             await aw(leaves.subscribe(topics=[topic]))
             await _poll_both_until_split(stays, leaves, topic)
-            kept = stays.assignment()
         finally:
             await close_consumer(leaves, timeout=10, operation=operation)
         try:
-            if operation is Op.LEAVE_GROUP:
-                # Well inside the 45 s session timeout (about 4 s here: the
-                # next heartbeat of the member that stays).
-                await _poll_until_assigned(stays, _partitions(topic), deadline=20)
-            else:
-                # Twice the LEAVE handover, well inside the session timeout.
-                end = time.monotonic() + 10
-                while time.monotonic() < end:
-                    await aw(stays.poll(timeout=0.2))
-                    assert stays.assignment() == kept
+            # Both operations hand the partition over well inside the 45 s
+            # session timeout (about 4 s here: the next heartbeat of the member
+            # that stays). These are dynamic members, and a dynamic member's
+            # REMAIN_IN_GROUP close leaves the group too, as in Java 4.4:
+            # leaveGroupOnClose moves it to LEAVING with the leave epoch (-1),
+            # and although shouldSendLeaveHeartbeatNow() skips the immediate
+            # leave heartbeat, AbstractHeartbeatRequestManager.poll still sends
+            # one because shouldHeartbeatNow() includes LEAVING.
+            await _poll_until_assigned(stays, _partitions(topic), deadline=20)
         finally:
             await close_consumer(stays)
 
