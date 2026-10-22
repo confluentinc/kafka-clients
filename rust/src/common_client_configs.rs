@@ -18,6 +18,10 @@
 //! Only the constants needed by the Metadata class are included here;
 //! full configuration support will be added as needed.
 
+use crate::common::Error;
+use crate::common::config::SaslConfigs;
+use crate::common::security::auth::SecurityProtocol;
+
 /// Configuration keys shared by producer, consumer and admin clients.
 ///
 /// Translates the Java static-utility class
@@ -148,4 +152,106 @@ impl CommonClientConfigs {
 
     /// The jitter factor for retry backoff.
     pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+    /// Rejects an unusable `sasl.mechanism` when a client config is built.
+    ///
+    /// Translates `CommonClientConfigs.postValidateSaslMechanismConfig`
+    /// (`CommonClientConfigs.java:320`), which every client config runs from its
+    /// `postProcessParsedConfig`: with `SASL_PLAINTEXT` or `SASL_SSL` the mechanism
+    /// must be non-empty. Nothing is checked for the other protocols.
+    ///
+    /// DOCUMENTED DEVIATION (not a TODO): Java then builds a `SaslClient` for any
+    /// mechanism a security provider offers. The authenticator here builds only the
+    /// PLAIN token, so any other mechanism is reported as a [`Error::Config`]
+    /// instead of sending the password as PLAIN. This check goes when the other
+    /// mechanisms are implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns a config error naming `sasl.mechanism` when SASL is enabled and the
+    /// mechanism is empty or not PLAIN.
+    pub(crate) fn post_validate_sasl_mechanism_config(
+        security_protocol: SecurityProtocol,
+        mechanism: &str,
+    ) -> Result<(), Error> {
+        if security_protocol != SecurityProtocol::SaslPlaintext && security_protocol != SecurityProtocol::SaslSsl {
+            return Ok(());
+        }
+        if mechanism.is_empty() {
+            return Err(Error::config_name_value_message(
+                SaslConfigs::SASL_MECHANISM,
+                "null",
+                format!(
+                    "When the {} configuration enables SASL, mechanism must be non-null and non-empty string.",
+                    Self::SECURITY_PROTOCOL_CONFIG
+                ),
+            ));
+        }
+        if mechanism != SaslConfigs::PLAIN_MECHANISM {
+            return Err(Error::config_name_value_message(
+                SaslConfigs::SASL_MECHANISM,
+                mechanism,
+                format!(
+                    "SASL mechanism '{mechanism}' is not supported by this client: only {} is implemented",
+                    SaslConfigs::PLAIN_MECHANISM
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::security::auth::SecurityProtocol;
+
+    /// `CommonClientConfigs.postValidateSaslMechanismConfig`: with SASL enabled,
+    /// the mechanism must be non-empty (Java's message and `ConfigException` shape).
+    #[test]
+    fn test_empty_sasl_mechanism_is_rejected_when_sasl_is_enabled() {
+        for protocol in [SecurityProtocol::SaslPlaintext, SecurityProtocol::SaslSsl] {
+            let err = CommonClientConfigs::post_validate_sasl_mechanism_config(protocol, "")
+                .expect_err("an empty mechanism must be rejected");
+            assert!(err.is_config_error(), "must be a ConfigError: {err:?}");
+            assert_eq!(
+                "Invalid value null for configuration sasl.mechanism: When the security.protocol configuration \
+                 enables SASL, mechanism must be non-null and non-empty string.",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sasl_mechanism_is_not_checked_without_sasl() {
+        for protocol in [SecurityProtocol::Plaintext, SecurityProtocol::Ssl] {
+            CommonClientConfigs::post_validate_sasl_mechanism_config(protocol, "").expect("no SASL, nothing to check");
+            CommonClientConfigs::post_validate_sasl_mechanism_config(protocol, "SCRAM-SHA-256")
+                .expect("no SASL, nothing to check");
+        }
+    }
+
+    #[test]
+    fn test_plain_is_accepted_when_sasl_is_enabled() {
+        CommonClientConfigs::post_validate_sasl_mechanism_config(SecurityProtocol::SaslPlaintext, "PLAIN")
+            .expect("PLAIN is implemented");
+    }
+
+    /// Java would build a `SaslClient` for these; this client only implements PLAIN,
+    /// so they fail at configuration time instead of sending the password as PLAIN.
+    #[test]
+    fn test_unimplemented_sasl_mechanism_is_a_config_error_when_sasl_is_enabled() {
+        for mechanism in ["SCRAM-SHA-256", "GSSAPI", "OAUTHBEARER"] {
+            let err = CommonClientConfigs::post_validate_sasl_mechanism_config(SecurityProtocol::SaslSsl, mechanism)
+                .expect_err("an unimplemented mechanism must be rejected");
+            assert!(err.is_config_error(), "must be a ConfigError: {err:?}");
+            assert_eq!(
+                format!(
+                    "Invalid value {mechanism} for configuration sasl.mechanism: SASL mechanism '{mechanism}' is not \
+                     supported by this client: only PLAIN is implemented"
+                ),
+                err.message()
+            );
+        }
+    }
 }

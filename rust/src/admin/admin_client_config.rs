@@ -204,6 +204,11 @@ impl AdminClientConfig {
             }
         }
 
+        CommonClientConfigs::post_validate_sasl_mechanism_config(
+            config.security_protocol,
+            &config.sasl_config.mechanism,
+        )?;
+
         // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
         // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
         // `createInternal`; this crate has always run the check here, when the
@@ -394,6 +399,39 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
 
 #[cfg(test)]
 mod tests {
+    /// `postValidateSaslMechanismConfig` runs when the config is built, so an unusable
+    /// `sasl.mechanism` fails here and not later, when a channel builder is created.
+    #[test]
+    fn test_sasl_mechanism_is_validated_when_the_config_is_built() {
+        let build = |protocol: &str, mechanism: &str| {
+            let props = std::collections::HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("security.protocol".to_string(), protocol.to_string()),
+                ("sasl.mechanism".to_string(), mechanism.to_string()),
+            ]);
+            AdminClientConfig::new(&props)
+        };
+
+        let err = build("SASL_PLAINTEXT", "SCRAM-SHA-256").expect_err("SCRAM is not implemented");
+        assert!(err.is_config_error(), "must be a ConfigError: {err:?}");
+        assert!(
+            err.message().contains("SASL mechanism 'SCRAM-SHA-256' is not supported"),
+            "got: {}",
+            err.message()
+        );
+
+        let err = build("SASL_SSL", "").expect_err("an empty mechanism is invalid with SASL");
+        assert!(err.is_config_error(), "must be a ConfigError: {err:?}");
+        assert!(
+            err.message().contains("mechanism must be non-null and non-empty string"),
+            "got: {}",
+            err.message()
+        );
+
+        build("SASL_PLAINTEXT", "PLAIN").expect("PLAIN is implemented");
+        build("PLAINTEXT", "SCRAM-SHA-256").expect("the mechanism only matters with SASL");
+    }
+
     use super::*;
 
     #[test]
@@ -575,6 +613,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.security_protocol(), SecurityProtocol::SaslSsl);
     }
