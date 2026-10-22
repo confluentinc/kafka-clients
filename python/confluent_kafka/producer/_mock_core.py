@@ -45,13 +45,15 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from confluent_kafka._args import MISSING
+from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
+from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._record_future import complete_record
 from ._send import call_callback
@@ -124,13 +126,20 @@ class MockProducerCore(Generic[K, V]):
                    partitioner: Partitioner | None, key_serializer: Serializer[Any] | None,
                    value_serializer: Serializer[Any] | None) -> None:
         """Java's ``MockProducer(cluster, autoComplete, partitioner,
-        keySerializer, valueSerializer)``. A ``None`` cluster is Java's
-        ``Cluster.empty()``; a ``None`` serializer is ``bytes_serializer()``
-        *(deviation: Java requires one)*."""
+        keySerializer, valueSerializer)``. A ``cluster`` left out (``MISSING``)
+        is Java's ``Cluster.empty()``; a ``None`` one is Java's null, stored, so
+        the first ``send()`` or ``partitions_for()`` that reads it raises
+        ``TypeError`` there, as Java's mock does. A ``None`` serializer is
+        ``bytes_serializer()`` *(deviation: Java requires one)*."""
         self._lock = threading.RLock()
-        self._cluster = cluster
+        self._null_cluster = cluster is None
+        self._cluster = None if cluster is MISSING else cluster
         self._auto_complete = auto_complete
         self._partitioner = partitioner
+        if key_serializer is not None:
+            require_kwargs(key_serializer, "key_serializer")
+        if value_serializer is not None:
+            require_kwargs(value_serializer, "value_serializer")
         self._key_serializer: Serializer[Any] = (
             bytes_serializer() if key_serializer is None else key_serializer)
         self._value_serializer: Serializer[Any] = (
@@ -344,13 +353,15 @@ class MockProducerCore(Generic[K, V]):
     def _send_offsets_to_transaction(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                                      group_metadata: ConsumerGroupMetadata) -> None:
         if group_metadata is None:
-            raise NullPointerError()  # Objects.requireNonNull(groupMetadata)
+            raise TypeError("group_metadata must not be None")  # Objects.requireNonNull(groupMetadata)
         self._verify_not_closed()
         self._verify_not_fenced()
         self._verify_transactions_initialized()
         self._verify_transaction_in_flight()
         if self._send_offsets_to_transaction_exception is not None:
             raise self._send_offsets_to_transaction_exception
+        if offsets is None:  # Java's offsets.isEmpty()
+            raise TypeError("offsets must not be None")
         if len(offsets) == 0:
             return
         uncommitted = self._uncommitted_consumer_group_offsets.setdefault(
@@ -415,14 +426,18 @@ class MockProducerCore(Generic[K, V]):
                                  cause=ProducerFencedError(message="Fenced"))
             if self._send_exception is not None:
                 raise self._send_exception
+            if record is None:  # Java's record.topic()
+                raise TypeError("record must not be None")
             partition = 0
             if self._partitions_for_topic(record.topic()):
                 partition = self._partition(record)
             else:
                 # just to raise the serializer's error if the serializers are not
                 # the proper ones to serialize the key / value
-                self._key_serializer(record.topic(), record.key(), ())
-                self._value_serializer(record.topic(), record.value(), ())
+                # (each with `new RecordHeaders()`, MockProducer.java:316-317).
+                self._key_serializer(topic=record.topic(), data=record.key(), headers=Headers())
+                self._value_serializer(topic=record.topic(), data=record.value(),
+                                       headers=Headers())
             topic_partition = TopicPartition(topic=record.topic(), partition=partition)
             offset = self._next_offset(topic_partition)
             base_offset = max(0, offset - _INT_MAX)
@@ -494,7 +509,10 @@ class MockProducerCore(Generic[K, V]):
         return offset
 
     def _partitions_for_topic(self, topic: str) -> list[PartitionInfo]:
-        """``cluster.partitionsForTopic(topic)``; ``Cluster.empty()`` has none."""
+        """``cluster.partitionsForTopic(topic)``; ``Cluster.empty()`` has none,
+        and a null cluster raises ``TypeError``, as Java's dereference."""
+        if self._null_cluster:
+            raise TypeError("cluster must not be None")
         if self._cluster is None:
             return []
         partitions: list[PartitionInfo] = self._cluster.partitions_for_topic(topic)  # type: ignore[attr-defined]
@@ -512,8 +530,10 @@ class MockProducerCore(Generic[K, V]):
                     message=f"Invalid partition given with record: {partition} is not in the "
                     f"range [0...{num_partitions}].")
             return partition
-        key_bytes = self._key_serializer(topic, record.key(), record.headers())
-        value_bytes = self._value_serializer(topic, record.value(), record.headers())
+        key_bytes = self._key_serializer(topic=topic, data=record.key(),
+                                         headers=record.headers())
+        value_bytes = self._value_serializer(topic=topic, data=record.value(),
+                                             headers=record.headers())
         if self._partitioner is None:
             return self._partitions_for_topic(record.topic())[0].partition()
         chosen: int = self._partitioner.partition(  # type: ignore[attr-defined]

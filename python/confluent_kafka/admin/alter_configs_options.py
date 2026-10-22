@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["AlterConfigsOptions"]
@@ -40,20 +40,20 @@ class AlterConfigsOptions(AbstractOptions):
 
     __slots__ = ("_validate_only",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, validate_only: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, validate_only: bool = MISSING) -> None:
         super().__init__()
         self._validate_only = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if validate_only is not UNSET:
+        if validate_only is not MISSING:
             self.validate_only(validate_only=validate_only)
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object. Without: the timeout in milliseconds, or ``None``."""
         # This method is retained to keep binary compatibility with 0.11
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)
@@ -67,6 +67,8 @@ class AlterConfigsOptions(AbstractOptions):
     def validate_only(self, *, validate_only: bool) -> AlterConfigsOptions:
         """Set to true if the request should be validated without altering the
         configs."""
+        if validate_only is None:  # a boolean: Java cannot pass null
+            raise TypeError("validate_only must not be None")
         self._validate_only = validate_only
         self._record("validate_only", self._validate_only)
         return self

@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.GroupAuthorizationError).
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from confluent_kafka.common.errors.authorization_error import AuthorizationError
 
@@ -22,7 +22,10 @@ __all__ = ["GroupAuthorizationError"]
 
 class GroupAuthorizationError(AuthorizationError):
     _ffi_id: ClassVar[int]
-    def __init__(self, *, message: str, group_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None, group_id: str | None) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
     def group_id(self) -> str | None: ...
     @staticmethod
     def for_group_id(*, group_id: str) -> GroupAuthorizationError: ...

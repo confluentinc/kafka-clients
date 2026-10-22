@@ -542,7 +542,11 @@ mod tests {
             kafka_consumer_KafkaConsumer_destroy(class);
             let elapsed = started.elapsed();
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
-            assert_eq!(*fired.lock().unwrap(), [Some((1, "WakeupTrigger fired".to_string()))]);
+            assert_eq!(
+                *fired.lock().unwrap(),
+                [Some((1, String::new()))],
+                "a wakeup, with Java's empty message"
+            );
         }
     }
 }

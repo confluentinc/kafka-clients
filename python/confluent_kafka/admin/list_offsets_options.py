@@ -16,14 +16,15 @@
 
 Java has a constructor that takes an argument, so the class keeps only Java's
 constructors, ``()`` and ``(isolationLevel)``, as one keyword-only constructor
-(CLAUDE.md, Python Binding Conventions, Signatures). ``()`` calls
-``this(IsolationLevel.READ_UNCOMMITTED)``, a Java-given default, so ``isolation_level``
-defaults to that enum constant; every combination is a Java form, so there is no
+(CLAUDE.md, Python Binding Conventions, Signatures), with one stub each. ``()`` calls
+``this(IsolationLevel.READ_UNCOMMITTED)``, a Java-given default the constructor fills
+when ``isolation_level`` is left out; every combination is a Java form, so there is no
 ``java_forms`` check. ``isolationLevel`` is ``final``: there is no setter.
 """
 
 from __future__ import annotations
 
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 from confluent_kafka.common.isolation_level import IsolationLevel
 
@@ -38,9 +39,10 @@ class ListOffsetsOptions(AbstractOptions):
 
     __slots__ = ("_isolation_level",)
 
-    def __init__(self, *,
-                 isolation_level: IsolationLevel = IsolationLevel.READ_UNCOMMITTED) -> None:
+    def __init__(self, *, isolation_level: IsolationLevel = MISSING) -> None:
         super().__init__()
+        if isolation_level is MISSING:
+            isolation_level = IsolationLevel.READ_UNCOMMITTED
         self._isolation_level = isolation_level
 
     def isolation_level(self) -> IsolationLevel:

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
@@ -39,20 +39,20 @@ class ListTopicsOptions(AbstractOptions):
 
     __slots__ = ("_list_internal",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, list_internal: bool = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, list_internal: bool = MISSING) -> None:
         super().__init__()
         self._list_internal = False
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if list_internal is not UNSET:
+        if list_internal is not MISSING:
             self.list_internal(list_internal=list_internal)
 
-    def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
+    def timeout_ms(self, *, timeout_ms: int | None = MISSING) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
         ``None`` if the default api timeout for the AdminClient should be used, and
         return this object. Without: the timeout in milliseconds, or ``None``."""
         # This method is retained to keep binary compatibility with 0.11
-        if timeout_ms is UNSET:
+        if timeout_ms is MISSING:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
         self._record("timeout_ms", self._timeout_ms)
@@ -64,6 +64,8 @@ class ListTopicsOptions(AbstractOptions):
         :param list_internal: Whether we should list internal topics.
         :return: This ListTopicsOptions object.
         """
+        if list_internal is None:  # a boolean: Java cannot pass null
+            raise TypeError("list_internal must not be None")
         self._list_internal = list_internal
         self._record("list_internal", self._list_internal)
         return self

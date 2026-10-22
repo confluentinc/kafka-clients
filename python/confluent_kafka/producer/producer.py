@@ -64,16 +64,15 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka._wait import wait_sliced
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
-from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
     FLUSH_IN_CALLBACK_MESSAGE,
@@ -81,6 +80,8 @@ from ._base import (
     Completion,
     _ProducerState,
     check_group_metadata,
+    check_offsets,
+    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -94,6 +95,7 @@ from ._base import (
 )
 from ._send import (
     MetadataTuple,
+    check_callback,
     completion_to_python,
     in_any_callback,
     in_callback,
@@ -383,7 +385,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         Raises ``IllegalArgumentError`` if ``group_metadata`` is ``None`` or has
         a generation id above 0 with an unknown member id,
-        ``UnsupportedVersionError`` if ``group_metadata`` comes from a mock
+        ``UnsupportedOperationError`` if ``group_metadata`` comes from a mock
         consumer, ``IllegalStateError`` if no ``transactional.id`` has been
         configured or no transaction has been started, ``ProducerFencedError``,
         ``CommitFailedError`` if the commit failed and cannot be retried, and
@@ -392,6 +394,7 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         check_group_metadata(group_metadata)
+        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         self._run_void("AddOffsetsToTxn", _lib.Producer_send_offsets_to_transaction_cb,
@@ -441,12 +444,18 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         self._run_void("EndTxn(false)", _lib.Producer_abort_transaction_cb)
 
+    @overload
+    def send(self, *, record: ProducerRecord[K, V]) -> KafkaFuture[RecordMetadata]: ...
+    @overload
+    def send(self, *, record: ProducerRecord[K, V], callback: Callback | None
+             ) -> KafkaFuture[RecordMetadata]: ...
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = UNSET) -> KafkaFuture[RecordMetadata]:
+             callback: Callback | None = MISSING) -> KafkaFuture[RecordMetadata]:
         """Asynchronously send a record to a topic and invoke the provided
         ``callback`` when the send has been acknowledged (``None`` indicates no
-        callback). Java's ``send(record)`` passes ``null`` to it, so
-        ``callback`` defaults to ``UNSET`` (Signatures) and is filled here.
+        callback). Java's ``send(record)`` passes ``null`` to it, so a
+        ``callback`` left out is filled here with ``None``. A ``None`` record
+        raises ``TypeError``, as Java's ``record.topic()`` does.
 
         The send is asynchronous and this method will return immediately
         (except for rare cases described below) once the record has been stored
@@ -506,11 +515,13 @@ class Producer(Generic[K, V], _ProducerState):
         callback, of this producer or another, ``send()`` hands its record over
         on the calling thread (see the module docstring).
         """
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None
         self._check_not_closed()
+        check_record(record)
         if callback is not None:
             reject_coroutine_callback(callback)
+            check_callback(callback)
         native, topic, partition = self._native_parts(record)
         # The record's future: Python state the completion completes, under the
         # KafkaFuture returned (RecordFuture: cancel() answers False, as Java's
@@ -603,11 +614,11 @@ class Producer(Generic[K, V], _ProducerState):
         """Get the partition metadata for the given topic. This can be used for
         custom partitioning. This will attempt to refresh metadata until it
         finds the topic in it, or the configured ``max.block.ms`` expires
-        (``TimeoutError``). Raises ``NullPointerError`` for a ``None`` topic.
+        (``TimeoutError``). Raises ``TypeError`` for a ``None`` topic.
         """
         self._check_not_closed()
         if topic is None:
-            raise NullPointerError(message="topic cannot be null")
+            raise TypeError("topic must not be None")
         partitions, error = self._run_queued(
             f"the metadata of topic {topic}", _lib.Producer_partitions_for_cb, topic,
             free=_free_partitions_payload)
@@ -619,7 +630,11 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
 
-    def close(self, *, timeout: Duration | None = None) -> None:
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
+    def close(self, *, timeout: Duration = MISSING) -> None:
         """Close this producer: ``close()`` waits until all previously sent
         requests complete; ``close(timeout=…)`` waits up to ``timeout`` for the
         producer to complete the sending of all incomplete requests, and if it
@@ -636,7 +651,9 @@ class Producer(Generic[K, V], _ProducerState):
         Closing twice is harmless; any other call after it raises
         ``IllegalStateError``. A negative ``timeout`` raises
         ``IllegalArgumentError``, except that a second ``close()`` returns
-        before checking it *(deviation)*.
+        before checking it *(deviation)*. A ``None`` ``timeout`` raises
+        ``TypeError``, Java's ``timeout.toMillis()`` on a null, with the same
+        exception.
         """
         if self._closed:
             return

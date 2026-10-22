@@ -67,7 +67,6 @@ from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors import TopicAuthorizationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 # Fix round 1 additions.
 from confluent_kafka.admin._internals import _CoordinatorKey, _sub_level_error
@@ -392,11 +391,11 @@ class TestListTopicsOptions:
         assert hash(a) == hash(b)
         assert a != ListTopicsOptions()
         assert a != CreateTopicsOptions()
-        assert a != "ListTopicsOptions(listInternal=true)"
+        assert a != "ListTopicsOptions(listInternal=True)"
 
     def test_str(self) -> None:
-        assert str(ListTopicsOptions()) == "ListTopicsOptions(listInternal=false)"
-        assert str(ListTopicsOptions(list_internal=True)) == "ListTopicsOptions(listInternal=true)"
+        assert str(ListTopicsOptions()) == "ListTopicsOptions(listInternal=False)"
+        assert str(ListTopicsOptions(list_internal=True)) == "ListTopicsOptions(listInternal=True)"
 
 
 class TestCreateDelegationTokenOptions:
@@ -446,7 +445,13 @@ class TestRemoveMembersFromConsumerGroupOptions:
         options = RemoveMembersFromConsumerGroupOptions()
         assert options.members() == set()
         assert options.remove_all() is True
-        assert RemoveMembersFromConsumerGroupOptions(members=None).remove_all() is True
+        # Left out (or MISSING) is Java's (); a None is Java's null, whose
+        # members.isEmpty() throws.
+        from confluent_kafka._args import MISSING
+
+        assert RemoveMembersFromConsumerGroupOptions(members=MISSING).remove_all() is True
+        with pytest.raises(TypeError, match=r"^members must not be None$"):
+            RemoveMembersFromConsumerGroupOptions(members=None)  # type: ignore[call-overload]
         assert RemoveMembersFromConsumerGroupOptions(
             members=[MemberToRemove(group_instance_id="i")]).remove_all() is False
 
@@ -616,7 +621,7 @@ class TestDeleteTopicsResult:
 
     def test_invalid_configurations(self) -> None:
         with pytest.raises(IllegalArgumentError,
-                           match=r"^topicIdFutures and nameFutures cannot both be null\.$"):
+                           match=r"^topicIdFutures and nameFutures cannot both be None\.$"):
             DeleteTopicsResult._new(topic_id_futures=None, name_futures=None, kind=Sync)
         with pytest.raises(IllegalArgumentError,
                            match=r"^topicIdFutures and nameFutures cannot both be specified\.$"):
@@ -662,9 +667,10 @@ class TestCreateTopicsResult:
         assert _exception(result.values()["t"]) is error
         assert _exception(result.num_partitions(topic="t")) is error
 
-    def test_unknown_topic_raises_null_pointer_error(self) -> None:
-        with pytest.raises(NullPointerError):
+    def test_unknown_topic_raises_illegal_argument_error(self) -> None:
+        with pytest.raises(IllegalArgumentError) as info:
             self._result(Sync).config(topic="missing")
+        assert str(info.value) == "Topic missing was not part of the createTopics request"
 
     def test_topic_metadata_and_config_forms(self) -> None:
         failed = _TopicMetadataAndConfig(exception=TopicAuthorizationError(message="d"))
@@ -928,7 +934,7 @@ class TestListTransactionsOptions:
         options = ListTransactionsOptions(filtered_producer_ids=[7], timeout_ms=3)
         assert str(options) == (
             "ListTransactionsOptions(filteredStates=[], filteredProducerIds=[7], "
-            "filteredDuration=-1, filteredTransactionalIdPattern=null, timeoutMs=3)")
+            "filteredDuration=-1, filteredTransactionalIdPattern=None, timeoutMs=3)")
 
     def test_null_argument_is_not_checked(self) -> None:
         with pytest.raises(TypeError):
@@ -946,7 +952,7 @@ class TestDescribeProducersOptions:
 
     def test_str(self) -> None:
         assert str(DescribeProducersOptions()) == (
-            "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)")
+            "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=None)")
         assert str(DescribeProducersOptions(broker_id=5, timeout_ms=10)) == (
             "DescribeProducersOptions(brokerId=OptionalInt[5], timeoutMs=10)")
 

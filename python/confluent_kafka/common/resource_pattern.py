@@ -24,7 +24,6 @@ from confluent_kafka.common.pattern_type import PatternType
 from confluent_kafka.common.resource_pattern_filter import ResourcePatternFilter
 from confluent_kafka.common.resource_type import ResourceType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["ResourcePattern"]
 
@@ -50,13 +49,13 @@ class ResourcePattern:
         specific, resource pattern type, which controls how the pattern will
         match resource names."""
         if resource_type is None:
-            raise NullPointerError(message="resourceType")
+            raise TypeError("resource_type must not be None")
         self._resource_type = resource_type
         if name is None:
-            raise NullPointerError(message="name")
+            raise TypeError("name must not be None")
         self._name = name
         if pattern_type is None:
-            raise NullPointerError(message="patternType")
+            raise TypeError("pattern_type must not be None")
         self._pattern_type = pattern_type
         if resource_type is ResourceType.ANY:
             raise IllegalArgumentError(message="resourceType must not be ANY")

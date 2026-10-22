@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
 from confluent_kafka.common.kafka_error import KafkaError
 
@@ -49,9 +49,9 @@ class ConfigError(KafkaError):
     def __init__(
         self,
         *,
-        name: str | None = None,
-        value: Any = None,
-        message: str | None = UNSET,
+        name: str = MISSING,
+        value: Any = MISSING,
+        message: str | None = MISSING,
         _java_form: int = -1,
     ) -> None:
         if _java_form == 0:

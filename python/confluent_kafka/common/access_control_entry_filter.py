@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, ClassVar
 from confluent_kafka.common._access_control_entry_data import _AccessControlEntryData
 from confluent_kafka.common.acl_operation import AclOperation
 from confluent_kafka.common.acl_permission_type import AclPermissionType
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.common.access_control_entry import AccessControlEntry
@@ -54,9 +53,9 @@ class AccessControlEntryFilter:
         the host or ``None``, ``operation`` a non-null operation,
         ``permission_type`` a non-null permission type."""
         if operation is None:
-            raise NullPointerError()
+            raise TypeError("operation must not be None")
         if permission_type is None:
-            raise NullPointerError()
+            raise TypeError("permission_type must not be None")
         self._data = _AccessControlEntryData(principal=principal, host=host, operation=operation,
                                              permission_type=permission_type)
 
