@@ -178,6 +178,16 @@ impl RequestManagers {
         }
     }
 
+    /// Appends a dyn-dispatched manager to an already-built container, so a
+    /// test can inject a fake manager into a consumer built by the production
+    /// constructor (`AsyncKafkaConsumer::new`) instead of a hand-built
+    /// network thread. Iterated last in `entries()`, like the managers of
+    /// [`Self::with_dyn_managers`].
+    #[cfg(test)]
+    pub(crate) fn add_dyn_manager_for_test(&mut self, manager: Box<dyn RequestManager>) {
+        self.dyn_managers.push(manager);
+    }
+
     /// Returns the managers in deterministic registration order
     /// (`consumer-threading.md` §10), matching Java's
     /// `RequestManagers.java:91-101` order:
