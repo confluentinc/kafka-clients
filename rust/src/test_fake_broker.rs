@@ -43,10 +43,17 @@
 //! (UNSUPPORTED_SASL_MECHANISM) on later ones
 //! ([`FakeBroker::accept_sasl_handshakes`]).
 //!
+//! [`FakeBroker::start_with_group_coordinator`] additionally acts as the group
+//! coordinator: a joining or heartbeating `ConsumerGroupHeartbeat` gets
+//! member epoch 1 with an empty assignment. A leave heartbeat (member epoch -1) is recorded and left
+//! unanswered, so the client's leave can only end by a timeout.
+//!
 //! Requests are recorded when they arrive, as Java's `MockClient` records them
 //! when the client sends them, even while an earlier request on the same
 //! connection is held: a reader task records each frame and hands it to the
 //! connection's responder, which answers in arrival order, as a broker must.
+//! A request left unanswered is recorded but never handed to the responder, so
+//! it does not hold back the responses to the requests after it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -61,6 +68,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::ApiVersionsRequestData;
+use crate::ConsumerGroupHeartbeatRequestData;
+use crate::ConsumerGroupHeartbeatResponseData;
 use crate::FetchRequestData;
 use crate::FetchResponseData;
 use crate::FindCoordinatorRequestData;
@@ -79,6 +88,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::record::TimestampType;
 use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
 use crate::common::requests::{ApiVersionsResponse, FetchResponse, RequestHeader, RequestUtils, ResponseHeader};
+use crate::consumer_group_heartbeat_response_data::Assignment;
 use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as FetchPartitionData};
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
@@ -137,6 +147,11 @@ struct Shared {
     fetch_requests: AtomicUsize,
     /// The answer for the next `Fetch`, taken by the one that uses it.
     fetch_answer: Mutex<Option<FetchAnswer>>,
+    /// Whether the fake acts as the group coordinator.
+    group_coordinator: bool,
+    /// The member epoch of every `ConsumerGroupHeartbeat` received, in arrival
+    /// order (only recorded when acting as the group coordinator).
+    heartbeat_epochs: Mutex<Vec<i32>>,
     /// `SaslHandshake`s answered so far. The first `sasl_handshakes_accepted`
     /// succeed (PLAIN, and the `SaslAuthenticate` after them succeeds too);
     /// later ones are answered UNSUPPORTED_SASL_MECHANISM.
@@ -180,6 +195,16 @@ impl FakeBroker {
     /// Binds `127.0.0.1:0` and serves every accepted connection. Metadata
     /// responses carry `cluster_id` and a single-partition `topic`.
     pub(crate) async fn start(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, false).await
+    }
+
+    /// Like [`Self::start`], and also acts as the group coordinator (see the
+    /// module docs): joins are answered, leave heartbeats are not.
+    pub(crate) async fn start_with_group_coordinator(cluster_id: &str, topic: &str) -> Self {
+        Self::start_inner(cluster_id, topic, true).await
+    }
+
+    async fn start_inner(cluster_id: &str, topic: &str, group_coordinator: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake broker");
         let addr = listener.local_addr().expect("fake broker address");
         let shared = Arc::new(Shared {
@@ -188,6 +213,8 @@ impl FakeBroker {
             list_offsets_answer: watch::Sender::new(None),
             fetch_requests: AtomicUsize::new(0),
             fetch_answer: Mutex::new(None),
+            group_coordinator,
+            heartbeat_epochs: Mutex::new(Vec::new()),
             sasl_handshakes: AtomicUsize::new(0),
             sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
             connections: Mutex::new(Vec::new()),
@@ -268,6 +295,13 @@ impl FakeBroker {
     /// How many `Fetch` requests have arrived so far.
     pub(crate) fn fetch_requests(&self) -> usize {
         self.shared.fetch_requests.load(Ordering::SeqCst)
+    }
+
+    /// The member epochs of the `ConsumerGroupHeartbeat` requests received so
+    /// far, in arrival order (always empty unless started with
+    /// [`Self::start_with_group_coordinator`]).
+    pub(crate) fn heartbeat_epochs(&self) -> Vec<i32> {
+        self.shared.heartbeat_epochs.lock().expect("fake broker mutex poisoned").clone()
     }
 
     /// Sets the committed offset `OffsetFetch` returns for every partition.
@@ -451,6 +485,28 @@ async fn read_requests(
             let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
             seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
             Pending::Fetch { response_header, version, request }
+        } else if *header.api_key() == ApiKeys::CONSUMER_GROUP_HEARTBEAT && seen.group_coordinator {
+            let request = ConsumerGroupHeartbeatRequestData::read(&mut accessor, version)
+                .expect("fake broker: ConsumerGroupHeartbeat body");
+            seen.heartbeat_epochs
+                .lock()
+                .expect("fake broker mutex poisoned")
+                .push(request.member_epoch);
+            if request.member_epoch < 0 {
+                // A leave heartbeat: recorded above, never answered.
+                continue;
+            }
+            let mut body = ConsumerGroupHeartbeatResponseData::new();
+            body.member_id = Some(request.member_id.clone());
+            body.member_epoch = 1;
+            body.heartbeat_interval_ms = 100;
+            body.assignment = Some(Assignment::new());
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
         } else {
             continue;
         };

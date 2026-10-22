@@ -57,6 +57,7 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
@@ -173,6 +174,21 @@ pub(crate) struct MembershipInner {
     /// callback returns. Mirrors Java chaining `transitionToJoining` onto
     /// the in-flight `staleMemberAssignmentRelease` future.
     pub(crate) stale_rejoin_requested: bool,
+    /// If the member is currently leaving the group after a call to
+    /// `leave_group` or `leave_group_on_close`, this holds a future that
+    /// completes when the ongoing leave operation completes (the response
+    /// to the leave heartbeat is received, the leave heartbeat could not be
+    /// sent, or the member is fenced / fails while leaving). `None` when no
+    /// leave is in progress.
+    ///
+    /// Java: `Optional<CompletableFuture<Void>> leaveGroupInProgress`
+    /// (`AbstractMembershipManager.java:155-160`). Completed only through
+    /// [`AbstractMembershipManager::maybe_complete_leave_in_progress`] (or
+    /// [`MembershipInner::take_leave_in_progress`] where the caller already
+    /// holds the guard), always after the guard is released, because the
+    /// completion runs the chained continuations (the `Unsubscribe` /
+    /// `LeaveGroupOnClose` event handles).
+    pub(crate) leave_group_in_progress: Option<KafkaFutureImpl<()>>,
     /// Whether auto-commit is enabled (immutable for the manager's
     /// lifetime; stored here for state-machine queries).
     pub(crate) auto_commit_enabled: bool,
@@ -254,6 +270,15 @@ impl MembershipInner {
         for listener in &self.state_updates_listeners {
             listener.on_group_assignment_updated(partitions);
         }
+    }
+
+    /// Take the in-progress leave future, if any, leaving `None` behind —
+    /// the first half of Java's `maybeCompleteLeaveInProgress()`
+    /// (`AbstractMembershipManager.java:378-385`) for call sites that hold the
+    /// guard. The caller completes the returned future with
+    /// [`AbstractMembershipManager::complete_leave`] AFTER dropping the guard.
+    pub(crate) fn take_leave_in_progress(&mut self) -> Option<KafkaFutureImpl<()>> {
+        self.leave_group_in_progress.take()
     }
 
     /// Java: `isNotInGroup()`.
@@ -361,6 +386,7 @@ impl AbstractMembershipManager {
             is_poll_timer_expired: false,
             stale_assignment_release_pending: false,
             stale_rejoin_requested: false,
+            leave_group_in_progress: None,
             subscription_updated: false,
             auto_commit_enabled,
             state_updates_listeners: Vec::new(),
@@ -402,19 +428,18 @@ impl AbstractMembershipManager {
     /// Returns `Err(LocalIllegalArgument)` for an unexpected error in the
     /// response body — Java throws `IllegalArgumentException`.
     ///
-    /// Java's `maybeCompleteLeaveInProgress()` (the UNSUBSCRIBED and the
-    /// invalid-epoch branches) has no Rust counterpart: there is no leave
-    /// future here, the leave completes through the state machine
-    /// (`on_heartbeat_request_generated` moves LEAVING to UNSUBSCRIBED). Java
-    /// returns from both branches whatever that call answers (the
-    /// UNSUBSCRIBED member that finds no leave in progress returns at the
-    /// `isNotInGroup()` check right after), so the outcome is the same.
+    /// An UNSUBSCRIBED member receiving a response with a negative epoch (the
+    /// response to its leave heartbeat), and a member receiving an invalid
+    /// negative epoch, complete the in-progress leave via Java's
+    /// `maybeCompleteLeaveInProgress()` (`AbstractMembershipManager.java:309,323`),
+    /// which is what unblocks the `unsubscribe()` / `close()` caller waiting
+    /// on the leave.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatSuccess")]
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         Self::return_if_unexpected_error(response)?;
 
         let response_member_epoch = ConsumerMembershipManager::member_epoch_with_response(response);
-        let guard = match self.inner.lock() {
+        let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
@@ -429,13 +454,18 @@ impl AbstractMembershipManager {
             return Ok(());
         }
 
-        if state == MemberState::Unsubscribed && response_member_epoch < 0 {
+        if state == MemberState::Unsubscribed
+            && response_member_epoch < 0
+            && let Some(leave) = guard.take_leave_in_progress()
+        {
             log::debug!(
                 "Member {} with epoch {} received a successful response to the heartbeat \
                  to leave the group and completed the leave operation. ",
                 guard.member_id,
                 guard.member_epoch
             );
+            drop(guard);
+            Self::complete_leave(Some(leave));
             return Ok(());
         }
         if guard.is_not_in_group() {
@@ -456,10 +486,12 @@ impl AbstractMembershipManager {
                 state,
                 response_member_epoch
             );
+            let leave = guard.take_leave_in_progress();
+            drop(guard);
+            Self::complete_leave(leave);
             return Ok(());
         }
 
-        let mut guard = guard;
         guard.update_member_epoch(response_member_epoch);
 
         if let Some(assignment) = ConsumerMembershipManager::extract_assignment(response) {
@@ -823,6 +855,9 @@ impl AbstractMembershipManager {
                 MemberState::Unsubscribed
             );
             guard.transition_to(MemberState::Unsubscribed)?;
+            let leave = guard.take_leave_in_progress();
+            drop(guard);
+            Self::complete_leave(leave);
         }
         Ok(())
     }
@@ -946,11 +981,15 @@ impl AbstractMembershipManager {
 
     /// Java: `onHeartbeatFailure(boolean retriable)` shared bookkeeping.
     /// On a non-retriable failure, records a failed rebalance (if one was in
-    /// progress). Returns `true` when the member is UNSUBSCRIBED with a
-    /// pending leave; caller (the Consumer subclass) should log a warning.
+    /// progress). The leave group request is sent out once (not retried), so
+    /// an UNSUBSCRIBED member completes the leave in progress once the request
+    /// completes, regardless of the response (Java:
+    /// `if (state == UNSUBSCRIBED && maybeCompleteLeaveInProgress())`).
+    /// Returns `true` when this call completed a leave in progress; the caller
+    /// (the Consumer subclass) then logs the warning Java logs.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatFailure")]
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) -> bool {
-        let guard = match self.inner.lock() {
+        let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
@@ -958,18 +997,61 @@ impl AbstractMembershipManager {
         if !retriable && let Some(metrics) = &guard.metrics_manager {
             metrics.maybe_record_rebalance_failed();
         }
-        guard.state == MemberState::Unsubscribed
+        if guard.state != MemberState::Unsubscribed {
+            return false;
+        }
+        let leave = guard.take_leave_in_progress();
+        drop(guard);
+        Self::complete_leave(leave)
     }
 
-    /// Non-blocking sibling of [`Self::invoke_rebalance_callback`]
-    /// (Phase 41b). Enqueues the §31 `RebalanceListenerCallbackNeeded`
-    /// event and returns the ack [`oneshot::Receiver`] **without awaiting
-    /// it**, so the caller (the bg loop's `reconcile`) can store it and
-    /// return — leaving the loop free to keep spinning while the app side
+    /// Complete the leave in progress (if any). This is expected to be used to
+    /// complete the leave in progress when a member receives the response to
+    /// the leave heartbeat. Returns `true` if a leave was in progress.
+    ///
+    /// Java: `maybeCompleteLeaveInProgress()`
+    /// (`AbstractMembershipManager.java:378-385`). The future is taken under
+    /// the guard and completed after the guard is released, since completing
+    /// it runs the continuations chained on it.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeCompleteLeaveInProgress")]
+    pub(crate) fn maybe_complete_leave_in_progress(&self) -> bool {
+        let leave = {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.take_leave_in_progress()
+        };
+        Self::complete_leave(leave)
+    }
+
+    /// Second half of [`Self::maybe_complete_leave_in_progress`]: complete a
+    /// future already taken with [`MembershipInner::take_leave_in_progress`].
+    /// MUST be called with no membership guard held. Returns `true` if there
+    /// was a future to complete.
+    pub(crate) fn complete_leave(leave: Option<KafkaFutureImpl<()>>) -> bool {
+        match leave {
+            Some(leave) => {
+                leave.complete(());
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Enqueues the §31 `RebalanceListenerCallbackNeeded` event and
+    /// returns the ack [`oneshot::Receiver`] **without awaiting it**
+    /// (Phase 41b), so the caller (the bg loop's `reconcile`, a release
+    /// transition, or a leave) can store it and return — leaving the loop free to keep spinning while the app side
     /// runs the listener. Returns `Ok(None)` when no listener is
-    /// registered (the same short-circuit as the blocking variant — Java's
-    /// `subscriptions.rebalanceListener().isPresent()` guard), in which
+    /// registered (Java's `subscriptions.rebalanceListener().isPresent()`
+    /// guard), in which
     /// case the caller proceeds as if the callback completed successfully.
+    ///
+    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
+    /// behind the listener-presence checks of
+    /// `invokeOnPartitions{Revoked,Lost}Callback`
+    /// (`ConsumerMembershipManager.java:320-341`).
     ///
     /// `MutexGuard`s are never held across an `.await` (this method does
     /// not await at all).
@@ -977,6 +1059,21 @@ impl AbstractMembershipManager {
         &self,
         method: ConsumerRebalanceListenerMethodName,
         partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
+        self.enqueue_rebalance_callback_with_ack_through_application_events(method, partitions, false, current_time_ms)
+    }
+
+    /// [`Self::enqueue_rebalance_callback`] for the callback a leave
+    /// enqueues, with `ack_through_application_events` set on the event
+    /// (see [`BackgroundEvent::PartitionsRemoved`]): the app side returns the
+    /// ack through the application-event queue, so it takes effect in FIFO
+    /// order with the events the listener submitted.
+    pub(crate) fn enqueue_rebalance_callback_with_ack_through_application_events(
+        &self,
+        method: ConsumerRebalanceListenerMethodName,
+        partitions: Vec<TopicPartition>,
+        ack_through_application_events: bool,
         current_time_ms: i64,
     ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
         let listener_present = {
@@ -991,7 +1088,12 @@ impl AbstractMembershipManager {
         }
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
+        let event = BackgroundEvent::PartitionsRemoved {
+            method_name: method,
+            partitions,
+            ack: ack_tx,
+            ack_through_application_events,
+        };
         self.background_event_handler.add(event, current_time_ms)?;
         Ok(Some(ack_rx))
     }
@@ -1028,84 +1130,6 @@ impl AbstractMembershipManager {
              needed has been enqueued successfully to be sent to the app thread."
         );
         Ok(ack_rx)
-    }
-
-    /// Invokes a rebalance listener callback per §31.
-    ///
-    /// Mechanism:
-    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
-    ///    registered on the subscription state. Java's
-    ///    `invokeOnPartitions{Revoked,Lost}Callback` both check
-    ///    `subscriptions.rebalanceListener().isPresent()` and return a
-    ///    completed future without enqueueing anything. Without this
-    ///    guard the bg task would hang forever awaiting an ack that no
-    ///    one will send (Phase 10's app-side drain only invokes the
-    ///    listener when one exists). See `ConsumerMembershipManager.java:320-341`.
-    ///    (The assigned path has no such check since KAFKA-20106: it always
-    ///    enqueues, see [`Self::enqueue_partitions_assigned_event`].)
-    /// 2. Create a fresh `oneshot::channel`.
-    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
-    ///    carrying the sender half.
-    /// 4. **Await** the receiver. The membership state machine does NOT
-    ///    advance until this resolves.
-    ///
-    /// `MutexGuard`s are NEVER held across this `.await`.
-    ///
-    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
-    ///
-    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
-    /// (defined on `ConsumerMembershipManager`, but the contract is
-    /// shared across all subclasses).
-    pub(crate) async fn invoke_rebalance_callback(
-        &self,
-        method: ConsumerRebalanceListenerMethodName,
-        partitions: Vec<TopicPartition>,
-        current_time_ms: i64,
-    ) -> Result<(), Error> {
-        // Step 1: listener-presence short-circuit, matching Java's
-        // `subscriptions.rebalanceListener().isPresent()` guard. Drop
-        // the guard immediately to satisfy §16.
-        let listener_present = {
-            let subs = match self.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            subs.rebalance_listener().is_some()
-        };
-        if !listener_present {
-            return Ok(());
-        }
-
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
-        // Enqueue. If the receiver is gone (consumer shutting down) we
-        // surface the error like Java would on a closed queue.
-        self.background_event_handler.add(event, current_time_ms)?;
-
-        match ack_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                // Non-fatal: Java logs and continues. Java's
-                // AbstractMembershipManager calls
-                // `revocationResult.completeExceptionally(callbackError)`
-                // for revoked / assigned errors — but the rebalance is
-                // still treated as effectively complete (the manager
-                // logs the failure and the broker will kick the member
-                // out if the assignment never gets acked). Our
-                // translation surfaces the error to the caller so they
-                // can choose to log + continue (state machine still
-                // advances).
-                log::warn!("Rebalance listener callback returned error: {} (continuing rebalance)", e);
-                Err(e)
-            },
-            Err(_recv_err) => {
-                // App side dropped the receiver before responding —
-                // treat as fatal listener failure.
-                Err(Error::local_illegal_state(
-                    "Rebalance listener ack receiver dropped before completion",
-                ))
-            },
-        }
     }
 }
 
@@ -1237,159 +1261,5 @@ mod tests {
         partitions.insert(Uuid::random_uuid(), vec![0, 1]);
         let err = LocalAssignment::new(LocalAssignment::NONE_EPOCH, partitions).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalArgument(_)));
-    }
-
-    /// §31 handshake regression: enqueueing a callback then sending
-    /// `Ok(())` on the ack completes the future cleanly.
-    #[tokio::test]
-    async fn invoke_rebalance_callback_ack_ok() {
-        let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
-
-        // Spawn the bg-side invocation.
-        let mgr_for_bg = Arc::new(mgr);
-        let mgr_clone = mgr_for_bg.clone();
-        let bg = tokio::spawn(async move {
-            mgr_clone
-                .invoke_rebalance_callback(
-                    ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                    vec![TopicPartition::new("t".to_string(), 0)],
-                    100,
-                )
-                .await
-        });
-
-        // App side: drain the event and send Ok on the ack.
-        let env = rx.recv().await.expect("event must arrive");
-        match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, .. } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
-                ack.send(Ok(())).unwrap();
-            },
-            _ => panic!("unexpected event"),
-        }
-
-        let result = bg.await.unwrap();
-        assert!(result.is_ok());
-    }
-
-    /// §31 handshake: if the app side drops the receiver, the bg call
-    /// returns an `LocalIllegalState` error.
-    #[tokio::test]
-    async fn invoke_rebalance_callback_ack_dropped() {
-        let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
-
-        let mgr_for_bg = Arc::new(mgr);
-        let mgr_clone = mgr_for_bg.clone();
-        let bg = tokio::spawn(async move {
-            mgr_clone
-                .invoke_rebalance_callback(ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, vec![], 0)
-                .await
-        });
-
-        let env = rx.recv().await.expect("event must arrive");
-        match env.event {
-            BackgroundEvent::PartitionsRemoved { ack, .. } => {
-                // Drop the sender — the bg should see an Err receiver result.
-                drop(ack);
-            },
-            _ => panic!("unexpected event"),
-        }
-
-        let result = bg.await.unwrap();
-        assert!(matches!(result, Err(Error::LocalIllegalState(_))));
-    }
-
-    /// §31 short-circuit (COMMENTS.1.md fix #1): when no rebalance
-    /// listener is registered, `invoke_rebalance_callback` returns
-    /// `Ok(())` immediately without enqueueing — mirrors Java's
-    /// `subscriptions.rebalanceListener().isPresent()` guard.
-    #[tokio::test]
-    async fn invoke_rebalance_callback_no_listener_short_circuits() {
-        // Build a subscription state WITHOUT a registered listener.
-        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
-        let metadata = Arc::new(ConsumerMetadata::with_config(
-            &config,
-            subs.clone(),
-            ClusterResourceListeners::new(),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let beh = Arc::new(BackgroundEventHandler::new(tx));
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
-
-        // Without a listener, the handshake must complete immediately
-        // and emit no event — otherwise the bg task would hang in
-        // Phase 10 when no listener is registered.
-        let result = mgr
-            .invoke_rebalance_callback(
-                ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                vec![TopicPartition::new("t".to_string(), 0)],
-                0,
-            )
-            .await;
-        assert!(result.is_ok());
-        assert!(rx.try_recv().is_err(), "no event should be enqueued when listener is absent");
-    }
-
-    /// §31 handshake: if the app-side reports an error, the bg call
-    /// surfaces it (Java: non-fatal — bubble up to the caller who logs
-    /// and decides).
-    #[tokio::test]
-    async fn invoke_rebalance_callback_app_returns_err() {
-        let (subs, metadata, beh, mut rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
-
-        let mgr_for_bg = Arc::new(mgr);
-        let mgr_clone = mgr_for_bg.clone();
-        let bg = tokio::spawn(async move {
-            mgr_clone
-                .invoke_rebalance_callback(ConsumerRebalanceListenerMethodName::OnPartitionsLost, vec![], 0)
-                .await
-        });
-
-        let env = rx.recv().await.expect("event must arrive");
-        match env.event {
-            BackgroundEvent::PartitionsRemoved { ack, .. } => {
-                ack.send(Err(Error::timeout("listener slow"))).unwrap();
-            },
-            _ => panic!("unexpected event"),
-        }
-
-        let result = bg.await.unwrap();
-        assert!(matches!(result, Err(Error::Timeout(_))));
     }
 }
