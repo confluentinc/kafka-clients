@@ -356,6 +356,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // ──── Phase 1: drain application events ────
         self.process_application_events();
 
+        // ──── Phase 1.5: resume an unsubscribe waiting on its callback ────
+        //
+        // Java chains `clearAssignmentAndLeaveGroup()` on the leave's release
+        // callback with `whenComplete`; it runs on the network thread while
+        // `processApplicationEvents()` handles the callback-completed event,
+        // i.e. before the request managers poll. Phase 1 does the same when it
+        // processes the `ConsumerRebalanceListenerCallbackCompleted` event that
+        // carries the ack. This covers an ack dropped with no completed event
+        // to carry it (see the per-event check in `process_application_events`)
+        // when no application event follows.
+        // Either way the member moves PREPARE_LEAVING -> LEAVING before the
+        // heartbeat manager's poll in this same iteration, which then builds
+        // the leave heartbeat.
+        self.maybe_apply_leave_callback_ack();
+
         // Acquire the network-client-delegate mutex ONCE for the whole
         // iteration. The bg task is the delegate's only locker (verified:
         // the app side signals wakeups via the `WakeupTrigger` token and the
@@ -817,6 +832,27 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let start_ms = self.time.milliseconds();
 
         for env in envelopes.drain(..) {
+            // A leave's callback ack comes back inside a
+            // `ConsumerRebalanceListenerCallbackCompleted` event in this queue,
+            // as Java's `ConsumerRebalanceListenerCallbackCompletedEvent` does,
+            // and processing that event runs the leave's `whenComplete` ->
+            // `clearAssignmentAndLeaveGroup()`. So the leave takes effect after
+            // every event enqueued before the ack — including one the listener
+            // submitted through its `ConsumerHandle` and stopped waiting for,
+            // which can still be queued here — and before every event enqueued
+            // after it (e.g. a `subscribe()` right after an `unsubscribe()`
+            // that timed out during the listener).
+            //
+            // This check only fires for an ack dropped with no completed event
+            // to carry it: the callback event itself was dropped before the app
+            // ran the listener (e.g. the consumer was dropped with it still in
+            // its background-event queue), or processing the completed event
+            // panicked before completing the future (caught by the boundary
+            // below). A caller future dropped mid-listener does NOT get here:
+            // `PartitionsRemovedAckGuard` still enqueues the completed event,
+            // with an interrupt error, behind the listener's ops. The closed
+            // ack is applied before the next event, so the leave cannot hang.
+            self.maybe_apply_leave_callback_ack();
             // Java CNT:256 — record the time this event spent in the queue.
             if let Some(metrics) = &metrics {
                 metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
@@ -853,6 +889,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
+    }
+
+    /// Apply a stored unsubscribe-leave callback ack, if it has arrived
+    /// (`ConsumerMembershipManager::drive_pending_leave_callback`). The app
+    /// returns that ack through the application-event queue, whose processing
+    /// applies it, so here it can only be one dropped with no completed event
+    /// to carry it. One atomic load when no leave callback is pending; no
+    /// allocation.
+    fn maybe_apply_leave_callback_ack(&self) {
+        if let Some(membership) = self.membership.as_ref()
+            && membership.has_pending_leave_callback()
+            && let Err(e) = membership.drive_pending_leave_callback()
+        {
+            log::warn!("Failed to transition to send the leave group heartbeat: {}", e);
+        }
     }
 
     /// The body of Java's per-event `try` block in `processApplicationEvents`:
@@ -1094,8 +1145,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
     /// Java: `run()`. Wraps `run_once` in a loop guarded by `running`
     /// and the wakeup-token shutdown signal, and calls `cleanup` on
-    /// exit. Intended to be spawned via `tokio::spawn` from the Phase
-    /// 11 consumer constructor.
+    /// exit. Production runs it through [`Self::spawn_dedicated`], on the
+    /// `kafka-consumer-io` OS thread's single-thread runtime.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
         use futures_util::FutureExt;
@@ -1108,8 +1159,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
             // { log.error(...) }` — swallow and continue, so a failing
             // iteration neither ends the task nor skips `cleanup()`. Without
-            // this boundary a panic would unwind out of the spawned task, which
-            // Tokio turns into task termination, not Java's swallow-and-continue.
+            // this boundary a panic would unwind out of `block_on` on the
+            // dedicated thread and end that OS thread (and the consumer's bg
+            // loop with it), not Java's swallow-and-continue.
             if let Err(payload) = std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
                 log::error!(
                     "Unexpected error caught in consumer network task: {}",
@@ -1125,6 +1177,34 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             }
         }
         self.cleanup().await;
+    }
+
+    /// Runs [`Self::run`] on a dedicated `std::thread` named
+    /// `kafka-consumer-io` that hosts its own `current_thread` Tokio runtime,
+    /// and returns the receiver that fires once `run` (loop plus `cleanup`)
+    /// has returned, together with the OS thread handle.
+    ///
+    /// The Rust analog of Java starting this `KafkaThread` subclass, whose
+    /// body is `run()`. Production and tests both go through `run`, so the
+    /// per-iteration catch of `ConsumerNetworkThread.run()` applies to the
+    /// production loop too.
+    pub(crate) fn spawn_dedicated(self) -> (tokio::sync::oneshot::Receiver<()>, std::thread::JoinHandle<()>) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build consumer io runtime");
+                rt.block_on(self.run());
+                // Signal the close path that the bg loop + `cleanup()`
+                // have finished. Errors (receiver dropped before close)
+                // are benign — `await_join` treats them as a clean exit.
+                let _ = done_tx.send(());
+            })
+            .expect("spawn consumer io thread");
+        (done_rx, thread_handle)
     }
 }
 
@@ -2242,6 +2322,97 @@ mod tests {
         assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
     }
 
+    /// Request manager that panics on the first `poll` (or on every `poll`
+    /// when `always_panic`) and counts calls, without touching the running
+    /// flag, so the test decides when the loop stops.
+    struct CountingPanickingRequestManager {
+        always_panic: bool,
+        poll_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestManager for CountingPanickingRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 || self.always_panic {
+                panic!("request manager failure");
+            }
+            PollResult::with_time_until_next_poll_ms(10)
+        }
+
+        fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+            10
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// Starts the thread the way the production consumer does
+    /// (`spawn_dedicated`, a `kafka-consumer-io` OS thread), waits for at
+    /// least `min_polls` manager polls, then stops it like `close()` does
+    /// (clear the running flag) and asserts `done` fires, the OS thread exits
+    /// and `cleanup()` ran.
+    async fn assert_dedicated_thread_survives_panics(always_panic: bool, min_polls: usize) {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let manager = CountingPanickingRequestManager {
+            always_panic,
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let running = fixture.thread.running_handle();
+        let (done_rx, thread_handle) = fixture.thread.spawn_dedicated();
+
+        let start = std::time::Instant::now();
+        while poll_calls.load(Ordering::SeqCst) < min_polls
+            && !thread_handle.is_finished()
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let finished_early = thread_handle.is_finished();
+        let polls = poll_calls.load(Ordering::SeqCst);
+        running.store(false, Ordering::Release);
+        let done = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        let joined = tokio::task::spawn_blocking(move || thread_handle.join())
+            .await
+            .expect("join task");
+
+        assert!(
+            !finished_early && polls >= min_polls,
+            "Java: the network thread logs the error and keeps running; Rust: thread finished early={finished_early}, \
+             manager polls={polls}"
+        );
+        assert!(
+            matches!(done, Ok(Ok(()))),
+            "the dedicated thread must signal done after the loop exits, got {done:?}"
+        );
+        assert!(joined.is_ok(), "the dedicated OS thread must exit cleanly");
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
+    }
+
+    /// Audit C1-22. The production consumer runs the loop on the dedicated
+    /// `kafka-consumer-io` thread; Java's `ConsumerNetworkThread.run()`
+    /// catches every `runOnce()` failure, logs "Unexpected error caught in
+    /// consumer network thread" and keeps looping, with `cleanup()` in the
+    /// `finally`. One panicking iteration must not end that thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_survives_a_panicking_iteration() {
+        assert_dedicated_thread_survives_panics(false, 3).await;
+    }
+
+    /// Every iteration panics (e.g. a poisoned lock keeps failing). Java just
+    /// keeps looping; the Rust loop yields after each caught panic, so the
+    /// running-flag check is still reached and stopping the thread still
+    /// runs `cleanup()` and fires `done`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_stops_and_cleans_up_when_every_iteration_panics() {
+        assert_dedicated_thread_survives_panics(true, 3).await;
+    }
+
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when
     /// the wakeup token is cancelled before/during the network poll.
     /// We assert `run_once` returns within a tight window even though
@@ -2286,6 +2457,424 @@ mod tests {
         );
         // Sanity: a second run_once should also not panic.
         thread.run_once().await;
+    }
+
+    /// A thread with a heartbeat manager (coordinator known) and a member in
+    /// the group (epoch 5) owning `t-0` with a listener registered, that has
+    /// just called `leave_group()`: PREPARE_LEAVING, its `onPartitionsRevoked`
+    /// callback enqueued. Returns the thread, the membership manager, the
+    /// subscription state, the application-event sender, the background-event
+    /// receiver (kept alive), the callback event (whose ack the app side
+    /// returns with [`return_leave_callback_ack`]) and the leave future.
+    #[expect(clippy::type_complexity)]
+    fn make_thread_with_member_preparing_to_leave() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+        mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+        crate::consumer::internals::events::BackgroundEvent,
+        crate::common::internals::KafkaFutureImpl<()>,
+    ) {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        let (thread, membership, subs, tx, mut bg_rx) = make_thread_with_member_in_group();
+        let leave = membership.leave_group(0).unwrap();
+        assert_eq!(membership.state(), MemberState::PrepareLeaving);
+        let callback = bg_rx.try_recv().expect("revoked callback enqueued").event;
+        assert!(
+            matches!(
+                callback,
+                BackgroundEvent::PartitionsRemoved { ack_through_application_events: true, .. }
+            ),
+            "a leave's callback returns through the application-event queue, got {callback:?}"
+        );
+        (thread, membership, subs, tx, bg_rx, callback, leave)
+    }
+
+    /// What the app side does once the listener for `callback` (a
+    /// `PartitionsRemoved` event) has returned `result`, through the same
+    /// helper `AsyncKafkaConsumer::process_background_events` uses (DoD §12).
+    fn return_leave_callback_ack(
+        tx: &mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        callback: crate::consumer::internals::events::BackgroundEvent,
+        result: Result<(), Error>,
+    ) {
+        use crate::consumer::internals::events::BackgroundEvent;
+        let BackgroundEvent::PartitionsRemoved { method_name, ack, ack_through_application_events, .. } = callback
+        else {
+            panic!("expected a PartitionsRemoved event, got {callback:?}");
+        };
+        let handler =
+            crate::consumer::internals::events::ApplicationEventHandler::new(tx.clone(), Arc::new(Notify::new()));
+        crate::consumer::internals::async_kafka_consumer::notify_background_task_of_rebalance_callback(
+            &handler,
+            method_name,
+            ack,
+            ack_through_application_events,
+            result,
+            1_000,
+        );
+    }
+
+    /// A thread with a heartbeat manager (coordinator known) and a member in
+    /// the group (epoch 5) owning `t-0` with a listener registered. Returns
+    /// the thread, the membership manager, the subscription state, the
+    /// application-event sender and the background-event receiver (kept
+    /// alive).
+    #[expect(clippy::type_complexity)]
+    fn make_thread_with_member_in_group() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+        mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
+        use crate::consumer::ConsumerRebalanceListener;
+        use crate::consumer::internals::ConsumerHeartbeatRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
+
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _partitions: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        {
+            let mut guard = subs.lock().unwrap();
+            guard
+                .subscribe_with_topics(HashSet::from(["t".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+            guard
+                .assign_from_subscribed(&[crate::common::TopicPartition::new("t", 0)])
+                .unwrap();
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(bg_tx));
+        let membership = Arc::new(ConsumerMembershipManager::new(
+            "g".to_string(),
+            None,
+            None,
+            30_000,
+            None,
+            subs.clone(),
+            None,
+            metadata.clone(),
+            Arc::clone(&beh),
+            false,
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+        ));
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let heartbeat =
+            ConsumerHeartbeatRequestManager::new(0, &config, coordinator, subs.clone(), membership.clone(), beh);
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            Some(heartbeat),
+            Some(membership.clone()),
+            None,
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let thread = ConsumerNetworkThread::new(
+            time as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers,
+            Some(membership.clone()),
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        membership.transition_to_joining().unwrap();
+        membership.abstract_mm.inner.lock().unwrap().update_member_epoch(5);
+        (thread, membership, subs, tx, bg_rx)
+    }
+
+    /// C2-01 (Critic 1 item 1): an `unsubscribe()` leave waiting in
+    /// PREPARE_LEAVING for its `on_partitions_revoked` ack moves to LEAVING
+    /// on the bg loop, in `run_once` before the request managers poll — Java
+    /// runs `clearAssignmentAndLeaveGroup()` from the callback's
+    /// `whenComplete` on the network thread — so the heartbeat manager's poll
+    /// in the same iteration builds the leave heartbeat (LEAVING ->
+    /// UNSUBSCRIBED). The ack arriving on its own changes nothing.
+    #[tokio::test]
+    async fn run_once_applies_leave_callback_ack_before_heartbeat_poll() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, tx, _bg_rx, callback, leave) = make_thread_with_member_preparing_to_leave();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            membership.state(),
+            MemberState::PrepareLeaving,
+            "the ack alone must not move the member: the bg loop applies it"
+        );
+
+        thread.run_once().await;
+        assert_eq!(
+            membership.state(),
+            MemberState::Unsubscribed,
+            "the leave heartbeat must be built in the same run_once that applied the ack"
+        );
+        assert_eq!(membership.member_epoch(), -1);
+        assert!(!membership.has_pending_leave_callback());
+        assert!(!leave.is_done(), "the leave completes only on the leave heartbeat's response");
+    }
+
+    /// Audit finding C1-17: a `LeaveGroupOnClose` whose deadline has already
+    /// passed (`close(Duration::ZERO)`) is still processed — the member
+    /// leaves and the leave heartbeat is built and handed to the network
+    /// client — and the reaper then expires the event in the same
+    /// `run_once`, so the waiting `close()` proceeds after one iteration.
+    /// Java's `runOnce` processes the application events before
+    /// `applicationEventReaper.reap(currentTimeMs)`.
+    #[tokio::test]
+    async fn run_once_processes_then_reaps_an_expired_leave_group_on_close() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, tx, _bg_rx) = make_thread_with_member_in_group();
+        let now_ms = thread.time.milliseconds();
+        let (handle, mut rx, _) = CompletableEvent::make_completable_event::<()>(now_ms);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::LeaveGroupOnClose {
+                handle,
+                membership_operation: GroupMembershipOperation::Default,
+            },
+            enqueued_ms: now_ms,
+        })
+        .expect("send ok");
+
+        thread.run_once().await;
+
+        assert_eq!(
+            membership.state(),
+            MemberState::Unsubscribed,
+            "the expired LeaveGroupOnClose must still be processed and its leave heartbeat built"
+        );
+        assert_eq!(membership.member_epoch(), -1, "the leave heartbeat carries the leave epoch");
+        assert!(
+            thread.network_client_delegate.lock().await.has_any_pending_requests(),
+            "the leave heartbeat must have been handed to the network client"
+        );
+        match rx.try_recv().expect("the reaper must complete the event in the same run_once") {
+            // Java: "{event} was {pastDueMs} ms past its expiration of {deadlineMs}".
+            Err(err @ Error::Timeout(_)) => assert!(
+                err.to_string().ends_with(&format!(" was 0 ms past its expiration of {now_ms}")),
+                "unexpected reaper message: {err}"
+            ),
+            other => panic!("expected the reaper's timeout, got {other:?}"),
+        }
+    }
+
+    /// C2-01 (Critic 1 R2-1): the leave's callback ack is applied in queue
+    /// order with the application events. Java's
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` is enqueued before
+    /// anything the app submits afterwards, so `clearAssignmentAndLeaveGroup()`
+    /// runs before a `subscribe()` that follows an `unsubscribe()` which
+    /// returned without the ack applied (its deadline passed during the
+    /// listener). The new subscription must survive the old leave.
+    #[tokio::test]
+    async fn leave_callback_ack_is_applied_before_later_application_events() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+        let (handle, sub_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::TopicSubscriptionChange {
+                handle,
+                topics: HashSet::from(["t2".to_string()]),
+                listener: None,
+            },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+
+        thread.run_once().await;
+        assert!(matches!(sub_rx.await, Ok(Ok(()))), "subscribe() reported success");
+        let subscription = subs.lock().unwrap().subscription();
+        assert_eq!(
+            subscription,
+            HashSet::from(["t2".to_string()]),
+            "the late leave step must run before the subscribe, not wipe it"
+        );
+        assert!(!membership.has_pending_leave_callback(), "the old leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the old leave reached LEAVING and its leave heartbeat was built"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// PR #263 review (Copilot): the leave's callback ack must not overtake an
+    /// application event the listener submitted before it returned, even one
+    /// whose wait the listener abandoned (a `ConsumerHandle` op under
+    /// `tokio::time::timeout`, or a dropped future) and that is therefore
+    /// still queued. Java's app thread enqueues
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` after the listener
+    /// returns (`AsyncKafkaConsumer.invokeRebalanceCallbackAndNotifyBackgroundThread`),
+    /// on the same queue, so `ConsumerNetworkThread.processApplicationEvents`
+    /// first processes the listener's `SeekUnvalidatedEvent` — the partition
+    /// is still assigned, so the seek succeeds — and only then the
+    /// completed event, whose `whenComplete` runs
+    /// `clearAssignmentAndLeaveGroup()`. Applying the ack first would clear
+    /// the assignment under the seek, which then fails with "No current
+    /// assignment for partition t-0".
+    #[tokio::test]
+    async fn leave_callback_ack_is_applied_after_an_abandoned_listener_operation() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        let t0 = crate::common::TopicPartition::new("t", 0);
+
+        // The listener submits a seek through its handle and stops waiting
+        // for it: the event stays queued, the listener returns, and the app
+        // returns the callback's ack.
+        let (handle, mut seek_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::SeekUnvalidated { handle, partition: t0.clone(), offset: 42, offset_epoch: None },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+
+        thread.run_once().await;
+        match seek_rx.try_recv() {
+            Ok(Ok(())) => {},
+            other => panic!(
+                "the seek the listener queued must run before the leave clears the assignment (Java FIFO), got {other:?}"
+            ),
+        }
+        let subs = subs.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty(), "the leave then cleared the assignment");
+        assert!(subs.subscription().is_empty(), "and unsubscribed");
+        drop(subs);
+        assert!(!membership.has_pending_leave_callback(), "the leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// The leave still proceeds when its ack is dropped with no completed
+    /// event to carry it (here the callback event itself is dropped before the
+    /// app ran the listener): the bg loop applies the closed ack before the
+    /// next application event, as it did before the ack moved to the
+    /// application-event queue. Java has no equivalent (its callback event
+    /// cannot be lost).
+    #[tokio::test]
+    async fn leave_callback_ack_dropped_by_the_app_is_applied_before_later_application_events() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        drop(callback);
+        let (handle, sub_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::TopicSubscriptionChange {
+                handle,
+                topics: HashSet::from(["t2".to_string()]),
+                listener: None,
+            },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+
+        thread.run_once().await;
+        assert!(matches!(sub_rx.await, Ok(Ok(()))), "subscribe() reported success");
+        assert_eq!(
+            subs.lock().unwrap().subscription(),
+            HashSet::from(["t2".to_string()]),
+            "the leave step ran before the subscribe"
+        );
+        assert!(!membership.has_pending_leave_callback());
+        assert_eq!(membership.member_epoch(), -1, "the leave heartbeat was built");
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// Critic pr2-c2 finding 2: Phase 1.5 of `run_once` applies a leave ack
+    /// dropped with no completed event to carry it when no application event
+    /// follows, before the heartbeat poll, so the leave heartbeat is built in
+    /// that same iteration rather than waiting for an application event that
+    /// may never come.
+    #[tokio::test]
+    async fn run_once_applies_a_dropped_leave_callback_ack_with_no_application_event() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, _tx, _bg_rx, callback, _leave) =
+            make_thread_with_member_preparing_to_leave();
+        drop(callback);
+
+        thread.run_once().await;
+        assert!(!membership.has_pending_leave_callback(), "the leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// Critic pr2-c2 finding 1, bg side: a leave ack completed with an error —
+    /// the interrupt error the app sends when the caller's future was dropped
+    /// mid-listener — still keeps its FIFO position behind the listener's
+    /// queued op, and still clears the assignment and leaves, as Java's
+    /// `whenComplete` in `AbstractMembershipManager.leaveGroup(boolean)` runs
+    /// `clearAssignmentAndLeaveGroup()` whether the callback failed or not.
+    #[tokio::test]
+    async fn error_completed_leave_callback_ack_is_applied_after_the_listener_operation() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        let t0 = crate::common::TopicPartition::new("t", 0);
+        let (handle, mut seek_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::SeekUnvalidated { handle, partition: t0, offset: 42, offset_epoch: None },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+        return_leave_callback_ack(
+            &tx,
+            callback,
+            Err(Error::Interrupt(crate::common::errors::InterruptError::new("interrupted"))),
+        );
+
+        thread.run_once().await;
+        match seek_rx.try_recv() {
+            Ok(Ok(())) => {},
+            other => panic!("the listener's seek must run before the leave (Java FIFO), got {other:?}"),
+        }
+        assert!(
+            subs.lock().unwrap().assigned_partitions().is_empty(),
+            "the leave cleared the assignment"
+        );
+        assert!(!membership.has_pending_leave_callback());
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
     }
 
     /// Post-poll `maybeFailOnMetadataError(uncompletedEvents)` arm
