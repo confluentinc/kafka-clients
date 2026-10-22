@@ -944,15 +944,24 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // ──── 1. pollOnClose round ────
         //
         // Java's `cleanup` iterates `requestManagers.entries()` and calls
-        // `pollOnClose` on each. The Rust `entries()` skips coordinator
-        // and commit (Arc-shared); the bg-task drives them explicitly:
+        // `pollOnClose` on each, in the order `coordinator → commit →
+        // heartbeat → membership → offsets → topic metadata → fetch`
+        // (`RequestManagers` constructor). The Rust `entries()` skips
+        // coordinator, commit and fetch; the bg-task drives them explicitly,
+        // at their place in that order:
         //   * coordinator has no close-side work (Java's
         //     `CoordinatorRequestManager.pollOnClose` returns EMPTY).
         //   * commit drains pending offset-commit requests via
-        //     `drain_pending_offset_commit_requests()` — mirrors Java
-        //     `CommitRequestManager.pollOnClose` which calls
-        //     `drainPendingOffsetCommitRequests()` (Java
-        //     `CommitRequestManager.java:215`).
+        //     `drain_pending_offset_commit_requests()`. Java 4.4's
+        //     `CommitRequestManager` inherits the EMPTY `pollOnClose`; its
+        //     close-time drain is `poll()` while `closing`
+        //     (`drainPendingOffsetCommitRequests`), which runs in `runOnce`
+        //     before `cleanup`, so a pending `OffsetCommit` is always queued
+        //     ahead of everything `runAtClose` builds. This sweep goes first
+        //     for the same reason: the commit precedes the leave-group
+        //     heartbeat and the fetch-session close requests, also when the
+        //     coordinator leads a fetched partition.
+        //   * fetch builds the fetch-session close requests last.
         let current_time_ms = self.time.milliseconds();
         let commit_on_close = {
             let rm_guard = match self.request_managers.lock() {
@@ -970,6 +979,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 .network_client_delegate
                 .try_lock()
                 .expect("delegate not contended on bg task");
+            // Commit's close-side drain (Java `CommitRequestManager.poll` while
+            // `closing` → `drainPendingOffsetCommitRequests`), ahead of the
+            // `entries()` walk as the commit manager is in Java's.
+            if let Some(commit_arc) = commit_on_close.as_ref() {
+                let result = commit_arc.drain_pending_offset_commit_requests();
+                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+            }
             for rm in rm_guard.entries() {
                 let result = rm.poll_on_close(current_time_ms);
                 let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
@@ -979,12 +995,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // delegate held here (`entries()` skips the fetch slot).
             if let Some(fetch) = rm_guard.fetch.as_mut() {
                 let result = fetch.poll_on_close(&*delegate_guard, current_time_ms);
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
-            }
-            // Commit's close-side drain (Java
-            // `CommitRequestManager.pollOnClose` → `drainPendingOffsetCommitRequests`).
-            if let Some(commit_arc) = commit_on_close.as_ref() {
-                let result = commit_arc.drain_pending_offset_commit_requests();
                 let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
             }
         }
@@ -3453,6 +3463,137 @@ mod tests {
         assert!(
             request.data().topics().is_empty(),
             "the close request carries no partition data"
+        );
+    }
+
+    /// Close-time request order, with the group coordinator also leading the
+    /// fetched partition (both on node 0). In Java an `OffsetCommit` still
+    /// pending at close is queued ahead of every request `runAtClose` builds:
+    /// `CommitRequestManager.poll` drains it while `closing`
+    /// (`drainPendingOffsetCommitRequests`), and `runAtClose` walks
+    /// `requestManagers.entries()`, where the commit manager precedes the
+    /// fetch manager (`RequestManagers` constructor,
+    /// `ConsumerNetworkThread.runAtClose`). Rust's `cleanup` sweeps the commit
+    /// manager's unsent commits itself, so that sweep must come before the
+    /// fetch manager's `pollOnClose` and the `OffsetCommit` must reach node 0
+    /// before the fetch-session close request.
+    #[tokio::test]
+    async fn cleanup_queues_the_offset_commit_before_the_fetch_session_close() {
+        use std::collections::HashMap;
+
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{ConcreteResponse, FetchResponse};
+        use crate::consumer::OffsetAndMetadata;
+        use crate::consumer::internals::CommitRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
+        use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, leader, topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        // The coordinator is node 0, the leader of `test-0`.
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g".to_string()));
+        coordinator.set_coordinator_for_test(leader.clone());
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g".to_string(),
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+            0,
+        ));
+        commit.set_coordinator(coordinator.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(coordinator),
+            None,
+            Some(commit.clone()),
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let session_id = 123;
+        let mut partition = RespPartitionData::new();
+        partition.set_partition_index(tp.partition());
+        partition.set_error_code(crate::common::protocol::Errors::None.code());
+        partition.set_high_watermark(100);
+        partition.set_last_stable_offset(100);
+        partition.set_log_start_offset(0);
+        partition.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+        let mut topic = FetchableTopicResponse::new();
+        topic.set_topic(tp.topic().to_string());
+        topic.set_topic_id(topic_id);
+        topic.set_partitions(vec![partition]);
+        let mut data = crate::FetchResponseData::new();
+        data.set_error_code(crate::common::protocol::Errors::None.code());
+        data.set_throttle_time_ms(0);
+        data.set_session_id(session_id);
+        data.set_responses(vec![topic]);
+        client.prepare_response(ConcreteResponse::Fetch(FetchResponse::new(data)));
+        let (mut thread, delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // A normal fetch establishes a session with node 0, so closing has a
+        // fetch session to close there.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        let session_established = || {
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .session_handler(leader.id())
+                .is_some_and(|handler| handler.session_id() == session_id)
+        };
+        for _ in 0..50 {
+            thread.run_once().await;
+            if session_established() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(session_established(), "the fetch response establishes a session with node 0");
+        assert!(!delegate.lock().await.has_any_pending_requests());
+        delegate.lock().await.client_for_test_mut().requests_mut().clear();
+
+        // An offset commit is still unsent when the consumer closes.
+        let mut offsets: HashMap<_, OffsetAndMetadata> = HashMap::new();
+        offsets.insert(tp.clone(), OffsetAndMetadata::new(42).expect("offset is non-negative"));
+        let _commit_rx = commit.commit_sync(offsets, i64::MAX, time.milliseconds());
+
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        let mut guard = delegate.lock().await;
+        let sent: Vec<(ApiKeys, String)> = guard
+            .client_for_test_mut()
+            .requests()
+            .iter()
+            .map(|r| (*r.api_key(), r.destination().to_string()))
+            .collect();
+        assert_eq!(
+            vec![
+                (ApiKeys::OFFSET_COMMIT, leader.id_string().to_string()),
+                (ApiKeys::FETCH, leader.id_string().to_string()),
+            ],
+            sent,
+            "Java queues the pending OffsetCommit ahead of the fetch-session close request \
+             (the commit manager precedes the fetch manager in RequestManagers.entries())"
         );
     }
 
