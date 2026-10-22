@@ -1176,7 +1176,18 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 tokio::task::yield_now().await;
             }
         }
-        self.cleanup().await;
+        // Java 4.4 CNT:143-171: the `finally { cleanup(); }` sits outside the
+        // `catch (Throwable)`, so a failure in `cleanup()` leaves `run()` and
+        // reaches `KafkaThread`'s uncaught-exception handler, which logs it at
+        // ERROR (`KafkaThread.java:51`); the thread then ends normally and
+        // `closeInternal`'s `join()` (CNT:379-390) returns, so `close()` does
+        // not fail. Catch the panic here for the same outcome: log it, return
+        // normally, and let `spawn_dedicated` signal `done`. Without the catch
+        // the panic unwinds out of `block_on`, skips `done`, and only reaches
+        // stderr through the default panic hook.
+        if let Err(payload) = std::panic::AssertUnwindSafe(self.cleanup()).catch_unwind().await {
+            log::error!("Uncaught error in consumer network task: {}", panic_payload_message(&*payload));
+        }
     }
 
     /// Runs [`Self::run`] on a dedicated `std::thread` named
@@ -1335,6 +1346,9 @@ mod tests {
         /// to prove the `run_once` `select!` preempts a blocked poll.
         poll_block: Arc<AtomicBool>,
         poll_release: Arc<Notify>,
+        /// When `true`, `close()` panics — a failure in the last step of
+        /// `cleanup()`, after the pollOnClose round.
+        close_panics: Arc<AtomicBool>,
     }
 
     impl CountingClient {
@@ -1346,6 +1360,7 @@ mod tests {
                 has_in_flight_script: Arc::new(Mutex::new(VecDeque::new())),
                 poll_block: Arc::new(AtomicBool::new(false)),
                 poll_release: Arc::new(Notify::new()),
+                close_panics: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -1360,6 +1375,9 @@ mod tests {
         }
         fn poll_block(&self) -> Arc<AtomicBool> {
             self.poll_block.clone()
+        }
+        fn close_panics(&self) -> Arc<AtomicBool> {
+            self.close_panics.clone()
         }
     }
 
@@ -1476,6 +1494,9 @@ mod tests {
             self.inner.active()
         }
         async fn close(&mut self) {
+            if self.close_panics.load(Ordering::SeqCst) {
+                panic!("client close failure");
+            }
             self.inner.close().await
         }
     }
@@ -2411,6 +2432,50 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedicated_thread_stops_and_cleans_up_when_every_iteration_panics() {
         assert_dedicated_thread_survives_panics(true, 3).await;
+    }
+
+    /// Java 4.4 `ConsumerNetworkThread.run()` (CNT:143-171) runs `cleanup()`
+    /// in a `finally` outside its `catch (Throwable)`; a failure there is
+    /// logged at ERROR by `KafkaThread`'s uncaught-exception handler and the
+    /// thread still ends, so `closeInternal`'s `join()` returns normally.
+    /// A panic in `cleanup()` (here: the client's `close()`, the last step)
+    /// must therefore still let the dedicated thread signal `done` and exit
+    /// cleanly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_signals_done_when_cleanup_panics() {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let manager = CountingPanickingRequestManager {
+            always_panic: false,
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let close_panics = fixture
+            .delegate
+            .try_lock()
+            .expect("delegate not contended")
+            .client_for_test_ref()
+            .close_panics();
+        close_panics.store(true, Ordering::SeqCst);
+        // Stopped before it starts: `run()` goes straight to `cleanup()`.
+        fixture.thread.running_handle().store(false, Ordering::Release);
+        let (done_rx, thread_handle) = fixture.thread.spawn_dedicated();
+
+        let done = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        let joined = tokio::task::spawn_blocking(move || thread_handle.join())
+            .await
+            .expect("join task");
+
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must have run");
+        assert!(
+            matches!(done, Ok(Ok(()))),
+            "the dedicated thread must signal done after cleanup() panics, got {done:?}"
+        );
+        assert!(
+            joined.is_ok(),
+            "the dedicated OS thread must exit cleanly after cleanup() panics"
+        );
     }
 
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when
