@@ -834,6 +834,10 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
 /// :262): subscribe to a topic that does not exist yet, create it 2 s later,
 /// consume 1000 records; then stop every broker, restart them all, and consume
 /// 1000 more on the same consumer.
+///
+/// Deviation: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
+/// comment at the config). Everything else, including `metadata.max.age.ms=100`
+/// and the exact-count assertion on the second poller, is Java's.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_subscribe_when_topic_unavailable() {
     let mut ctx = TestContext::new(bounce_cluster_config()).await;
@@ -846,8 +850,11 @@ async fn test_async_subscribe_when_topic_unavailable() {
     // broker restart below: nothing polls while the brokers are down. Restarting
     // the Docker brokers one by one takes far longer (about 45 s on CI). With 6000
     // the member goes stale when the brokers return, loses its partitions and
-    // rejoins. If phase 1 ended before its first auto-commit, it then resets to
-    // offset 0 and receives 2000 records instead of 1000. 120000 covers the
+    // rejoins, dropping its assignment and positions without a commit (Java's
+    // `AbstractMembershipManager.transitionToStale`; this client auto-commits
+    // only from the application's `poll()`/`assign()`, as Java does). If phase 1
+    // ended before its first auto-commit, it then resets to offset 0 and
+    // receives 2000 records instead of 1000. 120000 covers the
     // restart, so the consumer survives the outage as Java's does.
     let mut consumer = create_consumer(
         &ctx,
