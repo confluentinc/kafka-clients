@@ -17,15 +17,17 @@
 Java's two constructors are one keyword-only constructor: the shorter passes
 ``new Node[0]`` as ``offlineReplicas``, so ``offline_replicas=()``. Every
 combination is one of them, so there is no ``java_forms`` check;
-``offline_replicas`` defaults to ``UNSET`` (CLAUDE.md, Python Binding
-Conventions, Signatures: one constructor requires it and the other defaults
-it), and the constructor fills it. Java's ``Node[]`` is ``tuple[Node, ...]``
+``offline_replicas`` defaults to ``MISSING`` (CLAUDE.md, Python Binding
+Conventions, Signatures), and the constructor fills it. Java's ``Node[]`` is ``tuple[Node, ...]``
 (Types).
 """
 
 from __future__ import annotations
 
-from confluent_kafka._args import UNSET
+from collections.abc import Iterable
+from typing import cast, overload
+
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 
 from .node import Node
@@ -42,17 +44,28 @@ class PartitionInfo:
     __slots__ = ("_topic", "_partition", "_leader", "_replicas",
                  "_in_sync_replicas", "_offline_replicas")
 
+    @overload
+    def __init__(self, *, topic: str, partition: int, leader: Node | None,
+                 replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...]) -> None: ...
+    @overload
     def __init__(self, *, topic: str, partition: int, leader: Node | None,
                  replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...],
-                 offline_replicas: tuple[Node, ...] = UNSET) -> None:
-        if offline_replicas is UNSET:
+                 offline_replicas: tuple[Node, ...]) -> None: ...
+    def __init__(self, *, topic: str, partition: int, leader: Node | None,
+                 replicas: tuple[Node, ...], in_sync_replicas: tuple[Node, ...],
+                 offline_replicas: tuple[Node, ...] = MISSING) -> None:
+        if offline_replicas is MISSING:
             offline_replicas = ()  # the five-argument constructor's new Node[0]
         self._topic = topic
         self._partition = partition
         self._leader = leader
-        self._replicas = tuple(replicas)
-        self._in_sync_replicas = tuple(in_sync_replicas)
-        self._offline_replicas = tuple(offline_replicas)
+        # Java stores the arrays as given, a null one included (its toString
+        # formats a null array as "[]"); the stubs keep them non-nullable.
+        self._replicas: tuple[Node, ...] = cast("tuple[Node, ...]", _copied(replicas))
+        self._in_sync_replicas: tuple[Node, ...] = cast("tuple[Node, ...]",
+                                                        _copied(in_sync_replicas))
+        self._offline_replicas: tuple[Node, ...] = cast("tuple[Node, ...]",
+                                                        _copied(offline_replicas))
 
     def topic(self) -> str:
         """The topic name."""
@@ -106,6 +119,11 @@ class PartitionInfo:
                 f"leader = {leader}, replicas = {_format_node_ids(self._replicas)}, "
                 f"isr = {_format_node_ids(self._in_sync_replicas)}, "
                 f"offlineReplicas = {_format_node_ids(self._offline_replicas)})")
+
+
+def _copied(nodes: Iterable[Node] | None) -> tuple[Node, ...] | None:
+    """Java's ``Node[]`` as given: a copy, or ``None`` for Java's null."""
+    return None if nodes is None else tuple(nodes)
 
 
 def _format_node_ids(nodes: tuple[Node, ...] | None) -> str:

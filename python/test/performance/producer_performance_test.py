@@ -204,17 +204,17 @@ class CompatibleProducer:
         def delivery_report(err, msg):
             # Fires on the single poll thread at the broker ack. Stamp latency
             # here via callback — mirroring the Rust binding's
-            # callback(metadata, exception) — so both backends record at the
+            # callback(metadata=..., exception=...) — so both backends record at the
             # delivery callback, not in a recorder that reads the clock later.
             if err is not None:
                 exc = Exception(err)
                 fut.set_exception(exc)
                 if callback is not None:
-                    callback(None, exc)
+                    callback(metadata=None, exception=exc)
             else:
                 fut.set_result(msg)
                 if callback is not None:
-                    callback(msg, None)
+                    callback(metadata=msg, exception=None)
 
         self._send_seq += 1
         sample = self._debug_timing and self._send_seq % 512 == 0
@@ -750,8 +750,8 @@ def main(v2=False):
                     # callback (stamped at the broker ack), not in a recorder.
                     producer.send(
                         record=next_message,
-                        callback=(lambda md, exc, st=start_time:
-                                  record_delivery(md, exc, st)))
+                        callback=(lambda *, metadata, exception, st=start_time, **_:
+                                      record_delivery(metadata, exception, st)))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:
@@ -956,8 +956,8 @@ async def async_main():
                         # future completes, and the future itself is not kept.
                         await producer.send(
                             record=next_message,
-                            callback=lambda md, exc, st=start_time: record_completion_async(
-                                md, exc, st))
+                            callback=lambda *, metadata, exception, st=start_time, **_:
+                                         record_completion_async(metadata, exception, st))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:

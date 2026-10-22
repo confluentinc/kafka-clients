@@ -61,19 +61,23 @@ def _double_to_string(d: float) -> str:
 
 
 def java_str(value: object) -> str:
-    """``String.valueOf(value)``: the text Java's string concatenation gives.
+    """``String.valueOf(value)``: the text Java's string concatenation gives, with
+    Python's spelling of ``None``, ``True`` and ``False`` (CLAUDE.md, Python Binding
+    Conventions, Idiom translations: ``toString()`` -> ``__str__``).
 
-    ``None`` is ``null``, a ``bool`` is ``true`` / ``false``, a float follows
+    ``None`` is ``None``, a ``bool`` is ``True`` / ``False``, a float follows
     ``Double.toString``, a collection is ``[a, b]`` and a mapping ``{k=v}`` with
     their elements converted the same way; everything else is ``str(value)``,
-    which for the package's own types is Java's ``toString()``.
+    which for the package's own types is Java's ``toString()``. The strings the
+    core parses keep Java's ``null`` / ``true`` / ``false``
+    (``_config.convert_to_string``).
     """
     if value is None:
-        return "null"
+        return "None"
     if value is True:
-        return "true"
+        return "True"
     if value is False:
-        return "false"
+        return "False"
     if isinstance(value, str):
         return value
     if isinstance(value, float):

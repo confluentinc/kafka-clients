@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka.common.errors.api_error import ApiError
 
 if TYPE_CHECKING:
@@ -54,9 +54,9 @@ class RecordTooLargeError(ApiError):
     def __init__(
         self,
         *,
-        message: str | None = UNSET,
-        cause: BaseException | None = None,
-        record_too_large_partitions: Mapping[TopicPartition, int] | None = UNSET,
+        message: str | None = MISSING,
+        cause: BaseException | None = MISSING,
+        record_too_large_partitions: Mapping[TopicPartition, int] | None = MISSING,
         _java_form: int = -1,
     ) -> None:
         if _java_form == 0:

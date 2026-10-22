@@ -33,11 +33,19 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
              kind: type[KindT]) -> ListConsumerGroupOffsetsResult[KindT]: ...
     @overload
     def partitions_to_offset_and_metadata(
-        self: ListConsumerGroupOffsetsResult[Sync], *, group_id: str | None = None
+        self: ListConsumerGroupOffsetsResult[Sync]
     ) -> KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
     @overload
     def partitions_to_offset_and_metadata(
-        self: ListConsumerGroupOffsetsResult[Async], *, group_id: str | None = None
+        self: ListConsumerGroupOffsetsResult[Sync], *, group_id: str
+    ) -> KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
+    @overload
+    def partitions_to_offset_and_metadata(
+        self: ListConsumerGroupOffsetsResult[Async]
+    ) -> AsyncKafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
+    @overload
+    def partitions_to_offset_and_metadata(
+        self: ListConsumerGroupOffsetsResult[Async], *, group_id: str
     ) -> AsyncKafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
     @overload
     def all(self: ListConsumerGroupOffsetsResult[Sync]

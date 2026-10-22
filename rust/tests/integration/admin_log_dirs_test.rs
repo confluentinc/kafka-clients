@@ -77,6 +77,10 @@ use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
+/// The `timeoutMs` a call naming an unregistered broker id waits before that
+/// broker's future fails. Short, since the failure *is* the timeout.
+const UNKNOWN_BROKER_TIMEOUT_MS: i32 = 3_000;
+
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks so
 /// the partition has a non-zero on-disk size.
 ///
@@ -340,6 +344,83 @@ async fn alter_replica_log_dirs_cross_dir_move<F: AdminBackendFactory>(ctx: &mut
     ctx.cleanup().await;
 }
 
+/// `describeLogDirs` for a live broker and an unregistered broker id in one
+/// call, with an explicit timeout, and `describeReplicaLogDirs` for a replica
+/// of a topic that does not exist.
+///
+/// The second scenario for `describe_log_dirs` (and a third for
+/// `describe_replica_log_dirs`): the per-broker fan-out is one call per broker
+/// (`KafkaAdminClient.describeLogDirs` builds a `ConstantNodeIdProvider` per id),
+/// so an id the cluster does not know can never be reached and its future alone
+/// fails when the timeout expires, while the live broker's answers. That is the
+/// per-broker error arm the module docs call unreachable on one healthy broker:
+/// it is reachable through an id that names no broker.
+///
+/// A replica the broker does not host is not an error in Java:
+/// `describeReplicaLogDirs` seeds every requested replica with an empty
+/// `ReplicaLogDirInfo` (no current or future dir, both lags -1) and only
+/// overwrites the ones the broker reports.
+async fn describe_log_dirs_unknown_broker_and_replica<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let broker_id = first_broker_id(&admin).await;
+    let unknown_broker = broker_id + 1000;
+    let described = admin
+        .describe_log_dirs(
+            &[broker_id, unknown_broker],
+            DescribeLogDirsOptions::new().set_timeout_ms(Some(UNKNOWN_BROKER_TIMEOUT_MS)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe log dirs: {e}"));
+    assert_eq!(
+        described.len(),
+        2,
+        "{backend} backend: one entry per requested broker, got {:?}",
+        described.keys().collect::<Vec<_>>()
+    );
+    let dirs = described[&broker_id]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: the live broker's log dirs: {e}"));
+    assert!(
+        !dirs.is_empty(),
+        "{backend} backend: the live broker reports at least one log directory"
+    );
+    // KIP-1066's `isCordoned()`: `IsCordoned` arrived with DescribeLogDirs v5
+    // in Kafka 4.3.0 (KAFKA-19774), so the default 4.2.0 broker cannot report a
+    // cordoned dir and every one must cross as false. The `true` arm is pinned
+    // by the Python translation's unit test.
+    for (path, description) in dirs {
+        assert!(!description.is_cordoned(), "{backend} backend: log dir {path} is not cordoned");
+    }
+    let err = described[&unknown_broker]
+        .as_ref()
+        .expect_err(&format!("{backend} backend: broker {unknown_broker} does not exist"));
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{backend} backend: an unreachable broker id times out, got {err:?}"
+    );
+
+    let missing = TopicPartitionReplica::new(ctx.topic("admin_replica_missing"), 0, broker_id);
+    let info = replica_info(&admin, &missing).await;
+    assert_eq!(
+        info,
+        ReplicaLogDirInfoView {
+            current_replica_log_dir: None,
+            current_replica_offset_lag: -1,
+            future_replica_log_dir: None,
+            future_replica_offset_lag: -1,
+        },
+        "{backend} backend: a replica the broker does not host is Java's empty ReplicaLogDirInfo"
+    );
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
 /// A dedicated single broker with two log directories, so an actual
 /// cross-directory replica move is possible.
 fn two_log_dir_cluster() -> ClusterConfig {
@@ -365,4 +446,8 @@ multilanguage_admin_test!(
     test_alter_replica_log_dirs_cross_dir_move,
     alter_replica_log_dirs_cross_dir_move,
     two_log_dir_cluster()
+);
+multilanguage_admin_test!(
+    test_describe_log_dirs_unknown_broker_and_replica,
+    describe_log_dirs_unknown_broker_and_replica
 );

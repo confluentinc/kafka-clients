@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
+from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.consumer.offset_out_of_range_error import OffsetOutOfRangeError
 
@@ -53,11 +54,11 @@ class LogTruncationError(OffsetOutOfRangeError):
     def __init__(
         self,
         *,
-        message: str | None = None,
+        message: str | None = MISSING,
         fetch_offsets: Mapping[TopicPartition, int],
         divergent_offsets: Mapping[TopicPartition, OffsetAndMetadata],
     ) -> None:
-        if message is not None:
+        if message is not MISSING:
             _throwable.init(self, message, None)
             self._offset_out_of_range_partitions = _throwable.copy_dict(fetch_offsets)
             self._divergent_offsets = _throwable.copy_dict(divergent_offsets)

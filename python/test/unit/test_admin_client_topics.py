@@ -375,9 +375,11 @@ def test_election_reassignment_and_offset_args() -> None:
     assert _conversions.list_partition_reassignments_args(None) == (None,)
     assert _conversions.list_partition_reassignments_args([tp1]) == ([("u", 3)],)
     args = _conversions.list_offsets_args(
-        {TP: OffsetSpec.for_timestamp(timestamp=-2), tp1: OffsetSpec.earliest()},
-        ListOffsetsOptions(isolation_level=IsolationLevel.READ_COMMITTED))
-    assert args == ([("t", 0, True, -2), ("u", 3, False, -2)], 1)
+        {TP: OffsetSpec.for_timestamp(timestamp=-2), tp1: OffsetSpec.earliest()})
+    assert args == ([("t", 0, True, -2), ("u", 3, False, -2)],)
+    # The caller adds the isolation level once it has read the options.
+    assert ListOffsetsOptions(isolation_level=IsolationLevel.READ_COMMITTED
+                              ).isolation_level().id() == 1
 
 
 def test_offset_spec_values() -> None:

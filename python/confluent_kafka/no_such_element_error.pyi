@@ -14,11 +14,14 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.NoSuchElementError).
 
-from typing import Any
+from typing import Any, overload
 
 __all__ = ["NoSuchElementError"]
 
 class NoSuchElementError(RuntimeError):
-    def __init__(self, *, message: str | None = None) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, message: str | None) -> None: ...
     def __str__(self) -> str: ...
     def __reduce__(self) -> str | tuple[Any, ...]: ...

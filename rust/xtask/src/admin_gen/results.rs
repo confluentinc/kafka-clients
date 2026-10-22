@@ -920,6 +920,43 @@ fn check_holder(raw: &str, outer: &JClass, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A Java message with Python's spelling of `null` (CLAUDE.md, Python Binding
+/// Conventions, Types): the standalone word `null` reads `None`.
+fn none_spelling(message: &str) -> String {
+    let bytes = message.as_bytes();
+    let mut out = String::with_capacity(message.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let word_start = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        let word_end = i + 4 >= bytes.len() || !(bytes[i + 4].is_ascii_alphanumeric() || bytes[i + 4] == b'_');
+        if word_start && word_end && message[i..].starts_with("null") {
+            out.push_str("None");
+            i += 4;
+        } else {
+            out.push(message[i..].chars().next().unwrap());
+            i += message[i..].chars().next().unwrap().len_utf8();
+        }
+    }
+    out
+}
+
+/// `create_topics` -> `createTopics`: the Java method name of an admin call.
+fn camel(snake: &str) -> String {
+    let mut out = String::new();
+    let mut upper = false;
+    for c in snake.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The `Admin` method returning each result class: the first declaration
 /// `[default] XResult name(` in `Admin.java` (the interface is the contract;
 /// a class Javadoc link can name the wrong method, as
@@ -1010,7 +1047,7 @@ fn analyze(class: JClass, raw: &str, admin: &BTreeMap<String, String>) -> Result
             if !(c["m"].starts_with('"') && c["m"].ends_with('"')) {
                 return Err(st(format!("constructor check message `{}`", c["m"])));
             }
-            checks.push((terms, c["m"].clone()));
+            checks.push((terms, none_spelling(&c["m"])));
             continue;
         }
         let c = pmatch("this.$f = $p", &s).ok_or_else(|| st(format!("constructor statement `{s}`")))?;
@@ -1409,7 +1446,6 @@ struct Uses {
     helpers: BTreeSet<&'static str>,
     java_str: bool,
     illegal_argument: bool,
-    null_pointer: bool,
     sub_level_error: bool,
     mapping_py: bool,
     iterable_py: bool,
@@ -2297,13 +2333,20 @@ impl Renderer<'_> {
             _ => None,
         });
         let Some((field, param)) = found else { return Ok(None) };
-        self.uses.null_pointer = true;
+        self.uses.illegal_argument = true;
         let f = self.field(&field);
         let v = self.arg_ty(&f.ty, &[1], Flavor::Any, false)?;
         let p = snake(&param);
+        let mut key = p.clone();
+        if let Some(first) = key.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        let method = camel(&self.r.admin_method);
         Ok(Some(format!(
             "    def _future_of(self, {p}: str) -> {v}:\n        future = self._{}.get({p})\n        if future is None:\n            \
-             # ``{}.get({param}).thenApply(...)`` on a {p} not in the call.\n            raise NullPointerError()\n        \
+             # ``{}.get({param}).thenApply(...)`` on a {p} not in the call: Java's\n            \
+             # NullPointerException, with the core's message.\n            raise IllegalArgumentError(\n                \
+             message=f\"{key} {{{p}}} was not part of the {method} request\")\n        \
              return future",
             f.py, f.java
         )))
@@ -2446,6 +2489,7 @@ impl Renderer<'_> {
             imp.first("confluent_kafka._java", "java_str");
         }
         if self.r.holder.is_some() {
+            imp.first("confluent_kafka._args", "MISSING");
             imp.first("confluent_kafka._args", "Form");
             imp.first("confluent_kafka._args", "java_forms");
         }
@@ -2469,9 +2513,6 @@ impl Renderer<'_> {
         }
         if self.uses.illegal_argument {
             imp.first("confluent_kafka.illegal_argument_error", "IllegalArgumentError");
-        }
-        if self.uses.null_pointer {
-            imp.first("confluent_kafka.null_pointer_error", "NullPointerError");
         }
         for (m, n) in &self.types.used {
             imp.checking(m, n);
@@ -2675,10 +2716,10 @@ class _{H}:
         Form("exception"),
         name="{H}",
     )
-    def __init__(self, *, topic_id: Uuid | None = None, num_partitions: int | None = None,
-                 replication_factor: int | None = None, config: Config | None = None,
-                 exception: ApiError | None = None) -> None:
-        if exception is None:
+    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
+                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                 exception: ApiError | None = MISSING) -> None:
+        if exception is MISSING:
             self._exception: ApiError | None = None
             self._topic_id = topic_id
             self._num_partitions = num_partitions
@@ -3060,7 +3101,7 @@ mod tests {
         assert!(
             py.contains(
                 "        if futures is None:\n            raise IllegalArgumentError(\n                \
-                             message=\"futures cannot be null\")"
+                             message=\"futures cannot be None\")"
             ),
             "{py}"
         );

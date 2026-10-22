@@ -85,7 +85,7 @@ _SAMPLES: dict[str, Any] = {
     "Iterable[str] | None": ["consumer"],
     "Iterable[TransactionState]": [TransactionState.ONGOING],
     "Iterable[int]": [5, 6],
-    "Iterable[MemberToRemove] | None": [MemberToRemove(group_instance_id="i")],
+    "Iterable[MemberToRemove]": [MemberToRemove(group_instance_id="i")],
     "IsolationLevel": IsolationLevel.READ_COMMITTED,
 }
 
@@ -173,9 +173,9 @@ def test_nullable_owners_sets_null() -> None:
 
 
 def test_to_string() -> None:
-    assert str(AbortTransactionOptions()) == "AbortTransactionOptions(timeoutMs=null)"
+    assert str(AbortTransactionOptions()) == "AbortTransactionOptions(timeoutMs=None)"
     assert str(AbortTransactionOptions(timeout_ms=5)) == "AbortTransactionOptions(timeoutMs=5)"
-    assert str(FenceProducersOptions()) == "FenceProducersOptions{timeoutMs=null}"
+    assert str(FenceProducersOptions()) == "FenceProducersOptions{timeoutMs=None}"
     assert str(TerminateTransactionOptions(timeout_ms=3)) == "TerminateTransactionOptions{timeoutMs=3}"
 
 
@@ -207,7 +207,7 @@ def _stub_defaults(cls: type) -> dict[str, Any]:
 
 
 def _keyword_setters(cls: type) -> list[tuple[str, str, str]]:
-    """``(keyword, setter, setter parameter)`` per ``if kw is not UNSET: self.setter(p=kw)``."""
+    """``(keyword, setter, setter parameter)`` per ``if kw is not MISSING: self.setter(p=kw)``."""
     init = _init(cls, ".py")
     assert init is not None
     out = []
@@ -227,8 +227,8 @@ def _normal(value: Any) -> Any:
     return value
 
 
-# Constructor-only classes whose keyword is not a setter field: ``members=None`` selects
-# Java's ``()`` form, which stores ``Collections.emptySet()``.
+# Constructor-only classes whose keyword is not a setter field: ``members`` left out
+# selects Java's ``()`` form, which stores ``Collections.emptySet()``.
 _CONSTRUCTOR_STARTS: dict[tuple[str, str], Any] = {("RemoveMembersFromConsumerGroupOptions", "members"): set()}
 
 

@@ -20,8 +20,13 @@ Java's three constructors ``(user, credentialInfo, String password)``,
 password, byte[] salt)`` are one keyword-only constructor (CLAUDE.md, Python
 Binding Conventions, Signatures): ``password`` is ``str | bytes``, dispatched by
 ``isinstance``, and ``salt``, which the shorter forms fill with a random salt
-(a computed value), defaults to ``None``. A ``str`` password with a ``salt`` is
-no Java constructor and raises ``TypeError``. The random salt is Java's
+(a computed value), defaults to ``MISSING``: left out, the random salt; a
+``None`` is Java's ``null`` and raises ``TypeError("salt must not be None")``
+(``Objects.requireNonNull(salt)``), as a ``None`` user, credential info or
+password does, in Java's order. A ``str`` password with a ``salt`` is no Java
+constructor and raises ``TypeError``; a ``None`` password without a salt matches
+both the ``String`` and the ``byte[]`` constructor and raises
+``IllegalArgumentError``. The random salt is Java's
 ``ScramFormatter.secureRandomBytes``: the UTF-8 bytes of a random 130-bit
 integer written in base 36. Java declares no ``equals`` / ``hashCode`` /
 ``toString``.
@@ -32,7 +37,7 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, overload
 
-from confluent_kafka.null_pointer_error import NullPointerError
+from confluent_kafka._args import MISSING
 
 from .user_scram_credential_alteration import UserScramCredentialAlteration
 
@@ -78,26 +83,36 @@ class UserScramCredentialUpsertion(UserScramCredentialAlteration):
                  salt: bytes) -> None: ...
 
     def __init__(self, *, user: str, credential_info: ScramCredentialInfo,
-                 password: str | bytes, salt: bytes | None = None) -> None:
+                 password: str | bytes, salt: bytes = MISSING) -> None:
         """``user``: the user for which the credential is to be
         updated/inserted; ``credential_info``: the mechanism and iterations to
         be used; ``password``: the password; ``salt``: the salt to be used, a
-        random salt when it is not given."""
-        if isinstance(password, str):
-            if salt is not None:
+        random salt when it is left out (Java's ``generateRandomSalt()``). Each
+        ``None`` raises ``TypeError``, as Java's ``Objects.requireNonNull`` does,
+        in Java's order; a ``None`` password without a salt matches both the
+        ``String`` and the ``byte[]`` constructor, which Java's compiler rejects."""
+        if salt is not MISSING:
+            if isinstance(password, str):
                 raise TypeError(
                     "UserScramCredentialUpsertion() takes a bytes password with a salt; "
                     "got a str password")
+        elif password is None:
+            from confluent_kafka.admin._conversions import ambiguous_none
+
+            raise ambiguous_none("UserScramCredentialUpsertion", "password", ("str", "bytes"))
+        if isinstance(password, str):
             password = password.encode("utf_8")
-        if salt is None:
+        if salt is MISSING:
             salt = _generate_random_salt()
         if user is None:
-            raise NullPointerError()
+            raise TypeError("user must not be None")
         super().__init__(user=user)
         if credential_info is None:
-            raise NullPointerError()
+            raise TypeError("credential_info must not be None")
         if password is None:
-            raise NullPointerError()
+            raise TypeError("password must not be None")
+        if salt is None:
+            raise TypeError("salt must not be None")
         self._info = credential_info
         self._password = bytes(password)
         self._salt = bytes(salt)

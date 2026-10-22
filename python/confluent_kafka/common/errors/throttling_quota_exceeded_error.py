@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, is_given
+from confluent_kafka._args import MISSING
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
 __all__ = ["ThrottlingQuotaExceededError"]
@@ -44,10 +44,10 @@ class ThrottlingQuotaExceededError(RetriableError):
     def __init__(
         self,
         *,
-        throttle_time_ms: int = UNSET,
-        message: str,
+        throttle_time_ms: int = MISSING,
+        message: str | None,
     ) -> None:
-        if is_given(throttle_time_ms, UNSET):
+        if throttle_time_ms is not MISSING:
             _throwable.init(self, message, None)
             self._throttle_time_ms = throttle_time_ms
         else:

@@ -19,7 +19,7 @@ Hand-written: outside every generator pattern (``_reference_set.md``, Coverage),
 constructor body is ``Collections.unmodifiableMap(Objects.requireNonNull(futures))``.
 Java's constructor is public: it is ``__init__(*, futures)``, the kind read from the
 futures, plus the clients' ``_new`` (rule interpretation 2). ``requireNonNull`` raises
-``NullPointerError()``; the unmodifiable map is a copy, and ``values()`` returns a new
+``TypeError``; the unmodifiable map is a copy, and ``values()`` returns a new
 ``dict`` each call, so no caller changes the stored map.
 """
 
@@ -29,7 +29,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
@@ -49,7 +48,7 @@ class AlterUserScramCredentialsResult(Generic[KindT]):
         """``futures``: the required map from user names to futures representing the
         results of the alteration(s) for each user."""
         if futures is None:
-            raise NullPointerError()
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -59,7 +58,7 @@ class AlterUserScramCredentialsResult(Generic[KindT]):
         """The clients' builder: Java's public ``AlterUserScramCredentialsResult(futures)``
         with the client kind set by the caller."""
         if futures is None:
-            raise NullPointerError()
+            raise TypeError("futures must not be None")
         result = cls.__new__(cls)
         result._futures = dict(futures)
         result._kind = kind

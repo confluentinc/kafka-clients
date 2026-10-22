@@ -161,7 +161,10 @@ class Uuid:
     def from_string(*, str: str) -> Uuid:  # noqa: A002 - Java's parameter name
         """Creates a UUID based on a base64 string encoding used in the
         ``__str__`` method. (``str`` is Java's parameter name; it shadows the
-        builtin only inside this method, whose body does not call ``str()``.)"""
+        builtin only inside this method, whose body does not call ``str()``.) A
+        ``None`` raises ``TypeError``, as Java's ``str.length()``."""
+        if str is None:
+            raise TypeError("str must not be None")
         if len(str) > 24:
             raise IllegalArgumentError(
                 message="Input string with prefix `" + str[:24]

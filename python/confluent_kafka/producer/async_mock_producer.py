@@ -50,12 +50,12 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from confluent_kafka._args import UNSET, java_forms
+from confluent_kafka._args import MISSING, java_forms
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
 from ._record_future import AsyncRecordFuture
-from ._send import run_callback
+from ._send import check_callback, run_callback
 from .async_producer import AsyncProducer, _AsyncCallback, _in_async_callback, _running_loop
 from .mock_producer import _FORMS
 from .record_metadata import RecordMetadata
@@ -115,16 +115,18 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     def __init__(self: AsyncMockProducer[bytes, bytes]) -> None: ...
 
     @java_forms(*_FORMS)
-    def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = UNSET,
-                 partitioner: Partitioner | None = UNSET,
-                 key_serializer: Serializer[Any] | None = None,
-                 value_serializer: Serializer[Any] | None = None) -> None:
+    def __init__(self, *, cluster: Cluster = MISSING, auto_complete: bool = MISSING,
+                 partitioner: Partitioner | None = MISSING,
+                 key_serializer: Serializer[Any] | None = MISSING,
+                 value_serializer: Serializer[Any] | None = MISSING) -> None:
         """See ``MockProducer``."""
         AsyncProducer.__init__(self)
-        if auto_complete is UNSET:
+        if auto_complete is MISSING:
             # MockProducer(): this(Cluster.empty(), false, null, null, null).
-            auto_complete, partitioner, key_serializer, value_serializer = False, None, None, None
-        self._init_mock(cluster, auto_complete, partitioner, key_serializer, value_serializer)
+            auto_complete, partitioner = False, None
+        self._init_mock(cluster, auto_complete, partitioner,
+                        None if key_serializer is MISSING else key_serializer,
+                        None if value_serializer is MISSING else value_serializer)
         # The last callback task of the mock: a later completion runs after it.
         self._mock_tail: asyncio.Task[None] | None = None
         # The exceptions the callback tasks raised, oldest first, that no call
@@ -214,16 +216,23 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
         self._abort_transaction()
         await self._await_callbacks()
 
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
+    @overload
+    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+                   ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = UNSET
+                   callback: _AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See ``MockProducer.send``; the returned ``AsyncKafkaFuture`` is
         complete when this returns if ``auto_complete`` (and the callback is
         not an ``async def`` still awaited). ``cancel()`` on it returns
         ``False``, as Java's."""
         self._raise_deferred_callback_error()
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None  # Java's send(record) passes null
+        if callback is not None:
+            check_callback(callback)
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
         self._send(record, callback, future)
         return AsyncRecordFuture._of_impl(future, asyncio.get_running_loop())
@@ -240,8 +249,13 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     def metrics(self) -> dict[MetricName, Metric]:
         return self._metrics()
 
-    async def close(self, *, timeout: Duration | None = None) -> None:
-        """Java's mock never reads the timeout, a negative one included."""
+    @overload
+    async def close(self) -> None: ...
+    @overload
+    async def close(self, *, timeout: Duration) -> None: ...
+    async def close(self, *, timeout: Duration = MISSING) -> None:
+        """Java's mock never reads the timeout, a negative or a ``None`` one
+        included."""
         self._close()
         await self._await_callbacks()
 

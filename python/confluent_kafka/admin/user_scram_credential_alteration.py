@@ -22,7 +22,6 @@ constructor is the ``__init__`` its subclasses call.
 
 from __future__ import annotations
 
-from confluent_kafka.null_pointer_error import NullPointerError
 
 __all__ = ["UserScramCredentialAlteration"]
 
@@ -45,7 +44,7 @@ class UserScramCredentialAlteration:
                 "UserScramCredentialAlteration cannot be constructed directly; use one of "
                 "its subclasses")
         if user is None:
-            raise NullPointerError()
+            raise TypeError("user must not be None")
         self._user = user
 
     def user(self) -> str:

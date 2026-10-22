@@ -55,7 +55,7 @@ class _RecordingSerde:
     def close(self) -> None:
         self.closed += 1
 
-    def __call__(self, topic, data, headers=None):  # noqa: ANN001
+    def __call__(self, *, topic, data, headers=None, **kwargs):  # noqa: ANN001
         return None if data is None else bytes(data)
 
 
@@ -86,7 +86,7 @@ class TestResolveSerde:
     def test_kwarg_function_accepted(self) -> None:
         default = bytes_deserializer()
 
-        def fn(topic, data, headers=None):  # noqa: ANN001
+        def fn(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
             return data
 
         got = resolve_serde(fn, {}, KEY, is_key=False, default=default)
@@ -156,6 +156,23 @@ class TestResolveSerde:
             "Could not find a public no-argument constructor for "
             f"{NeedsArgument.__module__}.{NeedsArgument.__qualname__}")
 
+    def test_config_class_whose_constructor_raises(self) -> None:
+        # Java's Utils.newInstance: KafkaException("Could not instantiate class <name>", e).
+        class Exploding:
+            def __init__(self) -> None:
+                raise RuntimeError("boom")
+
+        class ExplodingWithTypeError:
+            def __init__(self) -> None:
+                raise TypeError("inside the constructor")
+
+        for cls in (Exploding, ExplodingWithTypeError):
+            with pytest.raises(KafkaError) as exc:
+                resolve_serde(None, {KEY: cls}, KEY, is_key=False, default=bytes_deserializer())
+            assert str(exc.value) == f"Could not instantiate class {cls.__module__}.{cls.__qualname__}"
+            assert exc.value.__cause__ is not None
+            assert str(exc.value.__cause__) in ("boom", "inside the constructor")
+
     def test_config_class_that_is_not_a_serde(self) -> None:
         class NotCallable:
             pass
@@ -176,7 +193,7 @@ class TestLifecycleHelpers:
         assert serde.configured == (configs, False)
 
     def test_configure_if_defined_noop_on_bare_function(self) -> None:
-        def fn(topic, data, headers=None):  # noqa: ANN001
+        def fn(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
             return data
 
         configure_if_defined(fn, {}, False)  # must not raise
