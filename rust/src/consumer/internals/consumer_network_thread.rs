@@ -1013,41 +1013,57 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         //     heartbeat and the fetch-session close requests, also when the
         //     coordinator leads a fetched partition.
         //   * fetch builds the fetch-session close requests last.
+        //
+        // Java 4.4 CNT:412-434 wraps `runAtClose(...)` in `try { ... } catch
+        // (Exception e) { log.error("Unexpected error during shutdown. Proceed
+        // with closing.", e); } finally { ... }`, so a failure here still
+        // sends the unsent requests, reaps, and closes the managers and the
+        // delegate (steps 2-4). The round is sync, so `catch_unwind` covers
+        // it; the unwind drops the delegate guard, and the request-managers
+        // lock it may poison is taken through `into_inner` below.
         let current_time_ms = self.time.milliseconds();
-        let commit_on_close = {
-            let rm_guard = match self.request_managers.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
+        let poll_on_close_round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let commit_on_close = {
+                let rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.commit_handle()
             };
-            rm_guard.commit_handle()
-        };
-        {
-            let mut rm_guard = match self.request_managers.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let mut delegate_guard = self
-                .network_client_delegate
-                .try_lock()
-                .expect("delegate not contended on bg task");
-            // Commit's close-side drain (Java `CommitRequestManager.poll` while
-            // `closing` → `drainPendingOffsetCommitRequests`), ahead of the
-            // `entries()` walk as the commit manager is in Java's.
-            if let Some(commit_arc) = commit_on_close.as_ref() {
-                let result = commit_arc.drain_pending_offset_commit_requests();
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+            {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let mut delegate_guard = self
+                    .network_client_delegate
+                    .try_lock()
+                    .expect("delegate not contended on bg task");
+                // Commit's close-side drain (Java `CommitRequestManager.poll` while
+                // `closing` → `drainPendingOffsetCommitRequests`), ahead of the
+                // `entries()` walk as the commit manager is in Java's.
+                if let Some(commit_arc) = commit_on_close.as_ref() {
+                    let result = commit_arc.drain_pending_offset_commit_requests();
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
+                for rm in rm_guard.entries() {
+                    let result = rm.poll_on_close(current_time_ms);
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
+                // Java: `FetchRequestManager.pollOnClose(currentTimeMs)`, which
+                // skips close-session requests to unavailable nodes; it reads the
+                // delegate held here (`entries()` skips the fetch slot).
+                if let Some(fetch) = rm_guard.fetch.as_mut() {
+                    let result = fetch.poll_on_close(&*delegate_guard, current_time_ms);
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
             }
-            for rm in rm_guard.entries() {
-                let result = rm.poll_on_close(current_time_ms);
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
-            }
-            // Java: `FetchRequestManager.pollOnClose(currentTimeMs)`, which
-            // skips close-session requests to unavailable nodes; it reads the
-            // delegate held here (`entries()` skips the fetch slot).
-            if let Some(fetch) = rm_guard.fetch.as_mut() {
-                let result = fetch.poll_on_close(&*delegate_guard, current_time_ms);
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
-            }
+        }));
+        if let Err(payload) = poll_on_close_round {
+            log::error!(
+                "Unexpected error during shutdown. Proceed with closing. {}",
+                panic_payload_message(&*payload)
+            );
         }
 
         // ──── 2. Drain unsent requests until timer expires ────
@@ -2010,6 +2026,47 @@ mod tests {
         assert!(
             matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "reaper.reap(...) must complete tracked event with Timeout"
+        );
+    }
+
+    /// Request manager whose `pollOnClose` panics.
+    struct PanicOnCloseRequestManager;
+
+    impl RequestManager for PanicOnCloseRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            PollResult::empty()
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            panic!("poll on close failure");
+        }
+    }
+
+    /// Java 4.4 `ConsumerNetworkThread.cleanup()` (CNT:412-434) catches a
+    /// failure in `runAtClose(...)`, logs "Unexpected error during shutdown.
+    /// Proceed with closing." and still reaps and closes the managers and the
+    /// delegate in its `finally`. A panicking `poll_on_close` must therefore
+    /// neither escape `cleanup()` nor skip the later steps.
+    #[tokio::test]
+    async fn cleanup_proceeds_with_closing_when_poll_on_close_panics() {
+        let (mut fixture, _poll, _to, _hi) = make_thread_with_dyn_managers(vec![Box::new(PanicOnCloseRequestManager)]);
+        let (_h, mut rx, erased) = CompletableEvent::make_completable_event::<()>(0);
+        fixture.reaper.lock().unwrap().add(erased);
+
+        fixture.thread.cleanup().await;
+
+        assert!(
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
+            "cleanup must still reap the tracked event after poll_on_close panics"
+        );
+        assert!(
+            !fixture
+                .delegate
+                .try_lock()
+                .expect("delegate not contended")
+                .client_for_test_ref()
+                .active(),
+            "cleanup must still close the network client after poll_on_close panics"
         );
     }
 
