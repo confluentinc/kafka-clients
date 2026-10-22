@@ -108,14 +108,15 @@ pub(crate) struct RequestManagers {
     /// Fetch request manager — owns the receive-path (`createFetchRequests`,
     /// `collectFetch`). Java: `final FetchRequestManager
     /// fetchRequestManager` (always present). `Option<_>` for the same
-    /// reason as `offsets`.
+    /// reason as `offsets`. Not in [`Self::entries`]: the bg task polls it
+    /// directly with the network-client delegate it holds (see
+    /// [`crate::consumer::internals::NodeStatus`]).
     pub(crate) fetch: Option<FetchRequestManager>,
     /// Auxiliary slot for dyn-dispatched managers — used by tests to
     /// inject spy/fake managers without expanding the concrete-field
     /// list. The production constructor `new(...)` leaves this empty;
     /// tests use [`Self::with_dyn_managers`] to populate it. Iterated
-    /// last in `entries()` (after `fetch`) so the production order is
-    /// preserved.
+    /// last in `entries()`; tests that use it leave `fetch` empty.
     dyn_managers: Vec<Box<dyn RequestManager>>,
     closed: bool,
 }
@@ -193,7 +194,7 @@ impl RequestManagers {
     /// `RequestManagers.java:91-101` order:
     ///
     /// `(coordinator skipped) → (commit skipped) → heartbeat →
-    /// (membership skipped) → offsets → topic_metadata → fetch`.
+    /// (membership skipped) → offsets → topic_metadata → (fetch skipped)`.
     ///
     /// `coordinator`, `commit`, and `consumer_membership` are
     /// **intentionally skipped** — they are held as
@@ -207,6 +208,13 @@ impl RequestManagers {
     /// (semantic mismatch with Java). Instead the bg task polls them
     /// separately via [`Self::coordinator_handle`],
     /// [`Self::commit_handle`], and `ConsumerMembershipManager::reconcile`.
+    ///
+    /// `fetch` is skipped too, and polled last by the bg task, because its
+    /// `poll` / `poll_on_close` take the network-client delegate the bg task
+    /// is holding (Java's `FetchRequestManager` keeps the delegate as a
+    /// field; the Rust manager cannot, see
+    /// [`crate::consumer::internals::NodeStatus`]), which the
+    /// [`RequestManager`] signature does not carry.
     ///
     /// Streams managers (`StreamsGroupHeartbeatRequestManager`,
     /// `StreamsMembershipManager`) are out of milestone scope per
@@ -228,15 +236,16 @@ impl RequestManagers {
             consumer_heartbeat,
             consumer_membership: _,
             offsets,
-            fetch,
+            fetch: _,
             dyn_managers,
             closed: _,
         } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
         // Order matches Java (`RequestManagers.java:91-101`) minus the
-        // three Arc-shared slots: (coordinator skipped) → (commit
-        // skipped) → heartbeat → (membership skipped) → offsets →
-        // topic_metadata → fetch.
+        // three Arc-shared slots and the fetch slot: (coordinator skipped)
+        // → (commit skipped) → heartbeat → (membership skipped) → offsets
+        // → topic_metadata → (fetch, polled by the bg task with the
+        // delegate).
         if let Some(h) = consumer_heartbeat.as_mut() {
             list.push(h as &mut dyn RequestManager);
         }
@@ -245,9 +254,6 @@ impl RequestManagers {
         }
         if let Some(t) = topic_metadata.as_mut() {
             list.push(t as &mut dyn RequestManager);
-        }
-        if let Some(f) = fetch.as_mut() {
-            list.push(f as &mut dyn RequestManager);
         }
         for m in dyn_managers.iter_mut() {
             list.push(m.as_mut());
@@ -299,9 +305,12 @@ impl RequestManagers {
 
     /// Idempotent close. Subsequent calls are no-ops.
     ///
-    /// Java: `close()`. Java additionally invokes `closeQuietly` on
-    /// every manager that implements `Closeable`; in Rust no manager
-    /// implements an explicit close trait at this point.
+    /// Java: `close()`, which calls `closeQuietly` on every entry that
+    /// implements `Closeable`. Among the consumer's managers that is only the
+    /// fetch manager (`FetchRequestManager extends AbstractFetch implements
+    /// Closeable`), so this closes it: `AbstractFetch.close()` closes the
+    /// fetch buffer and the decompression buffer supplier. The Rust close is
+    /// infallible, so `closeQuietly`'s log-and-continue has nothing to catch.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
@@ -310,6 +319,9 @@ impl RequestManagers {
         }
         log::debug!("Closing RequestManagers");
         self.closed = true;
+        if let Some(fetch) = self.fetch.as_mut() {
+            fetch.abstract_fetch_mut().close();
+        }
         log::debug!("RequestManagers has been closed");
     }
 
@@ -440,8 +452,6 @@ mod tests {
             fetch_config,
             std::sync::Arc::new(FetchBuffer::new()),
             std::sync::Arc::new(BufferSupplier::create()),
-            FetchRequestManager::always_available(),
-            FetchRequestManager::no_auth_failure(),
             std::sync::Arc::new(crate::ApiVersions::new()),
             crate::consumer::internals::FetchMetricsManager::for_test(),
             100,
@@ -498,6 +508,30 @@ mod tests {
         assert!(rm.is_closed());
     }
 
+    /// Java's `RequestManagers.close()` closes every `Closeable` entry, so
+    /// the fetch manager's `AbstractFetch.close()` runs and closes its fetch
+    /// buffer, dropping any buffered data.
+    #[test]
+    fn close_closes_the_fetch_manager() {
+        let mut rm = RequestManagers::new(None, None, None, None, None, None, Some(fetch_manager()));
+        let fetch_buffer =
+            std::sync::Arc::clone(&rm.fetch.as_ref().expect("fetch manager").abstract_fetch().fetch_buffer);
+        fetch_buffer.add(crate::consumer::internals::CompletedFetch::new(
+            crate::common::TopicPartition::new("t".to_string(), 0),
+            crate::fetch_response_data::PartitionData::new(),
+        ));
+        assert!(!fetch_buffer.is_empty());
+        rm.close();
+        assert!(
+            rm.fetch.as_ref().expect("fetch manager").abstract_fetch().closed,
+            "Java's RequestManagers.close closes the fetch manager (AbstractFetch.close)"
+        );
+        assert!(
+            fetch_buffer.is_empty(),
+            "Java's AbstractFetch.close closes the fetch buffer, which drops its buffered data"
+        );
+    }
+
     /// Verifies that `entries()` returns managers in the same order on
     /// repeated calls, regardless of `Option` field shuffling.
     #[test]
@@ -538,14 +572,16 @@ mod tests {
         assert_eq!(1, entries.len());
     }
 
-    /// Verifies that the Phase 10 `fetch` slot is wired into
-    /// `entries()`. With coordinator Arc-shared and excluded, only
-    /// fetch appears.
+    /// Verifies that `entries()` SKIPS the `fetch` slot: the bg task polls
+    /// it directly with the network-client delegate (its `poll` reads the
+    /// delegate's connection state, which `RequestManager::poll` cannot
+    /// carry).
     #[test]
-    fn entries_includes_fetch_when_present() {
+    fn entries_skips_fetch_even_when_present() {
         let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, Some(fetch_manager()));
         let entries = rm.entries();
-        assert_eq!(1, entries.len());
+        assert!(entries.is_empty(), "fetch must be skipped from entries()");
+        assert!(rm.fetch.is_some(), "the fetch slot stays populated");
     }
 
     /// Verifies that `entries()` returns the correct count when five of
@@ -583,8 +619,9 @@ mod tests {
             Some(fetch_manager()),
         );
         let entries = rm.entries();
-        // 3 = offsets + topic_metadata + fetch.
-        // (coordinator + commit are Arc-shared and excluded.)
-        assert_eq!(3, entries.len());
+        // 2 = offsets + topic_metadata.
+        // (coordinator + commit are Arc-shared and excluded; fetch is
+        // polled by the bg task with the delegate.)
+        assert_eq!(2, entries.len());
     }
 }

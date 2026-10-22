@@ -4048,9 +4048,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 }
 
 /// `handle()`: the reentrancy handle a listener calls the consumer back
-/// through (consumer-threading.md §31, §41), owned by the caller
-/// (`kafka_consumer_ConsumerHandle_destroy`) and usable after the consumer
-/// is destroyed, when its operations fail.
+/// through (consumer-threading.md §31; Phase 41,
+/// design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md),
+/// owned by the caller (`kafka_consumer_ConsumerHandle_destroy`) and usable
+/// after the consumer is destroyed, when its operations fail.
 ///
 /// The handle is outside the consumer's single-owner flag but has its own
 /// guard: on a `KafkaConsumer` its async operations are admitted only while

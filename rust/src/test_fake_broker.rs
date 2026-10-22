@@ -32,12 +32,20 @@
 //! response yet). A `Fetch` is answered with the records the test sets with
 //! [`FakeBroker::answer_fetch`], once; without one it is answered empty after a
 //! short wait, as a broker does when `fetch.max.wait.ms` elapses with no data.
-//! Every other request is read and left unanswered.
+//! `FindCoordinator` names this broker (node 0) the coordinator of every key,
+//! and `OffsetFetch` returns the committed offset the test sets with
+//! [`FakeBroker::set_committed_offset`] (`-1`, no committed offset, until then)
+//! for every partition asked for. Every other request is read and left
+//! unanswered.
+//!
+//! A test can also kill the broker ([`FakeBroker::kill`]), or have SASL/PLAIN
+//! authentication succeed on the first connections and fail
+//! (UNSUPPORTED_SASL_MECHANISM) on later ones
+//! ([`FakeBroker::accept_sasl_handshakes`]).
 //!
 //! [`FakeBroker::start_with_group_coordinator`] additionally acts as the group
-//! coordinator: `FindCoordinator` names this listener, and a joining or
-//! heartbeating `ConsumerGroupHeartbeat` gets member epoch 1 with an empty
-//! assignment. A leave heartbeat (member epoch -1) is recorded and left
+//! coordinator: a joining or heartbeating `ConsumerGroupHeartbeat` gets
+//! member epoch 1 with an empty assignment. A leave heartbeat (member epoch -1) is recorded and left
 //! unanswered, so the client's leave can only end by a timeout.
 //!
 //! Requests are recorded when they arrive, as Java's `MockClient` records them
@@ -69,6 +77,10 @@ use crate::FindCoordinatorResponseData;
 use crate::ListOffsetsRequestData;
 use crate::ListOffsetsResponseData;
 use crate::MetadataResponseData;
+use crate::OffsetFetchRequestData;
+use crate::OffsetFetchResponseData;
+use crate::SaslAuthenticateResponseData;
+use crate::SaslHandshakeResponseData;
 use crate::api_message_type::ListenerType;
 use crate::common::Uuid;
 use crate::common::compress::Compression;
@@ -78,7 +90,6 @@ use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
 use crate::common::requests::{ApiVersionsResponse, FetchResponse, RequestHeader, RequestUtils, ResponseHeader};
 use crate::consumer_group_heartbeat_response_data::Assignment;
 use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as FetchPartitionData};
-use crate::find_coordinator_response_data::Coordinator;
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
@@ -141,6 +152,18 @@ struct Shared {
     /// The member epoch of every `ConsumerGroupHeartbeat` received, in arrival
     /// order (only recorded when acting as the group coordinator).
     heartbeat_epochs: Mutex<Vec<i32>>,
+    /// `SaslHandshake`s answered so far. The first `sasl_handshakes_accepted`
+    /// succeed (PLAIN, and the `SaslAuthenticate` after them succeeds too);
+    /// later ones are answered UNSUPPORTED_SASL_MECHANISM.
+    sasl_handshakes: AtomicUsize,
+    sasl_handshakes_accepted: AtomicUsize,
+    /// The serving task of every accepted connection, so [`FakeBroker::kill`]
+    /// can close them.
+    connections: Mutex<Vec<JoinHandle<()>>>,
+    /// How many `OffsetFetch` requests arrived.
+    offset_fetch_requests: AtomicUsize,
+    /// The committed offset `OffsetFetch` returns for every partition.
+    committed_offset: Mutex<i64>,
 }
 
 /// A request read from a connection, waiting for its turn to be answered.
@@ -192,6 +215,11 @@ impl FakeBroker {
             fetch_answer: Mutex::new(None),
             group_coordinator,
             heartbeat_epochs: Mutex::new(Vec::new()),
+            sasl_handshakes: AtomicUsize::new(0),
+            sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
+            connections: Mutex::new(Vec::new()),
+            offset_fetch_requests: AtomicUsize::new(0),
+            committed_offset: Mutex::new(-1),
         });
         let seen = Arc::clone(&shared);
         let cluster_id = cluster_id.to_string();
@@ -199,7 +227,7 @@ impl FakeBroker {
         let topic_id = Uuid::random_uuid();
         let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(
+                let connection = tokio::spawn(serve(
                     stream,
                     addr,
                     Arc::clone(&seen),
@@ -207,6 +235,7 @@ impl FakeBroker {
                     topic.clone(),
                     topic_id,
                 ));
+                seen.connections.lock().expect("fake broker mutex poisoned").push(connection);
             }
         });
         Self { addr, shared, accept_task }
@@ -245,6 +274,24 @@ impl FakeBroker {
         *self.shared.fetch_answer.lock().expect("fake broker mutex poisoned") = Some(answer);
     }
 
+    /// SASL/PLAIN: the first `accepted` `SaslHandshake`s (connections)
+    /// authenticate; every later one is answered UNSUPPORTED_SASL_MECHANISM
+    /// (offering only SCRAM-SHA-512), so that connection fails
+    /// authentication. With `accepted = 1` the bootstrap connection learns
+    /// the metadata and the connection to the partition leader fails.
+    pub(crate) fn accept_sasl_handshakes(&self, accepted: usize) {
+        self.shared.sasl_handshakes_accepted.store(accepted, Ordering::SeqCst);
+    }
+
+    /// Kills the broker: stops listening, so later connection attempts are
+    /// refused, and closes every open connection, as `docker kill` does.
+    pub(crate) fn kill(&self) {
+        self.accept_task.abort();
+        for connection in self.shared.connections.lock().expect("fake broker mutex poisoned").drain(..) {
+            connection.abort();
+        }
+    }
+
     /// How many `Fetch` requests have arrived so far.
     pub(crate) fn fetch_requests(&self) -> usize {
         self.shared.fetch_requests.load(Ordering::SeqCst)
@@ -255,6 +302,16 @@ impl FakeBroker {
     /// [`Self::start_with_group_coordinator`]).
     pub(crate) fn heartbeat_epochs(&self) -> Vec<i32> {
         self.shared.heartbeat_epochs.lock().expect("fake broker mutex poisoned").clone()
+    }
+
+    /// Sets the committed offset `OffsetFetch` returns for every partition.
+    pub(crate) fn set_committed_offset(&self, offset: i64) {
+        *self.shared.committed_offset.lock().expect("fake broker mutex poisoned") = offset;
+    }
+
+    /// How many `OffsetFetch` requests have arrived so far.
+    pub(crate) fn offset_fetch_requests(&self) -> usize {
+        self.shared.offset_fetch_requests.load(Ordering::SeqCst)
     }
 
     /// Waits (up to `timeout`) until at least `count` ApiVersions requests have
@@ -293,7 +350,15 @@ async fn serve(
 ) {
     let (reader, mut writer) = stream.into_split();
     let (pending_tx, mut pending_rx) = mpsc::unbounded_channel();
-    let reader_task = tokio::spawn(read_requests(
+    // Aborts the reader when this task ends or is aborted by `kill`, so the
+    // read half is dropped with the write half and the socket closes.
+    struct AbortOnDrop(JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _reader_task = AbortOnDrop(tokio::spawn(read_requests(
         reader,
         addr,
         Arc::clone(&seen),
@@ -301,7 +366,7 @@ async fn serve(
         topic,
         topic_id,
         pending_tx,
-    ));
+    )));
     while let Some(pending) = pending_rx.recv().await {
         let Some(response) = respond(&seen, pending).await else {
             break;
@@ -313,7 +378,6 @@ async fn serve(
             break;
         }
     }
-    reader_task.abort();
 }
 
 /// Reads, records and queues every request of a connection until it closes.
@@ -369,11 +433,34 @@ async fn read_requests(
                     .flat_map(|topic| topic.partitions().iter().map(|partition| partition.timestamp())),
             );
             Pending::ListOffsets { response_header, version, request }
-        } else if *header.api_key() == ApiKeys::FETCH {
-            let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
-            seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
-            Pending::Fetch { response_header, version, request }
-        } else if *header.api_key() == ApiKeys::FIND_COORDINATOR && seen.group_coordinator {
+        } else if *header.api_key() == ApiKeys::SASL_HANDSHAKE {
+            let accept = seen.sasl_handshakes.fetch_add(1, Ordering::SeqCst)
+                < seen.sasl_handshakes_accepted.load(Ordering::SeqCst);
+            let mut body = SaslHandshakeResponseData::new();
+            if accept {
+                body.set_error_code(Errors::None.code());
+                body.set_mechanisms(vec!["PLAIN".to_string()]);
+            } else {
+                body.set_error_code(Errors::UnsupportedSaslMechanism.code());
+                body.set_mechanisms(vec!["SCRAM-SHA-512".to_string()]);
+            }
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::SASL_AUTHENTICATE {
+            let mut body = SaslAuthenticateResponseData::new();
+            body.set_error_code(Errors::None.code());
+            body.set_auth_bytes(Vec::new());
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::FIND_COORDINATOR {
             let request =
                 FindCoordinatorRequestData::read(&mut accessor, version).expect("fake broker: FindCoordinator body");
             let mut body = find_coordinator_response(addr, &request, version);
@@ -383,6 +470,21 @@ async fn read_requests(
                 &mut body,
                 version,
             )))
+        } else if *header.api_key() == ApiKeys::OFFSET_FETCH {
+            let request = OffsetFetchRequestData::read(&mut accessor, version).expect("fake broker: OffsetFetch body");
+            seen.offset_fetch_requests.fetch_add(1, Ordering::SeqCst);
+            let committed = *seen.committed_offset.lock().expect("fake broker mutex poisoned");
+            let mut body = offset_fetch_response(&request, committed);
+            Pending::Ready(serialize(RequestUtils::serialize(
+                response_header.data(),
+                response_header.header_version(),
+                &mut body,
+                version,
+            )))
+        } else if *header.api_key() == ApiKeys::FETCH {
+            let request = FetchRequestData::read(&mut accessor, version).expect("fake broker: Fetch body");
+            seen.fetch_requests.fetch_add(1, Ordering::SeqCst);
+            Pending::Fetch { response_header, version, request }
         } else if *header.api_key() == ApiKeys::CONSUMER_GROUP_HEARTBEAT && seen.group_coordinator {
             let request = ConsumerGroupHeartbeatRequestData::read(&mut accessor, version)
                 .expect("fake broker: ConsumerGroupHeartbeat body");
@@ -451,35 +553,6 @@ fn serialize<E: std::fmt::Debug>(response: Result<ByteBufferAccessor, E>) -> Vec
     response.expect("fake broker: serialize response").into_buffer()
 }
 
-fn find_coordinator_response(
-    addr: SocketAddr,
-    request: &FindCoordinatorRequestData,
-    version: i16,
-) -> FindCoordinatorResponseData {
-    let mut data = FindCoordinatorResponseData::new();
-    data.error_message = None;
-    if version >= 4 {
-        data.coordinators = request
-            .coordinator_keys
-            .iter()
-            .map(|key| {
-                let mut coordinator = Coordinator::new();
-                coordinator.key = key.clone();
-                coordinator.node_id = FAKE_BROKER_NODE_ID;
-                coordinator.host = addr.ip().to_string();
-                coordinator.port = i32::from(addr.port());
-                coordinator.error_message = None;
-                coordinator
-            })
-            .collect();
-    } else {
-        data.node_id = FAKE_BROKER_NODE_ID;
-        data.host = addr.ip().to_string();
-        data.port = i32::from(addr.port());
-    }
-    data
-}
-
 fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: Uuid) -> MetadataResponseData {
     let mut broker = MetadataResponseBroker::new();
     broker.set_node_id(FAKE_BROKER_NODE_ID);
@@ -507,6 +580,88 @@ fn metadata_response(addr: SocketAddr, cluster_id: &str, topic: &str, topic_id: 
     data.set_controller_id(FAKE_BROKER_NODE_ID);
     data.set_brokers(vec![broker]);
     data.set_topics(vec![topic_metadata]);
+    data
+}
+
+/// Names this broker the coordinator of every key of `request` (v4+), or of
+/// its single key (v0-3).
+fn find_coordinator_response(
+    addr: SocketAddr,
+    request: &FindCoordinatorRequestData,
+    version: i16,
+) -> FindCoordinatorResponseData {
+    use crate::find_coordinator_response_data::Coordinator;
+    let coordinators = request
+        .coordinator_keys()
+        .iter()
+        .map(|key| {
+            let mut coordinator = Coordinator::new();
+            coordinator.set_key(key.clone());
+            coordinator.set_node_id(FAKE_BROKER_NODE_ID);
+            coordinator.set_host(addr.ip().to_string());
+            coordinator.set_port(i32::from(addr.port()));
+            coordinator.set_error_code(Errors::None.code());
+            coordinator.set_error_message(None);
+            coordinator
+        })
+        .collect();
+    let mut data = FindCoordinatorResponseData::new();
+    if version < 4 {
+        data.set_error_code(Errors::None.code());
+        data.set_error_message(None);
+        data.set_node_id(FAKE_BROKER_NODE_ID);
+        data.set_host(addr.ip().to_string());
+        data.set_port(i32::from(addr.port()));
+    } else {
+        data.set_coordinators(coordinators);
+    }
+    data
+}
+
+/// Answers every partition of every group of `request` (v8+) with
+/// `committed`.
+fn offset_fetch_response(request: &OffsetFetchRequestData, committed: i64) -> OffsetFetchResponseData {
+    use crate::offset_fetch_response_data::{
+        OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+    };
+    let groups = request
+        .groups()
+        .iter()
+        .map(|group| {
+            let topics = group
+                .topics()
+                .iter()
+                .flatten()
+                .map(|topic| {
+                    let partitions = topic
+                        .partition_indexes()
+                        .iter()
+                        .map(|partition| {
+                            let mut response = OffsetFetchResponsePartitions::new();
+                            response.set_partition_index(*partition);
+                            response.set_committed_offset(committed);
+                            response.set_committed_leader_epoch(-1);
+                            response.set_metadata(Some(String::new()));
+                            response.set_error_code(Errors::None.code());
+                            response
+                        })
+                        .collect();
+                    let mut response = OffsetFetchResponseTopics::new();
+                    response.set_name(topic.name().clone());
+                    response.set_topic_id(topic.topic_id());
+                    response.set_partitions(partitions);
+                    response
+                })
+                .collect();
+            let mut response = OffsetFetchResponseGroup::new();
+            response.set_group_id(group.group_id().clone());
+            response.set_topics(topics);
+            response.set_error_code(Errors::None.code());
+            response
+        })
+        .collect();
+    let mut data = OffsetFetchResponseData::new();
+    data.set_groups(groups);
     data
 }
 

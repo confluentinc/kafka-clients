@@ -94,7 +94,9 @@ pub(crate) use fetch_config::FetchConfig;
 pub(crate) use fetch_metrics_aggregator::FetchMetricsAggregator;
 pub(crate) use fetch_metrics_manager::FetchMetricsManager;
 pub(crate) use fetch_metrics_registry::FetchMetricsRegistry;
-pub(crate) use fetch_request_manager::{FetchRequestManager, IsUnavailableFn, MaybeAuthFailureFn};
+#[cfg(test)]
+pub(crate) use fetch_request_manager::TestNodeStatus;
+pub(crate) use fetch_request_manager::{FetchRequestManager, NodeStatus};
 pub(crate) use fetch_utils::FetchUtils;
 pub(crate) use group_coordinator_node::GroupCoordinatorNode;
 pub(crate) use heartbeat_request_state::HeartbeatRequestState;

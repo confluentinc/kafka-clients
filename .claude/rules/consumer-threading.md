@@ -53,7 +53,7 @@ unguarded methods are `metrics()`, `wakeup()` (cross-thread by design),
 The last three are not translated yet: when one is, it takes `&self` and is
 added to the allowlist of `cargo xtask lint-custom`
 (`check-consumer-receiver`). The Rust-only `handle()` also takes `&self`: it
-hands out the `ConsumerHandle` (§31, §41), the one cross-thread path into the
+hands out the `ConsumerHandle` (§31; Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md`), the one cross-thread path into the
 consumer. The lint fails on any other `Consumer` / `DynConsumer` method taking
 `&self`. (`enforceRebalance` is unguarded in `AsyncKafkaConsumer` but guarded
 in `ClassicKafkaConsumer`, so it takes `&mut self`.)
@@ -203,7 +203,7 @@ Implementations:
     (§20): with a single delegate the field is `AsyncKafkaConsumer` directly.
   - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
     `consumer.internals`, so it is `pub(crate)`: users reach it only through
-    `KafkaConsumer`. `ConsumerHandle` (§31, §41), declared in the same file, is
+    `KafkaConsumer`. `ConsumerHandle` (§31; Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md`), declared in the same file, is
     a Rust-only type with no Java class; it stays public through its
     `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`), because listeners need it for
     in-callback reentrancy.
@@ -694,10 +694,15 @@ COMMENTS.DONE entry. Examples of legitimate deviations:
 
 Listener callbacks (`ConsumerRebalanceListener::on_partitions_revoked`,
 `on_partitions_assigned`, `on_partitions_lost`) and
-`OffsetCommitCallback::on_complete` execute on the **caller's task** during
-`poll()`, `commit_*()`, `unsubscribe()`, `close()`, and any timed query API
-that drains the background event queue. They NEVER execute on the
-background task or any other spawned helper.
+`OffsetCommitCallback::on_complete` execute on the **caller's task**.
+Rebalance-listener callbacks and queued background errors are delivered only
+from `poll()` and `unsubscribe()` (and the listener is invoked directly by
+`close()`'s `run_rebalance_callbacks_on_close`), mirroring Java, where
+`processBackgroundEvents()` is called only from `poll()` (`checkInflightPoll`),
+`unsubscribe()` and `updateAssignmentMetadataIfNeeded`. `OffsetCommitCallback`s
+run from `poll()` and from every commit path (`commit()`,
+`awaitPendingAsyncCommitsAndExecuteCommitCallbacks`) and `close()`. They NEVER
+execute on the background task or any other spawned helper.
 
 The mechanism mirrors Java's bidirectional event handshake
 (`AsyncKafkaConsumer.java` `processBackgroundEvents` /
@@ -737,11 +742,12 @@ The mechanism mirrors Java's bidirectional event handshake
      the listener runs on the app task whose `poll()` cannot return until the
      listener does, but the bg task that must service the reentrant op was
      frozen on the ack. Closing that deadlock is the reason for the change.
-     The `leave_group` / `unsubscribe` / `close` `on_partitions_lost`
-     callback is the one exception that was already non-blocking: it runs on
-     a `tokio::spawn`ed continuation in `process_unsubscribe` /
-     `process_leave_group_on_close`, NOT inline in the bg loop, so it never
-     froze the loop.)
+     The `unsubscribe()` leave callback (`signal_member_leaving_group`:
+     `on_partitions_revoked`, or `on_partitions_lost` at epoch ≤ 0) is the
+     one exception that was already non-blocking: it runs on a
+     `tokio::spawn`ed continuation in `process_unsubscribe`, NOT inline in
+     the bg loop. The leave on close runs no callback
+     (`leave_group_on_close` → `run_callbacks = false`).)
 
      A release transition that interleaves with an in-flight reconcile
      callback **abandons** the stored reconcile state (Phase 41, Issue 1 —
@@ -750,7 +756,7 @@ The mechanism mirrors Java's bidirectional event handshake
      `whenComplete` would then `maybeAbortReconciliation`). This lets a fresh
      post-rejoin reconcile start immediately rather than being gated on the
      stale ack draining.
-  3. The app side, inside its `poll()` / `commit_*()` / etc. loop, drains
+  3. The app side, inside its `poll()` / `unsubscribe()` loop, drains
      the background-events channel via `try_recv` in a `while let` loop
      and, for each `RebalanceListenerCallbackNeeded`, invokes the
      user-supplied listener method inline on its own task.
@@ -786,10 +792,18 @@ The mechanism mirrors Java's bidirectional event handshake
 
 **How to apply:**
 
-  - `process_background_events` is called at the TOP of every public
-    blocking-style API (`poll`, `commit_sync`, `commit_async`,
-    `unsubscribe`, `close`, `position`, `committed`, `beginning_offsets`,
-    `end_offsets`, `offsets_for_times`).
+  - Only `poll()` (each `check_inflight_poll` pass) and `unsubscribe()` (with
+    `skip_assignment_events = true` and the Group/TopicAuthorization ignore
+    predicate) drain the background-event queue. Every other blocking-style
+    API (`commit_*`, `position`, `committed`, `seek*`, `pause`/`resume`,
+    `assign`, `subscribe*`, offsets/metadata queries, `close`) waits only on
+    its own event's completion with its deadline and, where Java calls
+    `setActiveTask`, the wakeup token, exactly as `ConsumerHandle` does;
+    commit paths additionally run queued `OffsetCommitCallback`s. A queued
+    `Error` event is surfaced by the next `poll()`, never by an unrelated
+    call. This is safe because the background loop never waits for a
+    listener ack outside the unsubscribe leave (Phase 41: acks are
+    `try_recv`ed across iterations).
   - Invoke listener methods inline on the caller's task; do NOT
     `tokio::spawn` them.
   - Drop the `SubscriptionState` lock guard before invoking the listener
@@ -813,7 +827,7 @@ The mechanism mirrors Java's bidirectional event handshake
   - **In-callback reentrancy:** a listener that calls back into the
     consumer (`assign`/`seek`/`pause`/`resume`/`position`/`committed`/
     `beginning_offsets`/`commit_*`) does so through a captured
-    [`ConsumerHandle`] (§41 — the Rust equivalent of Java capturing the
+    [`ConsumerHandle`] (Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md` — the Rust equivalent of Java capturing the
     `consumer` variable; the listener trait signature stays Java-identical,
     taking only `&self` + partitions). This only works because the bg loop
     is not frozen during the callback (step 2 above) — for `on_partitions_lost`
@@ -872,8 +886,9 @@ not per-record; the cost of one `Box<Future>` per callback is irrelevant.
     `KafkaError::Wakeup`, and is silently inert once `close()` has disabled
     it — the shutdown wake then no-ops and `close()` waits out the full
     selector poll timeout.
-  - A public blocking-style API that does not call
-    `process_background_events` before its main wait.
+  - A non-`poll`/`unsubscribe` API that drains the background-event queue:
+    it runs rebalance callbacks Java defers to `poll()` and consumes
+    background errors Java throws from `poll()`.
   - A separate task spawned to "drain the background events channel" —
     callbacks would run on that task, not the user's.
   - Holding `SubscriptionState`'s `MutexGuard` across the listener call.
@@ -883,11 +898,11 @@ not per-record; the cost of one `Box<Future>` per callback is irrelevant.
 Two regression tests must exist; the rule is not considered tested without
 them:
 
-  1. `on_partitions_revoked` calls `consumer.commit_sync()` from inside
-     the callback and the commit succeeds (mirrors Java's canonical test).
-     If the listener runs on the bg task, this deadlocks. If the bg task
-     fire-and-forgets the callback, the commit races reassignment and
-     the test is flaky.
+  1. A `poll()` delivers `on_partitions_revoked`, whose body calls
+     `ConsumerHandle::commit_sync()`; the commit succeeds (Java's
+     `testCommitInRebalanceCallback` shape). A test also asserts that
+     `commit_sync`/`committed`/`seek`/`pause` do NOT invoke a queued listener
+     or consume a queued error (the VC-01 tests).
   2. The rebalance does not advance until the listener future resolves —
      block the listener on a channel held by the test, observe that the
      membership state machine has not advanced, release the channel,

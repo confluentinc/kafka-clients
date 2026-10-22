@@ -153,8 +153,9 @@ class Consumer(Generic[K, V], _ConsumerState):
 
         The ``callback`` is a ``ConsumerRebalanceListener`` invoked when the
         partitions assigned to the consumer change, on the caller's thread,
-        inside ``poll()`` and the other waiting calls; subscribing without one
-        releases the previous listener.
+        inside ``poll()`` or ``unsubscribe()`` (and ``close()`` revokes or
+        loses the group assignment through it), as in Java; subscribing
+        without one releases the previous listener.
 
         Raises ``IllegalArgumentError`` if ``callback`` is ``None``
         ("RebalanceListener cannot be None"), if ``topics`` or ``pattern`` is
@@ -266,11 +267,6 @@ class Consumer(Generic[K, V], _ConsumerState):
         be sent in the same order as the invocations. The ``callback`` runs on
         the caller's thread, inside a later call on this consumer (``poll()``,
         ``commit()``, ``commit_nowait()``, ``close()``, …).
-
-        Unlike Java's ``commitAsync``, the call may deliver a queued
-        ``ConsumerRebalanceListener`` callback, on this thread, while it waits
-        for the offsets to commit (``consumer-threading.md`` §31); a listener
-        error it raised is then raised here.
 
         Called from inside a callback this consumer delivers (a listener method
         or another commit's ``callback``), it first runs the commit callbacks
