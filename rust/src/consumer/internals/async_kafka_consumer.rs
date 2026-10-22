@@ -3070,7 +3070,7 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {}", e)))?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
