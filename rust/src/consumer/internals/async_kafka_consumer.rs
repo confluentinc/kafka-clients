@@ -16184,31 +16184,20 @@ mod tests {
     }
 
     // ── Duration::MAX timeouts (audit finding C1-03) ───────────────────
+    //
+    // Rust saturates a `Duration` beyond `i64::MAX` ms to `i64::MAX` ms
+    // (`ConsumerUtils::duration_to_millis`) and never rejects it, so each test
+    // below asserts that single outcome: the call behaves as Java does for
+    // `Long.MAX_VALUE` ms.
 
-    /// Accepts either Java-parity outcome for a `Duration` Java cannot
-    /// represent: the call is still blocked after the test's wait (Rust saturates —
-    /// `Long.MAX_VALUE` ms in Java waits), or it was rejected up front with a
-    /// non-timeout argument error (Java: `ArithmeticException: long overflow`
-    /// from `Duration.toMillis()`). Anything else — in particular an
-    /// immediate `Ok(empty)` or a retriable `TimeoutError` — is the bug.
-    fn duration_max_outcome_is_java_like<T: std::fmt::Debug>(
-        outcome: &Result<Result<T, Error>, tokio::time::error::Elapsed>,
-    ) -> bool {
-        match outcome {
-            Err(_elapsed) => true,
-            Ok(Err(err)) => !matches!(err, Error::Timeout(_)),
-            Ok(Ok(_)) => false,
-        }
-    }
-
-    /// Audit finding C1-03: `poll(Duration::MAX)` must not return an empty batch at once.
-    /// Java: `poll(Duration)` with `Long.MAX_VALUE` ms blocks; a `Duration`
-    /// beyond `Long.MAX_VALUE` ms throws `ArithmeticException` from
-    /// `Duration.toMillis()` (`AsyncKafkaConsumer.java` `poll` →
-    /// `time.timer(timeout)`). An unchecked `timeout.as_millis() as i64` wrapped
-    /// `Duration::MAX` to -1 ms, so the deadline had already passed.
+    /// Audit finding C1-03: `poll(Duration::MAX)` must keep blocking.
+    /// Java: `poll(Duration)` with `Long.MAX_VALUE` ms blocks until records
+    /// arrive (`AsyncKafkaConsumer.java` `poll` → `time.timer(timeout)`). An
+    /// unchecked `timeout.as_millis() as i64` wrapped `Duration::MAX` to
+    /// -1 ms, so the deadline had already passed and `poll` returned an empty
+    /// batch at once.
     #[tokio::test]
-    async fn poll_with_duration_max_does_not_return_immediately() {
+    async fn poll_with_duration_max_blocks() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         assign_and_seek_for_poll(&handles);
         // Stand-in bg task: complete every AsyncPoll so poll() is gated only
@@ -16227,18 +16216,18 @@ mod tests {
         let took = start.elapsed();
         drainer.abort();
         assert!(
-            duration_max_outcome_is_java_like(&outcome),
-            "poll(Duration::MAX) returned {:?} after {took:?}; Java never returns an empty batch for this \
-             timeout (Long.MAX_VALUE ms blocks, a larger Duration throws ArithmeticException)",
+            outcome.is_err(),
+            "poll(Duration::MAX) must still be blocked when the 500 ms test timeout fires (Java: \
+             Long.MAX_VALUE ms blocks until records arrive); it returned {:?} after {took:?}",
             outcome.as_ref().map(|r| r.as_ref().map(|recs| recs.count()))
         );
     }
 
-    /// Audit finding C1-03: `commit_sync_with_offsets_timeout(.., Duration::MAX)` must not
-    /// report a timeout for a commit that completes 50 ms later. Java:
-    /// `commitSync(offsets, Duration)` waits (or throws `ArithmeticException`
-    /// for an unrepresentable `Duration`); it never fails with a retriable
-    /// `TimeoutException` before the commit completes.
+    /// Audit finding C1-03: `commit_sync_with_offsets_timeout(.., Duration::MAX)` must wait
+    /// for a commit that completes 50 ms later and return `Ok`. Java:
+    /// `commitSync(offsets, Duration)` with `Long.MAX_VALUE` ms waits for the
+    /// commit; it never fails with a retriable `TimeoutException` before the
+    /// commit completes.
     #[tokio::test]
     async fn commit_sync_with_duration_max_does_not_time_out_immediately() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
@@ -16260,11 +16249,10 @@ mod tests {
         )
         .await;
         completer.abort();
-        let ok = matches!(outcome, Ok(Ok(()))) || duration_max_outcome_is_java_like(&outcome) && outcome.is_ok();
         assert!(
-            ok,
-            "commit_sync_with_offsets_timeout(Duration::MAX) must not report a timeout for a commit that \
-             completes 50 ms later (Java waits, or throws ArithmeticException up front); got {outcome:?}"
+            matches!(outcome, Ok(Ok(()))),
+            "commit_sync_with_offsets_timeout(Duration::MAX) must wait for a commit that completes 50 ms \
+             later and return Ok (Java: Long.MAX_VALUE ms waits for the commit); got {outcome:?}"
         );
     }
 
@@ -16280,14 +16268,17 @@ mod tests {
             let mut subs = handles.subscriptions.lock().unwrap();
             subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
         }
+        // `ConsumerHandle` operations run only inside a callback the consumer
+        // is running; outside one they fail with `ConcurrentModification`.
+        let _in_callback = consumer.enter_callback_scope();
         let handle = consumer.handle();
         let outcome =
             tokio::time::timeout(Duration::from_millis(500), handle.position_with_timeout(&tp, Duration::MAX)).await;
         assert!(
-            duration_max_outcome_is_java_like(&outcome),
-            "ConsumerHandle::position_with_timeout(Duration::MAX) must not time out at once (Java: \
-             position(tp, Duration) waits, or throws ArithmeticException for an unrepresentable \
-             Duration); got {outcome:?}"
+            outcome.is_err(),
+            "ConsumerHandle::position_with_timeout(Duration::MAX) must still be waiting when the 500 ms \
+             test timeout fires (Java: position(tp, Duration) with Long.MAX_VALUE ms waits for a \
+             position); got {outcome:?}"
         );
         drop(handles.app_event_rx);
     }
@@ -16296,8 +16287,7 @@ mod tests {
     /// not close with a zero budget. Java caps the close timer at
     /// `request.timeout.ms` (`createTimerForCloseRequests`,
     /// `AsyncKafkaConsumer.java`), so `Long.MAX_VALUE` ms hands the
-    /// network thread ~`request.timeout.ms`; an unrepresentable `Duration`
-    /// throws before closing. An unchecked cast gave `min(-1, request_timeout_ms)`
+    /// network thread ~`request.timeout.ms`. An unchecked cast gave `min(-1, request_timeout_ms)`
     /// = -1 ms, so auto-commit-on-close, leave-group and the network-thread
     /// cleanup all got 0 ms.
     #[tokio::test]
@@ -16323,13 +16313,17 @@ mod tests {
         let result = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::MAX)).await;
         drainer.abort();
 
+        // The bg task gets what is left of the close timer
+        // (`close_deadline_ms - now`, on the fixture's real `SystemTime`), so the
+        // few milliseconds the close steps take are subtracted from the
+        // `request.timeout.ms` cap; 100 ms covers that and still fails a cap
+        // that is even slightly off.
         let signalled = handles.signal_close_timeout_ms.load(Ordering::Acquire);
-        let rejected = matches!(result, Err(Error::LocalIllegalArgument(_)));
         assert!(
-            rejected || signalled >= request_timeout_ms - 1_000,
-            "close(Duration::MAX) handed the bg task {signalled} ms (result {result:?}); Java caps the \
-             close timer at request.timeout.ms ({request_timeout_ms} ms) for Long.MAX_VALUE ms and \
-             throws for an unrepresentable Duration — it never closes with a 0 ms budget"
+            (request_timeout_ms - 100..=request_timeout_ms).contains(&signalled),
+            "close(Duration::MAX) must hand the bg task the request.timeout.ms cap \
+             ({request_timeout_ms} ms, less the elapsed close time) (Java: createTimerForCloseRequests \
+             caps Long.MAX_VALUE ms at request.timeout.ms); got {signalled} ms (result {result:?})"
         );
     }
 }
