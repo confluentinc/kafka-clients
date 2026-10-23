@@ -31,6 +31,7 @@ use anyhow::Context as _;
 
 mod admin_gen;
 mod chaos_matrix;
+mod perf_cloud;
 
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
@@ -63,6 +64,7 @@ fn main() -> anyhow::Result<()> {
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
+        Some("perf-cloud") => perf_cloud::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
@@ -2671,6 +2673,9 @@ fn print_help() {
                     e.g. cargo xtask chaos-matrix-status --watch 30
                     --out DIR (default: the most recently active matrix)
   transactional-producer-perf-test  Run the env-driven transactional producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
+  perf-cloud      Run the producer, transactional and consumer performance harnesses
+                  against a remote SASL_SSL cluster (e.g. Confluent Cloud) and compare the clients:
+                  list / check / build / run; `cargo xtask perf-cloud help` lists the flags
 
 Usage:
   cargo xtask format
@@ -2697,7 +2702,8 @@ Usage:
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
   cargo xtask transactional-producer-perf-test
-  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name> | --msrv] [--release]"
+  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name> | --msrv] [--release]
+  cargo xtask perf-cloud <list|check|build|run> [FLAGS]"
     );
 }
 
