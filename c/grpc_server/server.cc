@@ -1298,8 +1298,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       fill_proto_error(resp->mutable_error(), err);
     }
     pump_callbacks(handle.view);
-    // Destroying the class handle invalidates the view; it does not close the
-    // producer, which is why close ran first.
+    // Destroying the class handle invalidates the view. Close ran first, so
+    // destroy has no producer left to close.
     handle.destroy();
     // The log entries stay in callback_log_ and the LogState stays in
     // log_states_, so GetCallbackLog still works post-close.

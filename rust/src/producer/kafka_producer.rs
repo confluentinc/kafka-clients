@@ -2789,6 +2789,13 @@ impl<K, V> KafkaProducer<K, V> {
         self.wakeup.notify_one();
     }
 
+    /// Whether no close has started on this producer.
+    ///
+    /// Every close clears `running` in [`Self::initiate_close`].
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
     /// Force-close the sender, aborting all pending batches.
     fn force_close(&self) {
         self.force_close.store(true, Ordering::Release);
@@ -3072,14 +3079,20 @@ where
     }
 }
 
+/// Starts a graceful close of a producer that was not closed, so its sender task
+/// still sends the records it holds and then stops.
+///
+/// Java has no counterpart: its I/O thread is a daemon (`KafkaProducer.java:468`),
+/// which keeps sending the records of a producer nothing references any more. The
+/// sender task here does the same for as long as its runtime runs.
 impl<K, V> Drop for KafkaProducer<K, V> {
     fn drop(&mut self) {
-        if self.running.load(Ordering::Acquire) {
+        if self.is_running() {
             kafka_warn!(
                 self.log_context,
                 "KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks."
             );
-            self.force_close();
+            self.initiate_close();
         }
     }
 }
@@ -5563,7 +5576,7 @@ mod tests {
         // Simulate the sender completing all batches by aborting them.
         // abort() calls complete_future_and_fire_callbacks which calls
         // produce_future.set() and produce_future.done(), unblocking flush.
-        accumulator.abort_incomplete_batches();
+        accumulator.abort_incomplete_batches().await;
 
         // Now all futures should be done (abort marks ProduceRequestResults as done)
         for f in &futures {
@@ -7247,7 +7260,7 @@ mod tests {
             // The record still sits in the accumulator carrying the callback; the
             // accumulator fires it exactly once when the batch is aborted (as the
             // Sender's abort/close path would).
-            ctx.accumulator.abort_incomplete_batches();
+            ctx.accumulator.abort_incomplete_batches().await;
             (count_after_send, count.load(Ordering::SeqCst))
         });
 
@@ -9385,5 +9398,44 @@ mod tests {
             assert_eq!(expected_leader, seen[1], "leader connection, check = {check}");
             producer.close_with_timeout(Duration::ZERO).await.expect("close");
         }
+    }
+
+    /// A producer dropped without `close` still delivers the record it holds, as
+    /// Java's does: Java's I/O thread is a daemon (`KafkaProducer.java:468`) that
+    /// keeps sending after nothing references the producer. Dropping it used to
+    /// force-close the sender, which failed the record with "Producer is closed
+    /// forcefully.".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_producer_dropped_without_close_delivers_the_record_it_holds() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "dropped-producer-topic";
+        let broker = FakeBroker::start_acknowledging_produce("fake-cluster", TOPIC).await;
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            // Non-idempotent, so the Sender does not first wait on an
+            // InitProducerId the fake never answers.
+            ("enable.idempotence".to_string(), "false".to_string()),
+            // The record stays in the accumulator until the producer is dropped.
+            ("linger.ms".to_string(), "60000".to_string()),
+        ]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("constructs against the fake broker");
+        let future = producer
+            .send(ProducerRecord::new(TOPIC.to_string(), Some("value".to_string())))
+            .await
+            .expect("metadata arrives from the fake broker");
+        assert!(!future.is_done(), "the record must still be held when the producer is dropped");
+
+        drop(producer);
+
+        let metadata = future
+            .get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("the record must be delivered after the drop");
+        assert_eq!(0, metadata.offset());
     }
 }
