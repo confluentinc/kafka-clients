@@ -28,6 +28,7 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 
@@ -136,7 +137,27 @@ pub(crate) struct ConsumerMembershipManager {
     /// drive does a single atomic load and skips the `pending_release` mutex
     /// when no release callback is in flight.
     pending_release_flag: std::sync::atomic::AtomicBool,
+    /// The ack of the release callback an `unsubscribe()` leave enqueued
+    /// ([`Self::signal_member_leaving_group`]), while the member waits in
+    /// `PREPARE_LEAVING` for it. Java chains `clearAssignmentAndLeaveGroup()`
+    /// on that callback's future with `whenComplete`, which runs on the
+    /// network thread when the callback-completed event is processed — i.e.
+    /// serialized with the heartbeat manager's poll. The app side returns
+    /// this ack inside that same event, and the processor drives this slot
+    /// when it reaches it ([`Self::consumer_rebalance_listener_callback_completed`]),
+    /// before any request manager polls, so `PREPARE_LEAVING -> LEAVING`
+    /// keeps the event's queue position and can never land in the middle of
+    /// a heartbeat build.
+    pending_leave_callback: Mutex<Option<LeaveCallbackAck>>,
+    /// Lock-free mirror of `pending_leave_callback.is_some()`, so the
+    /// steady-state bg loop pays one atomic load.
+    pending_leave_callback_flag: std::sync::atomic::AtomicBool,
 }
+
+/// The ack of the `on_partitions_revoked` / `on_partitions_lost` callback a
+/// leave enqueued to release the assignment (§31). Stands in for the
+/// `CompletableFuture<Void>` Java's `signalMemberLeavingGroup()` returns.
+pub(crate) type LeaveCallbackAck = oneshot::Receiver<Result<(), Error>>;
 
 /// Cross-iteration state for a reconcile callback awaiting its app-side
 /// ack (Phase 41b). Mirrors the resume points of Java's
@@ -270,6 +291,8 @@ impl ConsumerMembershipManager {
             pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
             pending_release: Mutex::new(None),
             pending_release_flag: std::sync::atomic::AtomicBool::new(false),
+            pending_leave_callback: Mutex::new(None),
+            pending_leave_callback_flag: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -471,12 +494,24 @@ impl ConsumerMembershipManager {
         let previous_state = self.abstract_mm.transition_to_fatal()?;
 
         // If we were UNSUBSCRIBED / LEAVING / PREPARE_LEAVING, Java's
-        // semantics are: no onPartitionsLost callback; the leave
-        // future (if any) is completed silently.
+        // semantics are: no onPartitionsLost callback, and the ongoing leave
+        // (if any) is completed — Java's `maybeCompleteLeaveInProgress()` in
+        // both the "already left" (`AbstractMembershipManager.java:509`) and
+        // the "was leaving" (`:519`) branches.
         if matches!(
             previous_state,
             MemberState::Unsubscribed | MemberState::Leaving | MemberState::PrepareLeaving
         ) {
+            if previous_state != MemberState::Unsubscribed {
+                log::info!(
+                    "Member {} with epoch {} was leaving the group with state {} when it got a fatal error \
+                     from the broker. It will discard the ongoing leave and remain in fatal state.",
+                    self.member_id(),
+                    self.member_epoch(),
+                    previous_state
+                );
+            }
+            self.abstract_mm.maybe_complete_leave_in_progress();
             return Ok(());
         }
 
@@ -529,20 +564,34 @@ impl ConsumerMembershipManager {
         // Handle Java's "already leaving / unsubscribed" short-circuit.
         match pre_state {
             MemberState::PrepareLeaving => {
+                // Java (`AbstractMembershipManager.java:449-461`): briefly go
+                // through LEAVING (clear epoch, notify listeners), then
+                // UNSUBSCRIBED, and complete the ongoing leave operation. An
+                // `on_partitions_revoked` callback still in flight for the
+                // leave finds the member UNSUBSCRIBED when it completes and
+                // sends no leave heartbeat.
                 self.transition_to_sending_leave_group(false)?;
-                let mut guard = match self.abstract_mm.inner.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.transition_to(MemberState::Unsubscribed)?;
+                {
+                    let mut guard = match self.abstract_mm.inner.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    guard.transition_to(MemberState::Unsubscribed)?;
+                }
+                self.abstract_mm.maybe_complete_leave_in_progress();
                 return Ok(());
             },
             MemberState::Leaving => {
-                let mut guard = match self.abstract_mm.inner.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.transition_to(MemberState::Unsubscribed)?;
+                // Java (`:463-470`): no leave request is needed once fenced;
+                // complete the ongoing leave operation.
+                {
+                    let mut guard = match self.abstract_mm.inner.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    guard.transition_to(MemberState::Unsubscribed)?;
+                }
+                self.abstract_mm.maybe_complete_leave_in_progress();
                 return Ok(());
             },
             MemberState::Unsubscribed => {
@@ -1738,7 +1787,8 @@ impl ConsumerMembershipManager {
         is_leaving_state && has_leave_operation
     }
 
-    /// Java: `ConsumerMembershipManager.invokeOnPartitionsRevokedOrLostToReleaseAssignment()`.
+    /// Java: `ConsumerMembershipManager.invokeOnPartitionsRevokedOrLostToReleaseAssignment()`,
+    /// reached through `signalMemberLeavingGroup()`.
     ///
     /// Choose between `onPartitionsRevoked` and `onPartitionsLost`
     /// based on the current member epoch. From Java:
@@ -1748,13 +1798,15 @@ impl ConsumerMembershipManager {
     /// > the group anymore (epoch <= 0), this will invoke
     /// > onPartitionsLost.
     ///
-    /// Translated as `pub(crate)` because the Java method is
-    /// `protected`-on-subclass and the test module reaches into it via
-    /// the §31 event channel.
+    /// Non-blocking, like Java's (which returns the callback's
+    /// `CompletableFuture`): the §31 `RebalanceListenerCallbackNeeded` event
+    /// is enqueued and its ack receiver returned, never awaited here.
+    /// `Ok(None)` is Java's `completedFuture(null)`: no assignment to release,
+    /// or no listener registered.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalMemberLeavingGroup")]
-    pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), Error> {
-        // Snapshot the dropped partitions + epoch under a single short
-        // lock; drop both guards before any .await.
+    pub(crate) fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<Option<LeaveCallbackAck>, Error> {
+        // Snapshot the dropped partitions + epoch under short locks, one at
+        // a time.
         let (dropped_partitions, member_epoch) = {
             let subs = match self.abstract_mm.subscriptions.lock() {
                 Ok(g) => g,
@@ -1776,7 +1828,7 @@ impl ConsumerMembershipManager {
         );
 
         if dropped_partitions.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let method = if member_epoch > 0 {
@@ -1784,55 +1836,85 @@ impl ConsumerMembershipManager {
         } else {
             ConsumerRebalanceListenerMethodName::OnPartitionsLost
         };
-        self.abstract_mm
-            .invoke_rebalance_callback(method, dropped_partitions, current_time_ms)
-            .await
+        // The ack travels back through the application-event queue (Java's
+        // `ConsumerRebalanceListenerCallbackCompletedEvent`), so the step
+        // chained on it runs after every event the listener submitted.
+        self.abstract_mm.enqueue_rebalance_callback_with_ack_through_application_events(
+            method,
+            dropped_partitions,
+            true,
+            current_time_ms,
+        )
     }
 
+    /// Transition to `PREPARE_LEAVING`, then to `LEAVING` once the assignment
+    /// is released, and set the membership operation to perform on close.
+    /// Invoked by `Consumer::close(...)`.
+    ///
+    /// Returns the future that completes when the leave operation completes
+    /// (see [`Self::leave_group_with_run_callbacks`]). It runs no rebalance
+    /// callbacks, so the whole operation up to `LEAVING` is synchronous.
+    ///
     /// Java: `AbstractMembershipManager.leaveGroupOnClose(GroupMembershipOperation)`.
-    /// Invoked by `Consumer::close(...)`. Records the membership
-    /// operation and delegates to `leave_group(run_callbacks=false)`.
-    pub(crate) async fn leave_group_on_close(
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroupOnClose")]
+    pub(crate) fn leave_group_on_close(
         &self,
         membership_operation: GroupMembershipOperation,
         current_time_ms: i64,
-    ) -> Result<(), Error> {
+    ) -> Result<KafkaFutureImpl<()>, Error> {
         self.set_leave_group_operation(membership_operation);
-        self.leave_group_inner(false, current_time_ms).await
+        self.leave_group_with_run_callbacks(false, current_time_ms)
     }
 
-    /// Java: `AbstractMembershipManager.leaveGroup()`. Invoked by
-    /// `Consumer::unsubscribe()`. Runs callbacks during the leave.
-    pub(crate) async fn leave_group(&self, current_time_ms: i64) -> Result<(), Error> {
-        self.leave_group_inner(true, current_time_ms).await
+    /// Transition to `PREPARE_LEAVING` to release the assignment, then to
+    /// `LEAVING` to send the heartbeat that leaves the group. Invoked by
+    /// `Consumer::unsubscribe()`. Runs the rebalance callbacks (see
+    /// [`Self::leave_group_with_run_callbacks`]).
+    ///
+    /// Java: `AbstractMembershipManager.leaveGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroup")]
+    pub(crate) fn leave_group(&self, current_time_ms: i64) -> Result<KafkaFutureImpl<()>, Error> {
+        self.leave_group_with_run_callbacks(true, current_time_ms)
     }
 
     /// Java: `AbstractMembershipManager.leaveGroup(boolean runCallbacks)`.
-    /// The shared body of `leave_group` / `leave_group_on_close`.
+    /// The shared body of `leave_group` / `leave_group_on_close`, run
+    /// synchronously on the background task, as Java runs it inside
+    /// `ApplicationEventProcessor.process(...)` on the network thread — so the
+    /// heartbeat manager's poll in the same `run_once` already sees the member
+    /// leaving and builds the leave heartbeat.
     ///
-    /// Mirrors Java's flow phase-for-phase:
+    /// 1. Not in the group: clear and unsubscribe (no heartbeat needed;
+    ///    `FENCED` is reset to `UNSUBSCRIBED` after clearing the assignment)
+    ///    and return an already completed future.
+    /// 2. Already leaving (`PREPARE_LEAVING` / `LEAVING`): return the existing
+    ///    leave-in-progress future, which completes when the ongoing leave
+    ///    operation completes.
+    /// 3. Otherwise transition to `PREPARE_LEAVING` and store a new
+    ///    leave-in-progress future. With `run_callbacks`, enqueue the
+    ///    callback releasing the assignment
+    ///    ([`Self::signal_member_leaving_group`]). If one was enqueued, its
+    ///    ack is stored for the bg loop, which runs
+    ///    `clear_assignment_and_leave_group` once the ack arrives
+    ///    ([`Self::drive_pending_leave_callback`]; Java chains that step with
+    ///    `callbackResult.whenComplete(...)`); otherwise the member clears its
+    ///    assignment and moves to `LEAVING` right here.
     ///
-    /// 1. If already out of group: clear & unsubscribe (no heartbeat
-    ///    needed). `FENCED` is reset to `UNSUBSCRIBED` after clearing
-    ///    the assignment.
-    /// 2. If already leaving: no-op.
-    /// 3. Transition to `PREPARE_LEAVING`. If `run_callbacks=true`,
-    ///    invoke the rebalance-listener handshake via
-    ///    [`signal_member_leaving_group`]; listener errors are logged
-    ///    but the leave proceeds regardless (Java's `whenComplete`
-    ///    semantics).
-    /// 4. Unsubscribe + clear assignment.
-    /// 5. Transition to `LEAVING` so the next heartbeat sends the
-    ///    leave-group request.
-    async fn leave_group_inner(&self, run_callbacks: bool, current_time_ms: i64) -> Result<(), Error> {
+    /// The returned future completes only through
+    /// `maybe_complete_leave_in_progress()`: when the response to the leave
+    /// heartbeat is received (success or failure), when the leave heartbeat
+    /// could not be sent, or when the member is fenced or fails while
+    /// leaving. Rust returns the completable handle so the caller can chain
+    /// the event completion with `when_complete`, mirroring Java's
+    /// `future.whenComplete(complete(event.future()))`; callers never
+    /// complete it themselves.
+    fn leave_group_with_run_callbacks(
+        &self,
+        run_callbacks: bool,
+        current_time_ms: i64,
+    ) -> Result<KafkaFutureImpl<()>, Error> {
         // Step 1: already-out-of-group fast path.
-        let pre_state = {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.state
-        };
+        let pre_state = self.state();
         if matches!(
             pre_state,
             MemberState::Unsubscribed | MemberState::Fenced | MemberState::Fatal | MemberState::Stale
@@ -1859,37 +1941,214 @@ impl ConsumerMembershipManager {
                 };
                 guard.notify_assignment_change(&std::collections::HashSet::new());
             }
-            return Ok(());
+            let completed = KafkaFutureImpl::new();
+            completed.complete(());
+            return Ok(completed);
         }
 
-        // Step 2: already-leaving short-circuit. Java returns the
-        // existing in-flight future; our async equivalent is a no-op
-        // because the in-flight `leave_group` call will return when
-        // the rebalance completes.
-        if matches!(pre_state, MemberState::PrepareLeaving | MemberState::Leaving) {
-            log::debug!("Leave group operation already in progress for member {}", self.member_id());
-            return Ok(());
-        }
-
-        // Step 3: PREPARE_LEAVING + optional rebalance-callback step.
-        {
+        // Steps 2 and 3 under one guard, so the state check, the transition
+        // and the future registration are atomic with respect to the
+        // completion sites (which take the future under the same guard).
+        let leave_result = {
             let mut guard = match self.abstract_mm.inner.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            if matches!(guard.state, MemberState::PrepareLeaving | MemberState::Leaving) {
+                // Member already leaving. No-op and return the existing leave
+                // group future that will complete when the ongoing leave
+                // operation completes.
+                log::debug!("Leave group operation already in progress for member {}", guard.member_id);
+                // Deviation: Java's `leaveGroupInProgress.get()` throws
+                // `NoSuchElementException` when the member is leaving with no
+                // future registered. This is reachable when an invalid-epoch
+                // heartbeat response arrives while the member is
+                // PREPARE_LEAVING: `onHeartbeatSuccess` takes and completes the
+                // future but the state stays PREPARE_LEAVING, so a second
+                // `unsubscribe()` or a `close()` lands here. Java 4.4's
+                // `ConsumerNetworkThread.processApplicationEvents` catches the
+                // throwable and fails the event at once (`unsubscribe()` then
+                // throws a `KafkaException`; `close()` logs "Failed to leave
+                // group while closing consumer"). Rust deliberately registers a
+                // fresh future instead, so the caller waits for the ongoing
+                // leave to end and then succeeds.
+                let in_progress = guard.leave_group_in_progress.get_or_insert_with(KafkaFutureImpl::new);
+                return Ok(in_progress.clone());
+            }
             guard.transition_to(MemberState::PrepareLeaving)?;
-        }
+            let leave_result = KafkaFutureImpl::new();
+            guard.leave_group_in_progress = Some(leave_result.clone());
+            leave_result
+        };
 
-        if run_callbacks && let Err(e) = self.signal_member_leaving_group(current_time_ms).await {
-            log::error!(
+        if run_callbacks {
+            match self.signal_member_leaving_group(current_time_ms) {
+                Ok(Some(ack_rx)) => {
+                    self.store_pending_leave_callback(ack_rx);
+                    return Ok(leave_result);
+                },
+                Ok(None) => {
+                    log::info!(
+                        "Member {} completed callback to release assignment. It will proceed to clear \
+                         its assignment and send a leave group heartbeat",
+                        self.member_id()
+                    );
+                },
+                Err(e) => {
+                    log::error!(
+                        "Member {} callback to release assignment failed. It will proceed to clear its \
+                         assignment and send a leave group heartbeat: {}",
+                        self.member_id(),
+                        e
+                    );
+                },
+            }
+        } else {
+            log::debug!(
+                "Member {} attempting to leave has no rebalance callbacks, so it will clear assignments \
+                 and transition to send heartbeat to leave group.",
+                self.member_id()
+            );
+        }
+        self.clear_assignment_and_leave_group()?;
+
+        // Return future to indicate that the leave group is done when the
+        // callbacks complete, and the transition to send the heartbeat has
+        // been made.
+        Ok(leave_result)
+    }
+
+    /// `true` while an `unsubscribe()` leave waits in `PREPARE_LEAVING` for
+    /// its release callback's ack. Lock-free.
+    pub(crate) fn has_pending_leave_callback(&self) -> bool {
+        self.pending_leave_callback_flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A second leave can only store over an older, still-pending ack after
+    /// the first leave ended without it (fenced or failed while
+    /// PREPARE_LEAVING, then rejoined). Replacing it drops only that stale
+    /// clear-and-leave step — the first leave's future was already completed
+    /// by the fence / fatal transition. Java would still run the stale step
+    /// and move the new leave to LEAVING before its own callback ran.
+    fn store_pending_leave_callback(&self, ack_rx: LeaveCallbackAck) {
+        let mut guard = match self.pending_leave_callback.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(ack_rx);
+        self.pending_leave_callback_flag
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The step Java chains on the leave callback with
+    /// `callbackResult.whenComplete(...)` in `leaveGroup(boolean)`: once the
+    /// ack of the callback [`Self::leave_group`] enqueued has arrived, clear
+    /// the assignment and transition to `LEAVING`, whether the callback failed
+    /// or succeeded. While the ack is pending this is a no-op (`try_recv`, no
+    /// await), so the bg loop keeps spinning (§31).
+    ///
+    /// The app side returns the ack inside a
+    /// `ConsumerRebalanceListenerCallbackCompleted` application event, and
+    /// the processor drives this right after completing it
+    /// ([`Self::consumer_rebalance_listener_callback_completed`]) — where
+    /// Java runs the `whenComplete`, on the network thread while processing
+    /// the callback-completed event. That is in Phase 1 of `run_once`, before
+    /// the request managers poll, so the heartbeat manager's poll in the same
+    /// iteration builds the leave heartbeat. The bg loop also drives it
+    /// around each drained event, which only matters for an ack dropped with
+    /// no completed event to carry it (the callback event was dropped before
+    /// the app ran the listener, or processing the completed event panicked):
+    /// the ack then reads as closed. An error-completed ack — e.g. the
+    /// interrupt error sent when the caller's future was dropped mid-listener
+    /// — still clears the assignment and leaves, as Java's `whenComplete`
+    /// does on error.
+    pub(crate) fn drive_pending_leave_callback(&self) -> Result<(), Error> {
+        let pending = {
+            let mut guard = match self.pending_leave_callback.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            self.pending_leave_callback_flag
+                .store(false, std::sync::atomic::Ordering::Release);
+            guard.take()
+        };
+        let Some(mut ack_rx) = pending else {
+            return Ok(());
+        };
+        match ack_rx.try_recv() {
+            Ok(Ok(())) => log::info!(
+                "Member {} completed callback to release assignment. It will proceed to clear its \
+                 assignment and send a leave group heartbeat",
+                self.member_id()
+            ),
+            Ok(Err(e)) => log::error!(
                 "Member {} callback to release assignment failed. It will proceed to clear its \
                  assignment and send a leave group heartbeat: {}",
                 self.member_id(),
                 e
-            );
+            ),
+            Err(oneshot::error::TryRecvError::Closed) => log::error!(
+                "Member {} callback to release assignment failed. It will proceed to clear its \
+                 assignment and send a leave group heartbeat: rebalance listener ack receiver \
+                 dropped before completion",
+                self.member_id()
+            ),
+            Err(oneshot::error::TryRecvError::Empty) => {
+                // Ack not ready — keep waiting (the loop continues).
+                self.store_pending_leave_callback(ack_rx);
+                return Ok(());
+            },
         }
+        // Clear the assignment, no matter if the callback execution failed or
+        // succeeded.
+        self.clear_assignment_and_leave_group()
+    }
 
-        // Step 4 + 5: clearAssignmentAndLeaveGroup().
+    /// Java: `ConsumerMembershipManager.consumerRebalanceListenerCallbackCompleted(event)`.
+    ///
+    /// Run by the application-event processor when it reaches the
+    /// `ConsumerRebalanceListenerCallbackCompleted` event the app side
+    /// enqueued after a leave's release callback returned. Completes the
+    /// callback's future (`ack`) and then runs the step Java chains on it
+    /// with `whenComplete` ([`Self::drive_pending_leave_callback`]), so the
+    /// leave's `clearAssignmentAndLeaveGroup()` takes effect at the event's
+    /// position in the queue: after every event the listener submitted
+    /// before it returned, even one whose wait it abandoned, and before any
+    /// event the app submitted afterwards.
+    ///
+    /// When `ack` is not the pending leave's (an older leave's callback
+    /// whose slot a later leave replaced), the send finds the receiver gone
+    /// and the drive leaves the current leave's ack waiting.
+    pub(crate) fn consumer_rebalance_listener_callback_completed(
+        &self,
+        method_name: ConsumerRebalanceListenerMethodName,
+        error: Option<Error>,
+        ack: oneshot::Sender<Result<(), Error>>,
+    ) -> Result<(), Error> {
+        let result = match error {
+            Some(e) => {
+                log::warn!(
+                    "The {} method completed with an error ({}); signaling to continue to the next phase of \
+                     rebalance",
+                    method_name.fully_qualified_method_name(),
+                    e
+                );
+                Err(e)
+            },
+            None => {
+                log::debug!(
+                    "The {} method completed successfully; signaling to continue to the next phase of rebalance",
+                    method_name.fully_qualified_method_name()
+                );
+                Ok(())
+            },
+        };
+        let _ = ack.send(result);
+        self.drive_pending_leave_callback()
+    }
+
+    /// Java: `AbstractMembershipManager.clearAssignmentAndLeaveGroup()`.
+    fn clear_assignment_and_leave_group(&self) -> Result<(), Error> {
         {
             let mut subs = match self.abstract_mm.subscriptions.lock() {
                 Ok(g) => g,
@@ -1898,16 +2157,20 @@ impl ConsumerMembershipManager {
             subs.unsubscribe();
         }
         self.abstract_mm.clear_assignment();
-        self.transition_to_sending_leave_group(false)?;
-        Ok(())
+
+        // Transition to ensure that a heartbeat request is sent out to
+        // effectively leave the group (even in the case where the member had
+        // no assignment to release or when the callback execution failed.)
+        self.transition_to_sending_leave_group(false)
     }
 
     /// Java: `onHeartbeatFailure(boolean retriable)`.
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
-        let was_unsubscribed = self.abstract_mm.on_heartbeat_failure(retriable);
-        if was_unsubscribed {
+        if self.abstract_mm.on_heartbeat_failure(retriable) {
             log::warn!(
-                "Member with epoch {} received a failed response to the heartbeat to leave the group.",
+                "Member {} with epoch {} received a failed response to the heartbeat to leave the group \
+                 and completed the leave operation. ",
+                self.member_id(),
                 self.member_epoch()
             );
         }
@@ -2033,9 +2296,11 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 /// 4. **CompletableFuture-chain-shape verification** (~10 cases):
 ///    Tests that build a `CompletableFuture<Void>` chain via
 ///    `leaveGroup()` and assert chain shape (completion order,
-///    exceptionally-completion). The Rust async path does not expose a
-///    chain object; chain ordering is verified by our reconcile +
-///    leave_group tests via state assertions instead.
+///    exceptionally-completion). The Rust reconcile path does not expose
+///    a chain object; its ordering is verified by the reconcile tests via
+///    state assertions instead. (`leave_group()` does return its future,
+///    and the leave tests assert `is_done()` exactly where Java asserts
+///    `isDone()`.)
 ///
 /// 5. **Time / metric assertions** (~8 cases): tests using the Java
 ///    `MockTime` advance + `RebalanceMetricsManager` verification. The
@@ -2375,6 +2640,52 @@ mod tests {
     // Helper: force the manager into PREPARE_LEAVING so the
     // transition to LEAVING (via `transition_to_sending_leave_group`)
     // is valid per `MemberState::previous_valid_states`.
+    /// Java `membershipManager.leaveGroup()` for a member with no
+    /// assignment to release: the leave runs synchronously to LEAVING and no
+    /// callback is left pending.
+    fn leave_group_no_callback(mgr: &ConsumerMembershipManager) -> KafkaFutureImpl<()> {
+        let leave_result = mgr.leave_group(0).unwrap();
+        assert!(
+            !mgr.has_pending_leave_callback(),
+            "no release callback expected for this member"
+        );
+        leave_result
+    }
+
+    /// Java `membershipManager.leaveGroup()`. Returns the leave future and
+    /// whether a release callback was enqueued; when it was, the test acks
+    /// it and then calls `drive_pending_leave_callback()` the way the bg loop
+    /// does each iteration (Java's `callbackResult.whenComplete(...)`).
+    fn leave_group(mgr: &ConsumerMembershipManager) -> (KafkaFutureImpl<()>, bool) {
+        let leave_result = mgr.leave_group(0).unwrap();
+        (leave_result, mgr.has_pending_leave_callback())
+    }
+
+    /// Java `mockPrepareLeavingStuckOnUserCallback`: a member in the group
+    /// (epoch > 0) owning `topic1-0` calls `leaveGroup()`, which leaves it in
+    /// PREPARE_LEAVING waiting on the `onPartitionsRevoked` callback. Returns
+    /// the leave future and the callback's ack sender (Java's
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent`).
+    fn prepare_leaving_stuck_on_user_callback(
+        mgr: &ConsumerMembershipManager,
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) -> (KafkaFutureImpl<()>, oneshot::Sender<Result<(), Error>>) {
+        subscribe_with_topics(mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        mgr.abstract_mm.inner.lock().unwrap().update_member_epoch(1);
+        mock_owned_partitions(mgr, &[tp("topic1", 0)]);
+        let (leave_result, callback_pending) = leave_group(mgr);
+        assert!(callback_pending, "the revoked callback was enqueued");
+        let ack = match rx.try_recv().expect("revoked callback event").event {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+        (leave_result, ack)
+    }
+
     fn force_into_prepare_leaving(mgr: &ConsumerMembershipManager) {
         mgr.transition_to_joining().unwrap();
         let mut guard = mgr.abstract_mm.inner.lock().unwrap();
@@ -2752,31 +3063,57 @@ mod tests {
     /// `ConsumerMembershipManagerTest#testFencingWhenStateIsPrepareLeaving`.
     /// A PREPARE_LEAVING member that gets fenced goes through LEAVING
     /// to UNSUBSCRIBED (no callback, no rejoin) per
-    /// `transition_to_fenced`'s short-circuit.
+    /// `transition_to_fenced`'s short-circuit; when the stuck callback then
+    /// completes, the member stays UNSUBSCRIBED (no last HB sent).
     #[tokio::test]
     async fn fencing_when_state_is_prepare_leaving() {
-        let (mgr, _rx) = make(None, None, None);
-        force_into_prepare_leaving(&mgr);
+        let (mgr, mut rx) = make(None, None, None);
+        let (_leave_result, callback_ack) = prepare_leaving_stuck_on_user_callback(&mgr, &mut rx);
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Get fenced while preparing to leave the group. Member should ignore
+        // the fence (no callbacks or rejoin) and should transition to
+        // UNSUBSCRIBED to effectively stop sending heartbeats.
         mgr.transition_to_fenced(0).unwrap();
-        // The Java contract puts us in UNSUBSCRIBED after the
-        // PREPARE_LEAVING -> LEAVING -> UNSUBSCRIBED dance.
+        assert!(rx.try_recv().is_err(), "the fence must trigger no callback");
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+
+        // When PREPARE_LEAVING completes, the member should remain
+        // UNSUBSCRIBED (no last HB sent because member is already out of the
+        // group in the broker).
+        callback_ack.send(Ok(())).unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.abstract_mm.inner.lock().unwrap().should_skip_heartbeat());
     }
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testFencingWhenStateIsLeaving`.
     /// A LEAVING member that gets fenced transitions to UNSUBSCRIBED
-    /// (no callback, no last HB).
+    /// (no callback, no last HB) and completes the ongoing leave.
     #[tokio::test]
     async fn fencing_when_state_is_leaving() {
         let (mgr, _rx) = make(None, None, None);
-        force_into_prepare_leaving(&mgr);
-        mgr.transition_to_sending_leave_group(false).unwrap();
+        mgr.transition_to_joining().unwrap();
+        // Start leaving group.
+        let leave_operation = leave_group_no_callback(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(!leave_operation.is_done());
+
+        // Get fenced while leaving. Member should not trigger any callback or
+        // try to rejoin.
         mgr.transition_to_fenced(0).unwrap();
-        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_eq!(
+            mgr.state(),
+            MemberState::Unsubscribed,
+            "Member should transition from LEAVING to UNSUBSCRIBED when getting fenced (it does not \
+             need to send leave request if fenced"
+        );
+        assert!(
+            leave_operation.is_done(),
+            "Fenced member should complete the ongoing leave operation"
+        );
     }
 
     /// Translated from
@@ -2843,7 +3180,7 @@ mod tests {
         }
         listener.calls.lock().unwrap().clear();
 
-        mgr.leave_group(0).await.unwrap();
+        let _leave = leave_group_no_callback(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
         let calls = listener.calls.lock().unwrap();
         // The leave_group_epoch (LEAVE_GROUP_MEMBER_EPOCH=-1) was
@@ -2857,8 +3194,8 @@ mod tests {
     /// cause a state transition.
     #[test]
     fn new_assignment_ignored_when_state_is_prepare_leaving() {
-        let (mgr, _rx) = make(None, None, None);
-        force_into_prepare_leaving(&mgr);
+        let (mgr, mut rx) = make(None, None, None);
+        let (_leave_result, callback_ack) = prepare_leaving_stuck_on_user_callback(&mgr, &mut rx);
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
 
         // Java's onHeartbeatSuccess in PREPARE_LEAVING state is a no-op
@@ -2880,6 +3217,12 @@ mod tests {
         // Member stays in PREPARE_LEAVING; the new assignment is
         // ignored because the state can't accept new assignments.
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert!(topics_awaiting_reconciliation(&mgr).is_empty());
+
+        // When callback completes member should transition to LEAVING.
+        callback_ack.send(Ok(())).unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
     }
 
     /// Translated from
@@ -2924,7 +3267,7 @@ mod tests {
         // Static member -> -2 with default operation.
         let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
         mgr.transition_to_joining().unwrap();
-        mgr.leave_group(0).await.unwrap();
+        let _leave = leave_group_no_callback(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
         assert_eq!(
             mgr.member_epoch(),
@@ -2934,7 +3277,7 @@ mod tests {
         // Dynamic member -> -1.
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
-        mgr.leave_group(0).await.unwrap();
+        let _leave = leave_group_no_callback(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
@@ -2948,7 +3291,7 @@ mod tests {
         // Static member with DEFAULT -> -2.
         let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
         mgr.transition_to_joining().unwrap();
-        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
         assert_eq!(
             mgr.member_epoch(),
@@ -2958,14 +3301,14 @@ mod tests {
         // Static member with LEAVE_GROUP -> -1.
         let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
         mgr.transition_to_joining().unwrap();
-        mgr.leave_group_on_close(GroupMembershipOperation::LeaveGroup, 0).await.unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::LeaveGroup, 0).unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
 
         // Dynamic member with DEFAULT -> -1.
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
-        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
@@ -3226,7 +3569,7 @@ mod tests {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
             // Revoke / lost path (AK 4.3.1: `PartitionsRemovedEvent`).
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
@@ -3401,7 +3744,7 @@ mod tests {
 
         let env = rx.recv().await.expect("revoked event");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack.send(Ok(())).unwrap();
@@ -3773,7 +4116,7 @@ mod tests {
         // Revoke callback enqueued (topic1-0) once the commit resolves.
         let env = rx.recv().await.expect("onPartitionsRevoked after the commit resolves");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, HashSet::from([tp("topic1", 0)]));
@@ -4831,7 +5174,7 @@ mod tests {
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("revoked event");
         let _stuck_ack = match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack
@@ -5132,7 +5475,7 @@ mod tests {
     ) {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
@@ -5571,7 +5914,7 @@ mod tests {
         assert!(has_pending_reconcile_for_test(&mgr));
 
         // Leave group while reconciliation is in progress -> LEAVING.
-        mgr.leave_group(0).await.unwrap();
+        let _leave = leave_group_no_callback(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
 
         // Complete the pending assignment event exceptionally (simulating the
@@ -5694,11 +6037,11 @@ mod tests {
     // ---------------------------------------------------------------
     // Commit 6: leave / fatal matrices + misc.
     //
-    // Rust's `leave_group()` is linearized (no separate CompletableFuture
-    // returned). Java assertions on `leaveResult.isDone()` map to state
-    // transitions: leave_group -> LEAVING, then
-    // on_heartbeat_request_generated -> UNSUBSCRIBED, and the leave
-    // "completes" when the leave heartbeat response is processed.
+    // `leave_group()` returns the leave-in-progress future like Java's
+    // `leaveGroup()`, so Java's `leaveResult.isDone()` assertions translate
+    // to `KafkaFutureImpl::is_done`: leave_group -> LEAVING (not done),
+    // on_heartbeat_request_generated -> UNSUBSCRIBED (not done), and the
+    // leave completes when the leave heartbeat response is processed.
     // ---------------------------------------------------------------
 
     /// Bring a member to STABLE via join -> empty assignment -> reconcile
@@ -5765,17 +6108,68 @@ mod tests {
     #[tokio::test]
     async fn leave_group_when_state_is_stable() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+        let (leave_result, continuation) = leave_group(&mgr);
+        assert!(!continuation);
         assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(
+            !leave_result.is_done(),
+            "Leave group result should not complete until the heartbeat request to leave is sent out."
+        );
+        assert_transition_to_unsubscribe_on_hb_sent_and_wait_for_response_to_complete_leave(&mgr, &leave_result);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
+    }
 
-        // Leave heartbeat sent -> UNSUBSCRIBED.
+    /// Java: `assertTransitionToUnsubscribeOnHBSentAndWaitForResponseToCompleteLeave`.
+    fn assert_transition_to_unsubscribe_on_hb_sent_and_wait_for_response_to_complete_leave(
+        mgr: &ConsumerMembershipManager,
+        send_leave: &KafkaFutureImpl<()>,
+    ) {
+        assert_eq!(mgr.state(), MemberState::Leaving);
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert!(
+            !send_leave.is_done(),
+            "Send leave operation should not complete until a response is received"
+        );
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
-        // Leave response received -> remains UNSUBSCRIBED.
+
+        mgr.abstract_mm
+            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
+            .unwrap();
+        assert!(
+            !send_leave.is_done(),
+            "Send leave operation should not complete until a leave response is received"
+        );
+
         mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
-        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_send_leave_completed(mgr, send_leave);
+    }
+
+    /// Java: `assertSendLeaveCompleted`.
+    fn assert_send_leave_completed(mgr: &ConsumerMembershipManager, send_leave: &KafkaFutureImpl<()>) {
+        assert_eq!(
+            mgr.state(),
+            MemberState::Unsubscribed,
+            "Member should remain UNSUBSCRIBED after receiving the response to the HB to leave"
+        );
+        assert_eq!(mgr.member_epoch(), -1);
+        assert!(mgr.current_assignment().is_none());
+        assert!(
+            send_leave.is_done(),
+            "Leave group result should complete when the response to the heartbeat request to leave is received."
+        );
+        assert_leave_completed_successfully(send_leave);
+    }
+
+    /// Java: `assertFalse(future.isCompletedExceptionally())` on a done
+    /// leave future.
+    fn assert_leave_completed_successfully(leave: &KafkaFutureImpl<()>) {
+        use futures_util::FutureExt;
+        let result = leave.future().get().now_or_never();
+        assert!(
+            matches!(result, Some(Ok(()))),
+            "the leave must be done and not completed with an error: {result:?}"
+        );
     }
 
     /// Translated from
@@ -5804,9 +6198,10 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Stable);
         assert_eq!(mgr.current_assignment().partitions.len(), 1);
 
-        // Leave: owned partitions fire onPartitionsRevoked.
-        let mgr_clone = mgr.clone();
-        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        // Leave: owned partitions fire onPartitionsRevoked. The member waits
+        // in PREPARE_LEAVING for the callback.
+        let (leave_result, continuation) = leave_group(&mgr);
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
         expect_callback(
             &mut rx,
             None,
@@ -5815,24 +6210,47 @@ mod tests {
             Ok(()),
         )
         .await;
-        leave.await.unwrap().unwrap();
+        assert!(continuation, "a release callback was enqueued");
+        mgr.drive_pending_leave_callback().unwrap();
+        // Java: testLeaveGroupReleasesAssignmentAndResetsEpochToSendLeaveGroup.
         assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(
+            !leave_result.is_done(),
+            "Leave group result should not complete until the heartbeat request to leave is sent out."
+        );
+        assert_transition_to_unsubscribe_on_hb_sent_and_wait_for_response_to_complete_leave(&mgr, &leave_result);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
     }
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberAlreadyLeaving`.
-    /// A second leave while LEAVING is a no-op.
+    /// A second leave while LEAVING triggers nothing and returns the SAME
+    /// in-progress future (`AbstractMembershipManager.java:637-643`), so
+    /// both complete together on the leave heartbeat's response.
     #[tokio::test]
     async fn leave_group_when_member_already_leaving() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+
+        // First leave attempt. Stays LEAVING until the heartbeat is sent out.
+        let (leave_result1, continuation) = leave_group(&mgr);
+        assert!(!continuation);
+        assert!(!leave_result1.is_done());
         assert_eq!(mgr.state(), MemberState::Leaving);
 
-        // Second leave while still LEAVING: no-op, state unchanged.
-        mgr.leave_group(0).await.unwrap();
+        // Second leave attempt while the first one has not completed yet.
+        // Should not trigger any callbacks, and return a future that will
+        // complete when the ongoing first leave operation completes.
+        let (leave_result2, continuation) = leave_group(&mgr);
+        assert!(!continuation, "a second leave must not trigger callbacks");
+        assert!(!leave_result2.is_done());
         assert_eq!(mgr.state(), MemberState::Leaving);
+
+        // Complete first leave group operation. Should also complete the
+        // second leave group.
+        assert_transition_to_unsubscribe_on_hb_sent_and_wait_for_response_to_complete_leave(&mgr, &leave_result1);
+        assert!(leave_result2.is_done());
+        assert_leave_completed_successfully(&leave_result2);
     }
 
     /// Translated from
@@ -5842,12 +6260,17 @@ mod tests {
     #[tokio::test]
     async fn leave_group_when_member_already_left() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
-        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
-        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        // Leave group triggered and completed.
+        let (leave_result1, _) = leave_group(&mgr);
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_transition_to_unsubscribe_on_hb_sent_and_wait_for_response_to_complete_leave(&mgr, &leave_result1);
 
-        // Leave again when already left -> no-op, stays UNSUBSCRIBED.
-        mgr.leave_group(0).await.unwrap();
+        // Leave again when already left -> no-op (no callbacks), already
+        // completed future, stays UNSUBSCRIBED.
+        let (leave_result2, continuation) = leave_group(&mgr);
+        assert!(!continuation);
+        assert!(leave_result2.is_done());
+        assert_leave_completed_successfully(&leave_result2);
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
     }
 
@@ -5869,8 +6292,10 @@ mod tests {
         }
         assert_eq!(mgr.state(), MemberState::Fenced);
 
-        mgr.leave_group(0).await.unwrap();
+        let (leave_operation, continuation) = leave_group(&mgr);
+        assert!(!continuation);
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(leave_operation.is_done());
         assert!(mgr.current_assignment().is_none());
     }
 
@@ -5913,8 +6338,8 @@ mod tests {
         let mgr = Arc::new(mgr);
         // leave_group with owned partitions parks PREPARE_LEAVING on the
         // revoked callback.
-        let mgr_clone = mgr.clone();
-        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        let (leave_result, continuation) = leave_group(&mgr);
+        assert!(continuation, "a revoked callback was enqueued");
         let env = rx.recv().await.expect("revoked event");
         let stuck_ack = match env.event {
             BackgroundEvent::PartitionsRemoved { method_name, ack, .. } => {
@@ -5929,10 +6354,14 @@ mod tests {
         mgr.on_heartbeat_failure(false);
         mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
+        // Beyond Java's test (which does not keep the leave future): the
+        // fatal transition completes the ongoing leave
+        // (`AbstractMembershipManager.java:519`).
+        assert_leave_completed_successfully(&leave_result);
 
         // Complete the stuck callback -> the leave is aborted; remains FATAL.
         stuck_ack.send(Ok(())).unwrap();
-        leave.await.unwrap().unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
     }
 
@@ -5943,12 +6372,19 @@ mod tests {
     #[tokio::test]
     async fn fatal_failure_when_state_is_leaving() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+        // Start leaving group.
+        let (leave_operation, _) = leave_group(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(!leave_operation.is_done());
 
+        // Get fatal failure while waiting to send the heartbeat to leave.
         mgr.on_heartbeat_failure(false);
         mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
+        assert!(
+            leave_operation.is_done(),
+            "Member should complete the ongoing leave operation when transitioning to FATAL state"
+        );
 
         // The last heartbeat won't be sent because the member already failed.
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
@@ -5962,7 +6398,9 @@ mod tests {
     #[tokio::test]
     async fn fatal_failure_when_member_already_left() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+        // Start leaving group.
+        let (send_leave, _) = leave_group(&mgr);
+        assert_eq!(mgr.state(), MemberState::Leaving);
         // Last heartbeat sent.
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
@@ -5972,57 +6410,214 @@ mod tests {
         mgr.on_heartbeat_failure(false);
         mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
+
+        assert!(send_leave.is_done());
+        // Send leave should complete when a response to the leave group is
+        // received, even if it contains errors.
+        assert_leave_completed_successfully(&send_leave);
     }
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testHeartbeatSuccessfulResponseWhenLeavingGroupCompletesLeave`.
-    /// LEAVING -> (heartbeat generated) UNSUBSCRIBED; a non-leave response
-    /// is ignored, the leave response leaves the member UNSUBSCRIBED with
-    /// epoch -1 and no assignment.
+    /// `leave_group()` returns the leave-in-progress future, completed only by
+    /// `maybe_complete_leave_in_progress()` when the response to the leave
+    /// heartbeat arrives (`AbstractMembershipManager.java:309`) — not when the
+    /// member reaches LEAVING, nor when the leave heartbeat is only generated,
+    /// nor on a non-leave response.
     #[tokio::test]
     async fn heartbeat_successful_response_when_leaving_group_completes_leave() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+
+        let (leave_result, _) = leave_group(&mgr);
         assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(
+            !leave_result.is_done(),
+            "Java: leaveGroup() must not complete while the member is LEAVING (leave heartbeat not sent yet)"
+        );
 
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(
+            !leave_result.is_done(),
+            "Java: leaveGroup() must not complete when the leave heartbeat is only generated (no response yet)"
+        );
 
-        // A non-leave success response is ignored (member already
-        // UNSUBSCRIBED with a positive epoch in the response).
         mgr.abstract_mm
             .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
             .unwrap();
-        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(
+            !leave_result.is_done(),
+            "Java: a non-leave heartbeat response must not complete the leave"
+        );
 
-        // The leave response completes the leave.
         mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
-        assert_eq!(mgr.state(), MemberState::Unsubscribed);
-        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
-        assert!(mgr.current_assignment().is_none());
+        assert_send_leave_completed(&mgr, &leave_result);
     }
 
     /// Translated from
-    /// `ConsumerMembershipManagerTest#testHeartbeatFailedResponseWhenLeavingGroupCompletesLeave`.
-    /// LEAVING -> (heartbeat generated) UNSUBSCRIBED; a failed response
-    /// (retriable or not) still completes the leave. Parameterized over
-    /// [true, false].
+    /// `ConsumerMembershipManagerTest#testHeartbeatFailedResponseWhenLeavingGroupCompletesLeave`
+    /// (`@ValueSource(booleans = {true, false})`). The leave completes on the
+    /// failed response to the leave heartbeat
+    /// (`AbstractMembershipManager.onHeartbeatFailure`), not before.
     #[tokio::test]
     async fn heartbeat_failed_response_when_leaving_group_completes_leave() {
         for retriable in [true, false] {
             let (mgr, _rx) = create_member_in_stable_state(None).await;
-            mgr.leave_group(0).await.unwrap();
+
+            let (leave_result, _) = leave_group(&mgr);
             assert_eq!(mgr.state(), MemberState::Leaving);
+            assert!(
+                !leave_result.is_done(),
+                "[retriable={retriable}] Java: leaveGroup() must not complete while the member is LEAVING"
+            );
 
             mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
             assert_eq!(mgr.state(), MemberState::Unsubscribed);
+            assert!(
+                !leave_result.is_done(),
+                "[retriable={retriable}] Java: leaveGroup() must not complete before the leave heartbeat fails"
+            );
 
             mgr.on_heartbeat_failure(retriable);
-            // Member remains UNSUBSCRIBED; the leave is complete.
-            assert_eq!(mgr.state(), MemberState::Unsubscribed);
-            assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
-            assert!(mgr.current_assignment().is_none());
+            assert_send_leave_completed(&mgr, &leave_result);
         }
+    }
+
+    /// A heartbeat failure while the member is still LEAVING (the leave
+    /// heartbeat has not been generated yet, so the failure is the response
+    /// to an earlier heartbeat) must not complete the leave: Java completes
+    /// it only for an UNSUBSCRIBED member (`onHeartbeatFailure`).
+    #[tokio::test]
+    async fn heartbeat_failure_before_leave_heartbeat_does_not_complete_leave() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        let (leave_result, _) = leave_group(&mgr);
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        mgr.on_heartbeat_failure(true);
+        assert!(
+            !leave_result.is_done(),
+            "a failed response to a heartbeat sent before the leave heartbeat must not complete the leave"
+        );
+        assert_eq!(mgr.state(), MemberState::Leaving);
+    }
+
+    /// Translated from the `onHeartbeatRequestSkipped` branch of
+    /// `AbstractMembershipManager` (`:779-788`): when the leave heartbeat
+    /// cannot be sent (e.g. no coordinator), the member transitions LEAVING
+    /// -> UNSUBSCRIBED and completes the leave, so `unsubscribe()` does not
+    /// wait for a response that will never come.
+    #[tokio::test]
+    async fn heartbeat_request_skipped_while_leaving_completes_leave() {
+        let (mgr, _rx) = create_member_in_stable_state(None).await;
+        let (leave_result, _) = leave_group(&mgr);
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(!leave_result.is_done());
+
+        mgr.abstract_mm.on_heartbeat_request_skipped().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_leave_completed_successfully(&leave_result);
+    }
+
+    /// Java `onHeartbeatSuccess` (`:318-325`): a response carrying an invalid
+    /// negative epoch for a member still in the group completes any leave in
+    /// progress. A member in PREPARE_LEAVING (its leave callback still
+    /// running) is such a member: it is neither LEAVING nor out of the group.
+    #[tokio::test]
+    async fn invalid_epoch_response_while_prepare_leaving_completes_leave() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_with_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        let (leave_result, continuation) = leave_group(&mgr);
+        assert!(continuation, "a release callback was enqueued");
+        let env = rx.recv().await.expect("release callback event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert!(!leave_result.is_done());
+
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_leave_completed_successfully(&leave_result);
+        assert_eq!(
+            mgr.state(),
+            MemberState::PrepareLeaving,
+            "the invalid-epoch response is otherwise ignored"
+        );
+
+        // The callback completing afterwards still moves the member on to
+        // send its leave heartbeat.
+        stuck_ack.send(Ok(())).unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+    }
+
+    /// A second leave after an invalid-epoch response took the leave future
+    /// while the member is PREPARE_LEAVING waits for the ongoing leave.
+    ///
+    /// Deviation from Java 4.4 pinned here: `onHeartbeatSuccess` completes and
+    /// clears `leaveGroupInProgress` but leaves the member PREPARE_LEAVING, so
+    /// the second `AbstractMembershipManager.leaveGroup(boolean)` takes its
+    /// "already leaving" branch and `leaveGroupInProgress.get()` throws
+    /// `NoSuchElementException`. `ConsumerNetworkThread.processApplicationEvents`
+    /// then fails the event with it and the second `unsubscribe()` throws a
+    /// `KafkaException`. Rust instead registers a fresh leave future: the
+    /// second leave does not fail and completes when the ongoing leave ends
+    /// (here, on the response to the leave heartbeat).
+    #[tokio::test]
+    async fn second_leave_after_invalid_epoch_response_while_prepare_leaving_waits_for_ongoing_leave() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_with_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+
+        let mgr = Arc::new(mgr);
+        let (first_leave, continuation) = leave_group(&mgr);
+        assert!(continuation, "a release callback was enqueued");
+        let env = rx.recv().await.expect("release callback event");
+        let stuck_ack = match env.event {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // The invalid-epoch response takes and completes the leave future;
+        // the member stays PREPARE_LEAVING.
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_leave_completed_successfully(&first_leave);
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Second leave (a second `unsubscribe()`): Java fails it with
+        // NoSuchElementException; Rust returns a fresh future.
+        let second_leave = mgr
+            .leave_group(0)
+            .expect("Rust deviation from Java 4.4: the second leave does not fail");
+        assert!(rx.try_recv().is_err(), "the second leave enqueues no callback");
+        assert!(mgr.has_pending_leave_callback(), "the first leave's callback is still pending");
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert!(
+            !second_leave.is_done(),
+            "the second leave gets a fresh future that waits for the ongoing leave"
+        );
+
+        // The ongoing leave goes on: the callback completes, the leave
+        // heartbeat is sent, and its response completes the second leave.
+        stuck_ack.send(Ok(())).unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert!(!second_leave.is_done(), "still waiting for the leave heartbeat");
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(!second_leave.is_done(), "still waiting for the leave heartbeat's response");
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        assert_send_leave_completed(&mgr, &second_leave);
     }
 
     /// Translated from
@@ -6066,23 +6661,32 @@ mod tests {
     #[tokio::test]
     async fn ignore_leave_response_when_not_leaving_group() {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
-        mgr.leave_group(0).await.unwrap();
+        let (leave_result, _) = leave_group(&mgr);
+
+        // Send leave request, transitioning to UNSUBSCRIBED state.
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
-        // A previous (non-leave) heartbeat response is ignored.
+        // Receive a previous heartbeat response, which should be ignored.
         mgr.abstract_mm
             .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
             .unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(!leave_result.is_done());
 
-        // The leave response is processed (still UNSUBSCRIBED).
+        // Receive a leave heartbeat response, which should unblock the
+        // consumer.
         mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert_leave_completed_successfully(&leave_result);
 
-        // Subscription updated + poll -> rejoin.
+        // Consumer unblocks and updates subscription.
         mgr.abstract_mm.on_subscription_updated();
         mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
+
+        // A late leave response no longer affects the rejoining member.
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+
         assert_eq!(mgr.state(), MemberState::Joining);
         assert_eq!(mgr.member_epoch(), 0);
     }
@@ -6101,22 +6705,29 @@ mod tests {
         mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
 
         let mgr = Arc::new(mgr);
-        let mgr_clone = mgr.clone();
-        let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
+        let (leave_operation, continuation) = leave_group(&mgr);
+        assert!(continuation, "a release callback was enqueued");
         let env = rx.recv().await.expect("revoked event");
         let stuck_ack = match env.event {
             BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
             other => panic!("unexpected event: {other:?}"),
         };
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert!(!leave_operation.is_done());
 
-        // Fence while preparing to leave -> UNSUBSCRIBED.
+        // Fence while preparing to leave -> UNSUBSCRIBED, and the leave
+        // completes right away, without waiting for the stuck callback.
         mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(
+            leave_operation.is_done(),
+            "Fenced member should complete the ongoing leave operation"
+        );
 
-        // Completing the callback finishes the leave; remains UNSUBSCRIBED.
+        // Completing the callback afterwards sends no leave heartbeat;
+        // remains UNSUBSCRIBED.
         stuck_ack.send(Ok(())).unwrap();
-        leave.await.unwrap().unwrap();
+        mgr.drive_pending_leave_callback().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
     }
 
@@ -6413,7 +7024,7 @@ mod tests {
         // Capture the callback-needed event WITHOUT acking it yet.
         let env = rx.recv().await.expect("expected onPartitionsLost callback-needed event");
         let ack = match env.event {
-            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, [owned.clone()].into_iter().collect::<HashSet<_>>());
@@ -6451,9 +7062,111 @@ mod tests {
         let (mgr, _rx) = mock_stale_member().await;
         assert_eq!(mgr.state(), MemberState::Stale);
 
-        mgr.leave_group(0).await.unwrap();
+        let (leave_result1, continuation) = leave_group(&mgr);
+        assert!(!continuation);
         // SubscriptionState was unsubscribed.
         assert!(mgr.abstract_mm.subscriptions.lock().unwrap().subscription().is_empty());
+        assert!(leave_result1.is_done());
         assert_eq!(mgr.state(), MemberState::Stale);
+    }
+
+    // ─── Background-loop wakes for the pre-rebalance auto-commit ───
+    //
+    // Java runs `maybeReconcile(true)` for an `AsyncPollEvent` on the network
+    // thread inside `ConsumerNetworkThread.runOnce()`
+    // (`ApplicationEventProcessor.process(AsyncPollEvent)`), before that
+    // `runOnce` polls the request managers, so the pre-rebalance auto-commit
+    // that `signalReconciliationStarted()` queues
+    // (`CommitRequestManager.maybeAutoCommitSyncBeforeRebalance`) is sent in
+    // the same iteration, and its `whenComplete` continuation runs inside
+    // `client.poll` when the response is read. Rust runs the same
+    // `reconcile(.., true)` from the `tokio::spawn`ed AsyncPoll task, after
+    // the loop has already polled the commit manager and while it is parked in
+    // its network poll; the loop parks on the `Notify` production wires into
+    // `CommitRequestManager::set_completion_notify`, so a queued request or a
+    // resolved commit that does not poke it waits for the poll timeout
+    // (`MAX_POLL_TIMEOUT_MS`, 5 s) or an unrelated wake.
+
+    /// A member that owns `topic1-0` with a consumed offset and receives an
+    /// empty assignment, with a real commit manager whose completion `Notify`
+    /// is the returned one (as production wires `event_notify`).
+    fn member_revoking_with_consumed_offset() -> (Arc<ConsumerMembershipManager>, Arc<tokio::sync::Notify>) {
+        let (mgr, _rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        mgr.commit_request_manager
+            .as_ref()
+            .expect("commit manager present")
+            .set_completion_notify(Arc::clone(&notify));
+        (Arc::new(mgr), notify)
+    }
+
+    /// The pre-rebalance auto-commit queued from the AsyncPoll task must wake
+    /// the background loop, so it is sent at once as Java sends it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_rebalance_queued_from_async_poll_wakes_background_task() {
+        let (mgr, notify) = member_revoking_with_consumed_offset();
+        // As `process_async_poll` does: `reconcile(poll_time_ms, true)` on a
+        // spawned task.
+        let m = Arc::clone(&mgr);
+        tokio::spawn(async move { m.reconcile(0, true).await })
+            .await
+            .expect("reconcile task")
+            .expect("reconcile");
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        assert_eq!(
+            commit_mgr.unsent_offset_commits_len_for_test(),
+            1,
+            "the reconcile must queue the pre-rebalance auto-commit"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect(
+                "queuing the pre-rebalance OffsetCommit from the spawned AsyncPoll task did not wake the background \
+             loop, so the request waits for the network poll timeout; Java sends it in the runOnce that \
+             processes the AsyncPollEvent",
+            );
+    }
+
+    /// When the pre-rebalance auto-commit resolves, the background loop must
+    /// be woken to resume the parked reconciliation (`drive_pending_reconcile`),
+    /// as Java's `commitResult.whenComplete(...)` resumes it inside
+    /// `client.poll` (`AbstractMembershipManager.java:967`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_rebalance_completion_wakes_background_task() {
+        let (mgr, notify) = member_revoking_with_consumed_offset();
+        let m = Arc::clone(&mgr);
+        tokio::spawn(async move { m.reconcile(0, true).await })
+            .await
+            .expect("reconcile task")
+            .expect("reconcile");
+        assert!(reconciliation_in_progress(&mgr), "the reconcile parks on the commit");
+        // Drop a wake left by the enqueue, if any, so only the completion's
+        // own wake can satisfy the wait below.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), notify.notified()).await;
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), woken).await.expect(
+            "the resolved pre-rebalance auto-commit did not wake the background loop, so the parked \
+             reconciliation (onPartitionsRevoked enqueue) waits for the network poll timeout; Java resumes it \
+             from the commit future's whenComplete inside client.poll",
+        );
     }
 }

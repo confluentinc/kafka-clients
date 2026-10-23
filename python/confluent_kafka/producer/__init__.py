@@ -16,7 +16,7 @@
 
 The records (``ProducerRecord``, ``RecordMetadata``), the client family
 (``Producer``, ``KafkaProducer``, ``MockProducer`` and their ``Async`` peers),
-the ``Callback`` alias, the ``Partitioner`` placeholder and the errors Java
+the ``Callback`` protocol, the ``Partitioner`` placeholder and the errors Java
 declares in this package (CLAUDE.md, Python Binding Conventions, Modules).
 """
 

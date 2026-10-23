@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["DescribeFeaturesOptions"]
@@ -39,23 +39,25 @@ class DescribeFeaturesOptions(AbstractOptions):
 
     __slots__ = ("_node_id",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET, node_id: int = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING, node_id: int = MISSING) -> None:
         super().__init__()
         self._node_id: int | None = None  # OptionalInt.empty()
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if node_id is not UNSET:
+        if node_id is not MISSING:
             self.node_id(node_id=node_id)
 
-    def node_id(self, *, node_id: int | None = None) -> Any:
+    def node_id(self, *, node_id: int = MISSING) -> Any:
         """With ``node_id``: set the node id to which the request should be sent, and
         return this object.
 
         Without: the node id to which the request should be sent. If the node id is
         empty (``None``), the request will be sent to the arbitrary controller/broker.
         """
-        if node_id is None:
+        if node_id is MISSING:
             return self._node_id
+        if node_id is None:  # a int: Java cannot pass null
+            raise TypeError("node_id must not be None")
         self._node_id = node_id  # OptionalInt.of(nodeId)
         self._record("node_id", self._node_id)
         return self

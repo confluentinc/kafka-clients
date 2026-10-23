@@ -55,11 +55,27 @@ impl CompletableEvent {
     }
 
     /// Translate Java's
-    /// `CompletableEvent.calculateDeadlineMs(currentTimeMs, timeoutMs)` —
-    /// saturating addition guarding against `i64::MAX` overflow.
+    /// `CompletableEvent.calculateDeadlineMs(currentTimeMs, timeoutMs)`:
+    ///
+    /// ```java
+    /// if (currentTimeMs > Long.MAX_VALUE - timeoutMs)
+    ///     return Long.MAX_VALUE;
+    /// else
+    ///     return currentTimeMs + timeoutMs;
+    /// ```
+    ///
+    /// Java's `long` arithmetic wraps, so the translation uses wrapping
+    /// arithmetic too. This matters for a negative `timeout_ms`:
+    /// `Long.MAX_VALUE - timeoutMs` overflows to a negative number, the guard
+    /// is true and Java returns `Long.MAX_VALUE` (a saturating add would
+    /// return `current_time_ms + timeout_ms` instead).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEvent#calculateDeadlineMs")]
     pub(crate) fn calculate_deadline_ms(current_time_ms: i64, timeout_ms: i64) -> i64 {
-        current_time_ms.saturating_add(timeout_ms)
+        if current_time_ms > i64::MAX.wrapping_sub(timeout_ms) {
+            i64::MAX
+        } else {
+            current_time_ms.wrapping_add(timeout_ms)
+        }
     }
 }
 
@@ -290,6 +306,42 @@ mod tests {
         assert_eq!(CompletableEvent::calculate_deadline_ms(0, 100), 100);
         assert_eq!(CompletableEvent::calculate_deadline_ms(i64::MAX, 1), i64::MAX);
         assert_eq!(CompletableEvent::calculate_deadline_ms(i64::MAX - 5, 100), i64::MAX);
+    }
+
+    /// Audit finding C1-03. Java's `calculateDeadlineMs(currentTimeMs,
+    /// timeoutMs)` is `if (currentTimeMs > Long.MAX_VALUE - timeoutMs) return
+    /// Long.MAX_VALUE; else return currentTimeMs + timeoutMs;`
+    /// (`CompletableEvent.java`). For a negative `timeoutMs`,
+    /// `Long.MAX_VALUE - timeoutMs` overflows to a negative number, so the
+    /// guard is true and Java returns `Long.MAX_VALUE`, not
+    /// `currentTimeMs + timeoutMs`.
+    #[test]
+    fn calculate_deadline_ms_negative_timeout_matches_java() {
+        assert_eq!(
+            CompletableEvent::calculate_deadline_ms(1000, -1),
+            i64::MAX,
+            "Java: calculateDeadlineMs(1000, -1) == Long.MAX_VALUE"
+        );
+        assert_eq!(
+            CompletableEvent::calculate_deadline_ms(0, i64::MIN),
+            i64::MAX,
+            "Java: calculateDeadlineMs(0, Long.MIN_VALUE) == Long.MAX_VALUE"
+        );
+    }
+
+    /// Pins `calculate_deadline_ms` against hand-evaluated Java results for
+    /// the boundary inputs (audit finding C1-03).
+    #[test]
+    fn calculate_deadline_ms_matches_java_at_boundaries() {
+        let now = 1_700_000_000_000_i64;
+        // Long.MAX_VALUE - Long.MAX_VALUE = 0; now > 0 -> Long.MAX_VALUE.
+        assert_eq!(CompletableEvent::calculate_deadline_ms(now, i64::MAX), i64::MAX);
+        // Long.MAX_VALUE - (-1) wraps to Long.MIN_VALUE; now > MIN -> Long.MAX_VALUE.
+        assert_eq!(CompletableEvent::calculate_deadline_ms(now, -1), i64::MAX);
+        // Long.MAX_VALUE - 0 = Long.MAX_VALUE; now <= MAX -> now + 0.
+        assert_eq!(CompletableEvent::calculate_deadline_ms(now, 0), now);
+        // Long.MAX_VALUE - 1; MAX > MAX - 1 -> Long.MAX_VALUE.
+        assert_eq!(CompletableEvent::calculate_deadline_ms(i64::MAX, 1), i64::MAX);
     }
 
     #[test]

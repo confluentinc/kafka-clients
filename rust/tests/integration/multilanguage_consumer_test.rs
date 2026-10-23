@@ -20,8 +20,9 @@
 //! incidental fixture). Scope is the supported consumer surface, including the
 //! two user callbacks — the rebalance listener and the offset-commit callback —
 //! observed through [`ConsumerCallbackLog`] rather than by handing an
-//! in-process `dyn` object across the wire. Regex pattern subscription stays
-//! native-Rust-only (see plaintext_consumer_*.rs).
+//! in-process `dyn` object across the wire. Broker-side pattern subscription
+//! (`SubscriptionPattern`) crosses the wire like a topic list; client-side
+//! `java.util.regex.Pattern` subscription is not translated at all.
 //!
 //! Requires `--features multilanguage-tests`.
 
@@ -29,11 +30,14 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::{Metric, TopicPartition};
-use confluent_kafka::consumer::DynConsumer;
+use confluent_kafka::common::{Error, Metric, TopicPartition};
+use confluent_kafka::consumer::{
+    CloseOptions, DynConsumer, GroupMembershipOperation, OffsetAndMetadata, SubscriptionPattern,
+};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::admin_backend::{AdminBackend, admin_for, create_topic};
+use crate::common::backend_factory::{ConsumerBackendFactory, RustNativeFactory};
 use crate::common::callback_log::{CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED, KIND_COMMIT, KIND_REVOKED};
 use crate::common::test_context::TestContext;
 use crate::multilanguage_consumer_test;
@@ -120,29 +124,69 @@ async fn collect(
     out
 }
 
-/// Poll the consumer until its callback log contains an entry of `kind`, or
-/// `deadline` elapses. Returns the last snapshot either way, so callers can
-/// assert and print the whole log on failure.
+/// Poll the consumer until its callback log contains an entry of `kind` that
+/// satisfies `wanted`, or `deadline` elapses. Returns the last snapshot either
+/// way, so callers can assert and print the whole log on failure.
+///
+/// Waiting for the *expected* entry, not the first one of its kind, matters:
+/// a KIP-848 member's first reconciliation can complete with an empty
+/// assignment (a pattern the coordinator has not matched yet, or a topic its
+/// metadata does not have yet), and the listener then logs an `assigned`
+/// entry with no partitions before the one the scenario expects.
 ///
 /// Polling is what makes progress: per `consumer-threading.md` §31 both the
 /// rebalance listener and the offset-commit callback run on the *caller's* task
 /// inside `poll` / `commit_*` / `close`, so a test that only sleeps would never
 /// see them. For the gRPC backends each poll is a `Poll` RPC on the server-side
 /// consumer, and the log is one further RPC behind.
-async fn poll_until_kind(
+async fn poll_until_entry(
     consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     log: &ConsumerCallbackLog,
     kind: &str,
+    wanted: impl Fn(&CallbackLogEntry) -> bool,
     deadline: Duration,
 ) -> Vec<CallbackLogEntry> {
     let start = Instant::now();
     loop {
         let entries = log.entries().await.expect("read consumer callback log");
-        if entries.iter().any(|e| e.kind == kind) || start.elapsed() >= deadline {
+        if entries.iter().any(|e| e.kind == kind && wanted(e)) || start.elapsed() >= deadline {
             return entries;
         }
         consumer.poll(Duration::from_millis(500)).await.expect("poll");
     }
+}
+
+/// Create `topic` with `partitions` partitions through a native admin client,
+/// waiting for its metadata to propagate. The admin is fixture, like the
+/// producer: only the consumer is under test.
+async fn create_topic_with_partitions(ctx: &TestContext, topic: &str, partitions: i32) {
+    let admin = admin_for(&RustNativeFactory, ctx).await;
+    create_topic(&admin, topic, partitions, 1).await;
+    admin.close(Some(Duration::from_secs(5))).await.expect("close fixture admin");
+}
+
+/// Poll until the consumer's assignment has exactly `want` partitions, or
+/// `deadline` elapses; returns the last assignment either way.
+async fn poll_until_assigned(
+    consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
+    want: usize,
+    deadline: Duration,
+) -> std::collections::HashSet<TopicPartition> {
+    let start = Instant::now();
+    loop {
+        let assignment = consumer.assignment();
+        if assignment.len() == want || start.elapsed() >= deadline {
+            return assignment;
+        }
+        consumer.poll(Duration::from_millis(500)).await.expect("poll");
+    }
+}
+
+/// A broker-side (RE2/J) pattern matching exactly `topic`: the test topic
+/// names are `[a-z0-9_]` only, so the name is its own regex, and the trailing
+/// `.*` keeps it a pattern rather than a literal.
+fn pattern_for(topic: &str) -> SubscriptionPattern {
+    SubscriptionPattern::new(format!("{topic}.*"))
 }
 
 /// All log entries of one `kind`.
@@ -510,7 +554,14 @@ async fn rebalance_listener_logs_assigned_and_revoked<F: ConsumerBackendFactory>
     log.subscribe_with_logging_listener(&mut consumer, vec![topic_a.clone()])
         .await
         .expect("subscribe with logging listener");
-    let entries = poll_until_kind(&mut consumer, &log, KIND_ASSIGNED, Duration::from_secs(30)).await;
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_ASSIGNED,
+        |e| e.has_partition(&topic_a, 0),
+        Duration::from_secs(30),
+    )
+    .await;
     let assigned = of_kind(&entries, KIND_ASSIGNED);
     assert!(
         !assigned.is_empty(),
@@ -535,7 +586,14 @@ async fn rebalance_listener_logs_assigned_and_revoked<F: ConsumerBackendFactory>
     log.subscribe_with_logging_listener(&mut consumer, vec![topic_b.clone()])
         .await
         .expect("re-subscribe with logging listener");
-    let entries = poll_until_kind(&mut consumer, &log, KIND_REVOKED, Duration::from_secs(30)).await;
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_REVOKED,
+        |e| e.has_partition(&topic_a, 0),
+        Duration::from_secs(30),
+    )
+    .await;
     let revoked = of_kind(&entries, KIND_REVOKED);
     assert!(
         revoked.iter().any(|e| e.has_partition(&topic_a, 0)),
@@ -571,7 +629,14 @@ async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut
         .await
         .expect("commit_async with logging callback");
     // §31: the callback runs on the app task during a later poll/commit/close.
-    let entries = poll_until_kind(&mut consumer, &log, KIND_COMMIT, Duration::from_secs(20)).await;
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_COMMIT,
+        |e| e.offset_for(&topic, 0) == Some(2),
+        Duration::from_secs(20),
+    )
+    .await;
     let commits = of_kind(&entries, KIND_COMMIT);
     assert!(
         !commits.is_empty(),
@@ -595,6 +660,715 @@ async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut
 
     consumer.close().await.expect("close");
 }
+
+// ---------------------------------------------------------------------------
+// Pattern subscription (SubscriptionPattern, KIP-848)
+// ---------------------------------------------------------------------------
+
+/// Java's `subscribe(SubscriptionPattern)`: the group coordinator resolves the
+/// RE2/J pattern against the cluster's topics, and the consumer is assigned
+/// and consumes the matching topic like a named one.
+async fn subscribe_pattern_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_pattern_consume");
+    produce(ctx, &topic, &[("k0", "p0"), ("k1", "p1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    consumer
+        .subscribe_with_pattern(pattern_for(&topic))
+        .await
+        .expect("subscribe with pattern");
+
+    let got = collect(&mut consumer, 2, Duration::from_secs(30)).await;
+    let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
+    assert_eq!(values, vec![b("p0"), b("p1")], "{} backend", factory.name());
+    assert_eq!(
+        consumer.assignment(),
+        [TopicPartition::new(topic.clone(), 0)].into_iter().collect(),
+        "{} backend: the pattern's one matching partition is assigned",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+/// Java's `subscribe(SubscriptionPattern, ConsumerRebalanceListener)`: the
+/// listener the backend's own binding registers is invoked with the matching
+/// topic's partition on assignment, and with it again on revocation when the
+/// subscription switches to a pattern matching only another topic — the
+/// pattern twin of [`rebalance_listener_logs_assigned_and_revoked`].
+async fn pattern_listener_logs_assigned_and_revoked<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic_a = ctx.topic("ml_pattern_listener_a");
+    let topic_b = ctx.topic("ml_pattern_listener_b");
+    produce(ctx, &topic_a, &[("k", "va")]).await;
+    produce(ctx, &topic_b, &[("k", "vb")]).await;
+
+    let (mut consumer, log) = factory
+        .create_with_callback_log(consumer_config_for(factory, ctx, &format!("{topic_a}-grp")))
+        .await
+        .expect("create consumer with callback log");
+
+    log.subscribe_pattern_with_logging_listener(&mut consumer, pattern_for(&topic_a))
+        .await
+        .expect("subscribe pattern with logging listener");
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_ASSIGNED,
+        |e| e.has_partition(&topic_a, 0),
+        Duration::from_secs(30),
+    )
+    .await;
+    let assigned = of_kind(&entries, KIND_ASSIGNED);
+    assert!(
+        assigned.iter().any(|e| e.has_partition(&topic_a, 0)),
+        "{} backend: no {KIND_ASSIGNED} entry naming {topic_a}-0; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        assigned.iter().all(|e| !e.has_partition(&topic_b, 0)),
+        "{} backend: {topic_b} does not match the pattern, so it is never assigned; log = {entries:?}",
+        factory.name()
+    );
+    assert!(
+        assigned.iter().all(|e| e.error.is_empty()),
+        "{} backend: listener reported an error; log = {entries:?}",
+        factory.name()
+    );
+
+    log.subscribe_pattern_with_logging_listener(&mut consumer, pattern_for(&topic_b))
+        .await
+        .expect("re-subscribe pattern with logging listener");
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_REVOKED,
+        |e| e.has_partition(&topic_a, 0),
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        of_kind(&entries, KIND_REVOKED).iter().any(|e| e.has_partition(&topic_a, 0)),
+        "{} backend: no {KIND_REVOKED} entry naming {topic_a}-0 after switching pattern; log = {entries:?}",
+        factory.name()
+    );
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_ASSIGNED,
+        |e| e.has_partition(&topic_b, 0),
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        of_kind(&entries, KIND_ASSIGNED).iter().any(|e| e.has_partition(&topic_b, 0)),
+        "{} backend: the new pattern's {topic_b}-0 is assigned; log = {entries:?}",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// commitAsync(offsets, callback)
+// ---------------------------------------------------------------------------
+
+/// Java's `commitAsync(Map, OffsetCommitCallback)`: the callback the backend's
+/// binding registers reports exactly the offsets it was given — not the
+/// consumed position — with no error, and the broker then reports them as
+/// committed, metadata included.
+async fn commit_async_offsets_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_commit_offsets_cb");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let (mut consumer, log) = factory
+        .create_with_callback_log(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer with callback log");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    assert_eq!(
+        collect(&mut consumer, 3, Duration::from_secs(20)).await.len(),
+        3,
+        "{} backend",
+        factory.name()
+    );
+
+    // Offset 1, not the consumed position 3: the callback must echo the map it
+    // was handed.
+    let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::with_metadata(1, "explicit").expect("oam"))]);
+    log.commit_async_offsets_with_logging_callback(&mut consumer, offsets)
+        .await
+        .expect("commit_async with offsets and logging callback");
+    let entries = poll_until_entry(
+        &mut consumer,
+        &log,
+        KIND_COMMIT,
+        |e| e.offset_for(&topic, 0) == Some(1),
+        Duration::from_secs(20),
+    )
+    .await;
+    let commits = of_kind(&entries, KIND_COMMIT);
+    assert_eq!(
+        commits.len(),
+        1,
+        "{} backend: one commitAsync, one callback; log = {entries:?}",
+        factory.name()
+    );
+    assert_eq!(
+        commits[0].offset_for(&topic, 0),
+        Some(1),
+        "{} backend: the callback reports the explicit offset; log = {entries:?}",
+        factory.name()
+    );
+    assert_eq!(
+        commits[0].partitions,
+        vec![(topic.clone(), 0)],
+        "{} backend: the callback reports exactly the committed partition",
+        factory.name()
+    );
+    assert!(
+        commits[0].error.is_empty(),
+        "{} backend: commit callback reported an error: {}",
+        factory.name(),
+        commits[0].error
+    );
+
+    let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    let entry = committed.get(&tp).expect("committed entry");
+    assert_eq!(entry.offset(), 1, "{} backend", factory.name());
+    assert_eq!(entry.metadata(), "explicit", "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// The timed overloads (`Duration timeout`)
+// ---------------------------------------------------------------------------
+
+/// A timeout every timed call below passes: long enough to never expire on a
+/// healthy broker, and never the default, so a backend that dropped the
+/// argument would call a different overload.
+const EXPLICIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// `poll(Duration)` with an explicit timeout: it returns the produced records
+/// as soon as they arrive, and on a drained partition it waits out about the
+/// requested timeout before returning nothing (Java's "blocks up to the
+/// timeout"), which a backend sending a different timeout would miss.
+async fn poll_with_explicit_timeout<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_timed_poll");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    let mut got = Vec::new();
+    let start = Instant::now();
+    while got.len() < 2 && start.elapsed() < Duration::from_secs(30) {
+        let records = consumer.poll(Duration::from_secs(5)).await.expect("poll");
+        got.extend(records.into_iter().map(|r| r.value().map(|v| v.to_vec())));
+    }
+    assert_eq!(got, vec![Some(b("v0")), Some(b("v1"))], "{} backend", factory.name());
+
+    let wait = Duration::from_millis(1500);
+    let start = Instant::now();
+    let empty = consumer.poll(wait).await.expect("poll on a drained partition");
+    let elapsed = start.elapsed();
+    assert_eq!(empty.count(), 0, "{} backend: nothing left to fetch", factory.name());
+    assert!(
+        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
+        "{} backend: poll({wait:?}) on a drained partition should wait about the timeout, took {elapsed:?}",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+/// `commitSync(Duration)`, `commitSync(Map, Duration)`, `committed(Set,
+/// Duration)` and `position(TopicPartition, Duration)` return the broker's
+/// values. `position` with a zero timeout on a partition whose position is not
+/// yet known is Java's `TimeoutException`: the offset lookup cannot complete in
+/// zero time, which proves the timeout reaches the consumer.
+async fn timed_commit_committed_and_position<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_timed_commit");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    let err = consumer
+        .position_with_timeout(&tp, Duration::ZERO)
+        .await
+        .expect_err("a zero timeout cannot resolve an unknown position");
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{} backend: position(tp, 0) on an unknown position is a timeout, got {err:?}",
+        factory.name()
+    );
+
+    assert_eq!(collect(&mut consumer, 3, Duration::from_secs(20)).await.len(), 3);
+    assert_eq!(
+        consumer.position_with_timeout(&tp, EXPLICIT_TIMEOUT).await.expect("position"),
+        3,
+        "{} backend: the position after consuming three records",
+        factory.name()
+    );
+
+    consumer
+        .commit_sync_with_timeout(EXPLICIT_TIMEOUT)
+        .await
+        .expect("commit_sync with timeout");
+    let committed = consumer
+        .committed_with_timeout(std::slice::from_ref(&tp), EXPLICIT_TIMEOUT)
+        .await
+        .expect("committed with timeout");
+    assert_eq!(
+        committed.get(&tp).map(OffsetAndMetadata::offset),
+        Some(3),
+        "{} backend: commitSync(Duration) commits the consumed position",
+        factory.name()
+    );
+
+    consumer
+        .commit_sync_with_offsets_timeout(
+            HashMap::from([(tp.clone(), OffsetAndMetadata::with_metadata(2, "timed").expect("oam"))]),
+            EXPLICIT_TIMEOUT,
+        )
+        .await
+        .expect("commit_sync with offsets and timeout");
+    let committed = consumer
+        .committed_with_timeout(std::slice::from_ref(&tp), EXPLICIT_TIMEOUT)
+        .await
+        .expect("committed with timeout");
+    let entry = committed.get(&tp).expect("committed entry");
+    assert_eq!(entry.offset(), 2, "{} backend", factory.name());
+    assert_eq!(entry.metadata(), "timed", "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+/// `beginningOffsets(Collection, Duration)`, `endOffsets(Collection, Duration)`
+/// and `offsetsForTimes(Map, Duration)` return the broker's offsets. A zero
+/// timeout makes Java's `beginningOrEndOffset` return an empty map at once
+/// (`AsyncKafkaConsumer`, "to align with the classic consumer"), so the zero
+/// calls only pass when the timeout crosses the wire.
+async fn timed_offset_lookups<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_timed_offsets");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2"), ("k3", "v3")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let tps = std::slice::from_ref(&tp);
+
+    assert_eq!(
+        consumer
+            .beginning_offsets_with_timeout(tps, EXPLICIT_TIMEOUT)
+            .await
+            .expect("beginning"),
+        HashMap::from([(tp.clone(), 0)]),
+        "{} backend",
+        factory.name()
+    );
+    assert_eq!(
+        consumer.end_offsets_with_timeout(tps, EXPLICIT_TIMEOUT).await.expect("end"),
+        HashMap::from([(tp.clone(), 4)]),
+        "{} backend",
+        factory.name()
+    );
+    assert!(
+        consumer
+            .beginning_offsets_with_timeout(tps, Duration::ZERO)
+            .await
+            .expect("beginning, 0")
+            .is_empty(),
+        "{} backend: beginningOffsets with a zero timeout returns an empty map",
+        factory.name()
+    );
+    assert!(
+        consumer
+            .end_offsets_with_timeout(tps, Duration::ZERO)
+            .await
+            .expect("end, 0")
+            .is_empty(),
+        "{} backend: endOffsets with a zero timeout returns an empty map",
+        factory.name()
+    );
+
+    // Timestamp 0 resolves to the first record; a timestamp in the future to
+    // none, which Java reports as a null value and the wire omits.
+    let found = consumer
+        .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), 0)]), EXPLICIT_TIMEOUT)
+        .await
+        .expect("offsets_for_times with timeout");
+    let first = found.get(&tp).expect("timestamp 0 resolves");
+    assert_eq!(first.offset(), 0, "{} backend", factory.name());
+    assert!(first.timestamp() > 0, "{} backend: the record's create time", factory.name());
+    let future = consumer
+        .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), i64::MAX / 2)]), EXPLICIT_TIMEOUT)
+        .await
+        .expect("offsets_for_times in the future");
+    assert!(
+        !future.contains_key(&tp),
+        "{} backend: no record at or after a future timestamp, got {future:?}",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// seek(TopicPartition, OffsetAndMetadata)
+// ---------------------------------------------------------------------------
+
+/// Java's `seek(TopicPartition, OffsetAndMetadata)` with a leader epoch: the
+/// position moves to the given offset and consumption resumes there. The
+/// epoch is the partition's real one (0, a fresh single-replica topic), so
+/// the position validation the epoch triggers succeeds.
+async fn seek_with_offset_and_metadata_resumes_there<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_seek_oam");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2"), ("k3", "v3")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    assert_eq!(collect(&mut consumer, 4, Duration::from_secs(20)).await.len(), 4);
+
+    consumer
+        .seek_with_offset_and_metadata(
+            tp.clone(),
+            OffsetAndMetadata::with_leader_epoch_metadata(2, Some(0), "seek").expect("oam"),
+        )
+        .await
+        .expect("seek with offset and metadata");
+    assert_eq!(
+        consumer.position(&tp).await.expect("position"),
+        2,
+        "{} backend: the position is the seeked offset",
+        factory.name()
+    );
+    let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
+    let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
+    assert_eq!(values, vec![b("v2"), b("v3")], "{} backend", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// close(CloseOptions), observed by a second member of the group
+// ---------------------------------------------------------------------------
+
+/// Two members share a two-partition topic: the consumer under test and a
+/// native Rust member that observes the group. Returns both, each holding one
+/// partition.
+async fn two_member_group<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    topic: &str,
+    group: &str,
+) -> (Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>) {
+    create_topic_with_partitions(ctx, topic, 2).await;
+    let mut under_test = factory
+        .create(consumer_config_for(factory, ctx, group))
+        .await
+        .expect("create consumer under test");
+    under_test
+        .subscribe_with_topics(vec![topic.to_string()])
+        .await
+        .expect("subscribe consumer under test");
+    assert_eq!(
+        poll_until_assigned(&mut under_test, 2, Duration::from_secs(30)).await.len(),
+        2,
+        "{} backend: the first member gets both partitions",
+        factory.name()
+    );
+
+    let mut observer = RustNativeFactory
+        .create(consumer_config_for(&RustNativeFactory, ctx, group))
+        .await
+        .expect("create observer");
+    observer
+        .subscribe_with_topics(vec![topic.to_string()])
+        .await
+        .expect("subscribe observer");
+    // Both members must poll for the group to hand one partition over: the
+    // first member revokes, the second is then assigned.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        observer.poll(Duration::from_millis(300)).await.expect("observer poll");
+        under_test.poll(Duration::from_millis(300)).await.expect("poll");
+        if observer.assignment().len() == 1 && under_test.assignment().len() == 1 {
+            return (under_test, observer);
+        }
+    }
+    panic!(
+        "{} backend: the two members never split the partitions: under test {:?}, observer {:?}",
+        factory.name(),
+        under_test.assignment(),
+        observer.assignment()
+    );
+}
+
+/// `close(CloseOptions.groupMembershipOperation(LEAVE_GROUP))` sends the leave
+/// heartbeat (`ConsumerMembershipManager.leaveGroupEpoch` is -1), so the
+/// coordinator hands the leaver's partition to the remaining member at once —
+/// well inside the 45 s session timeout that would otherwise have to expire.
+async fn close_with_leave_group_hands_over_partitions<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_close_leave");
+    let group = format!("{topic}-grp");
+    let (mut under_test, mut observer) = two_member_group(ctx, factory, &topic, &group).await;
+
+    under_test
+        .close_with_options(
+            CloseOptions::with_operation(GroupMembershipOperation::LeaveGroup).with_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .expect("close with LEAVE_GROUP");
+    let assignment = poll_until_assigned(&mut observer, 2, Duration::from_secs(20)).await;
+    assert_eq!(
+        assignment.len(),
+        2,
+        "{} backend: after a LEAVE_GROUP close the other member owns both partitions, got {assignment:?}",
+        factory.name()
+    );
+
+    observer.close().await.expect("close observer");
+}
+
+/// `close(CloseOptions.groupMembershipOperation(REMAIN_IN_GROUP))` on a
+/// dynamic member still leaves the group in Java 4.4, so the coordinator hands
+/// its partition to the remaining member at that member's next heartbeat, just
+/// as for LEAVE_GROUP. `AbstractMembershipManager.leaveGroupOnClose` calls
+/// `leaveGroup(false)`, which reaches `transitionToSendingLeaveGroup`: that sets
+/// the epoch to `ConsumerMembershipManager.leaveGroupEpoch` (-1 for a dynamic
+/// member) and moves to LEAVING. `ConsumerHeartbeatRequestManager.
+/// shouldSendLeaveHeartbeatNow` returns false and logs "No leave heartbeat will
+/// be sent", but that is misleading: `AbstractHeartbeatRequestManager.poll`
+/// Case 2 (`AbstractMembershipManager.shouldHeartbeatNow` is true in LEAVING,
+/// no request in flight) still sends the heartbeat with epoch -1, and its
+/// response completes the leave. Java's own
+/// `ConsumerHeartbeatRequestManagerTest.testPollOnLeaving` mocks the
+/// membership manager, so Case 2 is never exercised there. Checked against
+/// kafka-clients 4.4.0-rc4: close returns in about 20 ms after that heartbeat
+/// and the other member owns both partitions about 5 s later.
+async fn close_with_remain_in_group_of_a_dynamic_member_leaves_the_group<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let topic = ctx.topic("ml_close_remain");
+    let group = format!("{topic}-grp");
+    let (mut under_test, mut observer) = two_member_group(ctx, factory, &topic, &group).await;
+
+    under_test
+        .close_with_options(
+            CloseOptions::with_operation(GroupMembershipOperation::RemainInGroup).with_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .expect("close with REMAIN_IN_GROUP");
+    // Well above one heartbeat interval (5 s), well below the 45 s session
+    // timeout that would hand the partition over had the member stayed.
+    let assignment = poll_until_assigned(&mut observer, 2, Duration::from_secs(20)).await;
+    assert_eq!(
+        assignment.len(),
+        2,
+        "{} backend: a dynamic member closed with REMAIN_IN_GROUP still sends the epoch -1 heartbeat (Java 4.4), \
+         so the other member owns both partitions before the session timeout, got {assignment:?}",
+        factory.name()
+    );
+
+    observer.close().await.expect("close observer");
+}
+
+// ---------------------------------------------------------------------------
+// wakeup()
+// ---------------------------------------------------------------------------
+
+/// Java's `wakeup()` from another thread breaks a blocking `poll`: the poll
+/// fails with `WakeupException` long before its timeout, the exception carries
+/// no message (Java's `WakeupException` has none), and the next poll proceeds
+/// normally.
+async fn wakeup_breaks_a_blocking_poll<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_wakeup");
+    produce(ctx, &topic, &[("k", "v")]).await;
+
+    let (mut consumer, log) = factory
+        .create_with_callback_log(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    assert_eq!(collect(&mut consumer, 1, Duration::from_secs(20)).await.len(), 1);
+
+    let waker = log.wakeup_handle(consumer.as_ref());
+    let wake = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        waker.wakeup().await;
+    });
+    let start = Instant::now();
+    let err = consumer
+        .poll(Duration::from_secs(30))
+        .await
+        .expect_err("wakeup() must break the blocking poll");
+    let elapsed = start.elapsed();
+    wake.await.expect("wakeup task");
+    assert!(
+        matches!(err, Error::Wakeup(_)),
+        "{} backend: a woken poll is a WakeupException, got {err:?}",
+        factory.name()
+    );
+    assert_eq!(
+        err.message(),
+        "",
+        "{} backend: Java's WakeupException carries no message",
+        factory.name()
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "{} backend: the poll returned at the wakeup, not its timeout, took {elapsed:?}",
+        factory.name()
+    );
+
+    // The wakeup is consumed by the call it broke.
+    let records = consumer
+        .poll(Duration::from_millis(500))
+        .await
+        .expect("the poll after a wakeup proceeds normally");
+    assert_eq!(records.count(), 0, "{} backend: nothing new to fetch", factory.name());
+
+    consumer.close().await.expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// groupMetadata(), currentLag(), assignment() after a poll
+// ---------------------------------------------------------------------------
+
+/// After a subscribed consumer joined and consumed: `assignment()` is the
+/// subscribed partition, and `groupMetadata()` names the group with a real
+/// member id and the member's epoch as generation (KIP-848) and no
+/// `group.instance.id` for a dynamic member.
+async fn group_metadata_and_assignment_after_poll<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_group_metadata");
+    let group = format!("{topic}-grp");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &group))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+    assert_eq!(collect(&mut consumer, 3, Duration::from_secs(30)).await.len(), 3);
+
+    assert_eq!(
+        consumer.assignment(),
+        [tp.clone()].into_iter().collect(),
+        "{} backend: the subscribed topic's one partition is assigned",
+        factory.name()
+    );
+    let metadata = consumer.group_metadata();
+    assert_eq!(metadata.group_id(), group, "{} backend", factory.name());
+    assert!(
+        !metadata.member_id().is_empty(),
+        "{} backend: a joined member has a member id",
+        factory.name()
+    );
+    assert!(
+        metadata.generation_id() > 0,
+        "{} backend: a joined member's epoch is positive, got {}",
+        factory.name(),
+        metadata.generation_id()
+    );
+    assert_eq!(
+        metadata.group_instance_id(),
+        None,
+        "{} backend: a dynamic member has no group.instance.id",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+/// Java's `currentLag(TopicPartition)` reads `SubscriptionState.partitionLag`:
+/// the last fetch's high watermark minus the position. It is empty before the
+/// partition was fetched, and 0 once every record was consumed. (For a
+/// partition that is not assigned Java throws `IllegalStateException("No
+/// current assignment for partition …")`, which this scenario does not
+/// exercise.)
+async fn current_lag_after_consuming_everything<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_current_lag");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1"), ("k2", "v2")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config_for(factory, ctx, &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+    assert_eq!(
+        consumer.current_lag(&tp).await.expect("current_lag"),
+        None,
+        "{} backend: no lag before the partition was fetched",
+        factory.name()
+    );
+    assert_eq!(collect(&mut consumer, 3, Duration::from_secs(30)).await.len(), 3);
+    assert_eq!(
+        consumer.current_lag(&tp).await.expect("current_lag"),
+        Some(0),
+        "{} backend: everything was consumed, so the lag is 0",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+multilanguage_consumer_test!(test_ml_subscribe_pattern_and_consume, subscribe_pattern_and_consume);
+multilanguage_consumer_test!(
+    test_ml_pattern_listener_logs_assigned_and_revoked,
+    pattern_listener_logs_assigned_and_revoked
+);
+multilanguage_consumer_test!(
+    test_ml_commit_async_offsets_callback_logs_offsets,
+    commit_async_offsets_callback_logs_offsets
+);
+multilanguage_consumer_test!(test_ml_poll_with_explicit_timeout, poll_with_explicit_timeout);
+multilanguage_consumer_test!(test_ml_timed_commit_committed_and_position, timed_commit_committed_and_position);
+multilanguage_consumer_test!(test_ml_timed_offset_lookups, timed_offset_lookups);
+multilanguage_consumer_test!(
+    test_ml_seek_with_offset_and_metadata_resumes_there,
+    seek_with_offset_and_metadata_resumes_there
+);
+multilanguage_consumer_test!(
+    test_ml_close_with_leave_group_hands_over_partitions,
+    close_with_leave_group_hands_over_partitions
+);
+multilanguage_consumer_test!(
+    test_ml_close_with_remain_in_group_of_a_dynamic_member_leaves_the_group,
+    close_with_remain_in_group_of_a_dynamic_member_leaves_the_group
+);
+multilanguage_consumer_test!(test_ml_wakeup_breaks_a_blocking_poll, wakeup_breaks_a_blocking_poll);
+multilanguage_consumer_test!(
+    test_ml_group_metadata_and_assignment_after_poll,
+    group_metadata_and_assignment_after_poll
+);
+multilanguage_consumer_test!(
+    test_ml_current_lag_after_consuming_everything,
+    current_lag_after_consuming_everything
+);
 
 multilanguage_consumer_test!(test_ml_metrics, metrics_reports_backend_registry);
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);

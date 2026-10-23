@@ -90,7 +90,7 @@ class AutoOffsetResetStrategy:
         """Java's ``fromString(String)``, with its messages."""
         by_duration = str(AutoOffsetResetStrategy.StrategyType.BY_DURATION)
         if offset_strategy is None:
-            raise IllegalArgumentError(message="Auto offset reset strategy is null")
+            raise IllegalArgumentError(message="Auto offset reset strategy is None")
         if offset_strategy == by_duration:
             raise IllegalArgumentError(
                 message="<:duration> part is missing in by_duration auto offset reset strategy.")

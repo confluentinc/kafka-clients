@@ -325,8 +325,8 @@ public sealed class PublicConsumerCallbackRoutingTests
             string polled = await TestTimeout.Run(() => polling, s_wellInsideThePoll);
 
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "Dispose took " + elapsed.Elapsed);
-            Assert.Equal(Enumerable.Repeat("throws KafkaException -18: WakeupTrigger fired", routedCalls), outcomes);
-            Assert.Equal("throws KafkaException -18: WakeupTrigger fired", polled);
+            Assert.Equal(Enumerable.Repeat("throws KafkaException -18: ", routedCalls), outcomes);
+            Assert.Equal("throws KafkaException -18: ", polled);
             Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
         }
         finally
@@ -381,8 +381,8 @@ public sealed class PublicConsumerCallbackRoutingTests
             Exception? polled = await Record.ExceptionAsync(() => TestTimeout.Run(() => polling, s_wellInsideThePoll));
 
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "DisposeAsync took " + elapsed.Elapsed);
-            Assert.Equal(Enumerable.Repeat("faults KafkaException -18: WakeupTrigger fired", routedCalls), outcomes);
-            Assert.Equal("KafkaException -18: WakeupTrigger fired", polled is null ? "ok" : Describe(polled));
+            Assert.Equal(Enumerable.Repeat("faults KafkaException -18: ", routedCalls), outcomes);
+            Assert.Equal("KafkaException -18: ", polled is null ? "ok" : Describe(polled));
             Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
         }
         finally

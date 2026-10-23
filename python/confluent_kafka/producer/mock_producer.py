@@ -37,12 +37,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
 from ._record_future import RecordFuture
-from ._send import reject_coroutine_callback
+from ._send import check_callback, reject_coroutine_callback
 from .producer import Producer
 from .record_metadata import RecordMetadata
 
@@ -123,10 +123,10 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def __init__(self: MockProducer[bytes, bytes]) -> None: ...
 
     @java_forms(*_FORMS)
-    def __init__(self, *, cluster: Cluster | None = None, auto_complete: bool = UNSET,
-                 partitioner: Partitioner | None = UNSET,
-                 key_serializer: Serializer[Any] | None = None,
-                 value_serializer: Serializer[Any] | None = None) -> None:
+    def __init__(self, *, cluster: Cluster = MISSING, auto_complete: bool = MISSING,
+                 partitioner: Partitioner | None = MISSING,
+                 key_serializer: Serializer[Any] | None = MISSING,
+                 value_serializer: Serializer[Any] | None = MISSING) -> None:
         """Create a mock producer: ``cluster`` holds the metadata for this
         producer (none by default); with ``auto_complete``, all requests
         complete successfully and run the callback at once, otherwise the user
@@ -135,10 +135,12 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
         the partition strategy; and the key and value serializers default to
         ``bytes_serializer()``."""
         Producer.__init__(self)
-        if auto_complete is UNSET:
+        if auto_complete is MISSING:
             # MockProducer(): this(Cluster.empty(), false, null, null, null).
-            auto_complete, partitioner, key_serializer, value_serializer = False, None, None, None
-        self._init_mock(cluster, auto_complete, partitioner, key_serializer, value_serializer)
+            auto_complete, partitioner = False, None
+        self._init_mock(cluster, auto_complete, partitioner,
+                        None if key_serializer is MISSING else key_serializer,
+                        None if value_serializer is MISSING else value_serializer)
 
     def init_transactions(self) -> None:
         self._init_transactions()
@@ -157,18 +159,24 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def abort_transaction(self) -> None:
         self._abort_transaction()
 
+    @overload
+    def send(self, *, record: ProducerRecord[K, V]) -> KafkaFuture[RecordMetadata]: ...
+    @overload
+    def send(self, *, record: ProducerRecord[K, V], callback: Callback | None
+             ) -> KafkaFuture[RecordMetadata]: ...
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = UNSET) -> KafkaFuture[RecordMetadata]:
+             callback: Callback | None = MISSING) -> KafkaFuture[RecordMetadata]:
         """Adds the record to the list of sent records (``history()``). With
         ``auto_complete`` the returned future is complete, and the callback has
         run, when this returns. ``cancel()`` on the future returns ``False``,
         as Java's; its ``then_apply`` functions and ``when_complete`` actions run
         in the call that completes the record. A coroutine function given as
         ``callback`` raises ``TypeError`` (``AsyncMockProducer`` awaits it)."""
-        if callback is UNSET:
+        if callback is MISSING:
             callback = None  # Java's send(record) passes null
         if callback is not None:
             reject_coroutine_callback(callback)
+            check_callback(callback)
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
         self._send(record, callback, future)
         return RecordFuture._of_impl(future)
@@ -182,8 +190,13 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
     def metrics(self) -> dict[MetricName, Metric]:
         return self._metrics()
 
-    def close(self, *, timeout: Duration | None = None) -> None:
-        """Java's mock never reads the timeout, a negative one included."""
+    @overload
+    def close(self) -> None: ...
+    @overload
+    def close(self, *, timeout: Duration) -> None: ...
+    def close(self, *, timeout: Duration = MISSING) -> None:
+        """Java's mock never reads the timeout, a negative or a ``None`` one
+        included."""
         self._close()
 
     def __enter__(self) -> MockProducer[K, V]:

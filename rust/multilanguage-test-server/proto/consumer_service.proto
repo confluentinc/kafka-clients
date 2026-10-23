@@ -34,8 +34,10 @@
 // encoding, which both services share). A reverse callback RPC would only test
 // the harness's own plumbing; the log tests the binding.
 //
-// Still out of scope: regex pattern subscription (subscribe_pattern /
-// subscribe_pattern_with_listener) — tests needing it stay native-Rust-only.
+// Pattern subscription crosses too: Java's subscribe(SubscriptionPattern[,
+// listener]), the broker-side RE2/J form (KIP-848), through
+// SubscribeRequest.pattern. Only the client-side java.util.regex.Pattern
+// overloads stay out, because they are not translated at all.
 //
 // Like the producer service, blocking methods are awaited server-side: the
 // unary RPC response IS the resolved result (no future/streaming on the wire).
@@ -110,6 +112,11 @@ service ConsumerService {
   rpc Wakeup(ConsumerIdRequest) returns (StatusResponse);
   rpc Close(ConsumerCloseRequest) returns (StatusResponse);
 
+  // Java currentLag(TopicPartition): the lag the consumer computed from its
+  // last fetch, without a remote call. Absent `lag` is Java's
+  // `OptionalLong.empty()`.
+  rpc CurrentLag(CurrentLagRequest) returns (CurrentLagResponse);
+
   // Read (without clearing) the consumer's user-callback log — every rebalance
   // listener and offset-commit callback invocation the server's binding has
   // performed so far. CallbackLogEntry / CallbackLogResponse are defined in
@@ -173,6 +180,15 @@ message ConsumerCloseRequest {
   // not translated.
   reserved 2;
   reserved "timeout_ms";
+  // Java's `close(CloseOptions)` when set, the no-argument `close()` when
+  // absent: the `CloseOptions.GroupMembershipOperation` constant *name*
+  // ("LEAVE_GROUP", "REMAIN_IN_GROUP" or "DEFAULT"), since that enum has no
+  // numeric id in Java. Every CloseOptions has an operation (DEFAULT unless
+  // set), so its presence alone selects the overload.
+  optional string group_membership_operation = 3;
+  // `CloseOptions.timeout()`, read only with `group_membership_operation`;
+  // absent is the options' unset timeout (the consumer's default).
+  optional int64 close_timeout_ms = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +207,10 @@ message SubscribeRequest {
   // a *replacing* subscribe — never on unsubscribe). Entries already logged are
   // not affected.
   bool with_listener = 3;
+  // Java's `subscribe(SubscriptionPattern[, listener])` when set: the RE2/J
+  // regex the group coordinator evaluates (KIP-848). `topics` must then be
+  // empty; `with_listener` applies to either form.
+  optional string pattern = 4;
 }
 
 message AssignRequest {
@@ -203,6 +223,10 @@ message AssignRequest {
 message TopicPartitionListRequest {
   uint64 consumer_id = 1;
   repeated TopicPartition partitions = 2;
+  // The `Duration timeout` of Java's `beginningOffsets` / `endOffsets`
+  // overloads; absent calls the overload without it. The other RPCs sharing
+  // this message have no timed overload and ignore it.
+  optional int64 timeout_ms = 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +290,9 @@ message CommitSyncRequest {
   uint64 consumer_id = 1;
   // Empty => commit the current consumed positions; otherwise commit these.
   repeated OffsetMapEntry offsets = 2;
+  // Java's `commitSync(Duration)` / `commitSync(Map, Duration)`; absent calls
+  // the overload without a timeout.
+  optional int64 timeout_ms = 3;
 }
 
 // Same offsets shape as CommitSyncRequest, plus the callback flag.
@@ -281,6 +308,8 @@ message CommitAsyncRequest {
 message CommittedRequest {
   uint64 consumer_id = 1;
   repeated TopicPartition partitions = 2;
+  // Java's `committed(Set, Duration)`; absent calls the overload without it.
+  optional int64 timeout_ms = 3;
 }
 
 message CommittedResponse {
@@ -293,6 +322,9 @@ message CommittedResponse {
 message PositionRequest {
   uint64 consumer_id = 1;
   TopicPartition partition = 2;
+  // Java's `position(TopicPartition, Duration)`; absent calls the overload
+  // without it.
+  optional int64 timeout_ms = 3;
 }
 
 message PositionResponse {
@@ -335,6 +367,9 @@ message TimestampSpecEntry {
 message OffsetsForTimesRequest {
   uint64 consumer_id = 1;
   repeated TimestampSpecEntry timestamps = 2;
+  // Java's `offsetsForTimes(Map, Duration)`; absent calls the overload
+  // without it.
+  optional int64 timeout_ms = 3;
 }
 
 message OffsetAndTimestampMapEntry {
@@ -393,6 +428,20 @@ message SubscriptionResponse {
     StringList topics = 1;
     KafkaError error = 2;
   }
+}
+
+message CurrentLagRequest {
+  uint64 consumer_id = 1;
+  TopicPartition partition = 2;
+}
+
+message CurrentLagResponse {
+  // Java's `OptionalLong`: absent when the consumer does not know the lag
+  // (it has not fetched the partition, or the partition is not assigned).
+  optional int64 lag = 1;
+  // Set on failure (an unknown consumer_id, or another call holding the
+  // consumer, Java's ConcurrentModificationException).
+  optional KafkaError error = 2;
 }
 
 // ---------------------------------------------------------------------------

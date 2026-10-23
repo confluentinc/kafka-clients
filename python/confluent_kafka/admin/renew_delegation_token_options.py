@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from confluent_kafka._args import UNSET
+from confluent_kafka._args import MISSING
 from confluent_kafka.admin.abstract_options import AbstractOptions
 
 __all__ = ["RenewDelegationTokenOptions"]
@@ -41,22 +41,24 @@ class RenewDelegationTokenOptions(AbstractOptions):
 
     __slots__ = ("_renew_time_period_ms",)
 
-    def __init__(self, *, timeout_ms: int | None = UNSET,
-                 renew_time_period_ms: int = UNSET) -> None:
+    def __init__(self, *, timeout_ms: int | None = MISSING,
+                 renew_time_period_ms: int = MISSING) -> None:
         super().__init__()
         self._renew_time_period_ms = -1
-        if timeout_ms is not UNSET:
+        if timeout_ms is not MISSING:
             self.timeout_ms(timeout_ms=timeout_ms)
-        if renew_time_period_ms is not UNSET:
+        if renew_time_period_ms is not MISSING:
             self.renew_time_period_ms(renew_time_period_ms=renew_time_period_ms)
 
-    def renew_time_period_ms(self, *, renew_time_period_ms: int | None = None) -> Any:
+    def renew_time_period_ms(self, *, renew_time_period_ms: int = MISSING) -> Any:
         """With ``renew_time_period_ms``: set it and return this object.
 
         Without: the current value.
         """
-        if renew_time_period_ms is None:
+        if renew_time_period_ms is MISSING:
             return self._renew_time_period_ms
+        if renew_time_period_ms is None:  # a long: Java cannot pass null
+            raise TypeError("renew_time_period_ms must not be None")
         self._renew_time_period_ms = renew_time_period_ms
         self._record("renew_time_period_ms", self._renew_time_period_ms)
         return self

@@ -154,10 +154,13 @@ points, so the guard must be acquired and released repeatedly around them.
 Rule 2 is the failure documented in
 `design/current/consumer-join-stall-rootcause.md`: the poll is **not
 cancel-safe**, because `initiate_connect` calls `connection_states.connecting()`
-(a persisted side effect) and *then* awaits the TCP handshake. A `select!` that
-drops the poll at that await strands the node in `Connecting` with no socket,
-recovering only after the ~10 s connection-setup timeout. Milestone 8 learned
-this the hard way; do not relearn it in the producer.
+(a persisted side effect) and *then* awaits the address resolution
+(`current_address()`). A `select!` that drops the poll at that await strands the
+node in `Connecting` with no socket, recovering only after the ~10 s
+connection-setup timeout. Milestone 8 learned this the hard way, when the
+`await` was the TCP handshake (`Selector::connect` has since become
+non-blocking, as in Java, so only the resolution remains); do not relearn it in
+the producer.
 
 **How to apply:**
 

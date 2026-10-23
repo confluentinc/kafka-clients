@@ -81,44 +81,37 @@ impl DefaultRecord {
         let mut size = 1i32; // always one byte for attributes
         size += ByteUtils::size_of_varint(offset_delta);
         size += ByteUtils::size_of_varlong(timestamp_delta);
-        size += Self::size_of_key_value_headers(key_size, value_size, headers);
+        // `as i32` keeps the low 32 bits of the `i64` sum, which is what Java's
+        // `int` arithmetic leaves when the sum overflows.
+        size += Self::size_of_key_value_headers(key_size as i64, value_size as i64, headers) as i32;
         size
     }
 
     /// Compute the size of key, value, and headers fields.
-    fn size_of_key_value_headers(key_size: i32, value_size: i32, headers: &[RecordHeader]) -> i32 {
-        let mut size = 0i32;
-
-        if key_size < 0 {
-            size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
-        } else {
-            size += ByteUtils::size_of_varint(key_size) + key_size;
-        }
-
-        if value_size < 0 {
-            size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
-        } else {
-            size += ByteUtils::size_of_varint(value_size) + value_size;
-        }
-
-        size += ByteUtils::size_of_varint(headers.len() as i32);
-
-        for header in headers {
-            let header_key = header.key();
-            let header_key_size = header_key.len() as i32;
-            size += ByteUtils::size_of_varint(header_key_size) + header_key_size;
-
-            match header.value() {
-                None => {
-                    size += DefaultRecord::NULL_VARINT_SIZE_BYTES;
-                },
-                Some(header_value) => {
-                    let hv_size = header_value.len() as i32;
-                    size += ByteUtils::size_of_varint(hv_size) + hv_size;
-                },
+    ///
+    /// Corresponds to Java's private `DefaultRecord.sizeOf(int, int, Header[])`, but
+    /// computed in `i64`. In Java the sizes are `byte[]` lengths and the sum always fits
+    /// in an `int`; a Rust slice length may not, and the producer needs the exact size to
+    /// reject such a record (`KafkaProducer::ensure_valid_record_size`). For a length up
+    /// to `i32::MAX`, `size_of_varlong` returns what Java's `sizeOfVarint` does. The sum
+    /// saturates at `i64::MAX`.
+    fn size_of_key_value_headers(key_size: i64, value_size: i64, headers: &[RecordHeader]) -> i64 {
+        // A negative size is a null field.
+        fn size_of_field(size: i64) -> i64 {
+            if size < 0 {
+                DefaultRecord::NULL_VARINT_SIZE_BYTES as i64
+            } else {
+                (ByteUtils::size_of_varlong(size) as i64).saturating_add(size)
             }
         }
 
+        // A slice length is at most `isize::MAX`, so `len() as i64` is lossless.
+        let mut size = size_of_field(key_size).saturating_add(size_of_field(value_size));
+        size = size.saturating_add(ByteUtils::size_of_varlong(headers.len() as i64) as i64);
+        for header in headers {
+            size = size.saturating_add(size_of_field(header.key().len() as i64));
+            size = size.saturating_add(size_of_field(header.value().map_or(-1, |value| value.len() as i64)));
+        }
         size
     }
 
@@ -533,12 +526,14 @@ impl DefaultRecord {
 
     /// Compute the upper bound of the record size.
     ///
-    /// Uses MAX_RECORD_OVERHEAD for the fixed overhead.
+    /// Uses MAX_RECORD_OVERHEAD for the fixed overhead. Returns an `i64` where Java
+    /// returns an `int`, for the reason given on `size_of_key_value_headers`.
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#recordSizeUpperBound")]
-    pub fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
-        let key_size = key.map_or(-1, |k| k.len() as i32);
-        let value_size = value.map_or(-1, |v| v.len() as i32);
-        DefaultRecord::MAX_RECORD_OVERHEAD + DefaultRecord::size_of_key_value_headers(key_size, value_size, headers)
+    pub fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i64 {
+        let key_size = key.map_or(-1, |k| k.len() as i64);
+        let value_size = value.map_or(-1, |v| v.len() as i64);
+        (DefaultRecord::MAX_RECORD_OVERHEAD as i64)
+            .saturating_add(DefaultRecord::size_of_key_value_headers(key_size, value_size, headers))
     }
 }
 
@@ -1365,6 +1360,67 @@ mod tests {
 
         assert_eq!(written, computed);
         assert_eq!(out.len() as i32, computed);
+    }
+
+    /// Java's `sizeOf` for null, empty and non-empty fields, multi-byte length varints,
+    /// and headers with and without a value.
+    #[test]
+    fn test_size_of_key_value_headers() {
+        let headers = vec![
+            RecordHeader::new("h".to_string(), Some(b"v".to_vec())),
+            RecordHeader::new("h2-\u{e9}".to_string(), None),
+        ];
+        // Two null markers and a header count of 0.
+        assert_eq!(3, DefaultRecord::size_of_key_value_headers(-1, -1, &[]));
+        assert_eq!(3, DefaultRecord::size_of_key_value_headers(0, 0, &[]));
+        // Key 1 + 3, value 1 + 5, header count 1, "h" 1 + 1, "v" 1 + 1, "h2-é" 1 + 5,
+        // null header value 1.
+        assert_eq!(22, DefaultRecord::size_of_key_value_headers(3, 5, &headers));
+        // 2- and 3-byte length varints.
+        assert_eq!(
+            (2 + 200) + (3 + 20_000) + 1,
+            DefaultRecord::size_of_key_value_headers(200, 20_000, &[])
+        );
+    }
+
+    /// The size is exact on both sides of `i32::MAX`, where Java's `int` sum would wrap:
+    /// a null key (1 byte), a value behind a 5-byte length varint, and no headers (1 byte).
+    #[test]
+    fn test_size_of_key_value_headers_at_i32_max() {
+        let value_size = i32::MAX as i64 - 7;
+        assert_eq!(i32::MAX as i64, DefaultRecord::size_of_key_value_headers(-1, value_size, &[]));
+        assert_eq!(
+            i32::MAX as i64 + 1,
+            DefaultRecord::size_of_key_value_headers(-1, value_size + 1, &[])
+        );
+    }
+
+    /// The size is exact above `i32::MAX`, whether one field or the sum of fields is
+    /// that large.
+    #[test]
+    fn test_size_of_key_value_headers_beyond_i32_max() {
+        // A 4 GiB + 10 byte key, a null value and no headers.
+        let key_size = (1i64 << 32) + 10;
+        assert_eq!(
+            5 + key_size + 1 + 1,
+            DefaultRecord::size_of_key_value_headers(key_size, -1, &[])
+        );
+
+        // A 1.5 GiB key and value: each fits in an `i32`, the sum does not.
+        let half_size = 3i64 << 29;
+        let size = DefaultRecord::size_of_key_value_headers(half_size, half_size, &[]);
+        assert_eq!(2 * (5 + half_size) + 1, size);
+        assert!(size > i32::MAX as i64);
+    }
+
+    /// The size saturates at `i64::MAX` instead of overflowing.
+    #[test]
+    fn test_size_of_key_value_headers_saturates() {
+        assert_eq!(i64::MAX, DefaultRecord::size_of_key_value_headers(i64::MAX, -1, &[]));
+        assert_eq!(
+            i64::MAX,
+            DefaultRecord::size_of_key_value_headers(i64::MAX / 2, i64::MAX / 2, &[])
+        );
     }
 
     #[test]

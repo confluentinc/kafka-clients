@@ -219,7 +219,10 @@ test-integration-grpc-c-native:
 # AsyncConsumerServiceImpl implement the GroupMetadata / ReleaseGroupMetadata
 # RPCs that consumer_service.proto added, which
 # test_consume_transform_produce_with_offsets reaches through
-# Consumer::group_metadata(). The binding has no transaction surface at all yet
+# Consumer::group_metadata(). test_ml_group_metadata_and_assignment_after_poll
+# (tests/integration/multilanguage_consumer_test.rs) reaches the GroupMetadata RPC
+# outside any transaction, so the consumer servicers need it for that test too,
+# independently of the transaction surface. The binding has no transaction surface at all yet
 # -- IAsyncProducer's own docs record it as deferred.
 #
 # The admin unregisterController arms. Apache Kafka 4.4 added
@@ -252,7 +255,8 @@ test-integration-grpc-c-native:
 # producer servicers, plus the GroupMetadata / ReleaseGroupMetadata
 # ConsumerService RPCs in both consumer servicers -- ConsumerServiceImpl and
 # AsyncConsumerServiceImpl -- which test_consume_transform_produce_with_offsets
-# reaches through Consumer::group_metadata()). Deleting them is the last step of
+# reaches through Consumer::group_metadata(), unless an earlier phase has added
+# them for test_ml_group_metadata_and_assignment_after_poll). Deleting them is the last step of
 # that phase, not a follow-up to it. With both gone, remove DOTNET_GRPC_SKIPS (the
 # definition below and its uses in test-integration-grpc-dotnet and
 # test-integration-grpc-dotnet-native).
@@ -310,8 +314,10 @@ doc-check:
 
 # Package the crate as it would be published, fail if the compressed `.crate`
 # is above 3 MiB, and build a fresh project that depends on it.
+# `--locked`: a Cargo.lock that does not match the manifests fails here, on the
+# pull request, rather than in the release, which packages with `--locked`.
 package-check:
-	cargo xtask package-check
+	cargo --locked xtask package-check
 
 # Compare the Rust API (cargo-semver-checks) and the C ABI (libabigail's
 # abidiff) with a release tag, by default the highest one not above the
@@ -326,7 +332,7 @@ check-api-compat:
 # in the Cargo manifests and 0.3.0rc1 in the Python packages. PYTHON_VERSION
 # (PEP 440, e.g. 0.3.0.post1) gives the Python packages another version.
 bump-version:
-	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
 	cargo xtask bump-version $(VERSION) $(if $(PYTHON_VERSION),--python-version $(PYTHON_VERSION))
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer

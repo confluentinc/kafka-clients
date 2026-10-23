@@ -27,10 +27,11 @@ from confluent_kafka.common.serialization import string_serializer
 from confluent_kafka.producer import KafkaProducer, ProducerRecord
 
 
-def delivery_callback(record, metadata, exception):
+def delivery_callback(record, *, metadata, exception, **kwargs):
     """Per-message delivery callback, run on the producer's background
     completion thread once the message is delivered or has permanently failed
-    (after retries). The client passes (metadata, exception); the record is
+    (after retries). The client passes metadata= and exception= (and any parameter
+    Java adds later, into **kwargs); the record is
     bound in front by functools.partial, since the metadata carries no value."""
     if exception is not None:
         sys.stderr.write('%% Message failed delivery: %s: %s\n' % (record.value(), exception))

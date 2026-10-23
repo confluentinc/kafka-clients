@@ -51,7 +51,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use confluent_kafka::common::{Error, TopicPartition};
-use confluent_kafka::consumer::{ConsumerRebalanceListener, DynConsumer, OffsetAndMetadata, OffsetCommitCallback};
+use confluent_kafka::consumer::{
+    ConsumerHandle, ConsumerRebalanceListener, DynConsumer, OffsetAndMetadata, OffsetCommitCallback,
+    SubscriptionPattern,
+};
 use confluent_kafka::producer::{Producer, ProducerRecord, RecordMetadata};
 
 /// `kind` value for `ConsumerRebalanceListener::on_partitions_assigned`.
@@ -243,6 +246,58 @@ impl ConsumerCallbackLog {
         }
     }
 
+    /// Subscribe to the topics matching `pattern` (Java's
+    /// `subscribe(SubscriptionPattern, ConsumerRebalanceListener)`, evaluated
+    /// by the group coordinator) with the same logging listener as
+    /// [`Self::subscribe_with_logging_listener`], under the same per-subscribe
+    /// registration rule.
+    pub async fn subscribe_pattern_with_logging_listener(
+        &self,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
+        pattern: SubscriptionPattern,
+    ) -> Result<(), Error> {
+        match self {
+            ConsumerCallbackLog::Native(log) => {
+                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log) });
+                consumer.subscribe_with_pattern_listener(pattern, listener).await
+            },
+            #[cfg(feature = "multilanguage-tests")]
+            ConsumerCallbackLog::Grpc(remote) => remote.subscribe_pattern_with_listener(&pattern).await,
+        }
+    }
+
+    /// Initiate an asynchronous commit of `offsets` (Java's
+    /// `commitAsync(Map, OffsetCommitCallback)`) with a completion callback that
+    /// appends a `"commit"` entry to this log.
+    pub async fn commit_async_offsets_with_logging_callback(
+        &self,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), Error> {
+        match self {
+            ConsumerCallbackLog::Native(log) => {
+                let callback = Arc::new(LoggingCommitCallback { log: Arc::clone(log) });
+                consumer.commit_async_with_offsets_callback(offsets, callback).await
+            },
+            #[cfg(feature = "multilanguage-tests")]
+            ConsumerCallbackLog::Grpc(remote) => remote.commit_async_offsets_with_callback(&offsets).await,
+        }
+    }
+
+    /// A handle that fires `consumer`'s `wakeup()` from another task while
+    /// `consumer` is borrowed by a blocking call — Java's `consumer.wakeup()`
+    /// from another thread. The native arm is the consumer's own
+    /// [`ConsumerHandle`]; the gRPC arm sends the `Wakeup` RPC for the same
+    /// server-side consumer this log reads, which the server serves while the
+    /// blocking call's RPC is still in flight.
+    pub fn wakeup_handle(&self, consumer: &dyn DynConsumer<Vec<u8>, Vec<u8>>) -> ConsumerWakeup {
+        match self {
+            ConsumerCallbackLog::Native(_) => ConsumerWakeup::Native(consumer.handle()),
+            #[cfg(feature = "multilanguage-tests")]
+            ConsumerCallbackLog::Grpc(remote) => ConsumerWakeup::Grpc(remote.clone()),
+        }
+    }
+
     /// Initiate an asynchronous commit of the current positions with a
     /// completion callback that appends a `"commit"` entry to this log.
     pub async fn commit_async_with_logging_callback(
@@ -265,6 +320,28 @@ impl ConsumerCallbackLog {
             ConsumerCallbackLog::Native(log) => Ok(log.lock().expect("callback log poisoned").clone()),
             #[cfg(feature = "multilanguage-tests")]
             ConsumerCallbackLog::Grpc(remote) => remote.entries().await,
+        }
+    }
+}
+
+/// Fires one consumer's `wakeup()` from any task; see
+/// [`ConsumerCallbackLog::wakeup_handle`].
+pub enum ConsumerWakeup {
+    /// The native consumer's own handle.
+    Native(ConsumerHandle),
+    /// The `Wakeup` RPC for a server-side consumer.
+    #[cfg(feature = "multilanguage-tests")]
+    Grpc(grpc::ConsumerLog),
+}
+
+impl ConsumerWakeup {
+    /// Java's `consumer.wakeup()`: the blocking call in flight (or the next
+    /// one) fails with `WakeupException`. Never fails itself, as in Java.
+    pub async fn wakeup(&self) {
+        match self {
+            ConsumerWakeup::Native(handle) => handle.wakeup(),
+            #[cfg(feature = "multilanguage-tests")]
+            ConsumerWakeup::Grpc(remote) => remote.wakeup().await,
         }
     }
 }
@@ -391,13 +468,17 @@ pub mod grpc {
     //! The `GetCallbackLog` client side, plus the two flag-setting RPCs that
     //! ask a server to register real callbacks.
 
-    use confluent_kafka::common::Error;
+    use std::collections::HashMap;
+
+    use confluent_kafka::common::{Error, TopicPartition};
+    use confluent_kafka::consumer::{OffsetAndMetadata, SubscriptionPattern};
     use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
     use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
     use multilanguage_test_server::proto::{self};
     use tonic::transport::Channel;
 
     use super::CallbackLogEntry;
+    use crate::common::multilanguage_consumer::offset_map_to_proto;
     use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
     fn entries_from_proto(response: proto::CallbackLogResponse) -> Vec<CallbackLogEntry> {
@@ -414,6 +495,7 @@ pub mod grpc {
     }
 
     /// Server-side consumer callback log, keyed by the server-local consumer id.
+    #[derive(Clone)]
     pub struct ConsumerLog {
         client: ConsumerServiceClient<Channel>,
         consumer_id: u64,
@@ -427,9 +509,30 @@ pub mod grpc {
 
         /// `Subscribe` with `with_listener = true`.
         pub async fn subscribe_with_listener(&self, topics: Vec<String>) -> Result<(), Error> {
+            self.subscribe(proto::SubscribeRequest {
+                consumer_id: self.consumer_id,
+                topics,
+                with_listener: true,
+                pattern: None,
+            })
+            .await
+        }
+
+        /// `Subscribe` with a `pattern` and `with_listener = true`.
+        pub async fn subscribe_pattern_with_listener(&self, pattern: &SubscriptionPattern) -> Result<(), Error> {
+            self.subscribe(proto::SubscribeRequest {
+                consumer_id: self.consumer_id,
+                topics: Vec::new(),
+                with_listener: true,
+                pattern: Some(pattern.pattern().to_string()),
+            })
+            .await
+        }
+
+        async fn subscribe(&self, request: proto::SubscribeRequest) -> Result<(), Error> {
             let mut client = self.client.clone();
             let response = client
-                .subscribe(proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: true })
+                .subscribe(request)
                 .await
                 .map_err(|s| status_to_kafka_error(&s, self.backend))?
                 .into_inner();
@@ -437,6 +540,34 @@ pub mod grpc {
                 Some(err) => Err(kafka_error_from_proto(err)),
                 None => Ok(()),
             }
+        }
+
+        /// `CommitAsync` with `with_callback = true` and explicit `offsets`.
+        pub async fn commit_async_offsets_with_callback(
+            &self,
+            offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        ) -> Result<(), Error> {
+            let mut client = self.client.clone();
+            let response = client
+                .commit_async(proto::CommitAsyncRequest {
+                    consumer_id: self.consumer_id,
+                    offsets: offset_map_to_proto(offsets),
+                    with_callback: true,
+                })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, self.backend))?
+                .into_inner();
+            match response.error {
+                Some(err) => Err(kafka_error_from_proto(err)),
+                None => Ok(()),
+            }
+        }
+
+        /// `Wakeup`, best effort: Java's `wakeup()` never fails, and a server
+        /// that already dropped the consumer has nothing to wake.
+        pub async fn wakeup(&self) {
+            let mut client = self.client.clone();
+            let _ = client.wakeup(proto::ConsumerIdRequest { consumer_id: self.consumer_id }).await;
         }
 
         /// `CommitAsync` with `with_callback = true` and no explicit offsets

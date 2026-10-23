@@ -935,13 +935,16 @@ impl RecordAccumulator {
             // `finally` guard — Java's `ByteBuffer buffer = null` local — not in a
             // plain local, so the pool gets it back however this function exits.
             if guard.buffer.is_none() {
-                let estimated = AbstractRecords::estimate_size_in_bytes_upper_bound(
+                // `KafkaProducer` rejected any record larger than `max.request.size`, an
+                // `i32`, so the estimate fits.
+                let estimated = i32::try_from(AbstractRecords::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     self.compression.compression_type(),
                     key,
                     value,
                     headers,
-                );
+                ))
+                .unwrap_or(i32::MAX);
                 let size = self.batch_size.max(estimated);
 
                 kafka_trace!(
@@ -2528,6 +2531,13 @@ impl RecordAccumulator {
         f(&partitioner)
     }
 
+    /// The `linger.ms` the accumulator was built with, so that a producer-level
+    /// test can verify the value `KafkaProducer` passes in.
+    #[cfg(test)]
+    pub(crate) fn linger_ms_for_test(&self) -> i32 {
+        self.linger_ms
+    }
+
     /// Registers `batch` in the incomplete set as [`Self::append`] would.
     ///
     /// Test-only. `TransactionManagerTest`'s `writeIdempotentBatchWithValue`
@@ -3340,6 +3350,37 @@ mod tests {
         // Ready after linger.
         let result = accum.ready(&metadata, now + linger_ms as i64 + 1);
         assert!(result.ready_nodes.contains(&n1));
+    }
+
+    /// With the largest linger `KafkaProducer` passes in (`i32::MAX`, the clamp
+    /// applied to larger `linger.ms` values), a batch that is not full is not ready
+    /// until the full linger has elapsed.
+    #[tokio::test]
+    async fn test_max_linger_keeps_batch_lingering() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let linger_ms = i32::MAX;
+
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::none().build(), linger_ms);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        let k = key();
+        let v = value();
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
+            .unwrap();
+
+        let result = accum.ready(&metadata, now + linger_ms as i64 - 1);
+        assert!(result.ready_nodes.is_empty(), "not ready before the linger elapses");
+        assert_eq!(
+            1, result.next_ready_check_delay_ms,
+            "ready check is due when the linger elapses"
+        );
+
+        let result = accum.ready(&metadata, now + linger_ms as i64);
+        assert!(result.ready_nodes.contains(&n1), "ready once the linger elapses");
     }
 
     /// Translated from a subset of `RecordAccumulatorTest.testDrainBatches`.

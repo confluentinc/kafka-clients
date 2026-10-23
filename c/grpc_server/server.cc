@@ -101,6 +101,8 @@ using confluent::kafka::test::ConsumerRecordList;
 using confluent::kafka::test::ConsumerService;
 using confluent::kafka::test::CreateConsumerRequest;
 using confluent::kafka::test::CreateConsumerResponse;
+using confluent::kafka::test::CurrentLagRequest;
+using confluent::kafka::test::CurrentLagResponse;
 using confluent::kafka::test::GroupMetadataResponse;
 using confluent::kafka::test::ListTopicsResponse;
 using confluent::kafka::test::LongOffsetMap;
@@ -1493,6 +1495,9 @@ void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   dst->set_port(kafka_common_Node_port(node));
   const char* rack = kafka_common_Node_rack(node);  // nullptr when Java's rack is null
   if (rack != nullptr) dst->set_rack(rack);
+  // Java's isFenced() (KIP-1073); false for every node but a fenced broker a
+  // describeCluster(includeFencedBrokers) reports.
+  dst->set_is_fenced(kafka_common_Node_is_fenced(node) != 0);
 }
 
 // Converts every `kafka_common_Node_t *` of an owned list into the proto node
@@ -1621,6 +1626,10 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     BorrowedStringList topics(req->topics());
     kafka_common_Error_t* err = nullptr;
+    // subscribe(SubscriptionPattern[, listener]) when the request carries a
+    // pattern: an owned handle the subscribe borrows for the call.
+    kafka_consumer_SubscriptionPattern_t* pattern =
+        req->has_pattern() ? kafka_consumer_SubscriptionPattern_new(req->pattern().c_str()) : nullptr;
     if (req->with_listener()) {
       // A real ConsumerRebalanceListener whose invocations land in the callback
       // log. Its `self` is the consumer's LogState, which lives for the whole
@@ -1632,11 +1641,18 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           kafka_consumer_ConsumerRebalanceListener_new(
               log_state_for(req->consumer_id()), log_partitions_revoked,
               log_partitions_assigned, log_partitions_lost);
-      kafka_consumer_Consumer_subscribe_with_topics_listener(c, topics.list, listener, &err);
+      if (pattern != nullptr) {
+        kafka_consumer_Consumer_subscribe_with_pattern_listener(c, pattern, listener, &err);
+      } else {
+        kafka_consumer_Consumer_subscribe_with_topics_listener(c, topics.list, listener, &err);
+      }
       kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+    } else if (pattern != nullptr) {
+      kafka_consumer_Consumer_subscribe_with_pattern(c, pattern, &err);
     } else {
       kafka_consumer_Consumer_subscribe_with_topics(c, topics.list, &err);
     }
+    kafka_consumer_SubscriptionPattern_destroy(pattern);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1709,15 +1725,24 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
+    // An absent timeout_ms selects the overload without a Duration.
     if (req->offsets().empty()) {
-      kafka_consumer_Consumer_commit_sync(c, &err);
+      if (req->has_timeout_ms()) {
+        kafka_consumer_Consumer_commit_sync_with_timeout(c, req->timeout_ms(), &err);
+      } else {
+        kafka_consumer_Consumer_commit_sync(c, &err);
+      }
     } else {
       OffsetMapHandles offsets(req->offsets());
       if (offsets.error != nullptr) {
         fill_proto_error(resp->mutable_error(), offsets.take_error());
         return grpc::Status::OK;
       }
-      kafka_consumer_Consumer_commit_sync_with_offsets(c, offsets.map, &err);
+      if (req->has_timeout_ms()) {
+        kafka_consumer_Consumer_commit_sync_with_offsets_timeout(c, offsets.map, req->timeout_ms(), &err);
+      } else {
+        kafka_consumer_Consumer_commit_sync_with_offsets(c, offsets.map, &err);
+      }
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1768,7 +1793,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // An owned map of owned TopicPartition -> owned OffsetAndMetadata handles;
     // destroying the map frees both sides of every entry.
     kafka_common_Error_t* err = nullptr;
-    kafka_Map_t* map = kafka_consumer_Consumer_committed(c, partitions.list, &err);
+    kafka_Map_t* map = req->has_timeout_ms()
+                           ? kafka_consumer_Consumer_committed_with_timeout(c, partitions.list, req->timeout_ms(), &err)
+                           : kafka_consumer_Consumer_committed(c, partitions.list, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1797,7 +1824,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(
         req->partition().topic().c_str(), req->partition().partition());
     kafka_common_Error_t* err = nullptr;
-    const int64_t out = kafka_consumer_Consumer_position(c, tp, &err);
+    const int64_t out = req->has_timeout_ms()
+                            ? kafka_consumer_Consumer_position_with_timeout(c, tp, req->timeout_ms(), &err)
+                            : kafka_consumer_Consumer_position(c, tp, &err);
     kafka_common_TopicPartition_destroy(tp);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1852,11 +1881,13 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   grpc::Status BeginningOffsets(grpc::ServerContext*, const TopicPartitionListRequest* req,
                                 LongOffsetsResponse* resp) override {
-    return long_offsets(req, resp, kafka_consumer_Consumer_beginning_offsets);
+    return long_offsets(req, resp, kafka_consumer_Consumer_beginning_offsets,
+                        kafka_consumer_Consumer_beginning_offsets_with_timeout);
   }
   grpc::Status EndOffsets(grpc::ServerContext*, const TopicPartitionListRequest* req,
                           LongOffsetsResponse* resp) override {
-    return long_offsets(req, resp, kafka_consumer_Consumer_end_offsets);
+    return long_offsets(req, resp, kafka_consumer_Consumer_end_offsets,
+                        kafka_consumer_Consumer_end_offsets_with_timeout);
   }
 
   grpc::Status OffsetsForTimes(grpc::ServerContext*, const OffsetsForTimesRequest* req,
@@ -1871,7 +1902,10 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // An owned map of owned TopicPartition -> owned OffsetAndTimestamp handles;
     // partitions the broker could not resolve are absent (Java's null values).
     kafka_common_Error_t* err = nullptr;
-    kafka_Map_t* map = kafka_consumer_Consumer_offsets_for_times(c, timestamps.map, &err);
+    kafka_Map_t* map =
+        req->has_timeout_ms()
+            ? kafka_consumer_Consumer_offsets_for_times_with_timeout(c, timestamps.map, req->timeout_ms(), &err)
+            : kafka_consumer_Consumer_offsets_for_times(c, timestamps.map, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -2109,12 +2143,58 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // entries are appended before this returns and GetCallbackLog is
     // consistent right after Close.
     kafka_common_Error_t* err = nullptr;
-    kafka_consumer_Consumer_close(entry.view, &err);
+    if (req->has_group_membership_operation()) {
+      // close(CloseOptions): the operation crosses as its constant name; the
+      // handle is borrowed by the call.
+      const std::string& name = req->group_membership_operation();
+      const kafka_consumer_CloseOptions_GroupMembershipOperation_t* operation =
+          name == "LEAVE_GROUP"       ? kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group()
+          : name == "REMAIN_IN_GROUP" ? kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group()
+          : name == "DEFAULT"         ? kafka_consumer_CloseOptions_GroupMembershipOperation_default()
+                                      : nullptr;
+      if (operation == nullptr) {
+        *resp->mutable_error() = make_synthetic_error("unknown GroupMembershipOperation " + name);
+        entry.destroy();
+        return grpc::Status::OK;
+      }
+      kafka_consumer_CloseOptions_t* options = kafka_consumer_CloseOptions_with_operation(operation);
+      if (req->has_close_timeout_ms()) {
+        kafka_consumer_CloseOptions_with_timeout(options, req->close_timeout_ms());
+      }
+      kafka_consumer_Consumer_close_with_options(entry.view, options, &err);
+      kafka_consumer_CloseOptions_destroy(options);
+    } else {
+      kafka_consumer_Consumer_close(entry.view, &err);
+    }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     // Frees the class handle (`kafka` or `mock`); the view is invalid
     // afterwards. The log entries stay in callback_log_ and the
     // LogState stays in log_states_, so GetCallbackLog still works post-close.
     entry.destroy();
+    return grpc::Status::OK;
+  }
+
+  // Java currentLag(TopicPartition): -1 is OptionalLong.empty(), which stays
+  // an absent `lag`; a non-null error (another call holding the consumer)
+  // tells the two apart.
+  grpc::Status CurrentLag(grpc::ServerContext*, const CurrentLagRequest* req,
+                          CurrentLagResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(
+        req->partition().topic().c_str(), req->partition().partition());
+    kafka_common_Error_t* err = nullptr;
+    const int64_t lag = kafka_consumer_Consumer_current_lag(c, tp, &err);
+    kafka_common_TopicPartition_destroy(tp);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+    } else if (lag >= 0) {
+      resp->set_lag(lag);
+    }
     return grpc::Status::OK;
   }
 
@@ -2162,8 +2242,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   // owned `int64_t *`; destroying the map frees both sides of every entry.
   using LongOffFn = kafka_Map_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*,
                                      kafka_common_Error_t**);
+  // The timed overloads (`Duration timeout`), taken when the request carries
+  // timeout_ms.
+  using TimedLongOffFn = kafka_Map_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*, int64_t,
+                                          kafka_common_Error_t**);
   grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
-                            LongOffFn fn) {
+                            LongOffFn fn, TimedLongOffFn timed_fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
@@ -2172,7 +2256,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     TpList partitions(req->partitions());
     kafka_common_Error_t* err = nullptr;
-    kafka_Map_t* map = fn(c, partitions.list, &err);
+    kafka_Map_t* map = req->has_timeout_ms() ? timed_fn(c, partitions.list, req->timeout_ms(), &err)
+                                             : fn(c, partitions.list, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -4957,6 +5042,8 @@ class AdminServiceImpl final : public AdminService::Service {
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
     if (usable >= 0) dst->set_usable_bytes(usable);
+    // Java's isCordoned() (KIP-1066).
+    dst->set_is_cordoned(kafka_admin_LogDirDescription_is_cordoned(description) != 0);
     OwnedMap replicas(kafka_admin_LogDirDescription_replica_infos(description));
     const int32_t n = replicas ? kafka_Map_size(replicas.get()) : 0;
     for (int32_t i = 0; i < n; i++) {

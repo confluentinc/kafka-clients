@@ -21,7 +21,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from confluent_kafka._java import java_str
-from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from .scram_credential_info import ScramCredentialInfo
@@ -44,8 +43,10 @@ class UserScramCredentialsDescription:
     def __init__(self, *, name: str, credential_infos: Sequence[ScramCredentialInfo]) -> None:
         """``name``: the required user name; ``credential_infos``: the required
         SASL/SCRAM credential representations for the user."""
-        if name is None or credential_infos is None:
-            raise NullPointerError()
+        if name is None:
+            raise TypeError("name must not be None")
+        if credential_infos is None:
+            raise TypeError("credential_infos must not be None")
         self._name = name
         self._credential_infos = tuple(credential_infos)
 

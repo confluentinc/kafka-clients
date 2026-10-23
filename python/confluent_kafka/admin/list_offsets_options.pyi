@@ -14,12 +14,16 @@
 
 # Stub for confluent_kafka.admin.ListOffsetsOptions.
 
+from typing import overload
+
 from confluent_kafka.admin.abstract_options import AbstractOptions
 from confluent_kafka.common import IsolationLevel
 
 __all__ = ["ListOffsetsOptions"]
 
 class ListOffsetsOptions(AbstractOptions):
-    def __init__(self, *,
-                 isolation_level: IsolationLevel = IsolationLevel.READ_UNCOMMITTED) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, *, isolation_level: IsolationLevel) -> None: ...
     def isolation_level(self) -> IsolationLevel: ...
