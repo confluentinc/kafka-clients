@@ -36,6 +36,8 @@
 //! a real broker.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
@@ -51,6 +53,23 @@ struct StringDeserializer;
 impl Deserializer<String> for StringDeserializer {
     async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+    }
+}
+
+/// A [`StringDeserializer`] that counts its `close` calls, for the
+/// constructor-failure test below (Java's `closeQuietly` of the deserializers
+/// in the constructor's `catch`).
+struct CloseCountingDeserializer {
+    closes: Arc<AtomicUsize>,
+}
+
+impl Deserializer<String> for CloseCountingDeserializer {
+    async fn deserialize(&self, topic: &str, data: &[u8]) -> Result<String, Error> {
+        StringDeserializer.deserialize(topic, data).await
+    }
+
+    async fn close(&mut self) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -75,12 +94,9 @@ fn make_smoke_config() -> ConsumerConfig {
 /// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let mut consumer = KafkaConsumer::<String, String>::new(
-        make_smoke_config(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
-    )
-    .expect("KafkaConsumer::new should succeed even without a reachable broker");
+    let mut consumer =
+        KafkaConsumer::<String, String>::new(make_smoke_config(), StringDeserializer, StringDeserializer)
+            .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
     // Static trait dispatch on the concrete type: a fresh consumer has no
     // assignment.
@@ -103,7 +119,7 @@ async fn new_consumer_builds_and_closes_against_refused_broker() {
 }
 
 /// Smoke: `GroupProtocol::Classic` continues to return
-/// `Error::unsupported_version` after the Phase-12 factory swap.
+/// `Error::local_unsupported_operation` after the Phase-12 factory swap.
 /// Regression guard for the classic-protocol gate at
 /// `src/consumer/mod.rs`.
 #[tokio::test(flavor = "multi_thread")]
@@ -114,14 +130,16 @@ async fn new_consumer_rejects_classic_group_protocol() {
     ]);
     let config = ConsumerConfig::new(&props).expect("config should validate");
 
-    let result =
-        KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
+    let result = KafkaConsumer::<String, String>::new(config, StringDeserializer, StringDeserializer);
 
-    let err = result.err().expect("classic protocol must be rejected");
+    let err = result.expect_err("classic protocol must be rejected");
     assert!(
-        matches!(err, Error::UnsupportedVersion(_)),
-        "expected UnsupportedVersion, got: {:?}",
-        err
+        err.is_local_unsupported_operation_error(),
+        "expected LocalUnsupportedOperation, got: {err:?}"
+    );
+    assert_eq!(
+        err.message(),
+        "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848)."
     );
 }
 
@@ -139,12 +157,9 @@ async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_c
     use confluent_kafka::common::TopicPartition;
     use std::collections::HashSet;
 
-    let mut consumer = KafkaConsumer::<String, String>::new(
-        make_smoke_config(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
-    )
-    .expect("KafkaConsumer::new");
+    let mut consumer =
+        KafkaConsumer::<String, String>::new(make_smoke_config(), StringDeserializer, StringDeserializer)
+            .expect("KafkaConsumer::new");
     let tp0 = TopicPartition::new("test", 0);
     let tp1 = TopicPartition::new("test", 1);
 
@@ -230,8 +245,8 @@ async fn test_metrics_removed_on_close() {
     ]);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("config should validate"),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("KafkaConsumer::new");
 
@@ -272,8 +287,8 @@ async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
     ]);
     let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).unwrap(),
-        Box::new(StringDeserializer),
-        Box::new(StringDeserializer),
+        StringDeserializer,
+        StringDeserializer,
     )
     .expect("a positive timeout defers resolution, so construction succeeds");
 
@@ -322,6 +337,10 @@ async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
 /// synchronously in the constructor, so an unresolvable host fails
 /// construction with the `ConfigException` wrapped in the constructor's
 /// `KafkaException`, and no consumer instance is created.
+///
+/// The constructor's `catch` also runs `close(Duration.ZERO, LEAVE_GROUP,
+/// true)` (`AsyncKafkaConsumer.java:596-602`), which closes the deserializers
+/// it had already wrapped (`:1679`, KAFKA-2121): each is closed exactly once.
 #[tokio::test(flavor = "multi_thread")]
 #[doc(
     alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
@@ -338,10 +357,16 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
     // `bootstrap.resolve.timeout.ms` stays at its default of 0, asserted by the
     // crate's `consumer_config::tests::test_bootstrap_resolve_timeout_ms`.
     let config = ConsumerConfig::new(&props).unwrap();
-    let error =
-        KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
-            .err()
-            .expect("construction must fail");
+    let key_closes = Arc::new(AtomicUsize::new(0));
+    let value_closes = Arc::new(AtomicUsize::new(0));
+    let error = KafkaConsumer::<String, String>::new(
+        config,
+        CloseCountingDeserializer { closes: Arc::clone(&key_closes) },
+        CloseCountingDeserializer { closes: Arc::clone(&value_closes) },
+    )
+    .expect_err("construction must fail");
+    assert_eq!(key_closes.load(Ordering::SeqCst), 1, "the key deserializer is closed once");
+    assert_eq!(value_closes.load(Ordering::SeqCst), 1, "the value deserializer is closed once");
     assert_eq!(error.message(), "Failed to construct kafka consumer");
     let cause: &Error = std::error::Error::source(&error)
         .and_then(|e| e.downcast_ref::<Error>())

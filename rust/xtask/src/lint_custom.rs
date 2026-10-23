@@ -19,6 +19,7 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod derive_translation;
 mod ffi_translation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +83,8 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(ConsumerReceiver),
         Box::new(SendFuture),
         Box::new(ErrorPredicate),
+        Box::new(derive_translation::DeriveTranslation::new(ctx)),
+        Box::new(derive_translation::ThreadSafetyProbe::new()),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
 }
@@ -322,6 +325,16 @@ impl Crate {
     /// `mod producer_record; pub use producer_record::ProducerRecord;`.
     fn public_types(&self) -> BTreeSet<(ModPath, String)> {
         self.public_names(|item| pub_type_ident(item).map(ToString::to_string))
+    }
+
+    /// Every trait of the crate, public or not, with its module path.
+    fn traits(&self) -> impl Iterator<Item = (&ModPath, &syn::ItemTrait)> {
+        self.modules.iter().flat_map(|(path, module)| {
+            module.items.iter().filter_map(move |item| match item {
+                syn::Item::Trait(t) => Some((path, t)),
+                _ => None,
+            })
+        })
     }
 
     /// The names another crate can reach, as (defining module, name), where
@@ -3073,27 +3086,8 @@ impl PublicAudience {
         class
             .supertypes
             .iter()
-            .filter_map(|s| self.supertype(class, s))
+            .filter_map(|s| self.index.supertype(class, s))
             .find_map(|supertype| self.field_from(supertype, name, seen))
-    }
-
-    /// The class supertype `written` of `class` names: in `class`'s package,
-    /// fully qualified below `org.apache.kafka`, or else the only class of that
-    /// simple name (an imported one, `AbstractConfig`).
-    fn supertype(&self, class: &java::JavaClass, written: &str) -> Option<&java::JavaClass> {
-        let classes = || self.index.classes.iter().filter(|c| !c.is_test);
-        let exact = classes().find(|c| {
-            let nested = c.path.join(".");
-            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
-        });
-        exact.or_else(|| {
-            let simple = written.rsplit('.').next().unwrap_or(written);
-            let mut named = classes().filter(|c| c.name() == simple);
-            match (named.next(), named.next()) {
-                (Some(only), None) => Some(only),
-                _ => None,
-            }
-        })
     }
 }
 
@@ -3212,9 +3206,15 @@ impl Rule for PublicAudience {
 ///
 /// The exception is a performance-oriented trait whose methods return
 /// `impl Future` (e.g. `Producer`, so a generic caller does not box a future per
-/// call): it must be paired with a public `Dyn<Name>` trait (e.g. `DynProducer`)
-/// that is dyn-compatible and blanket-implemented for it, so the boxing cost is
-/// paid only by callers who need dynamic dispatch.
+/// call): it must be paired with a `Dyn<Name>` trait (e.g. `DynProducer`) that
+/// is dyn-compatible and blanket-implemented for it, so the boxing cost is paid
+/// only by callers who need dynamic dispatch. The companion is public when the
+/// crate hands the trait object out or callers hold one (`DynProducer`,
+/// `DynConsumer`), and crate-private when the crate only takes the object in
+/// and boxes it itself (`DynSerializer` and `DynDeserializer`, behind the
+/// `impl Serializer<K>` / `impl Deserializer<K>` constructor parameters): a
+/// private companion can be published later in a minor release, while a
+/// public one cannot be withdrawn without a major one.
 ///
 /// The check mirrors the reference's dyn-compatibility rules on the syntax: no
 /// `Sized`-implying or `Self`-parameterized supertrait (nor a trait-level
@@ -3225,7 +3225,8 @@ impl Rule for PublicAudience {
 /// `#[async_trait]` one is boxed and fine), and does not mention `Self` outside
 /// the receiver except through a projection such as `Self::Item`.
 ///
-/// Scope: the same public items as [`NoPublicField`], traits only.
+/// Scope: the same public items as [`NoPublicField`], traits only; the
+/// `Dyn<Name>` companions are looked up in every module, public or not.
 struct DynCompatible;
 
 impl DynCompatible {
@@ -3334,8 +3335,10 @@ impl Rule for DynCompatible {
                 _ => None,
             })
             .collect();
-        let dyn_compatible: BTreeSet<String> = traits
-            .iter()
+        // A companion may be crate-private (see above), so every trait of the
+        // crate is a candidate, not only the public ones.
+        let dyn_compatible: BTreeSet<String> = krate
+            .traits()
             .filter(|(_, t)| Self::violations(t).is_empty())
             .map(|(_, t)| t.ident.to_string())
             .collect();
@@ -3359,8 +3362,10 @@ impl Rule for DynCompatible {
     fn hint(&self) -> &'static str {
         "   Make the trait dyn-compatible (`where Self: Sized` on methods that cannot be,
    `#[async_trait]` for async methods off the hot path), or — for a
-   performance-oriented trait — add a public dyn-compatible `Dyn<Name>` trait
-   blanket-implemented for it, as `DynProducer` is for `Producer`."
+   performance-oriented trait — add a dyn-compatible `Dyn<Name>` trait
+   blanket-implemented for it: public when the crate hands the trait object
+   out, as `DynProducer` is for `Producer`; `pub(crate)` when the crate only
+   takes it in and boxes it itself, as `DynSerializer` is for `Serializer`."
     }
 }
 
@@ -3379,7 +3384,8 @@ impl Rule for DynCompatible {
 /// default body, and a `dyn Dyn<Name>` then answers with that default instead
 /// of the boxed producer's override; a forward to the wrong method, or with
 /// its arguments swapped, compiles whenever the types agree. So for every
-/// public trait `Name` with a public trait `Dyn<Name>`:
+/// public trait `Name` with a trait `Dyn<Name>`, public or crate-private (see
+/// [`DynCompatible`]):
 ///
 ///  - the two traits declare the same methods;
 ///  - a blanket `impl Dyn<Name> for P` (`P` a type parameter) defines each of
@@ -3538,7 +3544,7 @@ impl Rule for DynForwarding {
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
-        let traits: BTreeMap<String, (&ModPath, &syn::ItemTrait)> = krate
+        let mut traits: BTreeMap<String, (&ModPath, &syn::ItemTrait)> = krate
             .public_types()
             .iter()
             .filter_map(|(path, name)| match krate.type_item(path, name) {
@@ -3546,6 +3552,10 @@ impl Rule for DynForwarding {
                 _ => None,
             })
             .collect();
+        // A crate-private companion (`DynSerializer`) is checked like a public one.
+        for (path, t) in krate.traits().filter(|(_, t)| t.ident.to_string().starts_with("Dyn")) {
+            traits.entry(t.ident.to_string()).or_insert((path, t));
+        }
         let impls: Vec<(&Path, &syn::ItemImpl)> = krate
             .modules
             .values()
@@ -4464,6 +4474,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: java::JavaKind::Class,
@@ -4928,6 +4939,12 @@ mod dyn_compatible_tests {
         pub trait DynSlow {
             fn run<T>(&self, t: T);
         }
+        pub trait Quiet {
+            fn run(&self) -> impl std::future::Future<Output = ()>;
+        }
+        pub(crate) trait DynQuiet {
+            fn run(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>;
+        }
         pub(crate) trait Hidden {
             fn map<T>(&self, t: T);
         }
@@ -4948,8 +4965,9 @@ mod dyn_compatible_tests {
         let mut findings = Vec::new();
         let checked = DynCompatible.check(&krate, &mut findings);
         fs::remove_dir_all(&dir).unwrap();
-        // Every `pub trait` above except `Hidden` and `Unreachable`.
-        assert_eq!(checked, 20);
+        // Every `pub trait` above: not the `pub(crate)` `DynQuiet` and `Hidden`,
+        // nor `Unreachable`.
+        assert_eq!(checked, 21);
         findings
     }
 
@@ -5000,6 +5018,14 @@ mod dyn_compatible_tests {
         let findings = run("companion");
         assert_eq!(finding(&findings, "Fast"), None);
         assert!(finding(&findings, "Slow").unwrap().contains("has no dyn-compatible `DynSlow`"));
+    }
+
+    /// A `pub(crate)` companion exempts its trait like a public one
+    /// (`DynSerializer` for `Serializer`).
+    #[test]
+    fn test_crate_private_dyn_companion_exempts() {
+        let findings = run("private-companion");
+        assert_eq!(finding(&findings, "Quiet"), None);
     }
 
     #[test]
@@ -5072,6 +5098,22 @@ mod dyn_forwarding_tests {
         pub trait DynLone {
             fn run(&self);
         }
+
+        pub trait Quiet {
+            fn run(&self) -> impl Future<Output = i32> + Send;
+            fn get(&self) -> i32 { 0 }
+        }
+        pub(crate) trait DynQuiet {
+            fn run<'a>(&'a self) -> BoxFuture<'a>;
+            fn get(&self) -> i32;
+        }
+        impl<P: Quiet + Sync> DynQuiet for P {
+            fn run<'a>(&'a self) -> BoxFuture<'a> { Box::pin(Quiet::run(self)) }
+            fn get(&self) -> i32 { Quiet::get(self) }
+        }
+        impl Quiet for dyn DynQuiet + '_ {
+            async fn run(&self) -> i32 { DynQuiet::run(self).await }
+        }
     "#;
 
     fn run(name: &str) -> (Vec<String>, String) {
@@ -5082,8 +5124,8 @@ mod dyn_forwarding_tests {
         let mut findings = Vec::new();
         let checked = DynForwarding.check(&krate, &mut findings);
         fs::remove_dir_all(&dir).unwrap();
-        // The three pairs.
-        assert_eq!(checked, 3);
+        // The four pairs, the `pub(crate)` `DynQuiet` included.
+        assert_eq!(checked, 4);
         (findings, dir.join("lib.rs").display().to_string())
     }
 
@@ -5091,6 +5133,21 @@ mod dyn_forwarding_tests {
     fn test_correct_forwarding_passes() {
         let (findings, _) = run("good");
         assert!(findings.iter().all(|f| !f.contains("Good")), "{findings:#?}");
+    }
+
+    /// A `pub(crate)` companion is checked like a public one: `DynQuiet`
+    /// forwards `run` correctly and leaves the defaulted `get` out of its
+    /// `impl Quiet for dyn DynQuiet`.
+    #[test]
+    fn test_crate_private_companion_is_checked() {
+        let (findings, file) = run("private");
+        let about_quiet: Vec<&String> = findings.iter().filter(|f| f.contains("Quiet")).collect();
+        assert_eq!(
+            about_quiet,
+            [&format!(
+                "{file}: `impl Quiet for dyn DynQuiet` does not define `get`; define it as a forward to `DynQuiet::get`"
+            )]
+        );
     }
 
     #[test]
@@ -5109,6 +5166,8 @@ mod dyn_forwarding_tests {
             format!("{file}: `impl Bad for dyn DynBad` does not define `get`; define it as a forward to `DynBad::get`"),
             format!("{file}: no blanket `impl<P: Lone> DynLone for P`; every `Lone` must be a `DynLone`"),
             format!("{file}: no `impl Lone for dyn DynLone`; a `dyn DynLone` must be a `Lone`"),
+            // The same defaulted-method gap on the `pub(crate)` companion.
+            format!("{file}: `impl Quiet for dyn DynQuiet` does not define `get`; define it as a forward to `DynQuiet::get`"),
         ];
         want.sort();
         assert_eq!(findings, want);
@@ -5725,6 +5784,7 @@ mod enum_translation_tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind,
@@ -5859,6 +5919,7 @@ mod functional_interface_trait_tests {
             overloads,
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: if functional {

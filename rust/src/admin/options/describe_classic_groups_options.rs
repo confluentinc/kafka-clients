@@ -19,7 +19,7 @@
 /// Options for `Admin::describe_classic_groups`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClassicGroupsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsOptions")]
 pub struct DescribeClassicGroupsOptions {
     timeout_ms: Option<i32>,

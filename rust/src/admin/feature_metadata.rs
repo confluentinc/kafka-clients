@@ -69,6 +69,16 @@ impl FeatureMetadata {
     }
 }
 
+impl std::hash::Hash for FeatureMetadata {
+    /// Java's `FeatureMetadata.hashCode()` is `Objects.hash` of the three
+    /// fields; the two maps hash independently of their order.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::common::utils::Utils::hash_unordered(&self.finalized_features, state);
+        self.finalized_features_epoch.hash(state);
+        crate::common::utils::Utils::hash_unordered(&self.supported_features, state);
+    }
+}
+
 impl std::fmt::Display for FeatureMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let epoch = match self.finalized_features_epoch {

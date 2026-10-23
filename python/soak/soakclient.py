@@ -85,11 +85,12 @@ _SOAK_DIR = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 # Accepted client configuration keys.
 #
-# The Rust client only *warns* on an unknown configuration key
-# (src/producer/producer_config.rs, src/consumer/consumer_config.rs, both end
-# their new() match with a `warn!("Unknown ... key")` arm), so a
-# typo would silently start a soak with the default value — e.g. an
-# unauthenticated PLAINTEXT connection. A multi-day run must not begin that
+# The Rust client accepts an unknown configuration key, as Java's does: it
+# only lists it, with the other supplied keys it did not use, in one INFO line
+# when the client is built ("These configurations '[..]' were supplied but are
+# not used yet."; src/producer/producer_config.rs,
+# src/consumer/consumer_config.rs). So a typo would silently start a soak with
+# the default value — e.g. an unauthenticated PLAINTEXT connection. A multi-day run must not begin that
 # way, so the soak validates its own configuration up front and refuses to
 # start on an unknown key.
 #

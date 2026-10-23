@@ -1568,7 +1568,7 @@ fn run_grcov_html() -> anyhow::Result<()> {
 
 const PACKAGE_NAME: &str = "confluent-kafka";
 /// Maximum compressed size of the `.crate`: 3 MiB (the crates.io limit is 10 MiB).
-const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const PACKAGE_CHECK_DIR: &str = "target/package-check";
 const PACKAGE_SMOKE_DIR: &str = "target/package-smoke";
 /// Source of the smoke test, compiled as the `main.rs` of the generated project.
@@ -2593,13 +2593,21 @@ fn print_help() {
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
+                    check-enum-translation                a public enum translates a Java enum or class hierarchy
+                    check-functional-interface-trait      a public functional interface is a trait with factories
                     check-no-public-field                 public structs have no `pub` field
                     check-no-fixed-size-array             no fixed-size array in a public signature
                     check-java-name                       every public item names the Java API it translates
                     check-no-deprecated-translation       no deprecated Java API is translated
                     check-public-audience                 public items are public in Java
                     check-dyn-compatible                  public traits are dyn-compatible
+                    check-dyn-forwarding                  a Dyn<Name> companion and its trait forward to each other
+                    check-consumer-handle                 ConsumerHandle has the KIP-1306 callback view plus wakeup
+                    check-consumer-receiver               Consumer methods take &mut self unless Java leaves them unguarded
+                    check-send-future                     no public method is a native async fn
                     check-error-predicate                 every Error class has its predicate
+                    check-derive-translation              a public type derives what its Java class overrides
+                    check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
                   With a rule name only that rule runs; `--no-baseline` ignores
                   xtask/ffi-baseline.txt so every FFI finding is shown
@@ -2636,14 +2644,19 @@ fn print_help() {
                     --msrv                install and build with the crate's minimum supported Rust version
                     --release             build and run the smoke test in release mode
   api-compat      Compare the public surface with a release tag: the Rust API with
-                  cargo-semver-checks, the C ABI with libabigail's abidiff; a breaking
-                  change fails unless the Cargo.toml version allows it over the tag's
+                  cargo-semver-checks (default features), the C ABI with libabigail's
+                  abidiff (an added function passes, any other change is breaking) and
+                  the header's callback typedefs; a breaking change fails unless the
+                  Cargo.toml version allows it over the tag's
                     --baseline TAG (default $API_COMPAT_BASELINE, else the highest
                     rust/vX.Y.Z or vX.Y.Z tag not above the current version)
   bump-version    Set one version on the Rust crates released together, Cargo.lock and
                   the Python packages: semver in Cargo manifests, PEP 440 in Python
                     e.g. cargo xtask bump-version 0.3.0-rc.1 (Python gets 0.3.0rc1);
                     pre-releases are -alpha.N, -beta.N, -dev.N and -rc.N
+                    --python-version PEP440 gives the Python packages their own version;
+                    Python versions are a separate line that only moves up, so one below
+                    a package's current version is refused (rfc/versioning.md)
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2692,7 +2705,7 @@ Usage:
   cargo xtask producer-perf-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]

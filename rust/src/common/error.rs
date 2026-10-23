@@ -61,6 +61,7 @@ use crate::common::LocalConcurrentModificationError;
 use crate::common::LocalIllegalArgumentError;
 use crate::common::LocalIllegalStateError;
 use crate::common::LocalTimeoutError;
+use crate::common::LocalUnsupportedOperationError;
 use crate::common::config::ConfigError;
 use crate::common::errors::{
     ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
@@ -171,7 +172,8 @@ pub(crate) trait ErrorHierarchy {
     /// exceptions, which are siblings of `KafkaException` rather than
     /// subclasses (`common/KafkaException.java:22`): [`LocalIllegalArgumentError`],
     /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`],
-    /// [`LocalTimeoutError`] — and [`LocalCallbackError`], which has no Java class
+    /// [`LocalTimeoutError`], [`LocalUnsupportedOperationError`] — and
+    /// [`LocalCallbackError`], which has no Java class
     /// but stands in for a foreign callback's `Throwable`.
     ///
     /// Two call sites depend on this: `ConsumerUtils.maybeWrapAsKafkaException`
@@ -337,6 +339,11 @@ pub(crate) trait ErrorHierarchy {
 
     /// Whether this error's Java class is, or extends, `java.util.concurrent.TimeoutException`.
     fn is_local_timeout_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends, `java.lang.UnsupportedOperationException`.
+    fn is_local_unsupported_operation_error(&self) -> bool {
         false
     }
 
@@ -1617,6 +1624,9 @@ impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     fn is_local_timeout_error(&self) -> bool {
         (**self).is_local_timeout_error()
     }
+    fn is_local_unsupported_operation_error(&self) -> bool {
+        (**self).is_local_unsupported_operation_error()
+    }
     fn is_local_callback_error(&self) -> bool {
         (**self).is_local_callback_error()
     }
@@ -2111,13 +2121,14 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 ///
 /// Every path in the expansion is `$crate`-qualified, as in
 /// [`kafka_error_type`], so an invoking file needs nothing in scope but the
-/// macro itself. The four `Local*` classes each live in their own file per
+/// macro itself. The five JDK `Local*` classes each live in their own file per
 /// CLAUDE.md §2 and invoke this from there.
 ///
 /// # Constructors deliberately not modelled
 ///
-/// The four classes stand in for JDK types (`java.lang.IllegalStateException`,
+/// The five classes stand in for JDK types (`java.lang.IllegalStateException`,
 /// `java.lang.IllegalArgumentException`,
+/// `java.lang.UnsupportedOperationException`,
 /// `java.util.ConcurrentModificationException`,
 /// `java.util.concurrent.TimeoutException`), each of which really declares all
 /// four of `()`, `(String)`, `(Throwable)`, `(String, Throwable)`. Under
@@ -2274,8 +2285,8 @@ error_name_impl! {
 }
 
 // `IllegalArgumentException`, `IllegalStateException`,
-// `ConcurrentModificationException` and `java.util.concurrent.TimeoutException`
-// are `java.lang` / `java.util` exceptions sitting BESIDE `KafkaException`, not
+// `UnsupportedOperationException`, `ConcurrentModificationException` and
+// `java.util.concurrent.TimeoutException` are `java.lang` / `java.util` exceptions sitting BESIDE `KafkaException`, not
 // below it. Every Kafka hierarchy predicate is false for them, so each overrides
 // only its own class's predicate — the statement that they are outside the
 // Kafka hierarchy.
@@ -2299,7 +2310,12 @@ impl ErrorHierarchy for LocalTimeoutError {
         true
     }
 }
-// Beside `KafkaException` like the four above: a foreign callback's error is
+impl ErrorHierarchy for LocalUnsupportedOperationError {
+    fn is_local_unsupported_operation_error(&self) -> bool {
+        true
+    }
+}
+// Beside `KafkaException` like the five above: a foreign callback's error is
 // not a Kafka error, so the client wraps it as Java wraps a foreign `Throwable`.
 impl ErrorHierarchy for LocalCallbackError {
     fn is_local_callback_error(&self) -> bool {
@@ -2392,6 +2408,17 @@ pub enum Error {
     /// `RetriableException`. This one sits beside `KafkaException`, so it is
     /// never retriable, never an api error and carries no wire code.
     LocalTimeout(LocalTimeoutError),
+    /// Unsupported operation error — the requested operation is not supported.
+    ///
+    /// Corresponds to Java's `java.lang.UnsupportedOperationException`, thrown
+    /// where Java leaves an operation unimplemented (`MockAdminClient`'s "Not
+    /// implemented yet" methods, `MockConsumer.offsetsForTimes`) or rejects it
+    /// (`Compression.decompressionOutputSize`). Like `LocalIllegalState` it is a
+    /// plain `RuntimeException` — neither an `ApiException` nor a
+    /// `KafkaException` — so it is never retriable and never fatal. Distinct
+    /// from [`UnsupportedVersion`](Self::UnsupportedVersion), the wire-level
+    /// `ApiException` for a broker lacking an API version.
+    LocalUnsupportedOperation(LocalUnsupportedOperationError),
     /// An error raised by a callback written in another language.
     ///
     /// No Java class: it stands in for the foreign error, which cannot cross
@@ -2955,6 +2982,16 @@ impl Error {
         Self::LocalIllegalState(LocalIllegalStateError::new(message))
     }
 
+    /// Create an unsupported operation error.
+    ///
+    /// Corresponds to Java's `java.lang.UnsupportedOperationException`. Use
+    /// [`Error::unsupported_version`] instead for
+    /// `org.apache.kafka.common.errors.UnsupportedVersionException`, the
+    /// wire-level class for an API version the broker does not support.
+    pub fn local_unsupported_operation(message: impl Into<String>) -> Self {
+        Self::LocalUnsupportedOperation(LocalUnsupportedOperationError::new(message))
+    }
+
     /// Create a timeout error.
     ///
     /// Corresponds to Java's `TimeoutException`.
@@ -3204,8 +3241,9 @@ impl Error {
     /// misuse of the client rather than by Kafka itself:
     /// [`LocalIllegalArgument`](Self::LocalIllegalArgument),
     /// [`LocalIllegalState`](Self::LocalIllegalState),
-    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification) and
-    /// [`LocalTimeout`](Self::LocalTimeout), plus
+    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification),
+    /// [`LocalTimeout`](Self::LocalTimeout) and
+    /// [`LocalUnsupportedOperation`](Self::LocalUnsupportedOperation), plus
     /// [`LocalCallback`](Self::LocalCallback), a foreign callback's error, which
     /// the client wraps as Java wraps a listener's foreign `Throwable`.
     ///
@@ -3532,6 +3570,22 @@ impl Error {
     /// the subclasses a later Java release may add.
     pub fn is_local_timeout_error(&self) -> bool {
         ErrorHierarchy::is_local_timeout_error(self)
+    }
+
+    /// Whether this error's Java class is, or extends, `java.lang.UnsupportedOperationException`.
+    ///
+    /// Covers exactly [`Error::LocalUnsupportedOperation`](Self::LocalUnsupportedOperation), a
+    /// plain `RuntimeException` beside `KafkaException`: it answers `false` to
+    /// [`is_kafka_error`](Self::is_kafka_error), [`is_api_error`](Self::is_api_error) and
+    /// [`is_retriable_error`](Self::is_retriable_error), and, unlike
+    /// [`is_unsupported_version_error`](Self::is_unsupported_version_error) (the wire-level
+    /// `UnsupportedVersionException`), it is not fatal.
+    ///
+    /// Prefer this to matching
+    /// [`Error::LocalUnsupportedOperation`](Self::LocalUnsupportedOperation): a variant match
+    /// misses the subclasses a later Java release may add.
+    pub fn is_local_unsupported_operation_error(&self) -> bool {
+        ErrorHierarchy::is_local_unsupported_operation_error(self)
     }
 
     /// Whether this is an error raised by a callback written in another
@@ -5108,6 +5162,42 @@ mod tests {
         assert!(cme.kafka_error().is_none());
     }
 
+    /// `LocalUnsupportedOperation` mirrors `LocalIllegalState` too: Java's
+    /// `UnsupportedOperationException` is a plain `RuntimeException`. It must
+    /// not be confused with the wire-level `UnsupportedVersionException`, which
+    /// is an `ApiException` and fatal (`RequestUtils.isFatalException`).
+    #[test]
+    fn unsupported_operation_parity_with_illegal_state() {
+        let uoe = Error::local_unsupported_operation("Not implemented yet");
+        let ise = Error::local_illegal_state("bad state");
+
+        assert_eq!(uoe.message(), "Not implemented yet");
+        assert_eq!(uoe.to_string(), "LocalUnsupportedOperationError: Not implemented yet");
+        assert_eq!(uoe.error(), ise.error());
+        assert!(uoe.is_local_unsupported_operation_error());
+        assert!(!ise.is_local_unsupported_operation_error());
+        assert!(!uoe.is_local_illegal_state_error());
+        assert_eq!(uoe.is_retriable_error(), ise.is_retriable_error());
+        assert!(!uoe.is_retriable_error());
+        assert!(!crate::common::requests::RequestUtils::is_fatal_error(&uoe));
+        assert!(!uoe.is_api_error());
+        assert!(!uoe.is_kafka_error());
+        assert!(uoe.kafka_error().is_none());
+
+        // The wire-level class it replaces at the `UnsupportedOperationException`
+        // sites is a different class in both directions.
+        let version = Error::unsupported_version("Not implemented yet");
+        assert!(!uoe.is_unsupported_version_error());
+        assert!(!version.is_local_unsupported_operation_error());
+        assert!(version.is_api_error());
+        assert!(crate::common::requests::RequestUtils::is_fatal_error(&version));
+
+        // Java's no-argument `new UnsupportedOperationException()`.
+        let bare = Error::local_unsupported_operation("");
+        assert_eq!(bare.message(), "");
+        assert_eq!(bare.to_string(), "LocalUnsupportedOperationError: ");
+    }
+
     #[test]
     fn concurrent_modification_display() {
         let cme = Error::local_concurrent_modification("oops");
@@ -5345,6 +5435,17 @@ mod tests {
                     false, false, false,
                 ],
             ),
+            // `java.lang.UnsupportedOperationException`: NOT the wire-level
+            // `UnsupportedVersionException`, so `unsupported_version` (and with
+            // it `fatal`) is false too.
+            (
+                "LocalUnsupportedOperation",
+                Error::local_unsupported_operation("not implemented"),
+                [
+                    false, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false, false,
+                ],
+            ),
             // A foreign callback's error: no Java class, outside the hierarchy
             // like the runtime exceptions above.
             (
@@ -5482,6 +5583,7 @@ mod tests {
             ("LocalIllegalArgumentError", Error::local_illegal_argument("boom")),
             ("LocalIllegalStateError", Error::local_illegal_state("boom")),
             ("LocalConcurrentModificationError", Error::local_concurrent_modification("boom")),
+            ("LocalUnsupportedOperationError", Error::local_unsupported_operation("boom")),
             ("TimeoutError", Error::timeout("boom")),
             ("RecordTooLargeError", Error::record_too_large("boom")),
             ("SerializationError", Error::serialization("boom")),
@@ -5667,6 +5769,7 @@ mod tests {
             Error::local_illegal_argument("bad arg"),
             Error::local_illegal_state("bad state"),
             Error::local_concurrent_modification("racy"),
+            Error::local_unsupported_operation("not implemented"),
             Error::new(Errors::NotLeaderOrFollower),
             Error::new(Errors::SaslAuthenticationFailed),
             Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(std::collections::HashMap::new())),

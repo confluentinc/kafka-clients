@@ -96,12 +96,9 @@ async fn produce_records(ctx: &TestContext, topic: &str, partition: i32, num: us
     ]);
     ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
-        config,
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
-    )
-    .expect("build producer");
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
+        KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default())
+            .expect("build producer");
     let mut last = None;
     for i in 0..num {
         let record = ProducerRecord::with_partition_key(

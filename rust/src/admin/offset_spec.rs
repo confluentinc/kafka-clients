@@ -26,7 +26,7 @@
 /// timestamp mapping (`getOffsetFromSpec`). The one subclass with data,
 /// `TimestampSpec`, stays behind its variant as a struct, so a field Java adds
 /// to it arrives without changing the variant's shape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
 pub enum OffsetSpec {
@@ -68,7 +68,7 @@ pub enum OffsetSpec {
 /// Java keeps its constructor and `timestamp()` package-private: the value is
 /// built with [`OffsetSpec::for_timestamp`] and only `KafkaAdminClient`'s
 /// `getOffsetFromSpec` reads it, so outside the crate it is opaque.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec")]
 pub struct TimestampSpec {
     timestamp: i64,
@@ -150,19 +150,38 @@ impl OffsetSpec {
     }
 }
 
+/// What tells two specs apart, `OffsetSpec` having no `PartialEq` (Java's
+/// `OffsetSpec` does not override `equals`): the kind and, for a
+/// `TimestampSpec`, its timestamp. The tests here and in the C binding
+/// compare specs through it.
+#[cfg(test)]
+pub(crate) fn spec_key(spec: &OffsetSpec) -> (std::mem::Discriminant<OffsetSpec>, Option<i64>) {
+    let timestamp = match spec {
+        OffsetSpec::Timestamp(timestamp_spec) => Some(timestamp_spec.timestamp()),
+        _ => None,
+    };
+    (std::mem::discriminant(spec), timestamp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn factories_produce_expected_variants() {
-        assert_eq!(OffsetSpec::latest(), OffsetSpec::Latest);
-        assert_eq!(OffsetSpec::earliest(), OffsetSpec::Earliest);
-        assert_eq!(OffsetSpec::max_timestamp(), OffsetSpec::MaxTimestamp);
-        assert_eq!(OffsetSpec::earliest_local(), OffsetSpec::EarliestLocal);
-        assert_eq!(OffsetSpec::latest_tiered(), OffsetSpec::LatestTiered);
-        assert_eq!(OffsetSpec::earliest_pending_upload(), OffsetSpec::EarliestPendingUpload);
-        assert_eq!(OffsetSpec::for_timestamp(42), OffsetSpec::Timestamp(TimestampSpec::new(42)));
+        assert_eq!(spec_key(&OffsetSpec::latest()), spec_key(&OffsetSpec::Latest));
+        assert_eq!(spec_key(&OffsetSpec::earliest()), spec_key(&OffsetSpec::Earliest));
+        assert_eq!(spec_key(&OffsetSpec::max_timestamp()), spec_key(&OffsetSpec::MaxTimestamp));
+        assert_eq!(spec_key(&OffsetSpec::earliest_local()), spec_key(&OffsetSpec::EarliestLocal));
+        assert_eq!(spec_key(&OffsetSpec::latest_tiered()), spec_key(&OffsetSpec::LatestTiered));
+        assert_eq!(
+            spec_key(&OffsetSpec::earliest_pending_upload()),
+            spec_key(&OffsetSpec::EarliestPendingUpload)
+        );
+        assert_eq!(
+            spec_key(&OffsetSpec::for_timestamp(42)),
+            spec_key(&OffsetSpec::Timestamp(TimestampSpec::new(42)))
+        );
     }
 
     #[test]
@@ -171,6 +190,9 @@ mod tests {
             panic!("forTimestamp builds a TimestampSpec");
         };
         assert_eq!(spec.timestamp(), 42);
-        assert_ne!(OffsetSpec::for_timestamp(42), OffsetSpec::for_timestamp(43));
+        assert_ne!(
+            spec_key(&OffsetSpec::for_timestamp(42)),
+            spec_key(&OffsetSpec::for_timestamp(43))
+        );
     }
 }

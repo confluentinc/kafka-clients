@@ -27,8 +27,8 @@ use std::collections::BTreeMap;
 use std::ptr;
 use std::sync::Arc;
 
-use crate::common::metrics::MetricConfig;
-use crate::ffi::common::metrics::quota::{box_quota, kafka_common_metrics_Quota_t, quota_of};
+use crate::common::metrics::{MetricConfig, Quota};
+use crate::ffi::common::metrics::quota::{kafka_common_metrics_Quota_t, quota_of};
 use crate::ffi::common::metrics::sensor::{
     kafka_common_metrics_Sensor_RecordingLevel_t, recording_level_of, recording_level_singleton,
 };
@@ -199,8 +199,9 @@ pub extern "C" fn kafka_common_metrics_MetricConfig_new() -> *mut kafka_common_m
     box_metric_config(Arc::new(MetricConfig::new()))
 }
 
-/// `quota()`: an owned copy freed with `kafka_common_metrics_Quota_destroy`,
-/// or null when none is set.
+/// `quota()`: the config's quota, or null when none is set. Borrowed from
+/// `self_`: valid until `self_` is destroyed or one of its setters runs, and
+/// never passed to `kafka_common_metrics_Quota_destroy`.
 ///
 /// # Safety
 ///
@@ -209,14 +210,16 @@ pub extern "C" fn kafka_common_metrics_MetricConfig_new() -> *mut kafka_common_m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
     self_: *const kafka_common_metrics_MetricConfig_t,
-) -> *mut kafka_common_metrics_Quota_t {
+) -> *const kafka_common_metrics_Quota_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
-    // `metric_config_ref` requires; the quota is copied into an owned handle before return, so the
-    // borrow lasts for this call only.
-    unsafe { metric_config_ref(self_) }.quota().map_or(ptr::null_mut(), box_quota)
+    // `metric_config_ref` requires; the returned pointer views the quota inside that config, which
+    // lives until the handle is destroyed or a setter replaces its config, as documented above.
+    unsafe { metric_config_ref(self_) }.quota().map_or(ptr::null(), |quota| {
+        quota as *const Quota as *const kafka_common_metrics_Quota_t
+    })
 }
 
-/// `quota(Quota quota)`: `quota` is copied.
+/// `quota(Quota quota)`: `quota` is cloned.
 ///
 /// # Safety
 ///
@@ -229,8 +232,8 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
     quota: *const kafka_common_metrics_Quota_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `quota` is a valid quota handle, as `quota_of`
-    // requires; the `Copy` quota is read out, so the borrow lasts for this call only.
-    let quota = unsafe { quota_of(quota) };
+    // requires; the quota is cloned, so the borrow lasts for this call only.
+    let quota = unsafe { quota_of(quota) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
@@ -445,8 +448,8 @@ mod tests {
     use std::ffi::CString;
 
     use super::*;
-    use crate::common::metrics::{Quota, RecordingLevel, TimeUnit};
-    use crate::ffi::common::metrics::quota::kafka_common_metrics_Quota_destroy;
+    use crate::common::metrics::{RecordingLevel, TimeUnit};
+    use crate::ffi::common::metrics::quota::{box_quota, kafka_common_metrics_Quota_destroy};
     use crate::ffi::common::metrics::sensor::{
         kafka_common_metrics_Sensor_RecordingLevel_debug, kafka_common_metrics_Sensor_RecordingLevel_info,
     };
@@ -460,9 +463,9 @@ mod tests {
         let key = CString::new("k").unwrap();
         let value = CString::new("v").unwrap();
         // SAFETY: Test code: `handle` comes from `box_metric_config` and is destroyed once, at the
-        // end, and only this test uses it; each quota handle from `box_quota` or the `quota` getter
-        // and each map from `kafka_Map_new` or the `tags` getter is destroyed once, after its last
-        // use; `key` and `value` outlive the map borrowing them; the singletons are never freed.
+        // end, and only this test uses it; the quota handle from `box_quota` and each map from
+        // `kafka_Map_new` or the `tags` getter is destroyed once, after its last use; the `quota`
+        // getter's view is read before any later setter and never destroyed; `key` and `value` outlive the map borrowing them; the singletons are never freed.
         unsafe {
             assert!(kafka_common_metrics_MetricConfig_quota(handle).is_null());
             assert_eq!(
@@ -493,9 +496,10 @@ mod tests {
             kafka_common_metrics_MetricConfig_set_tags(handle, tags);
             kafka_Map_destroy(tags);
 
-            let quota = kafka_common_metrics_MetricConfig_quota(handle);
-            assert_eq!(quota_of(quota), Quota::upper_bound(5.0));
-            kafka_common_metrics_Quota_destroy(quota);
+            assert_eq!(
+                *quota_of(kafka_common_metrics_MetricConfig_quota(handle)),
+                Quota::upper_bound(5.0)
+            );
             assert_eq!(kafka_common_metrics_MetricConfig_event_window(handle), 7);
             assert_eq!(
                 kafka_common_metrics_MetricConfig_time_window_ms(handle),

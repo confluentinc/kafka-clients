@@ -22,7 +22,7 @@ use crate::common::Error;
 
 /// Isolation level used to control which records are visible to a consumer
 /// when reading from a topic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.IsolationLevel")]
 pub enum IsolationLevel {

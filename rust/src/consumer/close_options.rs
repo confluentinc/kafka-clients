@@ -21,7 +21,7 @@ use std::time::Duration;
 /// Enum to specify the group membership operation upon leaving a group.
 ///
 /// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation")]
 pub enum GroupMembershipOperation {
@@ -41,13 +41,24 @@ pub enum GroupMembershipOperation {
     Default,
 }
 
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for GroupMembershipOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LeaveGroup => "LEAVE_GROUP",
+            Self::RemainInGroup => "REMAIN_IN_GROUP",
+            Self::Default => "DEFAULT",
+        })
+    }
+}
+
 /// Options for controlling the consumer close behavior.
 ///
 /// This type allows customization of the close timeout and group membership
 /// operation when a consumer is being shut down.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.CloseOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions")]
 pub struct CloseOptions {
     operation: GroupMembershipOperation,

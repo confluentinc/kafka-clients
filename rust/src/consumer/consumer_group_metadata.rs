@@ -23,6 +23,7 @@ use std::fmt;
 /// NOTE: a later phase will wire this to the generated `JoinGroupRequest`
 /// constant once the consumer membership translation lands; for Phase 1 we
 /// hardcode the value with a comment pointing to the Java source.
+#[cfg(test)]
 const UNKNOWN_GENERATION_ID: i32 = -1;
 
 /// `JoinGroupRequest.UNKNOWN_MEMBER_ID` from Java's request module.
@@ -31,6 +32,7 @@ const UNKNOWN_GENERATION_ID: i32 = -1;
 /// constant once the consumer membership translation lands; for Phase 1 we
 /// hardcode the value (empty string) with a comment pointing to the Java
 /// source.
+#[cfg(test)]
 const UNKNOWN_MEMBER_ID: &str = "";
 
 /// The consumer group information: group id, generation id, member id and
@@ -107,7 +109,10 @@ pub(crate) struct ConsumerGroupMetadataImpl {
 impl ConsumerGroupMetadataImpl {
     /// Metadata for `group_id` with unknown generation and member ids.
     ///
-    /// Corresponds to Java's `new ConsumerGroupMetadata(String)`.
+    /// Corresponds to Java's `new ConsumerGroupMetadata(String)`. Only the
+    /// tests build it: Java deprecates that constructor, and the consumer
+    /// seeds its metadata through the four-argument form.
+    #[cfg(test)]
     pub(crate) fn new(group_id: impl Into<String>) -> Self {
         Self::with_generation_id_member_id_group_instance_id(group_id, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID, None)
     }

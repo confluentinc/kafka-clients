@@ -291,10 +291,9 @@ Java sources). The Java built-in exception classes (`IllegalStateError`,
 `NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`) live at the
 package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
 which the mocks raise for what Java's mocks do not implement
-(`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"); it
-is not a `KafkaError`, so `except KafkaError` does not catch it, as in Java. An
-error from the client's core for the same case is still `UnsupportedVersionError`
-until the core has its own one.
+(`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"), and the
+client's core for what this client does not support yet; it is not a `KafkaError`, so
+`except KafkaError` does not catch it, as in Java.
 
 ## Directory Structure
 

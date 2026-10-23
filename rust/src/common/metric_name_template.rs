@@ -89,6 +89,17 @@ impl PartialEq for MetricNameTemplate {
 
 impl Eq for MetricNameTemplate {}
 
+impl std::hash::Hash for MetricNameTemplate {
+    /// Java's `MetricNameTemplate.hashCode()` is `Objects.hash(name, group,
+    /// tags)`, the `LinkedHashSet` hashing independently of its order, as
+    /// equality compares it.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.group.hash(state);
+        crate::common::utils::Utils::hash_unordered(&self.tags, state);
+    }
+}
+
 impl std::fmt::Display for MetricNameTemplate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "name={}, group={}, tags={:?}", self.name, self.group, self.tags)

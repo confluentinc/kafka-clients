@@ -23,7 +23,7 @@ use crate::common::TopicPartition;
 /// Corresponds to `org.apache.kafka.clients.admin.AbortTransactionSpec`.
 /// `producer_id` is `i64` and `producer_epoch` is `i16` (Java `long` /
 /// `short`); `coordinator_epoch` is `i32`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec")]
 pub struct AbortTransactionSpec {
     topic_partition: TopicPartition,

@@ -21,7 +21,7 @@
 ///
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.RenewDelegationTokenOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenOptions")]
 pub struct RenewDelegationTokenOptions {
     renew_time_period_ms: i64,

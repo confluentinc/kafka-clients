@@ -19,7 +19,7 @@
 /// Options for `Admin::update_features`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesOptions")]
 pub struct UpdateFeaturesOptions {
     timeout_ms: Option<i32>,

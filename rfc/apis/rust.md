@@ -119,7 +119,7 @@ let props = HashMap::from([
 ]);
 let config = ProducerConfig::new(&props)?;
 let producer = KafkaProducer::<String, String>::new(
-    config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()),
+    config, StringSerializer::new(), StringSerializer::new(),
 )?;
 let record = ProducerRecord::with_key("my-topic".to_string(), Some("key".to_string()), Some("value".to_string()));
 producer.send(record).await?.get().await?;
@@ -147,7 +147,7 @@ while (true) {
 
 ```rust
 let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-    config, Box::new(ByteArrayDeserializer::new()), Box::new(ByteArrayDeserializer::new()),
+    config, ByteArrayDeserializer::new(), ByteArrayDeserializer::new(),
 )?;
 consumer.subscribe_with_topics(vec!["foo".into(), "bar".into()]).await?;
 loop {
@@ -287,21 +287,23 @@ The application uses `KafkaProducer<K, V>`.
 
 ```rust
 impl<K, V> KafkaProducer<K, V> {
+    // Any `Serializer`; the producer boxes it once behind a crate-private
+    // dyn-compatible companion, so its type carries only `K` and `V`.
     pub fn new(
         config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        key_serializer: impl Serializer<K> + 'static,
+        value_serializer: impl Serializer<V> + 'static,
     ) -> Result<Self, Error>;
 }
 
 // Send a record with borrowed byte-slice key/value, bypassing serialization.
 // This is the zero-copy path for callers that already have `&[u8]` data.
 impl KafkaProducer<Vec<u8>, Vec<u8>> {
-    pub async fn send(
+    pub fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Box<dyn Callback>>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
 }
 ```
 
@@ -357,7 +359,7 @@ The `Consumer<K, V>` trait and its type parameters are both `Send + 'static` bec
 
 Most of the methods of the `Consumer<K, V>` trait take a mutable reference to the consumer. This is because, just like in Java, the consumer instance is not shareable across threads.
 
-Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns an `UnsupportedVersion` error for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
+Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns a `LocalUnsupportedOperationError` (Java's `UnsupportedOperationException`) for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
 
 ```rust
 pub trait Consumer<K, V>: Send + 'static
@@ -365,13 +367,14 @@ where
     K: Send + 'static,
     V: Send + 'static,
 {
-    // --- State reads: do not block in Java, so synchronous here. ---
-    fn assignment(&self) -> HashSet<TopicPartition>;
-    fn subscription(&self) -> HashSet<String>;
-    fn paused(&self) -> HashSet<TopicPartition>;
-    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
-    fn client_id(&self) -> &str;
-    fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>; // currently always returns None
+    // --- State reads: do not block in Java, so synchronous here. They take
+    // `&mut self` as Java guards them with `acquireAndEnsureOpen()`. ---
+    fn assignment(&mut self) -> HashSet<TopicPartition>;
+    fn subscription(&mut self) -> HashSet<String>;
+    fn paused(&mut self) -> HashSet<TopicPartition>;
+    fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
+    // Java's `currentLag` waits on the background thread, so it is async.
+    fn current_lag(&mut self, topic_partition: &TopicPartition) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
     // --- Subscription and assignment ---
     fn subscribe_with_topics(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
@@ -484,10 +487,12 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
+    // Any `Deserializer`; the consumer boxes it once behind a crate-private
+    // dyn-compatible companion, so its type carries only `K` and `V`.
     pub fn new(
         config: ConsumerConfig,
-        key_deserializer: Box<dyn Deserializer<K>>,
-        value_deserializer: Box<dyn Deserializer<V>>,
+        key_deserializer: impl Deserializer<K>,
+        value_deserializer: impl Deserializer<V>,
     ) -> Result<Self, Error>;
 }
 
@@ -627,7 +632,7 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     println!("Kafka producer properties: {props:?}");
 
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
+    KafkaProducer::new(config, StringSerializer::new(), StringSerializer::new())
 }
 ```
 
@@ -723,7 +728,7 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     ]);
     println!("Kafka producer properties: {props:?}");
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(StringSerializer::new()))
+    KafkaProducer::new(config, StringSerializer::new(), StringSerializer::new())
 }
 ```
 
@@ -859,6 +864,6 @@ fn create_kafka_consumer() -> Result<KafkaConsumer<String, String>, Error> {
     println!("Kafka consumer properties: {props:?}");
 
     let config = ConsumerConfig::new(&props)?;
-    KafkaConsumer::new(config, Box::new(StringDeserializer::new()), Box::new(StringDeserializer::new()))
+    KafkaConsumer::new(config, StringDeserializer::new(), StringDeserializer::new())
 }
 ```

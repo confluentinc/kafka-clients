@@ -24,6 +24,8 @@ mod deserializer;
 mod dyn_deserializer;
 mod dyn_serializer;
 mod inline_future;
+#[cfg(test)]
+mod serialization_test;
 mod string_deserializer;
 mod string_serializer;
 
@@ -31,13 +33,18 @@ pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
 pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
-pub use dyn_deserializer::DynDeserializer;
-pub use dyn_serializer::DynSerializer;
-pub use inline_future::InlineFuture;
+// The dyn-compatible companions and the future they return are the crate's own
+// dispatch mechanism: the clients take serdes as `impl Serializer<K>` /
+// `impl Deserializer<K>` and box them once, and never hand a serde out, so no
+// caller needs to name them (`check-dyn-compatible`).
+pub(crate) use dyn_deserializer::DynDeserializer;
+pub(crate) use dyn_serializer::DynSerializer;
+pub(crate) use inline_future::InlineFuture;
 pub use string_deserializer::StringDeserializer;
 pub use string_serializer::StringSerializer;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
@@ -51,12 +58,12 @@ use crate::common::header::RecordHeaders;
 /// Every method returns a `Send` future, so a serializer can await I/O (a
 /// schema-registry lookup, for instance) without blocking the runtime.
 /// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible; [`DynSerializer`], which every `Serializer` implements, is
-/// its dyn-compatible companion, and the producer stores its serializers as
-/// `Box<dyn DynSerializer<K>>`. A call through `dyn` returns an
-/// [`InlineFuture`], which holds the future without allocating as long as it
-/// is small: a serializer that awaits a large operation only on a cache miss
-/// should `Box::pin` that operation alone.
+/// dyn-compatible, so a producer takes its serializers as `impl Serializer<K>`
+/// (`KafkaProducer::new`) and holds them behind a crate-private dyn-compatible
+/// companion, whose methods store the future inline rather than on the heap as
+/// long as it is small: a serializer that awaits a large operation only on a
+/// cache miss should `Box::pin` that operation alone, so the send path adds no
+/// heap allocation per record (CLAUDE.md §13).
 ///
 /// # Borrowed output
 ///
@@ -103,16 +110,27 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// serializer implementations that need to inspect or modify headers during
     /// serialization (e.g., for schema registry integration).
     ///
+    /// The headers may be empty. The implementation is allowed to modify them,
+    /// as a side effect of serialization: it is considered best practice not to
+    /// delete or modify existing headers, but only to add new ones. The producer
+    /// sends the headers as they are after both the key and the value are
+    /// serialized, and makes them read-only from then on.
+    ///
+    /// The headers are borrowed for `'h`, a lifetime of their own, so the
+    /// serialized bytes (which live for `'a`) do not keep them borrowed: the
+    /// producer serializes the key, then lends the same headers to the value
+    /// serializer while it still holds the key's bytes.
+    ///
     /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`
-    /// (`Serializer.java:82`). The two Java overloads intersect on
-    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:62`) — so that
+    /// (`Serializer.java:84`). The two Java overloads intersect on
+    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:64`) — so that
     /// one keeps the plain name and this one is suffixed with the parameter that
     /// distinguishes it (CLAUDE.md §2).
     ///
     /// # Arguments
     ///
     /// * `topic` - topic associated with data
-    /// * `headers` - record headers
+    /// * `headers` - headers associated with the record; may be modified
     /// * `data` - typed data; may be `None`
     ///
     /// # Returns
@@ -123,13 +141,64 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     ///
     /// As [`serialize`](Serializer::serialize).
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
-    fn serialize_with_headers<'a>(
+    fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a T>,
-    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + 'a {
+    ) -> impl Future<Output = Result<Option<Cow<'a, [u8]>>, Error>> + Send + use<'a, 'h, Self, T>
+    where
+        'a: 'h,
+    {
         let _ = headers;
         self.serialize(topic, data)
+    }
+
+    /// Configure this class. The default implementation is a no-op.
+    ///
+    /// Declared after the `serialize` methods, as on [`Deserializer`], so the
+    /// C constructor takes the methods in the same order for both. Corresponds
+    /// to Java's
+    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
+    /// returns `()` as Java's returns `void`.
+    ///
+    /// # Arguments
+    ///
+    /// * `configs` - configs in key/value pairs
+    /// * `is_key` - whether the serializer is used for the key or the value
+    #[doc(alias = "org.apache.kafka.common.serialization.Serializer#configure")]
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        // intentionally left blank — Java default
+        let _ = (configs, is_key);
+        async {}
+    }
+
+    /// Close this serializer. The default implementation is a no-op.
+    ///
+    /// Corresponds to Java's `default void close()`. As in Java, the method
+    /// must be idempotent, as it may be called multiple times. The producer
+    /// calls it once: from its `close`, after its I/O task has stopped, or
+    /// from a constructor that fails, as Java's catch does
+    /// (`KafkaProducer.java:519-523`).
+    ///
+    /// It returns `()` as Java's returns `void`: the producer closes its
+    /// serializers with `Utils.closeQuietly`, which logs a failure rather than
+    /// stopping. An implementation reports a failing close by panicking: the
+    /// producer catches the panic, logs it and closes the other serializer;
+    /// then the producer's `close` returns `Failed to close kafka producer`,
+    /// with the panic's message as its source, while a failed constructor only
+    /// logs it.
+    ///
+    /// It takes `&self`, unlike [`Deserializer::close`]: the producer shares
+    /// its serializers with every concurrent `send` and closes through a shared
+    /// reference, so an exclusive borrow would need a lock on every send.
+    #[doc(alias = "org.apache.kafka.common.serialization.Serializer#close")]
+    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+        // intentionally left blank — Java default
+        async {}
     }
 }

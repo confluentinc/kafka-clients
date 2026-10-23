@@ -24,6 +24,8 @@ pub mod admin;
 // `@InterfaceAudience.Public`, so they are crate-private. They are translated
 // in full (DoD #2) though the client calls only part of them, hence the
 // `dead_code` allowances.
+#[cfg(test)]
+mod api_promises;
 #[expect(dead_code)]
 mod api_versions;
 mod bootstrap_configuration;
@@ -62,6 +64,8 @@ pub mod producer;
 mod test_alloc_tracker;
 #[cfg(test)]
 mod test_fake_broker;
+#[cfg(test)]
+mod test_log_capture;
 #[cfg(test)]
 mod test_thread_safety;
 
