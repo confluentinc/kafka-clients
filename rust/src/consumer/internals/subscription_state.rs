@@ -682,8 +682,14 @@ impl SubscriptionState {
         }
     }
 
+    /// Also called with `None` by the consumers to release the listener when
+    /// they are done with it: `AsyncKafkaConsumer::close` once its last
+    /// callback has run, and `MockConsumer`'s drop. A listener that captured
+    /// the consumer's [`ConsumerHandle`](crate::consumer::ConsumerHandle) holds
+    /// this state through the handle, so keeping it here would be a reference
+    /// cycle; Java's garbage collector frees the same graph.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#registerRebalanceListener")]
-    fn register_rebalance_listener(&mut self, listener: Option<Arc<dyn ConsumerRebalanceListener>>) {
+    pub(crate) fn register_rebalance_listener(&mut self, listener: Option<Arc<dyn ConsumerRebalanceListener>>) {
         // Java uses `Objects.requireNonNull(listener)` to reject a null
         // `Optional<T>` (different from a present-but-null value). The Rust
         // equivalent is `Option<Arc<dyn>>` which cannot be `null`; treat

@@ -14,11 +14,12 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.UnsupportedOperationError).
 
-from typing import Any, overload
+from typing import Any, ClassVar, overload
 
 __all__ = ["UnsupportedOperationError"]
 
 class UnsupportedOperationError(NotImplementedError):
+    _ffi_id: ClassVar[int]
     @overload
     def __init__(self) -> None: ...
     @overload

@@ -131,6 +131,14 @@ impl Metric for KafkaMetric {
     }
 }
 
+impl std::fmt::Debug for KafkaMetric {
+    /// What [`Display`](std::fmt::Display) renders: the metric name and the
+    /// provider's type, never the provider's state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 impl std::fmt::Display for KafkaMetric {
     /// Returns a human-readable representation of this metric.
     ///
@@ -163,7 +171,7 @@ mod tests {
     use super::*;
     use crate::common::metrics::stats::Avg;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::{ClosureMeasurable, Stat, gauge};
+    use crate::common::metrics::{ClosureMeasurable, Stat, gauge, metric_value_provider};
     use crate::common::utils::MockTime;
     use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
@@ -275,24 +283,18 @@ mod tests {
         assert_eq!(metric.measurable_value(time.milliseconds()), 0.0);
     }
 
-    // KafkaMetricTest.testKafkaMetricAcceptsNonMeasurableNonGaugeProvider
-    //
-    // Java's provider is a bare `MetricValueProvider<String>` — neither
-    // `Measurable` nor `Gauge` — returning a `String`. Rust models
-    // `MetricValueProvider` as a closed two-variant enum (see its rustdoc), so a
-    // third kind of provider is unrepresentable by construction. The
-    // behavioral content that survives is "a metric may carry a non-numeric
-    // value and `metric_value()` returns it verbatim", which a
-    // `MetricValue::String` gauge expresses exactly.
+    // KafkaMetricTest.testKafkaMetricAcceptsNonMeasurableNonGaugeProvider:
+    // Java's provider is a bare `MetricValueProvider<String>` lambda, neither
+    // `Measurable` nor `Gauge`, which `metric_value_provider::new` builds.
     #[test]
     #[doc(
         alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testKafkaMetricAcceptsNonMeasurableNonGaugeProvider"
     )]
     fn test_kafka_metric_accepts_non_measurable_non_gauge_provider() {
-        let gauge = gauge::new(|_, _| MetricValue::String("metric value provider".to_string()));
+        let provider = metric_value_provider::new(|_, _| MetricValue::String("metric value provider".to_string()));
         let metric = KafkaMetric::new(
             name(),
-            Box::new(gauge),
+            Box::new(provider),
             Arc::new(MetricConfig::new()),
             Arc::new(MockTime::new()),
         );

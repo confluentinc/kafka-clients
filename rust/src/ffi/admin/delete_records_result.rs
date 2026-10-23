@@ -162,11 +162,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_new(
                 unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
                 // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
                 // alive for this call, and a successful one's value a valid `kafka_admin_DeletedRecords_t *`
-                // borrowed from it, as `deleted_records_ref` requires; the value is copied, so the borrow
+                // borrowed from it, as `deleted_records_ref` requires; the value is cloned, so the borrow
                 // ends within the call, as `resolved_future` requires.
                 unsafe {
                     resolved_future(v as *const kafka_common_KafkaFuture_t, "DeleteRecordsResult", |value| {
-                        *deleted_records_ref(value as *const kafka_admin_DeletedRecords_t)
+                        deleted_records_ref(value as *const kafka_admin_DeletedRecords_t).clone()
                     })
                 },
             )

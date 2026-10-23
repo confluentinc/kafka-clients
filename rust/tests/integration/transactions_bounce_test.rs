@@ -135,8 +135,8 @@ fn create_transactional_producer(bootstrap: &str, transactional_id: &str) -> Kaf
     ]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("valid producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("build producer")
 }
@@ -169,8 +169,8 @@ async fn create_consumer_and_subscribe(
     ]);
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
     )
     .expect("build consumer");
     consumer.subscribe_with_topics(topics).await.expect("subscribe");

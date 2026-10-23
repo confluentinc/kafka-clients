@@ -246,10 +246,13 @@ _CLOSING = "closing"
 _CLOSED = "closed"
 
 
-def _lag_or_none(lag: int) -> int | None:
-    """``current_lag``'s value from the FFI: ``-1`` is Java's empty
-    ``OptionalLong``."""
-    return None if lag < 0 else lag
+def _lag_or_none(lag: tuple[int, int]) -> int | None:
+    """``current_lag``'s value from the FFI: Java's ``OptionalLong`` as
+    ``(present, lag)``, ``present`` ``0`` for the empty one. The lag itself can
+    be negative (a position past the log end), so no value of it stands for
+    "empty"."""
+    present, value = lag
+    return value if present else None
 
 
 def raise_if_error(error: int) -> None:
@@ -1488,7 +1491,8 @@ class _ConsumerState:
 
     def _current_lag_spec(self, topic_partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
         # Java's currentLag waits through addAndGet without setActiveTask, so
-        # wakeup() does not end it: not wakeable. -1 is the empty OptionalLong.
+        # wakeup() does not end it: not wakeable. The FFI's presence flag 0 is
+        # the empty OptionalLong.
         return self._value_spec(_lib.Consumer_current_lag_cb, _lag_or_none,
                                 topic_partition.topic(), topic_partition.partition())
 
@@ -1736,7 +1740,8 @@ class _ConsumerState:
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's
-        # returns a stub without a group.id, so the binding checks it.
+        # check is a panic, which crosses the FFI as IllegalStateError, so the
+        # binding checks it.
         if not self._group_id_defined:
             with self._use():
                 pass

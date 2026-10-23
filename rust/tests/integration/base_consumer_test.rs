@@ -148,8 +148,8 @@ async fn send_records(
 ) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&merged(&config.client_props, &config.producer_props)).expect("valid producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer");
     for i in 0..num_records {
@@ -307,8 +307,8 @@ pub(super) async fn test_simple_consumption(ctx: &mut TestContext, config: Simpl
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&merged(&config.client_props, &config.consumer_props)).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
     assert_eq!(0, consumer.assignment().len());

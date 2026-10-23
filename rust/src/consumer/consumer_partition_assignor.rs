@@ -79,6 +79,7 @@ pub struct SubscriptionOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`SubscriptionOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds SubscriptionOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SubscriptionOptionsBuilder {
@@ -171,7 +172,7 @@ impl SubscriptionOptionsBuilder {
 /// data, and owned partitions.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Subscription`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription")]
 pub struct Subscription {
     topics: Vec<String>,
@@ -305,7 +306,7 @@ impl Subscription {
 /// Represents the partition assignment for a consumer.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Assignment`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment")]
 pub struct Assignment {
     partitions: Vec<TopicPartition>,
@@ -347,9 +348,76 @@ impl Assignment {
     }
 }
 
+/// Java's `List.toString()`: `[a, b]`.
+fn java_list<T: std::fmt::Display>(items: &[T]) -> String {
+    format!("[{}]", items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+}
+
+impl std::fmt::Display for Subscription {
+    /// Java's `toString()`: the user data prints as its size and only when
+    /// present, an absent group instance or rack id as `null`, an absent
+    /// generation as `-1`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subscription(topics={}", java_list(&self.topics))?;
+        if let Some(user_data) = &self.user_data {
+            write!(f, ", userDataSize={}", user_data.len())?;
+        }
+        write!(
+            f,
+            ", ownedPartitions={}, groupInstanceId={}, generationId={}, rackId={})",
+            java_list(&self.owned_partitions),
+            self.group_instance_id.as_deref().unwrap_or("null"),
+            self.generation_id.unwrap_or(-1),
+            self.rack_id.as_deref().unwrap_or("null")
+        )
+    }
+}
+
+impl std::fmt::Display for Assignment {
+    /// Java's `toString()`: the user data prints as its size and only when
+    /// present.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Assignment(partitions={}", java_list(&self.partitions))?;
+        if let Some(user_data) = &self.user_data {
+            write!(f, ", userDataSize={}", user_data.len())?;
+        }
+        f.write_str(")")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        let tp = |p| TopicPartition::new("t", p);
+        assert_eq!(
+            Subscription::new(vec!["a".to_string(), "b".to_string()]).to_string(),
+            "Subscription(topics=[a, b], ownedPartitions=[], groupInstanceId=null, generationId=-1, rackId=null)"
+        );
+        let mut s = Subscription::with_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["t".to_string()])
+                .set_user_data(Some(vec![1, 2, 3]))
+                .set_owned_partitions(vec![tp(0), tp(1)])
+                .set_generation_id(5)
+                .set_rack_id(Some("r".to_string()))
+                .build()
+                .unwrap(),
+        );
+        s.set_group_instance_id(Some("i".to_string()));
+        assert_eq!(
+            s.to_string(),
+            "Subscription(topics=[t], userDataSize=3, ownedPartitions=[t-0, t-1], groupInstanceId=i, generationId=5, \
+             rackId=r)"
+        );
+        assert_eq!(Assignment::new(vec![tp(0)]).to_string(), "Assignment(partitions=[t-0])");
+        assert_eq!(
+            Assignment::with_user_data(Vec::new(), Some(Vec::new())).to_string(),
+            "Assignment(partitions=[], userDataSize=0)"
+        );
+    }
 
     #[test]
     fn subscription_negative_generation_is_none() {

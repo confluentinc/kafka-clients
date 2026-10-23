@@ -73,7 +73,7 @@ impl<'a> ByteBufferLogInputStream<'a> {
     /// # Errors
     ///
     /// - [`Errors::CorruptMessage`] from [`next_batch_size`](Self::next_batch_size).
-    /// - An unsupported-version error ([`unsupported_magic_error`](Self::unsupported_magic_error))
+    /// - A `LocalUnsupportedOperationError` ([`unsupported_magic_error`](Self::unsupported_magic_error))
     ///   for magic v0
     ///   or v1. Java returns an `AbstractLegacyRecordBatch.ByteBufferLegacyRecordBatch`
     ///   here (`:57`); this client does not implement the legacy formats, which
@@ -191,11 +191,12 @@ impl<'a> ByteBufferLogInputStream<'a> {
     /// a 4.x broker never sends them — and per CLAUDE.md §5 an unimplemented Java
     /// path fails loudly: without the check, a legacy header (as small as 26 bytes)
     /// would either trip the v2 minimum-size check with a misleading "corrupt"
-    /// message or, past it, be read as a v2 header. The error class is the one this
-    /// crate uses for a Java path it does not implement. Shared with the consumer's
+    /// message or, past it, be read as a v2 header. The error class is Java's
+    /// `UnsupportedOperationException`, the one this crate uses for a Java path it
+    /// does not implement. Shared with the consumer's
     /// receive path, which reads the magic off the header itself.
     pub(crate) fn unsupported_magic_error(magic: i8) -> Error {
-        Error::unsupported_version(format!(
+        Error::local_unsupported_operation(format!(
             "Record batch magic v{magic} is not supported: this client reads only magic v2 record batches \
              (message formats v0 and v1 were removed in Kafka 4.0 by KIP-724)"
         ))
@@ -394,7 +395,7 @@ mod tests {
             assert_eq!(Some(buffer.len() - position), stream.next_batch_size().unwrap());
             // ...and `next_batch` refuses to hand out a v2 view of it.
             let err = stream.next_batch().expect_err("a legacy batch has no v2 view");
-            assert_eq!(Errors::UnsupportedVersion, err.error(), "{err:?}");
+            assert!(err.is_local_unsupported_operation_error(), "{err:?}");
             assert_eq!(
                 format!(
                     "Record batch magic v{magic} is not supported: this client reads only magic v2 record batches \

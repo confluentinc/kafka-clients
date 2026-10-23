@@ -32,14 +32,13 @@ use crate::common::header::RecordHeaders;
 /// Every method returns a `Send` future, so a deserializer can await I/O (a
 /// schema-registry lookup, for instance) without blocking the runtime.
 /// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible; [`DynDeserializer`], which every `Deserializer` implements,
-/// is its dyn-compatible companion, and the consumer stores its deserializers
-/// as `Box<dyn DynDeserializer<K>>`. A call through `dyn` returns an
-/// [`InlineFuture`], which holds the future without allocating as long as it
-/// is small: a deserializer that awaits a large operation only on a cache miss
-/// should `Box::pin` that operation alone. The receive path then adds no heap
-/// allocation per record beyond the deserialized `T` (`consumer-threading.md`
-/// §27).
+/// dyn-compatible, so a consumer takes its deserializers as
+/// `impl Deserializer<K>` (`KafkaConsumer::new`) and holds them behind a
+/// crate-private dyn-compatible companion, whose methods store the future
+/// inline rather than on the heap as long as it is small: a deserializer that
+/// awaits a large operation only on a cache miss should `Box::pin` that
+/// operation alone. The receive path then adds no heap allocation per record
+/// beyond the deserialized `T` (`consumer-threading.md` §27).
 ///
 /// A consumer's `poll()` may be cancelled while a record is being
 /// deserialized, for instance by `tokio::time::timeout`; the record is then
@@ -50,9 +49,6 @@ use crate::common::header::RecordHeaders;
 ///
 /// `Send + Sync + 'static` is required because the consumer's app side and its
 /// background task share the deserializers across tasks.
-///
-/// [`DynDeserializer`]: crate::common::serialization::DynDeserializer
-/// [`InlineFuture`]: crate::common::serialization::InlineFuture
 #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
 pub trait Deserializer<T>: Send + Sync + 'static {
     /// Deserialize a record value from a byte slice.
@@ -85,11 +81,11 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// Corresponds to Java's
     /// `default T deserialize(String topic, Headers headers, byte[] data)`
-    /// (`Deserializer.java:84`). The default implementation ignores the headers
+    /// (`Deserializer.java:86`). The default implementation ignores the headers
     /// and delegates to [`deserialize`](Deserializer::deserialize).
     ///
     /// The translated Java overloads intersect on `{topic, data}`, which is
-    /// exactly `deserialize(String, byte[])` (`:64`) — so that one keeps the
+    /// exactly `deserialize(String, byte[])` (`:66`) — so that one keeps the
     /// plain name and this one is suffixed with the parameter that distinguishes
     /// it (CLAUDE.md §2).
     ///
@@ -137,8 +133,9 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// The default implementation delegates to
     /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
     /// `&data[..]`, which, unlike Java's default (`Utils.toNullableArray`),
-    /// copies nothing. [`BytesDeserializer`] overrides it to return `data`
-    /// itself.
+    /// copies nothing. [`StringDeserializer`] overrides it, as Java's does, to
+    /// decode `data` in place; [`BytesDeserializer`] overrides it to return
+    /// `data` itself.
     ///
     /// Java's `byte[]` and `ByteBuffer` overloads share the parameter name
     /// `data`, so the Rust type name `bytes` tells this one apart (CLAUDE.md
@@ -149,6 +146,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// As [`deserialize`](Deserializer::deserialize).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
+    /// [`StringDeserializer`]: crate::common::serialization::StringDeserializer
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
@@ -162,7 +160,8 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Configure this deserializer. The default implementation is a no-op.
     ///
     /// Corresponds to Java's
-    /// `default void configure(Map<String, ?> configs, boolean isKey)`.
+    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
+    /// returns `()` as Java's returns `void`.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
     fn configure<'a>(
         &'a mut self,
@@ -178,6 +177,14 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// Corresponds to Java's `default void close()`. As in Java, the method
     /// must be idempotent, as it may be called multiple times.
+    ///
+    /// It returns `()` as Java's returns `void`: the consumer closes its
+    /// deserializers with `Utils.closeQuietly`, which logs a failure rather
+    /// than stopping. An implementation reports a failing close by panicking:
+    /// the consumer catches the panic, logs it and closes the other
+    /// deserializer; then the consumer's `close` returns `Failed to close kafka
+    /// consumer`, caused by `Failed to close deserializers` with the panic's
+    /// message as its source, while a failed constructor only logs it.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
     fn close(&mut self) -> impl Future<Output = ()> + Send {
         // intentionally left blank — Java default

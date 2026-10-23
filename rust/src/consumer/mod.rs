@@ -732,7 +732,7 @@ where
     /// `ConcurrentModificationError` Java's `acquire()` throws. `wakeup` and
     /// the sync reads work from any thread at any time. See the `Threads`
     /// section of [`ConsumerHandle`].
-    // listener reentrancy handle (consumer-threading.md §31; Phase 41, design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md)
+    // listener reentrancy handle (consumer-threading.md §31, §41)
     #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;
 }

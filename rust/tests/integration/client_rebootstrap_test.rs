@@ -28,6 +28,8 @@
 //!
 //! ## Translated
 //!
+//! - `testAdminRebootstrap` (line 57) → `test_admin_rebootstrap`
+//! - `testAdminRebootstrapDisabled` (line 87) → `test_admin_rebootstrap_disabled`
 //! - `testProducerRebootstrap` (line 116) → `test_producer_rebootstrap`
 //! - `testProducerRebootstrapDisabled` (line 151) → `test_producer_rebootstrap_disabled`
 //! - `testConsumerRebootstrap` (line 231) → `test_consumer_rebootstrap`
@@ -37,13 +39,11 @@
 //!
 //! - `testClassicConsumerRebootstrap` / `testClassicConsumerRebootstrapDisabled`
 //!   — classic-protocol arms (`consumer-threading.md` §20).
-//! - `testAdminRebootstrap` / `testAdminRebootstrapDisabled` — not in this
-//!   phase's scope (test-parity PLAN Phase 19 covers the producer and consumer).
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, NewTopic};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
@@ -74,10 +74,104 @@ fn rebootstrap_cluster_config() -> ClusterConfig {
     ]))
 }
 
+/// The `@ClusterTest` of the admin tests: two brokers, one isolated
+/// controller and `offsets.topic.replication.factor=2`, without the unclean
+/// leader election the producer and consumer tests add.
+fn admin_rebootstrap_cluster_config() -> ClusterConfig {
+    ClusterConfig::kraft_dedicated(REPLICAS as u16, 1).set_server_properties(BTreeMap::from([(
+        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(),
+        "2".to_string(),
+    )]))
+}
+
 /// Java `clusterInstance.admin()`.
 fn admin(bootstrap: &str) -> Box<dyn Admin> {
-    let props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
+    admin_with(bootstrap, &[])
+}
+
+/// Java `clusterInstance.admin(overrides)`, bootstrapping against every broker.
+fn admin_with(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn Admin> {
+    let mut props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
+    props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
+}
+
+/// Java `admin.createTopics(List.of(new NewTopic(TOPIC, PARTITIONS, (short) REPLICAS)))`,
+/// whose result Java never reads: with broker 0 down the request may fail for
+/// want of a second replica, and neither test depends on its outcome.
+fn create_topic_unawaited(admin: &dyn Admin, topic: &str) {
+    let _ = admin.create_topics(&[NewTopic::with_num_partitions_replication_factor(
+        topic.to_string(),
+        Some(PARTITIONS),
+        Some(REPLICAS),
+    )]);
+}
+
+/// Java `assertDoesNotThrow(() -> admin.listTopics().names().get(timeout, TimeUnit.SECONDS).contains(TOPIC))`:
+/// the call must succeed within `timeout`; Java discards the `contains` result.
+async fn assert_list_topics_succeeds(admin: &dyn Admin, timeout: Duration) {
+    if let Err(err) = admin.list_topics().names().get_with_timeout(timeout).await {
+        panic!("listTopics failed: {err:?}");
+    }
+}
+
+/// Translated from `ClientRebootstrapTest.testAdminRebootstrap`
+/// (`ClientRebootstrapTest.java:57`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_admin_rebootstrap() {
+    let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
+    let topic = ctx.topic(TOPIC);
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let timeout = Duration::from_secs(60);
+
+    ctx.cluster().shutdown_broker(BROKER0).await;
+
+    let admin = admin(&bootstrap);
+    create_topic_unawaited(admin.as_ref(), &topic);
+
+    // Only the broker 1 is available for the admin client during the bootstrap.
+    assert_list_topics_succeeds(admin.as_ref(), timeout).await;
+
+    ctx.cluster().shutdown_broker(BROKER1).await;
+    ctx.cluster().start_broker(BROKER0).await;
+
+    // The broker 1, originally cached during the bootstrap, is offline.
+    // However, the broker 0 from the bootstrap list is online.
+    // Should be able to list topics again.
+    assert_list_topics_succeeds(admin.as_ref(), timeout).await;
+    admin.close().await;
+}
+
+/// Translated from `ClientRebootstrapTest.testAdminRebootstrapDisabled`
+/// (`ClientRebootstrapTest.java:87`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_admin_rebootstrap_disabled() {
+    let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
+    let topic = ctx.topic(TOPIC);
+    let bootstrap = ctx.bootstrap_servers().to_string();
+
+    ctx.cluster().shutdown_broker(BROKER0).await;
+
+    let admin = admin_with(&bootstrap, &[("metadata.recovery.strategy", "none")]);
+    create_topic_unawaited(admin.as_ref(), &topic);
+
+    // Only the broker 1 is available for the admin client during the bootstrap.
+    assert_list_topics_succeeds(admin.as_ref(), Duration::from_secs(60)).await;
+
+    ctx.cluster().shutdown_broker(BROKER1).await;
+    ctx.cluster().start_broker(BROKER0).await;
+
+    // The broker 1, originally cached during the bootstrap, is offline.
+    // As a result, the admin client will throw a TimeoutException when trying to get list of the topics.
+    //
+    // Java's `Future.get(5, SECONDS)` throws `java.util.concurrent.TimeoutException`,
+    // whose Rust counterpart is `Error::LocalTimeout` (`KafkaFutureImpl::get_with_timeout`).
+    match admin.list_topics().names().get_with_timeout(Duration::from_secs(5)).await {
+        Err(err) if err.is_local_timeout_error() => {},
+        other => panic!("expected a local TimeoutException, got {other:?}"),
+    }
+    // Since the brokers cached during the bootstrap are offline, the admin client needs to wait the default timeout for other threads.
+    admin.close_with_timeout(Duration::ZERO).await;
 }
 
 /// Java `clusterInstance.producer(overrides)` — byte-array serializers,
@@ -86,12 +180,7 @@ fn producer(bootstrap: &str, overrides: &[(&str, &str)]) -> KafkaProducer<Vec<u8
     let mut props = HashMap::from([("bootstrap.servers".to_string(), bootstrap.to_string())]);
     props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new(
-        config,
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
-    )
-    .expect("build producer")
+    KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default()).expect("build producer")
 }
 
 /// Java `clusterInstance.consumer(overrides)` — byte-array deserializers,
@@ -106,8 +195,8 @@ fn consumer(bootstrap: &str, overrides: &[(&str, &str)]) -> Box<dyn DynConsumer<
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("valid consumer config"),
-            Box::new(ByteArrayDeserializer::default()),
-            Box::new(ByteArrayDeserializer::default()),
+            ByteArrayDeserializer::default(),
+            ByteArrayDeserializer::default(),
         )
         .expect("build consumer"),
     )

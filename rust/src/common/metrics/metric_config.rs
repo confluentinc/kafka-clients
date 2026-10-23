@@ -59,8 +59,8 @@ impl MetricConfig {
 
     /// The configured quota, if any.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#quota")]
-    pub fn quota(&self) -> Option<Quota> {
-        self.quota
+    pub fn quota(&self) -> Option<&Quota> {
+        self.quota.as_ref()
     }
 
     /// Set the quota.

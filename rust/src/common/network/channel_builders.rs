@@ -87,7 +87,7 @@ impl ChannelBuilders {
                 })?;
                 Ok(Box::new(SaslChannelBuilder::new(
                     SecurityProtocol::SaslPlaintext,
-                    sasl_config.clone(),
+                    sasl_config,
                     None,
                     listener_name,
                     client_id,
@@ -104,7 +104,7 @@ impl ChannelBuilders {
                 let ssl_factory = SslFactory::new(ssl_config)?;
                 Ok(Box::new(SaslChannelBuilder::new(
                     SecurityProtocol::SaslSsl,
-                    sasl_config.clone(),
+                    sasl_config,
                     Some(ssl_factory),
                     listener_name,
                     client_id,

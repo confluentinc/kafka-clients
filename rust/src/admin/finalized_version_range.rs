@@ -22,7 +22,7 @@ use crate::common::Error;
 /// for some feature.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FinalizedVersionRange`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange")]
 pub struct FinalizedVersionRange {
     min_version_level: i16,

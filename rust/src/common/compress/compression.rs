@@ -205,12 +205,13 @@ impl Compression {
     /// # Errors
     ///
     /// No compression has no such buffer: Java's interface default throws
-    /// `UnsupportedOperationException` (`Compression.java:61-63`), which
-    /// `NoCompression` does not override.
+    /// `UnsupportedOperationException` (`Compression.java:62`), which
+    /// `NoCompression` does not override; here
+    /// [`Error::LocalUnsupportedOperation`].
     #[doc(alias = "org.apache.kafka.common.compress.Compression#decompressionOutputSize")]
     pub fn decompression_output_size(&self) -> Result<usize, Error> {
         match self {
-            Self::None => Err(Error::unsupported_version(format!(
+            Self::None => Err(Error::local_unsupported_operation(format!(
                 "Size of decompression buffer is not defined for this compression type={}",
                 self.compression_type().name()
             ))),

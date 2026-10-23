@@ -175,10 +175,7 @@ mod tests {
             let reassignment = kafka_admin_NewPartitionReassignment_new(list, &mut error);
             assert!(error.is_null());
             kafka_List_destroy(list);
-            assert_eq!(
-                *new_partition_reassignment_ref(reassignment),
-                NewPartitionReassignment::new(vec![5, 7]).unwrap()
-            );
+            assert_eq!(new_partition_reassignment_ref(reassignment).target_replicas(), [5, 7]);
             let replicas = kafka_admin_NewPartitionReassignment_target_replicas(reassignment);
             assert_eq!(kafka_List_size(replicas), 2);
             assert_eq!(*(kafka_List_get(replicas, 1) as *const i32), 7);

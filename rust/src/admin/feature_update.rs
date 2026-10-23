@@ -22,7 +22,7 @@ use crate::common::Error;
 /// [`FeatureUpdate`].
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType")]
 pub enum UpgradeType {
@@ -35,6 +35,18 @@ pub enum UpgradeType {
     /// Any downgrade, including those which may result in metadata loss, are
     /// permitted.
     UnsafeDowngrade,
+}
+
+/// Java's inherited `Enum.toString()`: the constant's name.
+impl std::fmt::Display for UpgradeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Upgrade => "UPGRADE",
+            Self::SafeDowngrade => "SAFE_DOWNGRADE",
+            Self::UnsafeDowngrade => "UNSAFE_DOWNGRADE",
+        })
+    }
 }
 
 impl UpgradeType {
@@ -69,7 +81,7 @@ impl UpgradeType {
 /// Encapsulates details about an update to a finalized feature.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate")]
 pub struct FeatureUpdate {
     max_version_level: i16,
@@ -121,7 +133,7 @@ impl std::fmt::Display for FeatureUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "FeatureUpdate{{maxVersionLevel:{}, upgradeType:{:?}}}",
+            "FeatureUpdate{{maxVersionLevel:{}, upgradeType:{}}}",
             self.max_version_level, self.upgrade_type
         )
     }
@@ -174,5 +186,15 @@ mod tests {
     fn new_rejects_negative_version_level() {
         let err = FeatureUpdate::new(-1, UpgradeType::SafeDowngrade).unwrap_err();
         assert_eq!(err.message(), "Cannot specify a negative version level.");
+    }
+
+    /// Java's `toString()` prints the upgrade type's constant name.
+    #[test]
+    fn to_string_follows_java() {
+        let update = FeatureUpdate::new(0, UpgradeType::SafeDowngrade).unwrap();
+        assert_eq!(
+            update.to_string(),
+            "FeatureUpdate{maxVersionLevel:0, upgradeType:SAFE_DOWNGRADE}"
+        );
     }
 }

@@ -24,6 +24,7 @@ use crate::common::metrics::stats::{CumulativeSum, Rate, SampledStat};
 use crate::common::metrics::{CompoundStat, Measurable, MetricConfig, NamedMeasurable, Stat};
 
 /// A compound stat that includes a rate metric and a cumulative total metric.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter")]
 pub struct Meter {
     rate_metric_name: MetricName,
@@ -113,9 +114,31 @@ impl CompoundStat for Meter {
     }
 }
 
+impl std::fmt::Display for Meter {
+    /// Java's `toString()`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Meter(rate={}, total={}, rateMetricName={}, totalMetricName={})",
+            self.rate, self.total, self.rate_metric_name, self.total_metric_name
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        let name = |n: &str| MetricName::new(n, "g", "d", std::collections::BTreeMap::new());
+        assert_eq!(
+            Meter::new(name("rate"), name("total")).to_string(),
+            "Meter(rate=Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[])), total=CumulativeSum(total=0.0), \
+             rateMetricName=MetricName [name=rate, group=g, description=d, tags={}], \
+             totalMetricName=MetricName [name=total, group=g, description=d, tags={}])"
+        );
+    }
     use crate::common::metrics::stats::WindowedCount;
     use std::collections::BTreeMap;
 

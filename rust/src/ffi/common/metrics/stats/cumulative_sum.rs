@@ -16,6 +16,8 @@
 //! `org.apache.kafka.common.metrics.stats.CumulativeSum` (CLAUDE.md §4), the non-sampled sum of the recorded values.
 //! See the module docs of `stats` for the interface views.
 
+use std::ffi::c_char;
+
 use crate::common::metrics::stats::CumulativeSum;
 use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_t;
 use crate::ffi::common::metrics::measurable_stat::kafka_common_metrics_MeasurableStat_t;
@@ -23,6 +25,7 @@ use crate::ffi::common::metrics::metric_value_provider::kafka_common_metrics_Met
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::ffi_guard;
+use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`CumulativeSum`].
 #[repr(C)]
@@ -127,6 +130,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_CumulativeSum__as_Measurable
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_CumulativeSum_to_string(
+    self_: *const kafka_common_metrics_stats_CumulativeSum_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, as `handle` requires; the string is built during the call.
+    into_c_string(&unsafe { handle(self_) }.stat().to_string())
 }
 
 /// Frees an owned handle; null is a no-op. A sensor the stat was added to
