@@ -1,0 +1,21 @@
+# Batches of the preset tests in tests.txt that `cargo xtask perf-cloud` runs
+# by name (`--batch NAME`): the tests one after another, each with every
+# selected client of the group, on one cluster.
+#
+# One batch per line: <name> <group> <test-id> ...
+#
+#   name     lowercase letters, digits and `-`, at most 60 characters
+#   group    the client group it runs: rust or python
+#   test-id  tests of tests.txt for that group, in the order they run
+#
+# `cargo xtask perf-cloud check --group G --batch NAME` validates a batch and
+# prints its time estimate.
+
+# The Python clients' producer: peak throughput, compression, a high fixed
+# rate and keyed records. 4 tests: ~9 h 52 min at 5 + 30 min per client.
+producer-basic-perf-python  python  producer-max-1kb-200p producer-max-1kb-36p-lz4 producer-fixed-100k-1kb-200p producer-max-1kb-200p-key100b
+
+# The Python clients' consumer: end-to-end latency at a high (250k msg/s) and
+# a low load, then the high load with fetches tuned for throughput. 3 tests:
+# ~7 h 24 min at 5 + 30 min per client.
+consumer-basic-perf-python  python  consumer-fixed-250k-1kb-200p-librdkafka-poll consumer-fixed-500-10kb-200p-librdkafka-poll consumer-fixed-250k-1kb-200p-fetch-tuned
