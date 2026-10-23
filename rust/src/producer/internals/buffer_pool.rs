@@ -196,8 +196,6 @@ impl BufferPool {
         metric_grp_name: &str,
         allocation_mode: AllocationMode,
     ) -> Self {
-        assert!(memory > 0, "Buffer pool memory must be positive");
-
         // `bufferpool-wait-time` sensor: a Meter over the fraction of time an
         // appender waits and the total wait time in nanoseconds.
         let wait_time_sensor = metrics
